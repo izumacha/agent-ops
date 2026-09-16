@@ -24,12 +24,14 @@ const operations = Object.entries(spec.paths).flatMap(([path, item]) =>
 );
 
 describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
+  // 受け入れ基準「定義が存在する」を最低限の中身込みで固定する
   it('OpenAPI 3.1 で、パスが 1 つ以上ある (Step0 の受け入れ基準: 定義が存在する)', () => {
     // 版と最低限の中身を確認する
     expect(spec.openapi.startsWith('3.1')).toBe(true);
     expect(operations.length).toBeGreaterThan(0);
   });
 
+  // 生成される型・クライアントの名前になる operationId を固定する
   it('全オペレーションに一意な operationId がある (生成される型・クライアントの名前になる)', () => {
     // operationId を集める
     const ids = operations.map(({ op }) => op.operationId);
@@ -39,6 +41,7 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  // 未宣言タグ (typo) を落とす
   it('全オペレーションのタグは tags 一覧に宣言されている', () => {
     // 宣言済みタグの集合
     const declared = new Set((spec.tags ?? []).map((tag) => tag.name));
@@ -49,6 +52,7 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     }
   });
 
+  // 書き込み系は RBAC 違反の 403 を契約に持つ
   it('認証が必要なオペレーションは 403 (権限違反) の応答を宣言している', () => {
     // 認証不要なものは health だけ
     for (const { path, method, op } of operations) {

@@ -17,6 +17,8 @@ import { join } from 'node:path';
 const ROOT = process.cwd();
 // ADR の最低件数 (受け入れ基準)
 const REQUIRED_ADRS = 3;
+// Windows かどうか (npm の起動方法が変わる)
+const IS_WINDOWS = process.platform === 'win32';
 // 順に実行する検証コマンド (失敗したらその場で止める)
 const STEPS = [
   { name: 'OpenAPI 型生成', args: ['run', 'gen'] },
@@ -36,10 +38,12 @@ function banner(text) {
 for (const step of STEPS) {
   // 何を実行するか表示する
   banner(step.name);
-  // npm を子プロセスで実行し、出力はそのまま流す (Windows では npm.cmd)
-  const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', step.args, {
+  // npm を子プロセスで実行し、出力はそのまま流す。Windows の npm は .cmd なので shell 経由で起動する
+  // (Node 22 は .cmd/.bat の shell 無し spawn を EINVAL で拒否する。引数は固定配列なのでインジェクションの余地は無い)
+  const result = spawnSync(IS_WINDOWS ? 'npm.cmd' : 'npm', step.args, {
     cwd: ROOT,
     stdio: 'inherit',
+    shell: IS_WINDOWS,
   });
   // 非 0 終了なら赤として即終了する
   if (result.status !== 0) {

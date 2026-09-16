@@ -8,7 +8,7 @@ import type { HealthDto } from '@/lib/api-types';
 // DB を毎回叩くので、Next.js の静的化を無効にして常に動的に応答する
 export const dynamic = 'force-dynamic';
 
-// GET /api/health: アプリと DB の生存確認 (docker compose の healthcheck と Step7 の起動確認が使う)
+// GET /api/v1/health: アプリと DB の生存確認 (OpenAPI の servers.url=/api/v1 + /health と一致させる) (docker compose の healthcheck と Step7 の起動確認が使う)
 export async function GET(): Promise<NextResponse<HealthDto>> {
   // DB へ最小のクエリを投げて到達性を確かめる
   try {

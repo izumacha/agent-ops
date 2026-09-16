@@ -10,6 +10,16 @@ COPY package*.json ./
 # lockfile に従って厳密インストール (再現性重視)
 RUN npm ci
 
+# 本番用依存だけを解決するステージ (runner へ持ち込む node_modules。eslint / typescript / vitest 等の
+# devDependencies を実行イメージに載せない。migrate / seed に要る prisma・tsx・dotenv は dependencies 側にある)
+FROM base AS prod-deps
+# Prisma CLI のスキーマエンジンが要求する OpenSSL 3 (postinstall で prisma が動く)
+RUN apk add --no-cache openssl
+# lockfile を先にコピー
+COPY package*.json ./
+# devDependencies を除いて厳密インストール
+RUN npm ci --omit=dev
+
 # ビルドステージ (Next.js のプロダクションビルドを行う)
 FROM base AS builder
 # Prisma CLI のスキーマエンジンが要求する OpenSSL 3 を入れる (消すと prisma generate が動かない)
@@ -49,12 +59,13 @@ COPY --from=builder /app/src/generated ./src/generated
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
-# seed が参照するファクトリ・enum の正準・パスエイリアス定義
+# seed (prisma/seed.ts) が相対 import で参照する src/ 配下のファイルと、`@/` を解決する tsconfig。
+# 列挙は seed の import グラフと tests/docker-seed-files.test.ts が突き合わせる (足し忘れ・余分はどちらも落ちる)
 COPY --from=builder /app/src/lib/prisma-client.ts ./src/lib/prisma-client.ts
 COPY --from=builder /app/src/domain/types.ts ./src/domain/types.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
-# Prisma CLI / tsx とその依存をまとめて取り込む
-COPY --from=builder /app/node_modules ./node_modules
+# 本番用依存だけを取り込む (Prisma CLI / tsx / dotenv を含み、dev ツールチェーンは含まない)
+COPY --from=prod-deps /app/node_modules ./node_modules
 
 # 非 root ユーザーで実行
 USER nextjs

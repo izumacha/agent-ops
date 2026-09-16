@@ -51,7 +51,7 @@ CI（`.github/workflows/ci.yml`）は `gate-step0` ジョブと、PostgreSQL サ
 - `docs/spec.md` — ユースケース 10 件（`### UC-NN` 見出し）・ER 図（mermaid）・API 一覧。`tests/docs-gate.test.ts` が件数と節の存在を固定する。
 - `docs/roadmap.md` — 8 Step の成果物・受け入れ基準・状態。`docs/adr/NNNN-*.md` — 設計判断（ステータス行必須）。
 - `openapi/openapi.yaml` — REST API 契約（OpenAPI 3.1）。`npm run gen` → `src/generated/openapi.d.ts` → `src/lib/api-types.ts` がアプリ側の名前で再公開する。Route Handler の型はここから取り、生成物のパスを直接書かない。`tests/openapi.test.ts` が operationId の一意性・タグの宣言・書き込み系の 403 宣言を固定する。**新しいエンドポイントは「定義 → `gen` → 実装 → API テスト」の順**（ADR-0003）。
-- `prisma/schema.prisma` — 生成先は `src/generated/prisma`。**型/enum は `src/domain/types.ts` からのみ import**（`@/generated/prisma` の直接 import は ESLint が禁止。例外は `src/lib/prisma.ts` / `src/lib/prisma-client.ts` / `src/domain/types.ts`）。マイグレーションは `prisma/migrations/`（初期は `prisma migrate diff --from-empty --to-schema` で生成）。
+- `prisma/schema.prisma` — 生成先は `src/generated/prisma`。**enum の正準は `src/domain/types.ts`**（`as const` で定義し Prisma の実行時コードに依存しない。Prisma 側の enum と一致することは `tests/domain-enums.test.ts` が固定する）。`@/generated/prisma` の直接 import は ESLint が禁止し、例外は結線箇所の `src/lib/prisma.ts` / `src/lib/prisma-client.ts` だけ。マイグレーションは `prisma/migrations/`（初期は `prisma migrate diff --from-empty --to-schema` で生成）。
 
 ### Prisma 7 の結線
 
@@ -59,11 +59,11 @@ CI（`.github/workflows/ci.yml`）は `gate-step0` ジョブと、PostgreSQL サ
 
 ### レイヤ構成
 
-- `src/app/*` — App Router。`api/health/route.ts` は DB 到達性を返す（compose の healthcheck が使う）。API は `src/app/api/v1/*` に Route Handler として実装する（Step1〜）。
-- `src/domain/` — Prisma/Next 非依存の純粋ロジック。`rbac.ts` の許可表 `PERMISSIONS`（`viewer` / `operator` / `admin` × `view` / `execute` / `stop`）が**唯一の真実の源**で、`canPerform(role, action)` は未知の値を拒否する（fail-closed）。`tests/rbac.test.ts` が 9 パターンすべてを固定する。
+- `src/app/*` — App Router。API は OpenAPI の `servers.url`（`/api/v1`）に合わせて `src/app/api/v1/*` に Route Handler として実装する。`api/v1/health/route.ts` は DB 到達性を返す（compose の healthcheck が使う）。
+- `src/domain/` — Prisma/Next 非依存の純粋ロジック（`npm run db:generate` 無しでもユニットテストが動く）。`rbac.ts` の許可表 `PERMISSIONS`（`viewer` / `operator` / `admin` × `view` / `execute` / `stop`）が**唯一の真実の源**で、`canPerform(role, action)` は未知の値を拒否する（fail-closed）。`tests/rbac.test.ts` が 9 パターンすべてを固定する。
 - `src/lib/` — 横断インフラ: `prisma.ts` / `prisma-client.ts` / `constants.ts`（UI 文言・enum ラベル）/ `api-types.ts`。
 - `scripts/gate-stepN.mjs` — Step ごとの受け入れ基準の検査（ADR-0004）。
-- `tests/` — Vitest（`environment: 'node'`）。DB を触る挙動は Step6 の契約テスト（`*.contract.prisma.test.ts`、別 DB、`RUN_PRISMA_CONTRACT=1` のときだけ）へ寄せる。
+- `tests/` — Vitest（`environment: 'node'`）。DB を触る挙動は Step6 の契約テスト（`*.contract.prisma.test.ts`、別 DB、`RUN_PRISMA_CONTRACT=1` のときだけ）へ寄せる。設定の写しを見張る検出網: `docker-seed-files`（Dockerfile の seed 用 COPY 列挙 = seed の import グラフ）/ `node-runtime-alignment`（`.nvmrc` / Dockerfile / `engines.node` / CI 配線 / `@types/node` の major 一致）/ `dependabot-eslint-guard`（eslint major 保留の存在と期限切れ）。
 
 ### マルチテナントと RBAC（設計の不変条件）
 
@@ -318,5 +318,5 @@ CI（`.github/workflows/ci.yml`）は `gate-step0` ジョブと、PostgreSQL サ
 - REST API は `openapi/openapi.yaml`（OpenAPI 3.1）が契約の正本。`npm run gen` が `src/generated/openapi.d.ts` に型を生成し、`src/lib/api-types.ts` がアプリ側の名前で再公開する。新しいエンドポイントは「定義 → `gen` → 実装 → API テスト」の順で作る。
 - マルチテナントは行スコープ（全テーブルに `tenantId`、ADR-0002）。他テナントの資源は 404 で隠す（403 だと存在が漏れる）。
 - RBAC は `viewer` / `operator` / `admin` × `view` / `execute` / `stop` の許可表 `src/domain/rbac.ts` が唯一の真実の源（不明なら拒否）。
-- Prisma クライアントは `src/generated/prisma` に出力され、型/enum は `src/domain/types.ts` 経由で import する（`@/generated/prisma` の直接 import は ESLint が禁止。例外は結線箇所の `src/lib/prisma.ts` / `src/lib/prisma-client.ts` / `src/domain/types.ts`）。結線は `src/lib/prisma-client.ts` の `createPrismaClient()` に集約。生成物（`src/generated/`）はコミットしない。
+- Prisma クライアントは `src/generated/prisma` に出力される。enum の正準は `src/domain/types.ts`（`as const` で定義し Prisma の実行時コードに依存しない。Prisma 側との一致はテストで固定）。`@/generated/prisma` の直接 import は ESLint が禁止し、例外は結線箇所の `src/lib/prisma.ts` / `src/lib/prisma-client.ts` だけ。結線は `createPrismaClient()` に集約。生成物（`src/generated/`）はコミットしない。
 - 金額はマイクロ USD の整数（`BigInt`）で持ち、JSON では文字列で運ぶ。API キーは SHA-256 ハッシュ（`keyHash`）と先頭数文字（`prefix`）だけを保存し、平文は発行応答でしか返さない。

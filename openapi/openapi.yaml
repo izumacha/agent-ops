@@ -525,7 +525,7 @@ components:
         name:
           type: string
         description:
-          type: string
+          type: [string, 'null']
         provider:
           $ref: '#/components/schemas/Provider'
         model:
@@ -533,8 +533,8 @@ components:
         status:
           $ref: '#/components/schemas/AgentStatus'
         budgetMicroUsd:
-          type: string
-          description: 月次予算 (マイクロ USD)。BigInt を JSON で安全に運ぶため文字列
+          type: [string, 'null']
+          description: 月次予算 (マイクロ USD)。BigInt を JSON で安全に運ぶため文字列。未設定は null
         createdAt:
           type: string
           format: date-time
@@ -594,7 +594,8 @@ components:
         tenantId:
           type: string
         agentId:
-          type: string
+          type: [string, 'null']
+          description: 紐づくエージェント (テナント共通キーなら null)
         prefix:
           type: string
           description: 先頭数文字 (特定用。秘密ではない)
@@ -604,8 +605,9 @@ components:
           type: string
           format: date-time
         revokedAt:
-          type: string
+          type: [string, 'null']
           format: date-time
+          description: 失効日時 (有効なら null)
     ApiKeyCreate:
       type: object
       required: [name]

@@ -24,7 +24,7 @@ npm run db:seed                    # デモ用テナント / ユーザー / エ�
 npm run dev                        # http://localhost:3000
 ```
 
-アプリごと Docker で動かす場合: `docker compose up --build`（`app` サービスが起動時に `prisma migrate deploy` を実行する）。生存確認は `GET /api/health`（DB 到達性を含む）。
+アプリごと Docker で動かす場合: `docker compose up --build`（`app` サービスが起動時に `prisma migrate deploy` を実行する）。生存確認は `GET /api/v1/health`（DB 到達性を含む）。
 
 ## 検証コマンド
 

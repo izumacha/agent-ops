@@ -21,7 +21,7 @@ const config = [
     // 適用対象: src 配下の TypeScript / TSX ファイル全体
     files: ['src/**/*.{ts,tsx}'],
     // 例外: Prisma クライアントの結線箇所 (composition root) だけは生成物の直接 import を許可する
-    ignores: ['src/lib/prisma.ts', 'src/lib/prisma-client.ts', 'src/domain/types.ts'],
+    ignores: ['src/lib/prisma.ts', 'src/lib/prisma-client.ts'],
     rules: {
       // 指定したモジュールへの import をエラー化するルール
       'no-restricted-imports': [

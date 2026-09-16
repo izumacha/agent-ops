@@ -15,7 +15,9 @@ const EXPECTED: Record<Role, Record<(typeof ACTIONS)[number], boolean>> = {
 describe('RBAC の許可表', () => {
   // 役割ごとに 3 操作すべての判定を固定する
   for (const role of Object.values(Role)) {
+    // その役割について 3 操作を順に見る
     for (const action of ACTIONS) {
+      // 1 パターン = 1 テストにして、どの組み合わせが崩れたか名前で分かるようにする
       it(`${role} が ${action} を ${EXPECTED[role][action] ? '行える' : '行えない'}`, () => {
         // 判定関数の結果が期待値と一致すること
         expect(canPerform(role, action)).toBe(EXPECTED[role][action]);

@@ -216,5 +216,5 @@ Step2 以降（プロキシ `/proxy/*`、集計 `/usage/daily`、評価 `/evalua
 
 - **セキュリティ**: 全 Server Action / Route Handler で認証・RBAC・`tenantId` の絞り込みを強制（CLAUDE.md §9）。API キーはハッシュのみ保存。監査ログは追記専用。
 - **性能**: 一覧は必ず上限（既定 50、最大 200）。プロキシの追加遅延 p95 ≦ 50ms。
-- **可観測性**: `/api/health` で DB 到達性を返す。エラーは内部詳細を出さずサーバログへ。
+- **可観測性**: `/api/v1/health` で DB 到達性を返す。エラーは内部詳細を出さずサーバログへ。
 - **移植性**: PostgreSQL 16 / Node 22 / Docker。ローカルと CI で検証が完結する（人手の外部手順に依存しない）。

@@ -1,0 +1,25 @@
+# Dependabot: 依存の既知脆弱性・更新を定期的に拾う (§9 サプライチェーン管理)
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # @types/node の major は「動かす Node の major」(.nvmrc / Dockerfile / engines.node) と揃える。
+      # 型だけ先に進むと Node 22 に無い API を書いても typecheck が緑のまま通る (fail-open) ため、
+      # ランタイムを上げる判断の側で一緒に上げる
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # node ベースイメージの major も同じ理由で単独更新を止める
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,81 @@
+# CI: Step0 の受け入れ基準 (typecheck / lint / test 緑・OpenAPI 型生成・ADR 3 件以上) を
+# `npm run gate:step0` で検査し、あわせてマイグレーションの適用と本番ビルドを確かめる (CLAUDE.md §14)。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 既定の権限を読み取りのみに落とす (§9 最小権限)
+permissions:
+  contents: read
+
+jobs:
+  gate-step0:
+    name: gate:step0 (gen / db:generate / lint / typecheck / test / ADR)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node の版は .nvmrc が唯一の正本 (値を書き写さず配線で読む)
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Step0 の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
+      - name: Run Step0 gate
+        run: npm run gate:step0
+
+  migrate-and-build:
+    name: Migrate (PostgreSQL) / Build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: agent_ops
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_ops
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate OpenAPI types and Prisma client
+        run: npm run gen && npm run db:generate
+
+      # コミット済みマイグレーションが空の DB に連続適用できることを確かめる
+      - name: Apply migrations
+        run: npm run db:deploy
+
+      # seed が実 DB に対して冪等に通ることを確かめる (2 回流して 2 回目も緑)
+      - name: Seed (twice, idempotent)
+        run: npm run db:seed && npm run db:seed
+
+      - name: Build
+        run: npm run build

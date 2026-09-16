@@ -1,0 +1,263 @@
+// Prisma スキーマ: DB のテーブル定義と TS 型を 1 枚で管理するファイル。
+// ER 図の正本は docs/spec.md §3 (このファイルと同期させる)。
+
+// 生成設定: Prisma クライアント (TS で DB を操作する SDK) の出力先を指定
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma" // src/generated/prisma 配下にクライアント本体と型が生成される
+}
+
+// データソース設定: 接続先 DB の種類 (接続文字列は prisma.config.ts が持つ)
+datasource db {
+  provider = "postgresql" // 使用する DB は PostgreSQL
+}
+
+// ─────────────────────────────────────────────
+// Enums (列挙型: 取り得る値を列挙して固定する)
+// ─────────────────────────────────────────────
+
+// テナントの契約プラン (Step6 で Stripe と連携する。Step0 では free 固定)
+enum Plan {
+  free // 無料 (機能ゲートあり)
+  pro // 有料 (標準)
+  enterprise // 有料 (上位)
+}
+
+// ユーザーの役割 (RBAC: 閲覧 / 実行 / 停止 の 3 操作を役割ごとに許可する。src/domain/rbac.ts が正本)
+enum Role {
+  viewer // 閲覧のみ
+  operator // 閲覧 + 実行
+  admin // 閲覧 + 実行 + 停止 (全権限)
+}
+
+// エージェントの稼働状態
+enum AgentStatus {
+  active // 稼働中 (プロキシ経由の呼び出しを受け付ける)
+  stopped // 手動停止 (呼び出しを拒否する)
+  suspended // ガードレールによる自動停止 (復帰は admin の操作が必要)
+}
+
+// LLM プロバイダ (Step2 のコスト計測プロキシが中継する相手)
+enum Provider {
+  anthropic // Anthropic Messages API
+  openai // OpenAI Chat Completions API
+}
+
+// ガードレールのしきい値ルールの種類 (Step4)
+enum RuleKind {
+  cost // 期間内のコスト超過
+  quality // 品質スコアの低下
+  error_rate // エラー率の上昇
+}
+
+// しきい値に達したときの動作 (Step4)
+enum RuleAction {
+  notify // 通知のみ (Webhook / メール)
+  stop // 通知 + エージェントを suspended にする
+}
+
+// インシデントの状態 (Step4)
+enum IncidentStatus {
+  open // 発生中 (未対応)
+  resolved // 解決済み (復帰済み)
+}
+
+// ─────────────────────────────────────────────
+// Models (テーブル定義)。全テーブルが tenantId を持ち、クエリは必ずテナントで絞る
+// ─────────────────────────────────────────────
+
+// テナント (契約単位。全データの分離境界)
+model Tenant {
+  id        String   @id @default(cuid()) // 主キー (CUID: 推測困難な ID)
+  name      String // 表示名
+  plan      Plan     @default(free) // 契約プラン
+  createdAt DateTime @default(now()) // 作成日時
+  updatedAt DateTime @updatedAt // 更新日時 (自動更新)
+
+  users          User[] // 所属ユーザー
+  agents         Agent[] // 登録エージェント
+  apiKeys        ApiKey[] // 発行 API キー
+  usageEvents    UsageEvent[] // 利用イベント
+  evaluationSets EvaluationSet[] // 評価セット
+  evaluationRuns EvaluationRun[] // 評価実行
+  guardrailRules GuardrailRule[] // ガードレール
+  incidents      Incident[] // インシデント
+  auditLogs      AuditLog[] // 監査ログ
+}
+
+// ユーザー (テナント内の操作主体)
+model User {
+  id        String   @id @default(cuid()) // 主キー
+  tenantId  String // 所属テナント
+  email     String // ログイン用メール (テナント内で一意)
+  name      String // 表示名
+  role      Role    @default(viewer) // 役割 (既定は最小権限の viewer)
+  createdAt DateTime @default(now()) // 作成日時
+  updatedAt DateTime @updatedAt // 更新日時
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント (テナント削除で連鎖削除)
+  auditLogs AuditLog[] // このユーザーが行った操作
+
+  @@unique([tenantId, email]) // 同一テナント内でメールを重複させない
+  @@index([tenantId]) // テナント絞り込み用
+}
+
+// エージェント (管理対象の AI エージェント台帳)
+model Agent {
+  id               String      @id @default(cuid()) // 主キー
+  tenantId         String // 所属テナント
+  name             String // 表示名 (テナント内で一意)
+  description      String? // 用途の説明 (任意)
+  provider         Provider // 利用する LLM プロバイダ
+  model            String // モデル名 (例: claude-sonnet-4-6)
+  status           AgentStatus @default(active) // 稼働状態
+  budgetMicroUsd   BigInt? // 月次予算 (マイクロ USD。1 USD = 1,000,000。任意)
+  createdAt        DateTime    @default(now()) // 作成日時
+  updatedAt        DateTime    @updatedAt // 更新日時
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  apiKeys        ApiKey[] // このエージェント専用の API キー
+  usageEvents    UsageEvent[] // 利用イベント
+  evaluationRuns EvaluationRun[] // 評価実行
+  guardrailRules GuardrailRule[] // 個別ガードレール
+  incidents      Incident[] // インシデント
+
+  @@unique([tenantId, name]) // 同一テナント内で名前を重複させない
+  @@index([tenantId, status]) // 一覧の絞り込み (テナント + 状態)
+}
+
+// API キー (エージェントがプロキシへ接続するときの認証情報。平文は保存せずハッシュのみ)
+model ApiKey {
+  id        String    @id @default(cuid()) // 主キー
+  tenantId  String // 所属テナント
+  agentId   String? // 紐づくエージェント (テナント共通キーなら null)
+  prefix    String // 先頭数文字 (一覧表示・特定用。秘密ではない)
+  keyHash   String    @unique // キーの SHA-256 ハッシュ (照合用。平文は発行時のみ返す)
+  name      String // 用途メモ
+  createdAt DateTime  @default(now()) // 発行日時
+  revokedAt DateTime? // 失効日時 (null なら有効)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  agent  Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull) // 紐づくエージェント
+
+  @@index([tenantId]) // テナント絞り込み用
+}
+
+// 利用イベント (プロキシが中継した LLM 呼び出し 1 回 = 1 行。Step2 で記録し日次集計する)
+model UsageEvent {
+  id           String   @id @default(cuid()) // 主キー
+  tenantId     String // 所属テナント
+  agentId      String // 呼び出したエージェント
+  provider     Provider // 中継先プロバイダ
+  model        String // 実際に使ったモデル名
+  inputTokens  Int // 入力トークン数
+  outputTokens Int // 出力トークン数
+  costMicroUsd BigInt // 料金 (マイクロ USD。浮動小数誤差を避けるため整数)
+  latencyMs    Int // 上流応答までの時間 (ミリ秒)
+  statusCode   Int // 上流の HTTP ステータス
+  createdAt    DateTime @default(now()) // 発生日時
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  agent  Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade) // 呼び出し元エージェント
+
+  @@index([tenantId, createdAt]) // 日次集計 (テナント + 期間)
+  @@index([agentId, createdAt]) // エージェント別集計
+}
+
+// 評価セット (LLM-as-judge の固定入力集合。Step3)
+model EvaluationSet {
+  id        String   @id @default(cuid()) // 主キー
+  tenantId  String // 所属テナント
+  name      String // 表示名
+  createdAt DateTime @default(now()) // 作成日時
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  cases  EvaluationCase[] // 含まれる評価ケース
+  runs   EvaluationRun[] // このセットでの実行
+
+  @@index([tenantId]) // テナント絞り込み用
+}
+
+// 評価ケース (入力と期待出力の 1 組)
+model EvaluationCase {
+  id       String  @id @default(cuid()) // 主キー
+  setId    String // 所属する評価セット
+  input    String // エージェントへの入力
+  expected String? // 期待する出力 (任意。判定の参考情報)
+
+  set EvaluationSet @relation(fields: [setId], references: [id], onDelete: Cascade) // 親セット
+
+  @@index([setId]) // セット内列挙用
+}
+
+// 評価実行 (評価セット × エージェントの採点結果。Step3)
+model EvaluationRun {
+  id            String   @id @default(cuid()) // 主キー
+  tenantId      String // 所属テナント
+  agentId       String // 評価対象エージェント
+  setId         String // 使った評価セット
+  accuracy      Float // 正確性スコア (0.0〜1.0)
+  safety        Float // 安全性スコア (0.0〜1.0)
+  deviation     Float // 逸脱スコア (0.0〜1.0。低いほど良い)
+  createdAt     DateTime @default(now()) // 実行日時
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  agent  Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade) // 対象エージェント
+  set    EvaluationSet @relation(fields: [setId], references: [id], onDelete: Cascade) // 使った評価セット
+
+  @@index([tenantId, createdAt]) // 回帰比較 (テナント + 期間)
+}
+
+// ガードレールのしきい値ルール (Step4)
+model GuardrailRule {
+  id            String     @id @default(cuid()) // 主キー
+  tenantId      String // 所属テナント
+  agentId       String? // 対象エージェント (null ならテナント全体)
+  kind          RuleKind // 監視する指標
+  threshold     Float // しきい値 (kind により単位が異なる: cost はマイクロ USD、quality は 0〜1、error_rate は 0〜1)
+  windowMinutes Int // 集計窓 (分)
+  action        RuleAction // 発火時の動作
+  enabled       Boolean    @default(true) // 有効フラグ
+  createdAt     DateTime   @default(now()) // 作成日時
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  agent     Agent?     @relation(fields: [agentId], references: [id], onDelete: Cascade) // 対象エージェント
+  incidents Incident[] // このルールが起こしたインシデント
+
+  @@index([tenantId, enabled]) // 有効ルールの列挙
+}
+
+// インシデント (ルール発火の記録。Step4)
+model Incident {
+  id          String         @id @default(cuid()) // 主キー
+  tenantId    String // 所属テナント
+  agentId     String // 対象エージェント
+  ruleId      String // 発火したルール
+  status      IncidentStatus @default(open) // 状態
+  summary     String // 発火理由の要約 (通知本文にも使う)
+  triggeredAt DateTime       @default(now()) // 発火日時
+  resolvedAt  DateTime? // 解決日時
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  agent  Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade) // 対象エージェント
+  rule   GuardrailRule @relation(fields: [ruleId], references: [id], onDelete: Cascade) // 発火ルール
+
+  @@index([tenantId, status]) // 未解決一覧
+}
+
+// 監査ログ (誰が・いつ・何に・何をしたか。追記専用。Step4 で改ざん検知のハッシュ連鎖を足す)
+model AuditLog {
+  id         String   @id @default(cuid()) // 主キー
+  tenantId   String // 所属テナント
+  actorId    String? // 操作したユーザー (システム操作なら null)
+  action     String // 操作名 (例: agent.stop)
+  targetType String // 対象の種類 (例: Agent)
+  targetId   String // 対象の ID
+  payload    Json? // 操作の詳細 (機微情報は入れない)
+  createdAt  DateTime @default(now()) // 記録日時
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  actor  User?  @relation(fields: [actorId], references: [id], onDelete: SetNull) // 操作者
+
+  @@index([tenantId, createdAt]) // 期間検索
+}

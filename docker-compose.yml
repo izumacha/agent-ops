@@ -1,0 +1,56 @@
+# docker compose で起動するサービス群の定義 (クリーン環境で `docker compose up` → デモ動作が Step7 の基準)
+services:
+  # PostgreSQL データベースサービス
+  db:
+    # 軽量な Alpine ベースの Postgres 16 公式イメージ
+    image: postgres:16-alpine
+    # コンテナが落ちたら自動再起動 (手動 stop は除く)
+    restart: unless-stopped
+    # 初期化に使う環境変数 (ローカル専用の既定値。本番では別途設定する)
+    environment:
+      POSTGRES_DB: agent_ops
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    # データ永続化用ボリューム
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # ホストの 5432 をコンテナの 5432 に公開 (ローカルから DB クライアントで繋げる)
+    ports:
+      - '5432:5432'
+    # ヘルスチェック: pg_isready で接続可能か 5 秒おきに確認
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Next.js アプリ本体のサービス
+  app:
+    # カレントディレクトリの Dockerfile からビルド
+    build:
+      context: .
+    # 自動再起動
+    restart: unless-stopped
+    # ホストの 3000 をコンテナの 3000 に公開
+    ports:
+      - '3000:3000'
+    # 実行時の環境変数
+    environment:
+      # コンテナのタイムゾーンを日本時間に設定
+      TZ: Asia/Tokyo
+      # DB 接続文字列 (db サービスの 5432 を指す)
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/agent_ops
+    # db のヘルスチェックが green になってから起動する
+    depends_on:
+      db:
+        condition: service_healthy
+    # アプリ側のヘルスチェック: /api/health が 200 を返せば正常 (DB 到達性も含む)
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/api/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+# 名前付きボリュームの宣言 (永続データ用)
+volumes:
+  pgdata:

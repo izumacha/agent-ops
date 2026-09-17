@@ -28,7 +28,7 @@ import type {
   UserTokensPort,
   UsersPort,
 } from '@/data/ports';
-import { AgentStatus, Plan, Role, type AgentStatus as AgentStatusType } from '@/domain/types';
+import { AgentStatus, Plan, Role } from '@/domain/types';
 import { paginate } from './paginate';
 import { MemoryStore } from './store';
 
@@ -329,11 +329,7 @@ class MemoryAgents implements AgentsPort {
   }
 
   // 状態変更
-  async setStatus(
-    tenantId: string,
-    id: string,
-    status: AgentStatusType,
-  ): Promise<AgentRecord | null> {
+  async setStatus(tenantId: string, id: string, status: AgentStatus): Promise<AgentRecord | null> {
     // 対象行 (テナント境界内)
     const row = this.store.agents.get(id);
     if (!row || row.tenantId !== tenantId) return null;

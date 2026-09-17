@@ -8,10 +8,7 @@ import type {
   UserRecord,
   UserTokenRecord,
 } from '@/data';
-import type { AgentDto, ApiKeyDto, ApiSchemas, TenantDto, UserDto } from '@/lib/api-types';
-
-// ユーザートークンの DTO (OpenAPI の UserToken スキーマ)
-export type UserTokenDto = ApiSchemas['UserToken'];
+import type { AgentDto, ApiKeyDto, TenantDto, UserDto, UserTokenDto } from '@/lib/api-types';
 
 // 一覧の応答 (OpenAPI の *List スキーマ共通の形: items と、次ページがあるときだけ nextCursor)
 export interface ListDto<T> {

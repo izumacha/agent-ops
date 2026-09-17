@@ -181,10 +181,12 @@ class PrismaUsers implements UsersPort {
   ): Promise<UserMutationResult> {
     // 1 トランザクションで判定と更新を行う
     return this.db.$transaction(async (tx: Db): Promise<UserMutationResult> => {
-      // テナント行をロックし、同じテナントへの同種の要求を直列化する (存在しないテナントなら対象も無い)
+      // テナント行をロックし、同じテナントへの同種の要求を直列化する (存在しないテナントなら対象も無い)。
+      // FOR NO KEY UPDATE にするのは、子テーブルの INSERT が親行に取る FK 検査のロック (FOR KEY SHARE) と衝突させないため
+      // (FOR UPDATE だと役割変更中はテナント内の全書き込みが待たされる。NO KEY UPDATE 同士は衝突するので相互排他は保たれる)
       const locked = await tx.$queryRaw<
         { id: string }[]
-      >`SELECT id FROM "Tenant" WHERE id = ${tenantId} FOR UPDATE`;
+      >`SELECT id FROM "Tenant" WHERE id = ${tenantId} FOR NO KEY UPDATE`;
       if (locked.length === 0) return { status: 'not_found' };
       // 対象 (テナント境界内)
       const target = await tx.user.findUnique({ where: { tenantId_id: { tenantId, id } } });

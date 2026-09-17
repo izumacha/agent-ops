@@ -123,6 +123,7 @@ model Agent {
   incidents      Incident[] // インシデント
 
   @@unique([tenantId, name]) // 同一テナント内で名前を重複させない
+  @@unique([tenantId, id]) // 子テーブルの複合 FK (tenantId, agentId) の参照先。「別テナントのエージェントを指す行」を DB で弾く
   @@index([tenantId, status]) // 一覧の絞り込み (テナント + 状態)
 }
 
@@ -138,10 +139,12 @@ model ApiKey {
   revokedAt DateTime? // 失効日時 (null なら有効)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
-  agent  Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull) // 紐づくエージェント
+  // 紐づくエージェント。複合 FK で「同じテナントのエージェント」であることを DB が保証する。
+  // Cascade なのは、SetNull だと削除でキーが「テナント共通キー (agentId=null)」へ黙って昇格し権限が広がるため
+  agent Agent? @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Cascade)
 
   @@index([tenantId]) // テナント絞り込み用
-  @@index([agentId]) // エージェント削除時の SetNull 解決・エージェント別一覧用 (PostgreSQL は FK に索引を張らない)
+  @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別一覧用 (PostgreSQL は FK に索引を張らない)
 }
 
 // 利用イベント (プロキシが中継した LLM 呼び出し 1 回 = 1 行。Step2 で記録し日次集計する)
@@ -159,7 +162,9 @@ model UsageEvent {
   createdAt    DateTime @default(now()) // 発生日時
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
-  agent  Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade) // 呼び出し元エージェント
+  // 呼び出し元エージェント (同テナントであることを複合 FK で保証)。Restrict なのは、コスト履歴は請求の根拠なので
+  // エージェント削除で消してはいけないため (履歴があるエージェントは削除せず stopped にする。docs/spec.md §3)
+  agent Agent @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
 
   @@index([tenantId, createdAt]) // 日次集計 (テナント + 期間)
   @@index([agentId, createdAt]) // エージェント別集計
@@ -176,6 +181,7 @@ model EvaluationSet {
   cases  EvaluationCase[] // 含まれる評価ケース
   runs   EvaluationRun[] // このセットでの実行
 
+  @@unique([tenantId, id]) // EvaluationRun の複合 FK (tenantId, setId) の参照先
   @@index([tenantId]) // テナント絞り込み用
 }
 
@@ -203,12 +209,14 @@ model EvaluationRun {
   createdAt     DateTime @default(now()) // 実行日時
 
   tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
-  agent  Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade) // 対象エージェント
-  set    EvaluationSet @relation(fields: [setId], references: [id], onDelete: Cascade) // 使った評価セット
+  // 対象エージェント (同テナントを複合 FK で保証)。評価履歴は回帰比較の根拠なので削除で消さない (Restrict)
+  agent  Agent         @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
+  // 使った評価セット (同テナントを複合 FK で保証)。実行履歴を持つセットは削除できない (Restrict)
+  set    EvaluationSet @relation(fields: [tenantId, setId], references: [tenantId, id], onDelete: Restrict)
 
   @@index([tenantId, createdAt]) // 回帰比較 (テナント + 期間)
-  @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別履歴用
-  @@index([setId]) // 評価セット削除時の Cascade 解決・セット別履歴用
+  @@index([agentId]) // Restrict の解決・エージェント別履歴用
+  @@index([setId]) // Restrict の解決・セット別履歴用
 }
 
 // ガードレールのしきい値ルール (Step4)
@@ -224,9 +232,11 @@ model GuardrailRule {
   createdAt     DateTime   @default(now()) // 作成日時
 
   tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
-  agent     Agent?     @relation(fields: [agentId], references: [id], onDelete: Cascade) // 対象エージェント
+  // 対象エージェント (同テナントを複合 FK で保証)。設定なのでエージェントと一緒に消える (Cascade)
+  agent     Agent?     @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Cascade)
   incidents Incident[] // このルールが起こしたインシデント
 
+  @@unique([tenantId, id]) // Incident の複合 FK (tenantId, ruleId) の参照先
   @@index([tenantId, enabled]) // 有効ルールの列挙
   @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別ルール用
 }
@@ -243,12 +253,14 @@ model Incident {
   resolvedAt  DateTime? // 解決日時
 
   tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
-  agent  Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade) // 対象エージェント
-  rule   GuardrailRule @relation(fields: [ruleId], references: [id], onDelete: Cascade) // 発火ルール
+  // 対象エージェント (同テナントを複合 FK で保証)。「なぜ止まったか」の記録なので削除で消さない (Restrict)
+  agent  Agent         @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
+  // 発火ルール (同テナントを複合 FK で保証)。インシデントを起こしたルールは削除できない (Restrict。無効化は enabled=false)
+  rule   GuardrailRule @relation(fields: [tenantId, ruleId], references: [tenantId, id], onDelete: Restrict)
 
   @@index([tenantId, status]) // 未解決一覧
-  @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別インシデント用
-  @@index([ruleId]) // ルール削除時の Cascade 解決・ルール別インシデント用
+  @@index([agentId]) // Restrict の解決・エージェント別インシデント用
+  @@index([ruleId]) // Restrict の解決・ルール別インシデント用
 }
 
 // 監査ログ (誰が・いつ・何に・何をしたか。追記専用。Step4 で改ざん検知のハッシュ連鎖を足す)
@@ -262,9 +274,12 @@ model AuditLog {
   payload    Json? // 操作の詳細 (機微情報は入れない)
   createdAt  DateTime @default(now()) // 記録日時
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
-  actor  User?  @relation(fields: [actorId], references: [id], onDelete: SetNull) // 操作者
+  // 親テナント。テナント解約時はデータ一式を消す (テナント単位の消去要求に応えるため)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // 操作者。Restrict なのは、SetNull だと「誰が止めたか」が失われ (UC-09 の事後条件違反)、Step4 のハッシュ連鎖も
+  // 壊れるため。監査ログを持つユーザーは削除せず無効化する (Step1 で User に無効化フラグを足す)
+  actor  User?  @relation(fields: [actorId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, createdAt]) // 期間検索
-  @@index([actorId]) // ユーザー削除時の SetNull 解決・操作者別検索用
+  @@index([actorId]) // Restrict の解決・操作者別検索用
 }

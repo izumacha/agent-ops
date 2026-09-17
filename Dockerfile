@@ -62,6 +62,7 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 # seed (prisma/seed.ts) が相対 import で参照する src/ 配下のファイルと、`@/` を解決する tsconfig。
 # 列挙は seed の import グラフと tests/docker-seed-files.test.ts が突き合わせる (足し忘れ・余分はどちらも落ちる)
 COPY --from=builder /app/src/lib/prisma-client.ts ./src/lib/prisma-client.ts
+COPY --from=builder /app/src/lib/pg-search-path.ts ./src/lib/pg-search-path.ts
 COPY --from=builder /app/src/domain/types.ts ./src/domain/types.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 # 本番用依存だけを取り込む (Prisma CLI / tsx / dotenv を含み、dev ツールチェーンは含まない)
@@ -77,4 +78,5 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 # 起動コマンド: マイグレーションを適用してからサーバを起動する (クリーン環境で compose up だけで動かすため)
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+# exec で node を PID 1 にする (sh のままだと SIGTERM を握り潰し、停止が常に 10 秒後の SIGKILL になる)
+CMD ["sh", "-c", "npx prisma migrate deploy && exec node server.js"]

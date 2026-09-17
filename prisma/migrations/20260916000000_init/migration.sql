@@ -183,6 +183,9 @@ CREATE INDEX "Agent_tenantId_status_idx" ON "Agent"("tenantId", "status");
 CREATE UNIQUE INDEX "Agent_tenantId_name_key" ON "Agent"("tenantId", "name");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "Agent_tenantId_id_key" ON "Agent"("tenantId", "id");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "ApiKey_keyHash_key" ON "ApiKey"("keyHash");
 
 -- CreateIndex
@@ -201,6 +204,9 @@ CREATE INDEX "UsageEvent_agentId_createdAt_idx" ON "UsageEvent"("agentId", "crea
 CREATE INDEX "EvaluationSet_tenantId_idx" ON "EvaluationSet"("tenantId");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "EvaluationSet_tenantId_id_key" ON "EvaluationSet"("tenantId", "id");
+
+-- CreateIndex
 CREATE INDEX "EvaluationCase_setId_idx" ON "EvaluationCase"("setId");
 
 -- CreateIndex
@@ -217,6 +223,9 @@ CREATE INDEX "GuardrailRule_tenantId_enabled_idx" ON "GuardrailRule"("tenantId",
 
 -- CreateIndex
 CREATE INDEX "GuardrailRule_agentId_idx" ON "GuardrailRule"("agentId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "GuardrailRule_tenantId_id_key" ON "GuardrailRule"("tenantId", "id");
 
 -- CreateIndex
 CREATE INDEX "Incident_tenantId_status_idx" ON "Incident"("tenantId", "status");
@@ -243,13 +252,13 @@ ALTER TABLE "Agent" ADD CONSTRAINT "Agent_tenantId_fkey" FOREIGN KEY ("tenantId"
 ALTER TABLE "ApiKey" ADD CONSTRAINT "ApiKey_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ApiKey" ADD CONSTRAINT "ApiKey_agentId_fkey" FOREIGN KEY ("agentId") REFERENCES "Agent"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "ApiKey" ADD CONSTRAINT "ApiKey_tenantId_agentId_fkey" FOREIGN KEY ("tenantId", "agentId") REFERENCES "Agent"("tenantId", "id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "UsageEvent" ADD CONSTRAINT "UsageEvent_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "UsageEvent" ADD CONSTRAINT "UsageEvent_agentId_fkey" FOREIGN KEY ("agentId") REFERENCES "Agent"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "UsageEvent" ADD CONSTRAINT "UsageEvent_tenantId_agentId_fkey" FOREIGN KEY ("tenantId", "agentId") REFERENCES "Agent"("tenantId", "id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "EvaluationSet" ADD CONSTRAINT "EvaluationSet_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -261,29 +270,29 @@ ALTER TABLE "EvaluationCase" ADD CONSTRAINT "EvaluationCase_setId_fkey" FOREIGN 
 ALTER TABLE "EvaluationRun" ADD CONSTRAINT "EvaluationRun_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EvaluationRun" ADD CONSTRAINT "EvaluationRun_agentId_fkey" FOREIGN KEY ("agentId") REFERENCES "Agent"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "EvaluationRun" ADD CONSTRAINT "EvaluationRun_tenantId_agentId_fkey" FOREIGN KEY ("tenantId", "agentId") REFERENCES "Agent"("tenantId", "id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EvaluationRun" ADD CONSTRAINT "EvaluationRun_setId_fkey" FOREIGN KEY ("setId") REFERENCES "EvaluationSet"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "EvaluationRun" ADD CONSTRAINT "EvaluationRun_tenantId_setId_fkey" FOREIGN KEY ("tenantId", "setId") REFERENCES "EvaluationSet"("tenantId", "id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "GuardrailRule" ADD CONSTRAINT "GuardrailRule_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "GuardrailRule" ADD CONSTRAINT "GuardrailRule_agentId_fkey" FOREIGN KEY ("agentId") REFERENCES "Agent"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "GuardrailRule" ADD CONSTRAINT "GuardrailRule_tenantId_agentId_fkey" FOREIGN KEY ("tenantId", "agentId") REFERENCES "Agent"("tenantId", "id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Incident" ADD CONSTRAINT "Incident_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Incident" ADD CONSTRAINT "Incident_agentId_fkey" FOREIGN KEY ("agentId") REFERENCES "Agent"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Incident" ADD CONSTRAINT "Incident_tenantId_agentId_fkey" FOREIGN KEY ("tenantId", "agentId") REFERENCES "Agent"("tenantId", "id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Incident" ADD CONSTRAINT "Incident_ruleId_fkey" FOREIGN KEY ("ruleId") REFERENCES "GuardrailRule"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Incident" ADD CONSTRAINT "Incident_tenantId_ruleId_fkey" FOREIGN KEY ("tenantId", "ruleId") REFERENCES "GuardrailRule"("tenantId", "id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_actorId_fkey" FOREIGN KEY ("actorId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_actorId_fkey" FOREIGN KEY ("actorId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 

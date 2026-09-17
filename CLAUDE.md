@@ -55,13 +55,13 @@ CI（`.github/workflows/ci.yml`）は `gate-step0` ジョブと、PostgreSQL サ
 
 ### Prisma 7 の結線
 
-`PrismaClient` を直接 `new` せず、`src/lib/prisma-client.ts` の `createPrismaClient()` を使う（アプリの singleton `src/lib/prisma.ts`・seed・将来の契約テストがすべて経由する）。`src/lib/prisma.ts` の `prisma` は Proxy 経由の**遅延生成**で、DB を触らないユニットテストが import しただけでは接続文字列を要求しない。接続文字列と seed コマンドは `prisma.config.ts` に集約し、`.env` は Next.js 以外の入口（`prisma.config.ts` / `prisma/seed.ts`）が各自 `dotenv/config` で読む。`DATABASE_URL` 未設定は fail-closed で落とす。
+`PrismaClient` を直接 `new` せず、`src/lib/prisma-client.ts` の `createPrismaClient()` を使う（アプリの singleton `src/lib/prisma.ts`・seed・将来の契約テストがすべて経由する）。`src/lib/prisma.ts` の `prisma` は Proxy 経由の**遅延生成**で、DB を触らないユニットテストが import しただけでは接続文字列を要求しない。接続文字列と seed コマンドは `prisma.config.ts` に集約し、`.env` は Next.js 以外の入口（`prisma.config.ts` / `prisma/seed.ts`）が各自 `dotenv/config` で読む。`DATABASE_URL` 未設定は fail-closed で落とす。接続文字列の `?schema=` は**アダプタの `schema` オプションと接続時の `search_path` の両方**へ反映し、未指定なら `public` を明示的に固定する（片方だけだと Prisma CLI と実行時クライアントが別スキーマを向き、`SELECT 1` の生存確認は通るのに全クエリが落ちる）。
 
 ### レイヤ構成
 
 - `src/app/*` — App Router。API は OpenAPI の `servers.url`（`/api/v1`）に合わせて `src/app/api/v1/*` に Route Handler として実装する。`api/v1/health/route.ts` は DB 到達性を返す（compose の healthcheck が使う）。
 - `src/domain/` — Prisma/Next 非依存の純粋ロジック（`npm run db:generate` 無しでもユニットテストが動く）。`rbac.ts` の許可表 `PERMISSIONS`（`viewer` / `operator` / `admin` × `view` / `execute` / `stop`）が**唯一の真実の源**で、`canPerform(role, action)` は未知の値を拒否する（fail-closed）。`tests/rbac.test.ts` が 9 パターンすべてを固定する。
-- `src/lib/` — 横断インフラ: `prisma.ts` / `prisma-client.ts` / `constants.ts`（UI 文言・enum ラベル）/ `api-types.ts`。
+- `src/lib/` — 横断インフラ: `prisma.ts`（遅延生成 Proxy。転送できる操作はすべて実クライアントへ転送し、bind した関数は同一性を保つ）/ `prisma-client.ts` / `pg-search-path.ts`（`search_path` の引用規則。`tests/pg-search-path.test.ts` が固定）/ `constants.ts`（UI 文言・enum ラベル）/ `api-types.ts`。
 - `scripts/gate-stepN.mjs` — Step ごとの受け入れ基準の検査（ADR-0004）。
 - `tests/` — Vitest（`environment: 'node'`）。DB を触る挙動は Step6 の契約テスト（`*.contract.prisma.test.ts`、別 DB、`RUN_PRISMA_CONTRACT=1` のときだけ）へ寄せる。設定の写しを見張る検出網: `docker-seed-files`（Dockerfile の seed 用 COPY 列挙 = seed の import グラフ）/ `node-runtime-alignment`（`.nvmrc` / Dockerfile / `engines.node` / CI 配線 / `@types/node` の major 一致）/ `dependabot-eslint-guard`（eslint major 保留の存在と期限切れ）。
 
@@ -71,7 +71,7 @@ CI（`.github/workflows/ci.yml`）は `gate-step0` ジョブと、PostgreSQL サ
 - 書き込み系の API は RBAC 違反を 403 で返し、OpenAPI 定義にも `403` を宣言する。
 - 金額はマイクロ USD の整数（`BigInt`、1 USD = 1,000,000）で持ち、JSON では文字列で運ぶ（浮動小数誤差を避ける）。
 - API キーは SHA-256 ハッシュ（`keyHash`）と先頭数文字（`prefix`）だけを保存し、平文は発行応答でしか返さない。
-- 監査ログ（`AuditLog`）は追記専用。Step4 で改ざん検知（ハッシュ連鎖）を足す。
+- 監査ログ（`AuditLog`）は追記専用。Step4 で改ざん検知（ハッシュ連鎖）を足す。削除の規則（履歴は `Restrict`、設定は `Cascade`、`actorId` は `Restrict`、子テーブルは複合 FK `(tenantId, 親id)`）は `docs/spec.md` §3「削除の規則」が正本。
 - エージェントの状態は `active` / `stopped`（手動）/ `suspended`（ガードレールによる自動停止。復帰は `admin` の `resume`）。
 
 ### 見せ方（§15 の具体化）

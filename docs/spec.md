@@ -184,7 +184,14 @@ erDiagram
   }
 ```
 
-金額は浮動小数誤差を避けるため**マイクロ USD の整数（BigInt）**で持つ（1 USD = 1,000,000）。JSON では文字列で運ぶ。
+金額は浮動小数誤差を避けるため**マイクロ USD の整数（BigInt）**で持つ（1 USD = 1,000,000）。JSON では文字列で運ぶ（最大 19 桁）。
+
+### 削除の規則（参照整合性）
+
+- **履歴（`UsageEvent` / `EvaluationRun` / `Incident`）は親の削除で消さない（`Restrict`）。** コスト履歴は請求の根拠、インシデントは停止理由の記録なので、履歴を持つエージェントは削除できず `stop` で止める（`DELETE /agents/{id}` は 409）。実行履歴を持つ評価セット、発火済みのルールも同様（ルールは `enabled=false` で無効化）。
+- **設定（`ApiKey` / `GuardrailRule`）はエージェントと一緒に消える（`Cascade`）。** `ApiKey.agentId` を `SetNull` にすると削除で「テナント共通キー」へ黙って昇格し権限が広がるため、Cascade にする。
+- **監査ログの操作者（`AuditLog.actorId`）は `Restrict`。** 監査ログを持つユーザーは削除せず無効化する（Step1 で `User` に無効化フラグを足す）。テナント解約は `Cascade` でデータ一式を消す（テナント単位の消去要求に応えるため）。
+- **子テーブルは複合 FK `(tenantId, 親id)` で親を参照する。** 「別テナントのエージェント／セット／ルールを指す行」をクエリ規律だけでなく DB 制約でも拒否する（`Agent` / `EvaluationSet` / `GuardrailRule` に `@@unique([tenantId, id])`）。
 
 ## 4. API 一覧
 

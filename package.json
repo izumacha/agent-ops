@@ -29,8 +29,7 @@
     "prisma": "^7.10.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "tsx": "^4.23.13",
-    "zod": "^4.6.1"
+    "tsx": "^4.23.13"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",

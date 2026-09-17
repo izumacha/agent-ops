@@ -18,6 +18,21 @@ const config = [
   // TypeScript 向けルールを展開してマージ
   ...nextTypescript,
   {
+    // 適用対象: src 配下の TypeScript / TSX ファイル全体 (除外なし)
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
+      // _ プレフィックスの変数・引数は意図的な未使用として警告しない (Proxy トラップの _target 等)
+      '@typescript-eslint/no-unused-vars': [
+        'warn',
+        {
+          argsIgnorePattern: '^_', // 関数引数の _ プレフィックスを無視
+          varsIgnorePattern: '^_', // 変数宣言の _ プレフィックスを無視
+          destructuredArrayIgnorePattern: '^_', // 分割代入の _ プレフィックスを無視
+        },
+      ],
+    },
+  },
+  {
     // 適用対象: src 配下の TypeScript / TSX ファイル全体
     files: ['src/**/*.{ts,tsx}'],
     // 例外: Prisma クライアントの結線箇所 (composition root) だけは生成物の直接 import を許可する

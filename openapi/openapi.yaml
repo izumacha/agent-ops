@@ -244,7 +244,7 @@ paths:
     delete:
       tags: [agents]
       operationId: deleteAgent
-      summary: エージェント削除 (stop 権限)
+      summary: エージェント削除 (stop 権限)。利用・評価・インシデントの履歴があるエージェントは削除できない (409。stop を使う)
       responses:
         '204':
           description: 削除した
@@ -252,6 +252,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /agents/{agentId}/stop:
     parameters:
       - $ref: '#/components/parameters/AgentId'
@@ -393,6 +395,12 @@ components:
             $ref: '#/components/schemas/Error'
     NotFound:
       description: 見つからない (他テナントの資源も 404 で隠す)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 現在の状態では実行できない (履歴を持つ資源の削除など)
       content:
         application/json:
           schema:
@@ -563,6 +571,8 @@ components:
         budgetMicroUsd:
           type: string
           pattern: '^[0-9]+$'
+          maxLength: 19
+          description: マイクロ USD の整数 (PostgreSQL BIGINT の範囲。19 桁まで)
     AgentUpdate:
       type: object
       description: 省略したプロパティは変更しない。null を送ると未設定に戻す (description / budgetMicroUsd)
@@ -581,6 +591,7 @@ components:
         budgetMicroUsd:
           type: [string, 'null']
           pattern: '^[0-9]+$'
+          maxLength: 19
     AgentList:
       type: object
       required: [items]

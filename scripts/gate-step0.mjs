@@ -3,20 +3,12 @@
 // 赤なら次 Step のブランチを切らない。検査項目:
 //   1. `npm run gen` (OpenAPI → 型生成) が通る
 //   2. `npm run db:generate` (Prisma クライアント生成) が通る
-//   3. lint / typecheck / test が緑
-//   4. OpenAPI 定義が存在する
-//   5. ADR が 3 件以上ある
+//   3. lint / typecheck / test が緑 (OpenAPI 定義の存在と ADR の件数は tests/docs-gate.test.ts が test の中で検査する)
 // 子プロセスを同期実行するために使う (Node 標準)
 import { spawnSync } from 'node:child_process';
-// ファイル存在確認とディレクトリ列挙 (Node 標準)
-import { existsSync, readdirSync } from 'node:fs';
-// パス結合 (Node 標準)
-import { join } from 'node:path';
 
 // リポジトリのルート (このスクリプトは npm scripts から呼ばれる前提でカレントを使う)
 const ROOT = process.cwd();
-// ADR の最低件数 (受け入れ基準)
-const REQUIRED_ADRS = 3;
 // Windows かどうか (npm の起動方法が変わる)
 const IS_WINDOWS = process.platform === 'win32';
 // 順に実行する検証コマンド (失敗したらその場で止める)
@@ -34,7 +26,7 @@ function banner(text) {
   console.log(`\n=== ${text} ===`);
 }
 
-// 1〜3: コマンドを順番に実行する
+// コマンドを順番に実行する
 for (const step of STEPS) {
   // 何を実行するか表示する
   banner(step.name);
@@ -52,30 +44,8 @@ for (const step of STEPS) {
   }
 }
 
-// 4: OpenAPI 定義の存在
-banner('OpenAPI 定義');
-// 定義ファイルの場所
-const openapiPath = join(ROOT, 'openapi', 'openapi.yaml');
-// 無ければ赤
-if (!existsSync(openapiPath)) {
-  console.error('[gate:step0] 失敗: openapi/openapi.yaml がありません');
-  process.exit(1);
-}
-console.log('openapi/openapi.yaml あり');
-
-// 5: ADR の件数
-banner('ADR');
-// docs/adr 配下の「0001-xxx.md」形式のファイルを数える
-const adrDir = join(ROOT, 'docs', 'adr');
-const adrs = existsSync(adrDir)
-  ? readdirSync(adrDir).filter((name) => /^\d{4}-.+\.md$/.test(name))
-  : [];
-// 足りなければ赤
-if (adrs.length < REQUIRED_ADRS) {
-  console.error(`[gate:step0] 失敗: ADR が ${adrs.length} 件 (必要: ${REQUIRED_ADRS} 件以上)`);
-  process.exit(1);
-}
-console.log(`ADR ${adrs.length} 件: ${adrs.join(', ')}`);
+// OpenAPI 定義の存在と ADR の件数は tests/docs-gate.test.ts が検査する (上の Unit tests に含まれる)。
+// ここに写しを持つと、しきい値を変えたときに片方だけが古くなる
 
 // すべて通った
 banner('gate:step0 緑');

@@ -1,0 +1,39 @@
+# dependencies
+/node_modules
+
+# testing
+/coverage
+/playwright-report
+/test-results
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+/dist
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+
+# env files (キー名は .env.example に記載する。実値はコミットしない)
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# 生成物 (Prisma クライアント / OpenAPI 型)。`npm run db:generate` と `npm run gen` で再生成する
+/src/generated/
+
+# Claude Code agent worktrees / scratch state (per-session, never commit)
+.claude/

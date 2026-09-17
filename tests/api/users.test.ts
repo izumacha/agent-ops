@@ -1,5 +1,5 @@
 // ユーザー API: 招待・役割変更・無効化・ログイントークン (admin ロール限定) とテナント境界
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listUsers, POST as createUser } from '@/app/api/v1/users/route';
 import { DELETE as disableUser } from '@/app/api/v1/users/[userId]/route';
@@ -8,13 +8,15 @@ import { GET as listTokens, POST as createToken } from '@/app/api/v1/users/[user
 import { DELETE as revokeToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
 import { Role } from '@/domain/types';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
-import { call, setupSeed, type Seed } from './helpers';
+import { call, setupSeed, teardownSeed, type Seed } from './helpers';
 
 // seed (各テストで作り直す)
 let seed: Seed;
 beforeEach(() => {
   seed = setupSeed();
 });
+// 後始末 (Composition Root と環境変数を戻す)
+afterEach(teardownSeed);
 
 describe('GET /users', () => {
   it('自テナントのユーザーだけを返す (他テナントは混ざらない)', async () => {

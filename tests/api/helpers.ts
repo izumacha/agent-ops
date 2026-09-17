@@ -99,16 +99,29 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
   return { id, users, tokens, tokenRows, agent };
 }
 
-// memory アダプタへ差し替え、テナント A / B を seed する (各テストの beforeEach で呼ぶ)
+// setupSeed 前の環境変数 (teardownSeed で戻す)
+let platformTokenBefore: string | undefined;
+
+// memory アダプタへ差し替え、テナント A / B を seed する (各テストの beforeEach で呼ぶ。afterEach で teardownSeed を対にする)
 export function setupSeed(): Seed {
   // 新しい表で memory アダプタを作る
   const repos = createMemoryRepos();
   // Composition Root を差し替える
   setReposForTesting(repos);
-  // プラットフォーム管理者トークンを設定する
+  // プラットフォーム管理者トークンを設定する (元の値は後始末で戻す)
+  platformTokenBefore = process.env.PLATFORM_ADMIN_TOKEN;
   process.env.PLATFORM_ADMIN_TOKEN = PLATFORM_TOKEN;
   // 2 テナント分を seed する
   return { store: repos.store, a: seedTenant(repos.store, 'A'), b: seedTenant(repos.store, 'B') };
+}
+
+// setupSeed の後始末: Composition Root と環境変数を元へ戻す (ファイル単位の隔離に頼らず、別ファイルへ漏らさない)
+export function teardownSeed(): void {
+  // 本番の束へ戻す
+  setReposForTesting(undefined);
+  // 環境変数を元の値へ (元が未設定なら消す)
+  if (platformTokenBefore === undefined) delete process.env.PLATFORM_ADMIN_TOKEN;
+  else process.env.PLATFORM_ADMIN_TOKEN = platformTokenBefore;
 }
 
 // Route Handler の関数型 (route() が返す形)

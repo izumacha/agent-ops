@@ -32,3 +32,4 @@ Step1 で REST API（テナント・ユーザー・エージェント・API キ�
 - `prisma/schema.prisma` に `UserToken` と `User.disabledAt`、`User @@unique([tenantId, id])`（複合 FK の参照先）を追加（マイグレーション `20260917000000_add_user_token`）。
 - 認証は `src/lib/api/auth.ts`、認可ガードは `src/lib/api/guard.ts`（`requireAction` / `requireAdminRole` / `requirePlatformAdmin`）に集約。Route Handler はこれ以外の経路で権限を判定しない。
 - Step5 でブラウザ向けのログイン（セッション Cookie）を足すときは、Cookie → ユーザートークンの発行、という形でこの ADR の上に重ねる（置き換えない）。
+- **未対応（意図的に残す宿題）**: 認証経路のレート制限。無効なユーザートークンを大量に送ると毎回ハッシュ索引の検索が走る（総当たりは 256 ビット乱数のため成立しないが、DB を消耗させられる）。`docs/roadmap.md` Step6 の「レート制限」で扱う。

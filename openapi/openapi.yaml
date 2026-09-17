@@ -96,6 +96,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Tenant'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
   /me:
@@ -127,6 +129,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     post:
       tags: [users]
       operationId: createUser
@@ -278,6 +282,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AgentList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     post:
       tags: [agents]
       operationId: createAgent
@@ -313,6 +319,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Agent'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     patch:
@@ -402,6 +410,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiKeyList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     post:
       tags: [api-keys]
       operationId: createApiKey

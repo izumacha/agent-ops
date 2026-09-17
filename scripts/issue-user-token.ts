@@ -9,12 +9,13 @@ import { parseArgs } from 'node:util';
 import { createPrismaRepos } from '../src/data/adapters/prisma';
 import { createPrismaClient } from '../src/lib/prisma-client';
 // 既定の有効期間
-import { USER_TOKEN_DEFAULT_TTL_DAYS, USER_TOKEN_MAX_TTL_DAYS } from '../src/lib/constants';
+import {
+  DEFAULT_TENANT_ID,
+  USER_TOKEN_DEFAULT_TTL_DAYS,
+  USER_TOKEN_MAX_TTL_DAYS,
+} from '../src/lib/constants';
 // トークン生成
 import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '../src/lib/tokens';
-
-// seed が作る既定テナントの id (prisma/seed.ts と同じ値)
-const DEFAULT_TENANT_ID = 'default-tenant';
 
 // CLI 本体
 async function main(): Promise<void> {

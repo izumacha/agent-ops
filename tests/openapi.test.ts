@@ -57,13 +57,12 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     }
   });
 
-  // 書き込み系は RBAC 違反の 403 を契約に持つ
+  // 認証が要る操作はすべて 403 を契約に持つ (書き込み系は RBAC 違反、読み取り系もプラットフォーム管理者トークンで
+  // テナント内の資源を読もうとすると 403 になる。テナント境界そのものは 404 で隠すが、主体の種類違いは 403)
   it('認証が必要なオペレーションは 403 (権限違反) の応答を宣言している', () => {
     // 定義側が `security: []` で公開と宣言したオペレーションは対象外 (パス名の決め打ちで写しを持たない)
     for (const { path, method, op } of operations) {
       if (Array.isArray(op.security) && op.security.length === 0) continue;
-      // 読み取り (GET) は 403 を持たなくてよい (テナント境界は 404 で隠す)。書き込み系は必須
-      if (method === 'get') continue;
       expect(Object.keys(op.responses ?? {}), `${method.toUpperCase()} ${path}`).toContain('403');
     }
   });

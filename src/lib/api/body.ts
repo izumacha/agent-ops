@@ -54,10 +54,12 @@ export async function readBodyWithinByteLimit(request: Request, maxBytes: number
       // 次のかたまり
       const { done, value } = await reader.read();
       if (done) break;
-      // 合計を更新し、上限超過なら即 413
+      // 合計を更新し、上限超過なら残りを受け取らずに打ち切って 413 (§8 供給元も止める)
       total += value.byteLength;
-      if (total > maxBytes)
+      if (total > maxBytes) {
+        await reader.cancel();
         throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
+      }
       chunks.push(value);
     }
   } finally {

@@ -1,16 +1,18 @@
 // テナント API: 作成 (admin + トークン同時発行)・一覧・取得
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants, POST as createTenant } from '@/app/api/v1/tenants/route';
 import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
-import { call, PLATFORM_TOKEN, setupSeed, type Seed } from './helpers';
+import { call, PLATFORM_TOKEN, setupSeed, teardownSeed, type Seed } from './helpers';
 
 // seed (各テストで作り直す)
 let seed: Seed;
 beforeEach(() => {
   seed = setupSeed();
 });
+// 後始末 (Composition Root と環境変数を戻す)
+afterEach(teardownSeed);
 
 // 作成応答の形
 interface Created {

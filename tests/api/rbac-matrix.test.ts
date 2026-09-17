@@ -1,19 +1,21 @@
 // Step1 の受け入れ基準「権限違反テスト全パターン (役割 3 × 操作 3) で 403」を API 経路で固定する。
 // テスト名の「RBAC 行列: <役割> × <操作>」は scripts/gate-step1.mjs が 9 パターンの存在を照合するので変えない
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GET as listAgents, POST as createAgent } from '@/app/api/v1/agents/route';
 import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { POST as createUser } from '@/app/api/v1/users/route';
 import { GET as listTenants } from '@/app/api/v1/tenants/route';
 import { ACTIONS, canPerform, type Action } from '@/domain/rbac';
 import { Provider, Role } from '@/domain/types';
-import { call, PLATFORM_TOKEN, setupSeed, type Seed } from './helpers';
+import { call, PLATFORM_TOKEN, setupSeed, teardownSeed, type Seed } from './helpers';
 
 // seed (各テストで作り直す)
 let seed: Seed;
 beforeEach(() => {
   seed = setupSeed();
 });
+// 後始末 (Composition Root と環境変数を戻す)
+afterEach(teardownSeed);
 
 // 操作ごとに「その操作を要求する代表エンドポイント」を 1 つ決める
 const ENDPOINT_BY_ACTION: Record<Action, (token: string) => Promise<number>> = {

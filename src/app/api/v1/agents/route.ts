@@ -6,13 +6,14 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
 import { toAgentDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
+import { z } from 'zod';
 import { agentCreateSchema } from '@/lib/validations/agent';
 import { agentStatus } from '@/lib/validations/common';
 
 // 認証に依存するので静的化しない
 export const dynamic = 'force-dynamic';
-// status クエリの検証 (省略可)
-const statusQuerySchema = agentStatus.optional();
+// 一覧の絞り込みクエリ (status は省略可)。オブジェクトで検証するのは、失敗時の issues.path に 'status' を載せるため
+const agentListQuerySchema = z.object({ status: agentStatus.optional() });
 
 // GET /agents (listAgents)
 export const GET = route(async ({ request, principal, repos }) => {
@@ -20,7 +21,9 @@ export const GET = route(async ({ request, principal, repos }) => {
   const { tenantId } = requireAction(principal, 'view');
   // クエリを読む
   const url = new URL(request.url);
-  const status = validateWith(statusQuerySchema, url.searchParams.get('status') ?? undefined);
+  const { status } = validateWith(agentListQuerySchema, {
+    status: url.searchParams.get('status') ?? undefined,
+  });
   // 自テナントで絞って一覧する
   const page = await repos.agents.list(tenantId, parsePageQuery(url), { status });
   // DTO へ写す

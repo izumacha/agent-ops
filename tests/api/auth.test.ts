@@ -1,15 +1,17 @@
 // Bearer 認証の経路: ヘッダ無し・形式違い・未知・失効・期限切れ・無効化ユーザー・プラットフォーム管理者
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants } from '@/app/api/v1/tenants/route';
 import { generateSecret } from '@/lib/tokens';
-import { call, PLATFORM_TOKEN, setupSeed, type Seed } from './helpers';
+import { call, PLATFORM_TOKEN, setupSeed, teardownSeed, type Seed } from './helpers';
 
 // seed (各テストで作り直す)
 let seed: Seed;
 beforeEach(() => {
   seed = setupSeed();
 });
+// 後始末 (Composition Root と環境変数を戻す)
+afterEach(teardownSeed);
 
 describe('認証 (401 の経路)', () => {
   it('Authorization ヘッダが無ければ 401', async () => {

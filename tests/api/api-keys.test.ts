@@ -1,16 +1,18 @@
 // API キー API: 発行 (平文は 1 度だけ)・一覧・失効・エージェント紐づけ・テナント境界
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GET as listKeys, POST as createKey } from '@/app/api/v1/api-keys/route';
 import { DELETE as revokeKey } from '@/app/api/v1/api-keys/[apiKeyId]/route';
 import { DELETE as deleteAgent } from '@/app/api/v1/agents/[agentId]/route';
 import { API_KEY_PREFIX, hashSecret } from '@/lib/tokens';
-import { call, setupSeed, type Seed } from './helpers';
+import { call, setupSeed, teardownSeed, type Seed } from './helpers';
 
 // seed (各テストで作り直す)
 let seed: Seed;
 beforeEach(() => {
   seed = setupSeed();
 });
+// 後始末 (Composition Root と環境変数を戻す)
+afterEach(teardownSeed);
 
 describe('POST /api-keys', () => {
   it('operator は発行でき、平文は応答にだけ載り DB にはハッシュだけ残る (UC-04)', async () => {

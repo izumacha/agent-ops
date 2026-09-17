@@ -9,11 +9,12 @@ import type { Repositories } from '@/data/ports';
 import { Provider, Role } from '@/domain/types';
 import type { PrismaClient } from '@/generated/prisma';
 import { createPrismaClient } from '@/lib/prisma-client';
+import { userTokenExpiresAt } from '@/lib/tokens';
 
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
-// 1 日のミリ秒
-const DAY_MS = 24 * 60 * 60 * 1000;
+// テストで発行するトークンの有効期間 (日)
+const TOKEN_TTL_DAYS = 1;
 
 // テナントを 1 つ作る (admin + トークン込み)
 async function makeTenant(repos: Repositories, label: string) {
@@ -25,7 +26,7 @@ async function makeTenant(repos: Repositories, label: string) {
       prefix: 'aop_u_test',
       tokenHash: `hash-${label}-${Date.now()}`,
       name: '初期',
-      expiresAt: new Date(Date.now() + DAY_MS),
+      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
     },
   });
 }
@@ -158,7 +159,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
         prefix: 'aop_u_x',
         tokenHash: 't1',
         name: 'x',
-        expiresAt: new Date(Date.now() + DAY_MS),
+        expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
       }),
     ).toBeNull();
   });

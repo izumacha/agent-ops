@@ -14,10 +14,11 @@ beforeEach(() => {
 afterEach(teardownSeed);
 
 describe('認証 (401 の経路)', () => {
-  it('Authorization ヘッダが無ければ 401', async () => {
+  it('Authorization ヘッダが無ければ 401 で、WWW-Authenticate に Bearer 方式を示す', async () => {
     // ヘッダ無し
     const result = await call(getMe);
     expect(result.status).toBe(401);
+    expect(result.headers.get('www-authenticate')).toBe('Bearer realm="agent-ops"');
   });
 
   it('Bearer 以外の方式・トークン無し・余分な語は 401', async () => {
@@ -37,9 +38,11 @@ describe('認証 (401 の経路)', () => {
     expect(result.status).toBe(200);
   });
 
-  it('存在しないユーザートークンは 401', async () => {
+  it('存在しないユーザートークンは 401 で、WWW-Authenticate は invalid_token', async () => {
     // 形は正しいが DB に無いトークン
-    expect((await call(getMe, { token: generateSecret('user') })).status).toBe(401);
+    const result = await call(getMe, { token: generateSecret('user') });
+    expect(result.status).toBe(401);
+    expect(result.headers.get('www-authenticate')).toContain('error="invalid_token"');
   });
 
   it('失効したトークンは 401', async () => {

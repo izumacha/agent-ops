@@ -14,8 +14,11 @@ export function banner(text) {
 // npm を引数付きで実行し、終了コードを返す (出力はそのまま流す)
 export function runNpm(args, options = {}) {
   // Windows の npm は .cmd なので shell 経由で起動する
-  // (Node 22 は .cmd/.bat の shell 無し spawn を EINVAL で拒否する。引数は固定配列なのでインジェクションの余地は無い)
-  const result = spawnSync(IS_WINDOWS ? 'npm.cmd' : 'npm', args, {
+  // (Node 22 は .cmd/.bat の shell 無し spawn を EINVAL で拒否する。引数は固定配列と一時ファイルのパスだけなので
+  //  インジェクションの余地は無いが、shell 経由では空白を含む引数 (例: ユーザー名に空白があるときの一時パス) が
+  //  分割されるため、空白を含む引数だけ二重引用符で囲む)
+  const shellArgs = IS_WINDOWS ? args.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)) : args;
+  const result = spawnSync(IS_WINDOWS ? 'npm.cmd' : 'npm', shellArgs, {
     cwd: process.cwd(),
     stdio: 'inherit',
     shell: IS_WINDOWS,

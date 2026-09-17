@@ -12,9 +12,16 @@ export class ApiError extends Error {
   readonly status: number;
   // 入力検証の詳細 (422 のとき)
   readonly issues?: ApiIssue[];
+  // 応答に付ける追加ヘッダ (401 の WWW-Authenticate など)
+  readonly headers?: Record<string, string>;
 
-  // ステータス・利用者向け文言・任意の詳細を受け取る
-  constructor(status: number, message: string, issues?: ApiIssue[]) {
+  // ステータス・利用者向け文言・任意の詳細・追加ヘッダを受け取る
+  constructor(
+    status: number,
+    message: string,
+    issues?: ApiIssue[],
+    headers?: Record<string, string>,
+  ) {
     // 文言を親クラスへ
     super(message);
     // 名前を型名に合わせる
@@ -22,15 +29,21 @@ export class ApiError extends Error {
     // ステータスと詳細を保持する
     this.status = status;
     this.issues = issues;
+    this.headers = headers;
   }
 }
 
 // OpenAPI の Error スキーマに沿った JSON 応答を作る
-export function errorResponse(status: number, message: string, issues?: ApiIssue[]): Response {
+export function errorResponse(
+  status: number,
+  message: string,
+  issues?: ApiIssue[],
+  headers?: Record<string, string>,
+): Response {
   // issues は 422 のときだけ載せる (undefined のキーは JSON に出ない)
   const body: ApiErrorDto = { status, message, ...(issues ? { issues } : {}) };
-  // JSON で返す
-  return Response.json(body, { status });
+  // JSON で返す (追加ヘッダがあれば付ける)
+  return Response.json(body, { status, headers });
 }
 
 // よく使う例外の生成ヘルパー (文言は constants.ts の API_MESSAGES から引く)

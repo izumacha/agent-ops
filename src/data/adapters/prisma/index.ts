@@ -2,7 +2,7 @@
 // Prisma を直接 import してよいのはこのディレクトリと結線箇所 (src/lib/prisma*.ts) だけ (ESLint が強制する)。
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
 import { DuplicateError } from '@/data/errors';
-import { toPage } from '@/data/page';
+import { requireCursorKey, toPage, type CursorKey } from '@/data/page';
 import type {
   AgentFilter,
   AgentRecord,
@@ -54,27 +54,29 @@ function rethrowDuplicate(error: unknown, field: string): never {
   throw error;
 }
 
-// 一覧の共通引数: createdAt → id の安定順、カーソルは前ページ最終行の id、1 件多く取って次ページを判定する
-function pageArgs(query: PageQuery) {
-  // 並び順・件数・カーソルをまとめて返す (cursor 指定時は skip:1 でカーソル行自身を除く)
+// カーソルより後ろの行だけに絞る where 条件 (キーセット: createdAt が後、または同時刻で id が後)。
+// Prisma の `cursor` 引数は行 id で解決し where と AND しないため使わない (他テナントの id で先頭行が飛ぶ・
+// 存在が漏れる・行が消えると続きが取れない)。位置の比較なら 3 つとも起きない
+function afterCursorWhere(key: CursorKey) {
+  // (createdAt, id) > (key.createdAt, key.id)
   return {
-    orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
-    take: query.limit + 1,
-    ...(query.cursor !== undefined ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+    OR: [{ createdAt: { gt: key.createdAt } }, { createdAt: key.createdAt, id: { gt: key.id } }],
   };
 }
 
-// カーソルが「この一覧の絞り込み条件の中」に実在するかを確かめる。Prisma の cursor は id だけで行を解決し
-// where と AND しないため、他テナント・絞り込み外の id を渡すと (a) 空ではなく正規の先頭行を 1 件飛ばしたページが
-// 返り、(b) 空/非空の差で他テナントの id の存在が分かる。memory アダプタ (絞り込み後に探すので空) と同じにする
-async function cursorInScope(
-  query: PageQuery,
-  find: (id: string) => Promise<{ id: string } | null>,
-): Promise<boolean> {
-  // カーソル無しなら常に範囲内
-  if (query.cursor === undefined) return true;
-  // 絞り込み条件付きで引けたときだけ範囲内
-  return (await find(query.cursor)) !== null;
+// 一覧の共通引数: 絞り込み条件にカーソル条件を AND し、createdAt → id の安定順で 1 件多く取る
+function pageArgs<W>(query: PageQuery, where: W) {
+  // カーソルがあれば位置の条件を足す
+  const scoped =
+    query.cursor !== undefined
+      ? { AND: [where, afterCursorWhere(requireCursorKey(query.cursor))] }
+      : where;
+  // where・並び順・件数をまとめて返す
+  return {
+    where: scoped,
+    orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
+    take: query.limit + 1,
+  };
 }
 
 // P2025 (対象行が無い) を null に翻訳して update を実行する (事前の存在確認を省き、その間に消える窓も無くす)
@@ -99,13 +101,8 @@ class PrismaTenants implements TenantsPort {
 
   // 全テナントを一覧する (プラットフォーム管理者専用。テナント境界の外側)
   async list(query: PageQuery): Promise<Page<TenantRecord>> {
-    // カーソルが実在しなければ空ページ
-    const inScope = await cursorInScope(query, (id) =>
-      this.db.tenant.findUnique({ where: { id }, select: { id: true } }),
-    );
-    if (!inScope) return { items: [] };
-    // 1 件多く取って Page へ整形する
-    const rows = await this.db.tenant.findMany(pageArgs(query));
+    // 1 件多く取って Page へ整形する (テナント境界の外側なので絞り込み条件は空)
+    const rows = await this.db.tenant.findMany(pageArgs(query, {}));
     return toPage(rows, query.limit);
   }
 
@@ -156,13 +153,8 @@ class PrismaUsers implements UsersPort {
 
   // 一覧 (テナントで絞る)
   async list(tenantId: string, query: PageQuery): Promise<Page<UserRecord>> {
-    // カーソルが自テナントに実在しなければ空ページ
-    const inScope = await cursorInScope(query, (id) =>
-      this.db.user.findUnique({ where: { tenantId_id: { tenantId, id } }, select: { id: true } }),
-    );
-    if (!inScope) return { items: [] };
-    // テナント条件 + ページ引数
-    const rows = await this.db.user.findMany({ where: { tenantId }, ...pageArgs(query) });
+    // テナント条件 + ページ引数で 1 件多く取る
+    const rows = await this.db.user.findMany(pageArgs(query, { tenantId }));
     return toPage(rows, query.limit);
   }
 
@@ -285,16 +277,8 @@ class PrismaUserTokens implements UserTokensPort {
 
   // あるユーザーのトークン一覧
   async list(tenantId: string, userId: string, query: PageQuery): Promise<Page<UserTokenRecord>> {
-    // カーソルがこのユーザーのトークンとして実在しなければ空ページ
-    const inScope = await cursorInScope(query, (id) =>
-      this.db.userToken.findFirst({ where: { id, tenantId, userId }, select: { id: true } }),
-    );
-    if (!inScope) return { items: [] };
-    // テナント + ユーザーで絞る
-    const rows = await this.db.userToken.findMany({
-      where: { tenantId, userId },
-      ...pageArgs(query),
-    });
+    // テナント + ユーザーで絞って 1 件多く取る
+    const rows = await this.db.userToken.findMany(pageArgs(query, { tenantId, userId }));
     return toPage(rows, query.limit);
   }
 
@@ -319,13 +303,8 @@ class PrismaAgents implements AgentsPort {
   async list(tenantId: string, query: PageQuery, filter?: AgentFilter): Promise<Page<AgentRecord>> {
     // 絞り込み条件 (状態の指定があれば足す)
     const where = { tenantId, ...(filter?.status !== undefined ? { status: filter.status } : {}) };
-    // カーソルが絞り込みの中に実在しなければ空ページ
-    const inScope = await cursorInScope(query, (id) =>
-      this.db.agent.findFirst({ where: { id, ...where }, select: { id: true } }),
-    );
-    if (!inScope) return { items: [] };
     // 1 件多く取って Page へ整形する
-    const rows = await this.db.agent.findMany({ where, ...pageArgs(query) });
+    const rows = await this.db.agent.findMany(pageArgs(query, where));
     return toPage(rows, query.limit);
   }
 
@@ -386,13 +365,8 @@ class PrismaApiKeys implements ApiKeysPort {
 
   // 一覧 (テナントで絞る。失効済みも含む)
   async list(tenantId: string, query: PageQuery): Promise<Page<ApiKeyRecord>> {
-    // カーソルが自テナントに実在しなければ空ページ
-    const inScope = await cursorInScope(query, (id) =>
-      this.db.apiKey.findFirst({ where: { id, tenantId }, select: { id: true } }),
-    );
-    if (!inScope) return { items: [] };
-    // テナント条件 + ページ引数
-    const rows = await this.db.apiKey.findMany({ where: { tenantId }, ...pageArgs(query) });
+    // テナント条件 + ページ引数で 1 件多く取る
+    const rows = await this.db.apiKey.findMany(pageArgs(query, { tenantId }));
     return toPage(rows, query.limit);
   }
 

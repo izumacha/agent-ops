@@ -29,6 +29,26 @@ export type Principal = UserPrincipal | PlatformPrincipal;
 
 // Authorization ヘッダの認証方式
 const BEARER_SCHEME = 'bearer';
+// 401 に付ける WWW-Authenticate ヘッダ (RFC 6750 §3。方式の発見と「資格情報無し / 無効」の区別に使う)
+const WWW_AUTHENTICATE_HEADER = 'WWW-Authenticate';
+const CHALLENGE_MISSING = 'Bearer realm="agent-ops"';
+const CHALLENGE_INVALID = 'Bearer realm="agent-ops", error="invalid_token"';
+
+// 401 (資格情報が無い) の例外
+function unauthorizedError(): ApiError {
+  // 方式だけを示すチャレンジを付ける
+  return new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized, undefined, {
+    [WWW_AUTHENTICATE_HEADER]: CHALLENGE_MISSING,
+  });
+}
+
+// 401 (資格情報が無効) の例外。無効の理由 (失効・期限切れ・無効化) は区別しない
+function invalidTokenError(): ApiError {
+  // invalid_token のチャレンジを付ける
+  return new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken, undefined, {
+    [WWW_AUTHENTICATE_HEADER]: CHALLENGE_INVALID,
+  });
+}
 // 短すぎる PLATFORM_ADMIN_TOKEN の警告を出したか (設定ミスは 1 度だけ知らせる。
 // 毎リクエストで出すと、未認証の総当たりでエラーログを埋められる)
 let warnedShortPlatformToken = false;
@@ -38,12 +58,12 @@ function extractBearerToken(request: Request): string {
   // ヘッダを読む
   const header = request.headers.get('authorization');
   // 無ければ認証情報無し
-  if (!header) throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized);
+  if (!header) throw unauthorizedError();
   // 方式とトークンに分ける (方式名は大文字小文字を区別しない)
   const [scheme, token, ...rest] = header.trim().split(/\s+/);
   // Bearer 以外・トークン無し・余分な語があれば 401
   if (scheme?.toLowerCase() !== BEARER_SCHEME || !token || rest.length > 0) {
-    throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized);
+    throw unauthorizedError();
   }
   // トークン本体
   return token;
@@ -79,11 +99,11 @@ async function authenticateUserToken(
   // 平文は保存していないので、ハッシュで引く
   const found = await repos.userTokens.findByHash(hashSecret(token));
   // 無ければ無効
-  if (!found) throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken);
+  if (!found) throw invalidTokenError();
   // 失効済み・期限切れ・ユーザー無効化はすべて同じ 401 (どれかを区別して返すとトークンの状態が漏れる)
   const { token: record, user } = found;
   if (record.revokedAt !== null || record.expiresAt <= now || user.disabledAt !== null) {
-    throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken);
+    throw invalidTokenError();
   }
   // テナント内のユーザーとして認証成功
   return { kind: 'user', user, tenantId: user.tenantId, tokenId: record.id };
@@ -105,5 +125,5 @@ export async function authenticate(
   // ユーザートークンの形でなければプラットフォーム管理者トークンとして照合する
   if (matchesPlatformAdminToken(token)) return { kind: 'platform' };
   // どちらでもなければ無効
-  throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken);
+  throw invalidTokenError();
 }

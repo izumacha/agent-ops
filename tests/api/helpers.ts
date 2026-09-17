@@ -150,6 +150,8 @@ export interface CallResult {
   status: number;
   // JSON 本文 (204 など本文無しは undefined)
   json: unknown;
+  // 応答ヘッダ (WWW-Authenticate などの検査用)
+  headers: Headers;
 }
 
 // Route Handler を直接呼ぶ (URL はダミー。ハンドラはクエリと本文とヘッダしか見ない)
@@ -183,5 +185,9 @@ export async function call<P = Record<string, never>>(
   });
   // 本文を JSON として読む (無ければ undefined)
   const text = await response.text();
-  return { status: response.status, json: text ? JSON.parse(text) : undefined };
+  return {
+    status: response.status,
+    json: text ? JSON.parse(text) : undefined,
+    headers: response.headers,
+  };
 }

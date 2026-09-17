@@ -62,6 +62,7 @@ export const API_MESSAGES = {
   agentHasHistory:
     '利用・評価・インシデントの履歴があるエージェントは削除できません。停止 (stop) を使ってください。',
   agentNotInTenant: '指定したエージェントが見つかりません。',
+  invalidCursor: 'cursor の形式が不正です。前の応答の nextCursor をそのまま指定してください。',
   microUsdOutOfRange: `0 以上 ${MICRO_USD_MAX.toString()} 以下の整数を文字列で指定してください。`,
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;

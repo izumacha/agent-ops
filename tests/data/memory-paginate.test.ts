@@ -1,6 +1,7 @@
 // memory アダプタのページネーション (createdAt → id 順・カーソル・次ページ判定)
 import { describe, expect, it } from 'vitest';
 import { paginate } from '@/data/adapters/memory/paginate';
+import { decodeCursor, encodeCursor } from '@/data/page';
 
 // 同時刻を含む 5 行 (id の順序は挿入順とずらす)
 const T0 = new Date('2026-09-17T00:00:00Z');
@@ -20,11 +21,11 @@ describe('paginate', () => {
     expect(page.nextCursor).toBeUndefined();
   });
 
-  it('limit 件ずつ切り出し、最終行の id を nextCursor にする', () => {
+  it('limit 件ずつ切り出し、最終行の位置 (createdAt, id) を nextCursor にする', () => {
     // 2 件ずつ 3 ページ
     const p1 = paginate(rows, { limit: 2 });
     expect(p1.items.map((r) => r.id)).toEqual(['a', 'b']);
-    expect(p1.nextCursor).toBe('b');
+    expect(decodeCursor(p1.nextCursor!)).toEqual({ createdAt: T0, id: 'b' });
     const p2 = paginate(rows, { limit: 2, cursor: p1.nextCursor });
     expect(p2.items.map((r) => r.id)).toEqual(['c', 'd']);
     const p3 = paginate(rows, { limit: 2, cursor: p2.nextCursor });
@@ -39,8 +40,24 @@ describe('paginate', () => {
     expect(page.nextCursor).toBeUndefined();
   });
 
-  it('存在しないカーソルは空ページ (prisma の挙動に合わせる)', () => {
-    // 未知の id
-    expect(paginate(rows, { limit: 2, cursor: 'zzz' }).items).toHaveLength(0);
+  it('一覧に無い行の位置をカーソルにしても、その位置より後ろの行が続きとして取れる (行が消えても途切れない)', () => {
+    // 'c' と同時刻で id が 'c' より後・'d' より前の位置 (削除された行を模す)
+    const cursor = encodeCursor({ createdAt: new Date(T0.getTime() + 1000), id: 'cc' });
+    expect(paginate(rows, { limit: 10, cursor }).items.map((r) => r.id)).toEqual(['d', 'e']);
+  });
+
+  it('壊れたカーソルは復号できず null になる (API 層で 422 にする)', () => {
+    // 形が違う文字列
+    for (const value of [
+      'zzz',
+      '',
+      Buffer.from('abc').toString('base64url'),
+      Buffer.from('12:').toString('base64url'),
+    ]) {
+      expect(decodeCursor(value), value).toBeNull();
+    }
+    // 符号化 → 復号が往復する
+    const key = { createdAt: new Date(1_726_000_000_000), id: 'cuid_x' };
+    expect(decodeCursor(encodeCursor(key))).toEqual(key);
   });
 });

@@ -11,7 +11,7 @@ Step1 以降で REST API を実装し、Step7 で API docs を公開する。実
 
 - `openapi/openapi.yaml`（OpenAPI 3.1）を **API 契約の正本**にする。
 - `npm run gen` が `openapi-typescript` で `src/generated/openapi.d.ts` を生成し、`src/lib/api-types.ts` がアプリ側の名前で再公開する。Route Handler の応答型・リクエスト型はここから取る。
-- 定義の健全性（operationId の一意性・タグの宣言・書き込み系の 403 宣言）は `tests/openapi.test.ts` が固定する。
+- 定義の健全性（operationId の一意性・タグの宣言・認証が要る全オペレーションの 403 宣言）は `tests/openapi.test.ts` が固定する。
 - 実装が契約に従うことは Step1 の API テスト（応答をスキーマで検証）で確かめる。
 
 ## 理由

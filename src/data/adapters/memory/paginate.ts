@@ -1,16 +1,9 @@
-// memory アダプタ用のページネーション (純粋関数)。並び順は prisma アダプタと同じ「createdAt 昇順 → id 昇順」、
-// カーソルは「前ページ最終行の id」。存在しないカーソルは prisma の挙動 (空の結果) に合わせる
-import { toPage } from '@/data/page';
+// memory アダプタ用のページネーション (純粋関数)。並び順・カーソルの規則は src/data/page.ts (prisma アダプタと共有)
+import { isAfterCursor, requireCursorKey, toPage, type CursorKey } from '@/data/page';
 import type { Page, PageQuery } from '@/data/ports';
 
-// 並び順の基準になる最小限の形
-interface Sortable {
-  id: string;
-  createdAt: Date;
-}
-
 // createdAt → id の順で安定ソートする比較関数
-function compare(a: Sortable, b: Sortable): number {
+function compare(a: CursorKey, b: CursorKey): number {
   // まず作成日時で比べる
   const byTime = a.createdAt.getTime() - b.createdAt.getTime();
   // 同時刻なら id の文字列順で決める (順序を決定的にする)
@@ -18,19 +11,12 @@ function compare(a: Sortable, b: Sortable): number {
 }
 
 // 行の配列から 1 ページ分を切り出す
-export function paginate<T extends Sortable>(rows: Iterable<T>, query: PageQuery): Page<T> {
+export function paginate<T extends CursorKey>(rows: Iterable<T>, query: PageQuery): Page<T> {
   // 安定した順序に並べる (元の配列は変更しない)
   const sorted = [...rows].sort(compare);
-  // カーソルの次の行から始める (カーソル無しなら先頭、見つからなければ空)
-  let start = 0;
-  if (query.cursor !== undefined) {
-    // カーソルが指す行の位置
-    const index = sorted.findIndex((row) => row.id === query.cursor);
-    // 見つからなければ空ページ (prisma の cursor 未一致と同じ)
-    if (index === -1) return { items: [] };
-    // その次から
-    start = index + 1;
-  }
+  // カーソルがあれば、その位置より後ろの行だけにする (行が消えていても位置の比較なので続きが取れる)
+  const key = query.cursor !== undefined ? requireCursorKey(query.cursor) : undefined;
+  const after = key ? sorted.filter((row) => isAfterCursor(row, key)) : sorted;
   // 1 件多く取り、共通の規則でページに整形する (prisma アダプタと同じ)
-  return toPage(sorted.slice(start, start + query.limit + 1), query.limit);
+  return toPage(after.slice(0, query.limit + 1), query.limit);
 }

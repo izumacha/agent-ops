@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createPrismaRepos } from '@/data/adapters/prisma';
 import { DuplicateError } from '@/data/errors';
+import { encodeCursor } from '@/data/page';
 import type { Repositories } from '@/data/ports';
 import { Provider, Role } from '@/domain/types';
 import type { PrismaClient } from '@/generated/prisma';
@@ -290,8 +291,8 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(remaining).toBe(1);
   });
 
-  it('他テナントの id・絞り込み外の id をカーソルに渡すと空ページ (存在を漏らさず、1 行も飛ばさない)', async () => {
-    // テナント A に 2 件、テナント B に 1 件
+  it('カーソルは位置 (createdAt, id) なので、他テナントの行や削除済みの行の位置でも自テナントの続きが正しく取れる', async () => {
+    // テナント A に 3 件 (a1 → a2 → a3 の順)、その間にテナント B に 1 件
     const a = await makeTenant(repos, 'A');
     const b = await makeTenant(repos, 'B');
     const mk = (tenantId: string, name: string) =>
@@ -303,26 +304,29 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
         model: 'm',
         budgetMicroUsd: null,
       });
-    await mk(a.tenant.id, 'a1');
-    const a2 = await mk(a.tenant.id, 'a2');
+    const a1 = await mk(a.tenant.id, 'a1');
     const other = await mk(b.tenant.id, 'b1');
-    // 他テナントの id をカーソルにしても、A の行は 1 つも返らない
-    expect(
-      (await repos.agents.list(a.tenant.id, { limit: 10, cursor: other.id })).items,
-    ).toHaveLength(0);
-    // 絞り込み (active) の外にある stopped の id をカーソルにしても空
+    const a2 = await mk(a.tenant.id, 'a2');
+    const a3 = await mk(a.tenant.id, 'a3');
+    // 他テナントの行の位置をカーソルにしても、その位置より後ろの自テナントの行 (a2, a3) が 1 件も飛ばずに返る
+    const afterOther = await repos.agents.list(a.tenant.id, {
+      limit: 10,
+      cursor: encodeCursor(other),
+    });
+    expect(afterOther.items.map((r) => r.id)).toEqual([a2.id, a3.id]);
+    // カーソル行 (a1) を削除しても、そのカーソルで続きが取れる
+    const p1 = await repos.agents.list(a.tenant.id, { limit: 1 });
+    expect(p1.items[0].id).toBe(a1.id);
+    expect(await repos.agents.delete(a.tenant.id, a1.id)).toBe('deleted');
+    const p2 = await repos.agents.list(a.tenant.id, { limit: 10, cursor: p1.nextCursor });
+    expect(p2.items.map((r) => r.id)).toEqual([a2.id, a3.id]);
+    // 絞り込み (status) とカーソルの併用: stopped の a2 を除いた続き
     await repos.agents.setStatus(a.tenant.id, a2.id, 'stopped');
-    expect(
-      (await repos.agents.list(a.tenant.id, { limit: 10, cursor: a2.id }, { status: 'active' }))
-        .items,
-    ).toHaveLength(0);
-    // 絞り込みの中にある id なら「その続き」が返る (stopped は a2 だけなので続きは空、先頭からは 1 件)
-    expect(
-      (await repos.agents.list(a.tenant.id, { limit: 10, cursor: a2.id }, { status: 'stopped' }))
-        .items,
-    ).toHaveLength(0);
-    expect(
-      (await repos.agents.list(a.tenant.id, { limit: 10 }, { status: 'stopped' })).items,
-    ).toHaveLength(1);
+    const activeAfter = await repos.agents.list(
+      a.tenant.id,
+      { limit: 10, cursor: p1.nextCursor },
+      { status: 'active' },
+    );
+    expect(activeAfter.items.map((r) => r.id)).toEqual([a3.id]);
   });
 });

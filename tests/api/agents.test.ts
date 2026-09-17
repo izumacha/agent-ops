@@ -65,6 +65,23 @@ describe('POST /agents', () => {
     }
   });
 
+  it('空白だけの名前は 422 で、前後の空白は除いて保存する', async () => {
+    // 空白だけ
+    expect(
+      (await call(createAgent, { token: seed.a.tokens.operator, body: { ...VALID, name: '   ' } }))
+        .status,
+    ).toBe(422);
+    // 末尾空白は除かれるので、既存の名前と重複する
+    expect(
+      (
+        await call(createAgent, {
+          token: seed.a.tokens.operator,
+          body: { ...VALID, name: `${seed.a.agent.name} ` },
+        })
+      ).status,
+    ).toBe(422);
+  });
+
   it('未知のプロバイダ・空の名前は 422', async () => {
     // 未知のプロバイダ
     expect(
@@ -153,7 +170,7 @@ describe('GET /agents と /agents/{agentId}', () => {
     ).toBe(422);
   });
 
-  it('カーソルでページ送りでき、存在しないカーソルは空ページ', async () => {
+  it('カーソルでページ送りでき、カーソル行が削除されても続きが取れ、壊れたカーソルは 422', async () => {
     // 合計 3 件にする
     await call(createAgent, { token: seed.a.tokens.operator, body: { ...VALID, name: 'b' } });
     await call(createAgent, { token: seed.a.tokens.operator, body: { ...VALID, name: 'c' } });
@@ -161,7 +178,7 @@ describe('GET /agents と /agents/{agentId}', () => {
     const page1 = (await call(listAgents, { token: seed.a.tokens.viewer, query: 'limit=2' }))
       .json as { items: { id: string }[]; nextCursor?: string };
     expect(page1.items).toHaveLength(2);
-    expect(page1.nextCursor).toBe(page1.items[1].id);
+    expect(page1.nextCursor).toBeDefined();
     const page2 = (
       await call(listAgents, {
         token: seed.a.tokens.viewer,
@@ -173,10 +190,23 @@ describe('GET /agents と /agents/{agentId}', () => {
     // 3 ページ分の id に重複が無いこと
     const ids = [...page1.items, ...page2.items].map((a) => a.id);
     expect(new Set(ids).size).toBe(3);
-    // 存在しないカーソル
-    const none = (await call(listAgents, { token: seed.a.tokens.viewer, query: 'cursor=nope' }))
-      .json as { items: unknown[] };
-    expect(none.items).toHaveLength(0);
+    // カーソル行 (page1 の最終行) を削除しても、そのカーソルで続き (3 件目) が取れる
+    await call(deleteAgent, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { agentId: page1.items[1].id },
+    });
+    const afterDelete = (
+      await call(listAgents, {
+        token: seed.a.tokens.viewer,
+        query: `limit=2&cursor=${page1.nextCursor}`,
+      })
+    ).json as { items: { id: string }[] };
+    expect(afterDelete.items.map((a) => a.id)).toEqual(page2.items.map((a) => a.id));
+    // 壊れたカーソルは 422 (issues.path = cursor)
+    const broken = await call(listAgents, { token: seed.a.tokens.viewer, query: 'cursor=nope' });
+    expect(broken.status).toBe(422);
+    expect((broken.json as { issues: { path: string }[] }).issues[0].path).toBe('cursor');
   });
 
   it('他テナントのエージェントは取得・更新・削除・停止・復帰のすべてで 404', async () => {

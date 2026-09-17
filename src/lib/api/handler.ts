@@ -29,7 +29,9 @@ export type Handler<P> = (input: HandlerInput<P>) => Promise<Response>;
 // 例外を HTTP 応答へ写す
 function toErrorResponse(error: unknown): Response {
   // 明示的な API エラーはそのまま
-  if (error instanceof ApiError) return errorResponse(error.status, error.message, error.issues);
+  if (error instanceof ApiError) {
+    return errorResponse(error.status, error.message, error.issues, error.headers);
+  }
   // 一意制約違反は 422 に、どのフィールドかを添える
   if (error instanceof DuplicateError) {
     return errorResponse(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.validation, [

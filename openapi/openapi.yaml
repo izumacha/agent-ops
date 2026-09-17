@@ -46,7 +46,7 @@ paths:
     get:
       tags: [tenants]
       operationId: listTenants
-      summary: テナント一覧 (システム管理者のみ)
+      summary: テナント一覧 (プラットフォーム管理者のみ)
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
@@ -114,7 +114,7 @@ paths:
     post:
       tags: [users]
       operationId: createUser
-      summary: ユーザー招待 (admin のみ)
+      summary: ユーザー招待 (admin ロール限定)
       requestBody:
         required: true
         content:
@@ -138,7 +138,7 @@ paths:
     put:
       tags: [users]
       operationId: updateUserRole
-      summary: 役割変更 (admin のみ)
+      summary: 役割変更 (admin ロール限定)
       requestBody:
         required: true
         content:
@@ -160,6 +160,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
   /agents:
     get:
       tags: [agents]
@@ -291,6 +293,9 @@ paths:
       tags: [api-keys]
       operationId: listApiKeys
       summary: API キー一覧 (view 権限。平文は含まない)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
       responses:
         '200':
           description: 一覧
@@ -560,20 +565,21 @@ components:
           pattern: '^[0-9]+$'
     AgentUpdate:
       type: object
+      description: 省略したプロパティは変更しない。null を送ると未設定に戻す (description / budgetMicroUsd)
       properties:
         name:
           type: string
           minLength: 1
           maxLength: 100
         description:
-          type: string
+          type: [string, 'null']
           maxLength: 1000
         model:
           type: string
           minLength: 1
           maxLength: 100
         budgetMicroUsd:
-          type: string
+          type: [string, 'null']
           pattern: '^[0-9]+$'
     AgentList:
       type: object
@@ -635,3 +641,5 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ApiKey'
+        nextCursor:
+          type: string

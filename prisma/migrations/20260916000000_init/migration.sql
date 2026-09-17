@@ -189,6 +189,9 @@ CREATE UNIQUE INDEX "ApiKey_keyHash_key" ON "ApiKey"("keyHash");
 CREATE INDEX "ApiKey_tenantId_idx" ON "ApiKey"("tenantId");
 
 -- CreateIndex
+CREATE INDEX "ApiKey_agentId_idx" ON "ApiKey"("agentId");
+
+-- CreateIndex
 CREATE INDEX "UsageEvent_tenantId_createdAt_idx" ON "UsageEvent"("tenantId", "createdAt");
 
 -- CreateIndex
@@ -204,13 +207,31 @@ CREATE INDEX "EvaluationCase_setId_idx" ON "EvaluationCase"("setId");
 CREATE INDEX "EvaluationRun_tenantId_createdAt_idx" ON "EvaluationRun"("tenantId", "createdAt");
 
 -- CreateIndex
+CREATE INDEX "EvaluationRun_agentId_idx" ON "EvaluationRun"("agentId");
+
+-- CreateIndex
+CREATE INDEX "EvaluationRun_setId_idx" ON "EvaluationRun"("setId");
+
+-- CreateIndex
 CREATE INDEX "GuardrailRule_tenantId_enabled_idx" ON "GuardrailRule"("tenantId", "enabled");
+
+-- CreateIndex
+CREATE INDEX "GuardrailRule_agentId_idx" ON "GuardrailRule"("agentId");
 
 -- CreateIndex
 CREATE INDEX "Incident_tenantId_status_idx" ON "Incident"("tenantId", "status");
 
 -- CreateIndex
+CREATE INDEX "Incident_agentId_idx" ON "Incident"("agentId");
+
+-- CreateIndex
+CREATE INDEX "Incident_ruleId_idx" ON "Incident"("ruleId");
+
+-- CreateIndex
 CREATE INDEX "AuditLog_tenantId_createdAt_idx" ON "AuditLog"("tenantId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "AuditLog_actorId_idx" ON "AuditLog"("actorId");
 
 -- AddForeignKey
 ALTER TABLE "User" ADD CONSTRAINT "User_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;

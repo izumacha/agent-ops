@@ -141,6 +141,7 @@ model ApiKey {
   agent  Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull) // 紐づくエージェント
 
   @@index([tenantId]) // テナント絞り込み用
+  @@index([agentId]) // エージェント削除時の SetNull 解決・エージェント別一覧用 (PostgreSQL は FK に索引を張らない)
 }
 
 // 利用イベント (プロキシが中継した LLM 呼び出し 1 回 = 1 行。Step2 で記録し日次集計する)
@@ -206,6 +207,8 @@ model EvaluationRun {
   set    EvaluationSet @relation(fields: [setId], references: [id], onDelete: Cascade) // 使った評価セット
 
   @@index([tenantId, createdAt]) // 回帰比較 (テナント + 期間)
+  @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別履歴用
+  @@index([setId]) // 評価セット削除時の Cascade 解決・セット別履歴用
 }
 
 // ガードレールのしきい値ルール (Step4)
@@ -225,6 +228,7 @@ model GuardrailRule {
   incidents Incident[] // このルールが起こしたインシデント
 
   @@index([tenantId, enabled]) // 有効ルールの列挙
+  @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別ルール用
 }
 
 // インシデント (ルール発火の記録。Step4)
@@ -243,6 +247,8 @@ model Incident {
   rule   GuardrailRule @relation(fields: [ruleId], references: [id], onDelete: Cascade) // 発火ルール
 
   @@index([tenantId, status]) // 未解決一覧
+  @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別インシデント用
+  @@index([ruleId]) // ルール削除時の Cascade 解決・ルール別インシデント用
 }
 
 // 監査ログ (誰が・いつ・何に・何をしたか。追記専用。Step4 で改ざん検知のハッシュ連鎖を足す)
@@ -260,4 +266,5 @@ model AuditLog {
   actor  User?  @relation(fields: [actorId], references: [id], onDelete: SetNull) // 操作者
 
   @@index([tenantId, createdAt]) // 期間検索
+  @@index([actorId]) // ユーザー削除時の SetNull 解決・操作者別検索用
 }

@@ -13,7 +13,12 @@ const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
 
 // 定義を読み込んで最小限の型を当てる
-type Operation = { operationId?: string; tags?: string[]; responses?: Record<string, unknown> };
+type Operation = {
+  operationId?: string;
+  tags?: string[];
+  responses?: Record<string, unknown>;
+  security?: unknown[];
+};
 type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
 type Spec = { openapi: string; paths: Record<string, PathItem>; tags?: { name: string }[] };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
@@ -54,9 +59,9 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
 
   // 書き込み系は RBAC 違反の 403 を契約に持つ
   it('認証が必要なオペレーションは 403 (権限違反) の応答を宣言している', () => {
-    // 認証不要なものは health だけ
+    // 定義側が `security: []` で公開と宣言したオペレーションは対象外 (パス名の決め打ちで写しを持たない)
     for (const { path, method, op } of operations) {
-      if (path === '/health') continue;
+      if (Array.isArray(op.security) && op.security.length === 0) continue;
       // 読み取り (GET) は 403 を持たなくてよい (テナント境界は 404 で隠す)。書き込み系は必須
       if (method === 'get') continue;
       expect(Object.keys(op.responses ?? {}), `${method.toUpperCase()} ${path}`).toContain('403');

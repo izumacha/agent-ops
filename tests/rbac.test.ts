@@ -35,4 +35,11 @@ describe('RBAC の許可表', () => {
     expect(canPerform('root' as Role, 'view')).toBe(false);
     expect(canPerform(Role.admin, 'delete' as (typeof ACTIONS)[number])).toBe(false);
   });
+
+  it('Object.prototype 由来の名前を役割として渡しても throw せず拒否する', () => {
+    // 'constructor' 等は素の添字だと Object の関数を返して TypeError になる。false で返ること
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(canPerform(name as Role, 'view')).toBe(false);
+    }
+  });
 });

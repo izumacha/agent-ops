@@ -29,8 +29,14 @@ const config = [
         {
           patterns: [
             {
-              // Prisma の生成物 (@/generated/prisma 配下) への直接 import を禁止対象にする
-              group: ['@/generated/prisma', '@/generated/prisma/*'],
+              // Prisma の生成物への直接 import を禁止対象にする。エイリアス形 (@/generated/prisma) だけでなく
+              // 相対パス形 (../generated/prisma) も捕まえる (エイリアスだけだと書き方 1 つで素通りする)
+              group: [
+                '@/generated/prisma',
+                '@/generated/prisma/*',
+                '**/generated/prisma',
+                '**/generated/prisma/*',
+              ],
               // 違反したときに開発者へ表示するメッセージ (代わりに使うべき場所を案内)
               message:
                 'Prisma 生成物の直接 import は禁止。enum/型は正準である @/domain/types を使うこと。',

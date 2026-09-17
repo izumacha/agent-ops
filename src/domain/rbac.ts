@@ -30,8 +30,13 @@ export const PERMISSIONS: Readonly<Record<Role, ReadonlySet<Action>>> = {
  * DB・フレームワークに依存しないので、ユニットテストで全パターンを固定できる。
  */
 export function canPerform(role: Role, action: Action): boolean {
-  // 表からその役割の許可集合を引く (未知の役割なら undefined)
+  // 表に**自身のキーとして**存在する役割だけを許可対象にする。素の添字だと 'constructor' や
+  // '__proto__' のような Object.prototype 由来の名前が Object 関数などを返し、false ではなく
+  // TypeError (allowed.has is not a function) で落ちる。セッション由来の文字列を受ける Step1 では
+  // 403 ではなく 500 になるため、「不明なら拒否」を保つには自前キーの確認が要る
+  if (!Object.hasOwn(PERMISSIONS, role)) return false;
+  // 表からその役割の許可集合を引く
   const allowed = PERMISSIONS[role];
-  // 許可集合に含まれていれば true、無ければ (未知の役割も含めて) false
-  return allowed?.has(action) ?? false;
+  // 許可集合に含まれていれば true、無ければ false
+  return allowed.has(action);
 }

@@ -9,8 +9,11 @@ import { dirname, join, relative, resolve } from 'node:path';
 const ROOT = process.cwd();
 // seed の入口
 const SEED_ENTRY = join(ROOT, 'prisma', 'seed.ts');
-// import 文からモジュール指定子を取り出す正規表現 (静的 import のみ。seed に動的 import は無い)
-const IMPORT_PATTERN = /^import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/gm;
+// import / 再エクスポート (export ... from) 文からモジュール指定子を取り出す正規表現
+// (静的なものだけ。seed の import グラフに動的 import は無い)
+const IMPORT_PATTERN = /^(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/gm;
+// パスエイリアス `@/` の解決先 (tsconfig.json の paths と同じ)
+const ALIAS_PREFIX = '@/';
 
 // あるファイルから相対 import で辿れる src/ 配下のファイルを再帰的に集める
 function collectSrcImports(file: string, seen = new Set<string>()): Set<string> {
@@ -20,14 +23,19 @@ function collectSrcImports(file: string, seen = new Set<string>()): Set<string> 
   for (const match of source.matchAll(IMPORT_PATTERN)) {
     // モジュール指定子 (例: '../src/lib/prisma-client')
     const specifier = match[1];
-    // 相対 import 以外 (パッケージ・`@/` エイリアス) は対象外
-    if (!specifier.startsWith('.')) continue;
-    // 絶対パスへ解決し .ts 拡張子を補う
-    const target = resolve(dirname(file), specifier) + '.ts';
+    // 相対 import と `@/` エイリアス以外 (npm パッケージ) は対象外
+    const isAlias = specifier.startsWith(ALIAS_PREFIX);
+    if (!specifier.startsWith('.') && !isAlias) continue;
+    // 絶対パスへ解決し .ts 拡張子を補う (`@/x` は src/x)
+    const target =
+      (isAlias
+        ? join(ROOT, 'src', specifier.slice(ALIAS_PREFIX.length))
+        : resolve(dirname(file), specifier)) + '.ts';
     // リポジトリ相対のパスに正規化する
     const rel = relative(ROOT, target).split('\\').join('/');
-    // src/ 配下だけを集める (それ以外は Dockerfile が別途まとめてコピーする)
-    if (!rel.startsWith('src/') || seen.has(rel)) continue;
+    // src/ 配下の手書きファイルだけを集める (生成物 src/generated/ は Dockerfile がディレクトリごと
+    // コピーし、prisma/ 等は別途まとめてコピーする)
+    if (!rel.startsWith('src/') || rel.startsWith('src/generated/') || seen.has(rel)) continue;
     // 集合に加え、そのファイルの import も辿る
     seen.add(rel);
     collectSrcImports(target, seen);

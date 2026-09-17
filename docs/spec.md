@@ -17,7 +17,7 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 
 ### UC-01 テナントを作成する（Step1）
 
-- 主体: システム管理者
+- 主体: プラットフォーム管理者（テナントの外側。§4 の権限語彙を参照）
 - 事前条件: なし
 - 流れ: 名前を指定してテナントを作成 → 最初の `admin` ユーザーを招待
 - 事後条件: 以後の全データはこのテナントに紐づき、他テナントからは見えない
@@ -78,7 +78,7 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 
 ## 3. ER 図
 
-`prisma/schema.prisma` と同期させる（列の詳細・インデックスはスキーマ側が正本）。全テーブルが `tenantId` を持ち、クエリは必ずテナントで絞る（ADR-0002）。
+`prisma/schema.prisma` と同期させる（列の詳細・インデックスはスキーマ側が正本）。テナントに属する資源はすべて `tenantId` を持ち、クエリは必ずテナントで絞る（ADR-0002）。例外は親経由でしか到達しない子テーブル（`EvaluationCase` は `EvaluationSet` 経由）で、親を `tenantId` で絞ってから辿る。`setId` だけで直接引かない。
 
 ```mermaid
 erDiagram
@@ -190,15 +190,21 @@ erDiagram
 
 定義の正本は [`openapi/openapi.yaml`](../openapi/openapi.yaml)（`npm run gen` で型を生成）。ベースパスは `/api/v1`、認証は Bearer（API キーまたはセッション）。他テナントの資源は存在を隠すため 404 を返す。
 
+「必要権限」列の語彙は 3 種類で、混ぜない。
+
+- **`view` / `execute` / `stop`** — テナント内 RBAC の操作。`src/domain/rbac.ts` の許可表 `PERMISSIONS`（役割 3 × 操作 3）が唯一の真実の源。
+- **`admin` ロール限定** — ユーザー招待・役割変更のような「役割そのものを扱う」操作。3 操作の表とは別軸で、実装は「役割が `admin` であること」を明示的に確かめる（`role === 'admin'` を許す唯一の用途）。Step1 の 403 テスト（役割 3 × 操作 3）に加えて、`viewer` / `operator` がこれらを呼ぶと 403 になることも固定する。
+- **プラットフォーム管理者** — テナントを作る・列挙する操作。テナントの外側にいるため RBAC の表では表現しない。誰をプラットフォーム管理者とみなすか（環境変数の許可リスト、または `User` のフラグ）は Step1 の着手時に ADR で決める。
+
 | メソッド | パス                       | operationId      | 必要権限       | Step |
 | -------- | -------------------------- | ---------------- | -------------- | ---- |
 | GET      | `/health`                  | `getHealth`      | なし           | 0    |
-| GET      | `/tenants`                 | `listTenants`    | システム管理者 | 1    |
-| POST     | `/tenants`                 | `createTenant`   | システム管理者 | 1    |
+| GET      | `/tenants`                 | `listTenants`    | プラットフォーム管理者 | 1    |
+| POST     | `/tenants`                 | `createTenant`   | プラットフォーム管理者 | 1    |
 | GET      | `/tenants/{tenantId}`      | `getTenant`      | view           | 1    |
 | GET      | `/users`                   | `listUsers`      | view           | 1    |
-| POST     | `/users`                   | `createUser`     | admin          | 1    |
-| PUT      | `/users/{userId}/role`     | `updateUserRole` | admin          | 1    |
+| POST     | `/users`                   | `createUser`     | `admin` ロール限定          | 1    |
+| PUT      | `/users/{userId}/role`     | `updateUserRole` | `admin` ロール限定          | 1    |
 | GET      | `/agents`                  | `listAgents`     | view           | 1    |
 | POST     | `/agents`                  | `createAgent`    | execute        | 1    |
 | GET      | `/agents/{agentId}`        | `getAgent`       | view           | 1    |

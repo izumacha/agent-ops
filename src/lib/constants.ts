@@ -1,4 +1,5 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
+import { MICRO_USD_MAX } from '@/domain/money';
 import { AgentStatus, Role } from '@/domain/types';
 
 // アプリ名 (画面タイトル等で使う)
@@ -61,5 +62,6 @@ export const API_MESSAGES = {
   agentHasHistory:
     '利用・評価・インシデントの履歴があるエージェントは削除できません。停止 (stop) を使ってください。',
   agentNotInTenant: '指定したエージェントが見つかりません。',
+  microUsdOutOfRange: `0 以上 ${MICRO_USD_MAX.toString()} 以下の整数を文字列で指定してください。`,
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;

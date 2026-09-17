@@ -54,7 +54,8 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
     const user: UserRecord = {
       id: store.nextId('user'),
       tenantId: id,
-      email: `${role}-${label}@example.com`,
+      // 保存されるメールは小文字に正規化された形 (API の入力と同じ規則)
+      email: `${role}-${label.toLowerCase()}@example.com`,
       name: `${role} ${label}`,
       role,
       disabledAt: null,

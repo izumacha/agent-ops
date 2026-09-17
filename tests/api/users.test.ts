@@ -54,6 +54,22 @@ describe('POST /users', () => {
     expect((result.json as { issues: { path: string }[] }).issues[0].path).toBe('email');
   });
 
+  it('メールは小文字に正規化され、大文字小文字違いの重複も 422', async () => {
+    // 大文字混じりで招待する
+    const created = await call(createUser, {
+      token: seed.a.tokens.admin,
+      body: { email: 'Alice@Example.com', name: 'Alice', role: Role.viewer },
+    });
+    expect(created.status).toBe(201);
+    expect((created.json as { email: string }).email).toBe('alice@example.com');
+    // 小文字で同じ受信箱を招待すると重複
+    const dup = await call(createUser, {
+      token: seed.a.tokens.admin,
+      body: { email: 'alice@example.com', name: 'Alice 2', role: Role.viewer },
+    });
+    expect(dup.status).toBe(422);
+  });
+
   it('別テナントなら同じメールでも招待できる (一意性はテナント内)', async () => {
     // テナント B の admin がテナント A と同じメールを招待する
     const result = await call(createUser, {

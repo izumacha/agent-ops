@@ -5,7 +5,7 @@ import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
-import { toApiKeyDto } from '@/lib/api/serializers';
+import { toListDto, toApiKeyDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { API_MESSAGES } from '@/lib/constants';
 import { displayPrefix, generateSecret, hashSecret } from '@/lib/tokens';
@@ -21,10 +21,7 @@ export const GET = route(async ({ request, principal, repos }) => {
   // 自テナントで絞って一覧する (失効済みも含む)
   const page = await repos.apiKeys.list(tenantId, parsePageQuery(new URL(request.url)));
   // DTO へ写す (ハッシュは載らない)
-  const body: ApiSchemas['ApiKeyList'] = {
-    items: page.items.map(toApiKeyDto),
-    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-  };
+  const body: ApiSchemas['ApiKeyList'] = toListDto(page, toApiKeyDto);
   return Response.json(body);
 });
 

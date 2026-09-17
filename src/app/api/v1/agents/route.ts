@@ -4,7 +4,7 @@ import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
-import { toAgentDto } from '@/lib/api/serializers';
+import { toListDto, toAgentDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { z } from 'zod';
 import { agentCreateSchema } from '@/lib/validations/agent';
@@ -27,10 +27,7 @@ export const GET = route(async ({ request, principal, repos }) => {
   // 自テナントで絞って一覧する
   const page = await repos.agents.list(tenantId, parsePageQuery(url), { status });
   // DTO へ写す
-  const body: ApiSchemas['AgentList'] = {
-    items: page.items.map(toAgentDto),
-    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-  };
+  const body: ApiSchemas['AgentList'] = toListDto(page, toAgentDto);
   return Response.json(body);
 });
 

@@ -3,7 +3,7 @@ import { requirePlatformAdmin } from '@/lib/api/guard';
 import { readJsonBody } from '@/lib/api/body';
 import { route } from '@/lib/api/handler';
 import { parsePageQuery } from '@/lib/api/pagination';
-import { toTenantDto, toUserDto, toUserTokenDto } from '@/lib/api/serializers';
+import { toListDto, toTenantDto, toUserDto, toUserTokenDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { USER_TOKEN_BOOTSTRAP_NAME, USER_TOKEN_DEFAULT_TTL_DAYS } from '@/lib/constants';
@@ -20,10 +20,7 @@ export const GET = route(async ({ request, principal, repos }) => {
   // ページ指定を読む
   const page = await repos.tenants.list(parsePageQuery(new URL(request.url)));
   // DTO へ写して返す
-  const body: ApiSchemas['TenantList'] = {
-    items: page.items.map(toTenantDto),
-    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-  };
+  const body: ApiSchemas['TenantList'] = toListDto(page, toTenantDto);
   return Response.json(body);
 });
 

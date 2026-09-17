@@ -5,7 +5,7 @@ import { requireAdminRole } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
-import { toUserTokenDto } from '@/lib/api/serializers';
+import { toListDto, toUserTokenDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { API_MESSAGES } from '@/lib/constants';
 import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '@/lib/tokens';
@@ -28,10 +28,7 @@ export const GET = route<{ userId: string }>(async ({ request, params, principal
     parsePageQuery(new URL(request.url)),
   );
   // DTO へ写す
-  const body: ApiSchemas['UserTokenList'] = {
-    items: page.items.map(toUserTokenDto),
-    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-  };
+  const body: ApiSchemas['UserTokenList'] = toListDto(page, toUserTokenDto);
   return Response.json(body);
 });
 

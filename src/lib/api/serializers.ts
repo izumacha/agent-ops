@@ -1,10 +1,32 @@
 // データ層のレコードを OpenAPI の DTO へ写す (Date → ISO 文字列、BigInt → 文字列)。
 // 秘密 (tokenHash / keyHash) はここで落とし、DTO に載せない
-import type { AgentRecord, ApiKeyRecord, TenantRecord, UserRecord, UserTokenRecord } from '@/data';
+import type {
+  AgentRecord,
+  ApiKeyRecord,
+  Page,
+  TenantRecord,
+  UserRecord,
+  UserTokenRecord,
+} from '@/data';
 import type { AgentDto, ApiKeyDto, ApiSchemas, TenantDto, UserDto } from '@/lib/api-types';
 
 // ユーザートークンの DTO (OpenAPI の UserToken スキーマ)
 export type UserTokenDto = ApiSchemas['UserToken'];
+
+// 一覧の応答 (OpenAPI の *List スキーマ共通の形: items と、次ページがあるときだけ nextCursor)
+export interface ListDto<T> {
+  items: T[];
+  nextCursor?: string;
+}
+
+// Page をそのまま一覧 DTO へ写す (行ごとの変換関数を受け取る。6 つの一覧ルートが同じ形を持つので 1 か所にする)
+export function toListDto<R, D>(page: Page<R>, mapRow: (row: R) => D): ListDto<D> {
+  // 行を変換し、次ページがあるときだけ nextCursor を載せる (undefined のキーは JSON に出ない)
+  return {
+    items: page.items.map(mapRow),
+    ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
+  };
+}
 
 // Date | null を ISO 文字列 | null にする
 function isoOrNull(value: Date | null): string | null {

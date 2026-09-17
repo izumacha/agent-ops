@@ -228,7 +228,7 @@ paths:
     post:
       tags: [users]
       operationId: createUserToken
-      summary: ログイントークン発行 (admin ロール限定。平文はこの応答でのみ返す)
+      summary: ログイントークン発行 (admin ロール限定。平文はこの応答でのみ返す。無効化されたユーザーには 409)
       requestBody:
         required: true
         content:
@@ -246,6 +246,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/ValidationError'
   /users/{userId}/tokens/{tokenId}:
@@ -715,6 +717,7 @@ components:
           type: string
           format: email
           maxLength: 254
+          description: 小文字に正規化して保存する (テナント内の一意性と検索は大文字小文字を区別しない)
         name:
           type: string
           minLength: 1

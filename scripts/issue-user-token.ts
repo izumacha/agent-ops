@@ -7,6 +7,8 @@ import 'dotenv/config';
 import { parseArgs } from 'node:util';
 // prisma アダプタとクライアント結線
 import { createPrismaRepos } from '../src/data/adapters/prisma';
+// メールの正規化 (API と同じ規則で検索する)
+import { normalizeEmail } from '../src/domain/email';
 import { createPrismaClient } from '../src/lib/prisma-client';
 // 既定の有効期間
 import {
@@ -41,7 +43,7 @@ async function main(): Promise<void> {
   // 対象ユーザーをテナント内でメールで引く (テナント内で一意)
   try {
     // 複合一意 (tenantId, email) で検索する
-    const user = await repos.users.findByEmail(values.tenant!, values.email);
+    const user = await repos.users.findByEmail(values.tenant!, normalizeEmail(values.email));
     if (!user)
       throw new Error(`ユーザーが見つかりません: ${values.email} (tenant=${values.tenant})`);
     if (user.disabledAt !== null) throw new Error('このユーザーは無効化されています。');

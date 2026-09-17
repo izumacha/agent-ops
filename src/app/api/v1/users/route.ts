@@ -4,7 +4,7 @@ import { requireAction, requireAdminRole } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
-import { toUserDto } from '@/lib/api/serializers';
+import { toListDto, toUserDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { userCreateSchema } from '@/lib/validations/user';
 
@@ -18,10 +18,7 @@ export const GET = route(async ({ request, principal, repos }) => {
   // 自テナントで絞って一覧する
   const page = await repos.users.list(tenantId, parsePageQuery(new URL(request.url)));
   // DTO へ写す
-  const body: ApiSchemas['UserList'] = {
-    items: page.items.map(toUserDto),
-    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-  };
+  const body: ApiSchemas['UserList'] = toListDto(page, toUserDto);
   return Response.json(body);
 });
 

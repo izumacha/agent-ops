@@ -18,7 +18,7 @@ Step1 で REST API（テナント・ユーザー・エージェント・API キ�
 1. **ユーザートークン（`UserToken`）**: `User` に紐づく Bearer トークン。平文は `aop_u_` + 256 ビット乱数の base64url で、DB には SHA-256 ハッシュ（`tokenHash`）と表示用の先頭（`prefix`）だけを保存する。有効期限は既定 90 日・最長 365 日で無期限は作れない。失効（`revokedAt`）・期限切れ・ユーザー無効化（`User.disabledAt`）はすべて同じ 401 で返し、どの理由かは応答で区別しない。
 2. **プラットフォーム管理者トークン**: 環境変数 `PLATFORM_ADMIN_TOKEN`（32 文字以上）。`GET/POST /tenants` だけに使え、テナント内の資源には（閲覧すら）触れない（403）。未設定・短すぎる値は「プラットフォーム管理者は存在しない」として扱う（fail-closed）。比較はハッシュ化後の定数時間比較。
 3. **ブートストラップ**: `POST /tenants` はテナント・最初の `admin` ユーザー・その admin のトークンを 1 トランザクションで作り、平文をこの応答でのみ返す。以後のトークンは `admin` ロール限定の `POST /users/{userId}/tokens` で発行し、`DELETE .../tokens/{tokenId}` で失効させる。seed 済みのローカル環境では `scripts/issue-user-token.ts` で発行する。
-4. **ユーザーは削除せず無効化する**（`DELETE /users/{userId}` = `disabledAt` を入れる）。監査ログの操作者（`AuditLog.actorId`）が `Restrict` だから（`docs/spec.md` §3）。自分自身と最後の有効な `admin` は無効化・降格できない（409）。
+4. **ユーザーは削除せず無効化する**（`DELETE /users/{userId}` = `disabledAt` を入れる）。監査ログの操作者（`AuditLog.actorId`）が `Restrict` だから（`docs/spec.md` §3）。自分自身の無効化、および最後の有効な `admin` の降格・無効化はできない（409。自分自身の降格は、他に有効な `admin` が居れば可）。
 5. API キー（`aop_k_...`）は Step2 のプロキシ専用で、管理 API の認証には使えない（401）。
 
 ## 理由

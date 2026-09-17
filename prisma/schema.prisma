@@ -103,7 +103,7 @@ model User {
 
   @@unique([tenantId, email]) // 同一テナント内でメールを重複させない
   @@unique([tenantId, id]) // UserToken の複合 FK (tenantId, userId) の参照先。「別テナントのユーザーを指すトークン」を DB で弾く
-  @@index([tenantId]) // テナント絞り込み用
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)。先頭列がテナント絞り込みも担う
 }
 
 // ユーザーのログイントークン (Bearer 認証の資格情報。平文は発行時のみ返し、ハッシュだけを保存する。ADR-0005)
@@ -122,7 +122,7 @@ model UserToken {
   // 発行先ユーザー。複合 FK で「同じテナントのユーザー」であることを DB が保証する。ユーザー削除でトークンも消える
   user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
 
-  @@index([tenantId]) // テナント絞り込み用
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
   @@index([userId]) // ユーザー別一覧・Cascade 解決用
 }
 
@@ -148,7 +148,8 @@ model Agent {
 
   @@unique([tenantId, name]) // 同一テナント内で名前を重複させない
   @@unique([tenantId, id]) // 子テーブルの複合 FK (tenantId, agentId) の参照先。「別テナントのエージェントを指す行」を DB で弾く
-  @@index([tenantId, status]) // 一覧の絞り込み (テナント + 状態)
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
+  @@index([tenantId, status, createdAt]) // 状態で絞った一覧 (テナント + 状態 + createdAt 順)
 }
 
 // API キー (エージェントがプロキシへ接続するときの認証情報。平文は保存せずハッシュのみ)
@@ -167,7 +168,7 @@ model ApiKey {
   // Cascade なのは、SetNull だと削除でキーが「テナント共通キー (agentId=null)」へ黙って昇格し権限が広がるため
   agent  Agent? @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Cascade)
 
-  @@index([tenantId]) // テナント絞り込み用
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
   @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別一覧用 (PostgreSQL は FK に索引を張らない)
 }
 

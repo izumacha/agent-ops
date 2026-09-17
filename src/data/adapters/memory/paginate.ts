@@ -1,5 +1,6 @@
 // memory アダプタ用のページネーション (純粋関数)。並び順は prisma アダプタと同じ「createdAt 昇順 → id 昇順」、
 // カーソルは「前ページ最終行の id」。存在しないカーソルは prisma の挙動 (空の結果) に合わせる
+import { toPage } from '@/data/page';
 import type { Page, PageQuery } from '@/data/ports';
 
 // 並び順の基準になる最小限の形
@@ -30,12 +31,6 @@ export function paginate<T extends Sortable>(rows: Iterable<T>, query: PageQuery
     // その次から
     start = index + 1;
   }
-  // 1 件多く取って次ページの有無を判定する
-  const slice = sorted.slice(start, start + query.limit + 1);
-  // 次ページがあるか
-  const hasMore = slice.length > query.limit;
-  // 返す分だけに切り詰める
-  const items = hasMore ? slice.slice(0, query.limit) : slice;
-  // 次ページがあれば最終行の id をカーソルにする
-  return hasMore ? { items, nextCursor: items[items.length - 1].id } : { items };
+  // 1 件多く取り、共通の規則でページに整形する (prisma アダプタと同じ)
+  return toPage(sorted.slice(start, start + query.limit + 1), query.limit);
 }

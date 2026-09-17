@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 // Step0 の検証コマンド一覧 (写しを持たず再利用する)
-import { STEP0_STEPS } from './gate-step0.mjs';
+import { STEP0_STEPS } from './lib/step0-steps.mjs';
 // 共通の実行ヘルパー
 import { banner, runNpm, runSteps } from './lib/run-npm-steps.mjs';
 
@@ -44,18 +44,24 @@ const testStatus = runNpm([
   '--reporter=json',
   `--outputFile=${reportPath}`,
 ]);
-// レポートを読む (テストが落ちていても件数の内訳を出す)
+// レポートを読む (テストが落ちていても件数の内訳を出す)。process.exit は finally の後で呼ぶ
+// (catch の中で exit すると finally が走らず一時ディレクトリが残る)
 let report;
+let reportError;
 try {
   report = JSON.parse(readFileSync(reportPath, 'utf8'));
 } catch (error) {
-  console.error(
-    '[gate:step1] テストレポートを読めません:',
-    error instanceof Error ? error.message : error,
-  );
-  process.exit(1);
+  reportError = error;
 } finally {
   rmSync(reportDir, { recursive: true, force: true });
+}
+// 読めなければ赤
+if (reportError !== undefined) {
+  console.error(
+    '[gate:step1] テストレポートを読めません:',
+    reportError instanceof Error ? reportError.message : reportError,
+  );
+  process.exit(1);
 }
 // 内訳を表示する
 console.log(

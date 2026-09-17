@@ -2,6 +2,7 @@
 // Prisma を直接 import してよいのはこのディレクトリと結線箇所 (src/lib/prisma*.ts) だけ (ESLint が強制する)。
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
 import { DuplicateError } from '@/data/errors';
+import { toPage } from '@/data/page';
 import type {
   AgentFilter,
   AgentRecord,
@@ -86,16 +87,6 @@ async function updateOrNull<T>(update: () => Promise<T>): Promise<T | null> {
     if (isPrismaError(error, RECORD_NOT_FOUND)) return null;
     throw error;
   }
-}
-
-// 1 件多く取った結果を Page へ整形する
-function toPage<T extends { id: string }>(rows: T[], limit: number): Page<T> {
-  // 次ページがあるか (limit+1 件取れたか)
-  const hasMore = rows.length > limit;
-  // 返す分だけに切り詰める
-  const items = hasMore ? rows.slice(0, limit) : rows;
-  // 次ページがあれば最終行の id をカーソルにする
-  return hasMore ? { items, nextCursor: items[items.length - 1].id } : { items };
 }
 
 // トランザクション内外の両方で使えるクライアント型

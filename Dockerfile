@@ -64,6 +64,7 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/src/lib/prisma-client.ts ./src/lib/prisma-client.ts
 COPY --from=builder /app/src/lib/pg-search-path.ts ./src/lib/pg-search-path.ts
 COPY --from=builder /app/src/lib/constants.ts ./src/lib/constants.ts
+COPY --from=builder /app/src/domain/money.ts ./src/domain/money.ts
 COPY --from=builder /app/src/domain/types.ts ./src/domain/types.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 # 本番用依存だけを取り込む (Prisma CLI / tsx / dotenv を含み、dev ツールチェーンは含まない)

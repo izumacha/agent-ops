@@ -24,7 +24,9 @@ export function runNpm(args, options = {}) {
     shell: IS_WINDOWS,
     ...options,
   });
-  // 終了コード (シグナル終了などで null なら 1 扱い)
+  // npm 自体を起動できなかった (PATH に無い・実行権限が無い) ときは原因を残す (§6 エラーを握り潰さない)
+  if (result.error) console.error(`[gate] npm を起動できません: ${result.error.message}`);
+  // 終了コード (シグナル終了・起動失敗で null なら 1 扱い)
   return result.status ?? 1;
 }
 

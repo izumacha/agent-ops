@@ -28,14 +28,15 @@ export type Handler<P> = (input: HandlerInput<P>) => Promise<Response>;
 
 // 例外を HTTP 応答へ写す
 function toErrorResponse(error: unknown): Response {
-  // 明示的な API エラーはそのまま
+  // 明示的な API エラーはそのまま (ApiError → Response の写しはここ 1 か所)
   if (error instanceof ApiError) {
     return errorResponse(error.status, error.message, error.issues, error.headers);
   }
-  // 一意制約違反は 422 に、どのフィールドかを添える
+  // 一意制約違反は 422 の ApiError に翻訳してから同じ経路で写す (どのフィールドかを添える)
   if (error instanceof DuplicateError) {
-    const translated = validationError([{ path: error.field, message: API_MESSAGES.duplicate }]);
-    return errorResponse(translated.status, translated.message, translated.issues);
+    return toErrorResponse(
+      validationError([{ path: error.field, message: API_MESSAGES.duplicate }]),
+    );
   }
   // それ以外は内部エラー。応答には出さず、サーバログにはスタックトレースごと残す (§6 文脈を付けてログに残す / §9)
   console.error('[api] 予期しないエラー:', error);

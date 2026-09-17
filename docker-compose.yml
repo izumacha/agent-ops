@@ -40,6 +40,8 @@ services:
       TZ: Asia/Tokyo
       # DB 接続文字列 (db サービスの 5432 を指す)
       DATABASE_URL: postgresql://postgres:postgres@db:5432/agent_ops
+      # プラットフォーム管理者トークン (.env から渡す。空なら未設定 = テナント作成は誰もできない)
+      PLATFORM_ADMIN_TOKEN: ${PLATFORM_ADMIN_TOKEN:-}
     # db のヘルスチェックが green になってから起動する
     depends_on:
       db:

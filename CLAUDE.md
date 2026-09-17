@@ -17,7 +17,7 @@ Agent Ops — AI エージェントの**登録・権限・コスト・品質・�
 
 開発は `docs/roadmap.md` の 8 Step（0 設計・骨組み → 1 台帳・権限 → 2 コスト計測プロキシ → 3 品質評価 → 4 ガードレール・停止 → 5 ダッシュボード → 6 マルチテナント・課金 → 7 リリース準備）で進める。**各 Step の受け入れ基準は `npm run gate:stepN` として自動化し、`main` でゲートが緑になってから次 Step のブランチを切る。** Step の順序を入れ替えず、後 Step の機能を前 Step に混ぜない。基準を緩める変更は `docs/roadmap.md` と該当 ADR を同じ PR で更新する（テスト側だけを書き換えない）。検証はすべてローカル＋CI で完結させる（人手の営業・ヒアリングは含めない）。
 
-現在の段階: **Step0（設計・骨組み）実装済み**。
+現在の段階: **Step1（エージェント台帳・権限）実装済み**（`npm run gate:step1` 緑）。次は Step2（コスト計測プロキシ）。
 
 ## 2. コマンド
 
@@ -27,31 +27,44 @@ npm run build        # 本番ビルド（Docker 用 standalone 出力）
 npm run typecheck    # tsc --noEmit
 npm run lint         # eslint . (ESLint 9 flat config + next/core-web-vitals)
 npm run format       # Prettier (100 col, single quotes, trailing commas)
-npm run test         # Vitest — tests/**/*.test.ts のユニットテスト
+npm run test         # Vitest — tests/**/*.test.ts のユニット・API テスト（DB 不要。契約テストは RUN_PRISMA_CONTRACT 無しではスキップ）
+npm run test:contract # prisma アダプタの契約テスト（RUN_PRISMA_CONTRACT=1 と専用 DB の DATABASE_URL が必須。全テーブル TRUNCATE）
 npm run gen          # OpenAPI (openapi/openapi.yaml) → src/generated/openapi.d.ts
 npm run db:generate  # Prisma クライアントを src/generated/prisma に再生成
 npm run db:migrate   # prisma migrate dev
 npm run db:deploy    # prisma migrate deploy（CI / コンテナ起動時）
 npm run db:seed      # prisma db seed（実行内容は prisma.config.ts の migrations.seed が唯一の定義）
 npm run gate:step0   # Step0 の受け入れ基準を一括検査（gen / db:generate / lint / typecheck / test / OpenAPI / ADR）
+npm run gate:step1   # Step1 の受け入れ基準を一括検査（gate:step0 の項目 + テスト 60 件以上 pass / RBAC 3×3 の全パターン pass / npm audit high 0）
+npx tsx scripts/issue-user-token.ts --email admin@example.com  # seed 済みユーザーにログイントークンを発行（開発用 CLI）
 ```
 
-個別実行: `npx vitest run tests/rbac.test.ts` / `npx vitest run -t 'fail-closed'`。
+個別実行: `npx vitest run tests/rbac.test.ts` / `npx vitest run -t 'fail-closed'` / `npx vitest run tests/api/agents.test.ts`。
+
+契約テストをローカルで流すときは専用 DB を切る（開発 DB を指さない）:
+
+```bash
+docker compose exec db psql -U postgres -c "CREATE DATABASE agent_ops_contract;"  # 初回のみ
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agent_ops_contract npm run db:deploy
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agent_ops_contract RUN_PRISMA_CONTRACT=1 npm run test:contract
+```
 
 セットアップ: `cp .env.example .env && docker compose up -d db && npm ci && npm run gen && npm run db:generate && npm run db:migrate && npm run db:seed`。アプリごと Docker で動かすなら `docker compose up --build`（`app` は起動時に `prisma migrate deploy` を実行する）。**クローン後・スキーマ変更後・OpenAPI 変更後は `npm run db:generate` / `npm run gen` を実行してから `typecheck` する**（`src/generated/` は gitignore の生成物）。
 
-CI（`.github/workflows/ci.yml`）は `gate-step0` ジョブと、PostgreSQL サービスコンテナで `db:deploy` → `db:seed`（2 回流して冪等性確認）→ `build` を行う `migrate-and-build` ジョブの 2 本。§14 の「PR 前に通すローカル検証」は `npm run gate:step0` と `npm run build`。
+CI（`.github/workflows/ci.yml`）は `gate-step1` ジョブ、PostgreSQL サービスコンテナで `db:deploy` → `db:seed`（2 回流して冪等性確認）→ 専用 DB での契約テスト → `build` を行う `migrate-and-build` ジョブ、`docker compose up` で `/api/v1/health` が healthy になることを確かめる `docker-smoke` ジョブの 3 本。§14 の「PR 前に通すローカル検証」は `npm run gate:step1` と `npm run build`（ゲートは常に実装済みの最新 Step のものを回す。`docs/roadmap.md` ゲート運用ルール 2）。
+
+`npm audit` の high 0 はゲートの一部。Prisma 7.10 の CLI が固定する推移依存（`deepmerge-ts` / `mysql2`）の high は `package.json` の `overrides` で解決版へ差し替えている（この API は PostgreSQL しか使わず、`mysql2` は実行時に到達しない）。Prisma を上げて上流が解決版を取り込んだら `overrides` を外す。
 
 ## 3. アーキテクチャ
 
-**スタック:** Next.js 16 App Router, React 19, TypeScript strict, Prisma 7 + `@prisma/adapter-pg` + PostgreSQL 16, Zod, Vitest, openapi-typescript。
+**スタック:** Next.js 16 App Router, React 19, TypeScript strict, Prisma 7 + `@prisma/adapter-pg` + PostgreSQL 16, Zod 4, Vitest, openapi-typescript。
 
 ### 正本と生成物
 
 - `docs/spec.md` — ユースケース 10 件（`### UC-NN` 見出し）・ER 図（mermaid）・API 一覧。`tests/docs-gate.test.ts` が件数と節の存在を固定する。
 - `docs/roadmap.md` — 8 Step の成果物・受け入れ基準・状態。`docs/adr/NNNN-*.md` — 設計判断（ステータス行必須）。
 - `openapi/openapi.yaml` — REST API 契約（OpenAPI 3.1）。`npm run gen` → `src/generated/openapi.d.ts` → `src/lib/api-types.ts` がアプリ側の名前で再公開する。Route Handler の型はここから取り、生成物のパスを直接書かない。`tests/openapi.test.ts` が operationId の一意性・タグの宣言・書き込み系の 403 宣言を固定する。**新しいエンドポイントは「定義 → `gen` → 実装 → API テスト」の順**（ADR-0003）。
-- `prisma/schema.prisma` — 生成先は `src/generated/prisma`。**enum の正準は `src/domain/types.ts`**（`as const` で定義し Prisma の実行時コードに依存しない。Prisma 側の enum と一致することは `tests/domain-enums.test.ts` が固定する）。`@/generated/prisma` の直接 import は ESLint が禁止し、例外は結線箇所の `src/lib/prisma.ts` / `src/lib/prisma-client.ts` だけ。マイグレーションは `prisma/migrations/`（初期は `prisma migrate diff --from-empty --to-schema` で生成）。
+- `prisma/schema.prisma` — 生成先は `src/generated/prisma`。**enum の正準は `src/domain/types.ts`**（`as const` で定義し Prisma の実行時コードに依存しない。Prisma 側の enum と一致することは `tests/domain-enums.test.ts` が固定する）。`@/generated/prisma` の直接 import は ESLint が禁止し、例外は結線箇所の `src/lib/prisma.ts` / `src/lib/prisma-client.ts` と prisma アダプタ `src/data/adapters/prisma/` だけ。マイグレーションは `prisma/migrations/`（初期は `prisma migrate diff --from-empty --to-schema` で生成。以降は Docker が無い環境でも `--from-schema <直前の schema.prisma> --to-schema prisma/schema.prisma --script` で差分 SQL を作れる）。
 
 ### Prisma 7 の結線
 
@@ -59,16 +72,17 @@ CI（`.github/workflows/ci.yml`）は `gate-step0` ジョブと、PostgreSQL サ
 
 ### レイヤ構成
 
-- `src/app/*` — App Router。API は OpenAPI の `servers.url`（`/api/v1`）に合わせて `src/app/api/v1/*` に Route Handler として実装する。`api/v1/health/route.ts` は DB 到達性を返す（compose の healthcheck が使う）。
-- `src/domain/` — Prisma/Next 非依存の純粋ロジック（`npm run db:generate` 無しでもユニットテストが動く）。`rbac.ts` の許可表 `PERMISSIONS`（`viewer` / `operator` / `admin` × `view` / `execute` / `stop`）が**唯一の真実の源**で、`canPerform(role, action)` は未知の値を拒否する（fail-closed）。`tests/rbac.test.ts` が 9 パターンすべてを固定する。
-- `src/lib/` — 横断インフラ: `prisma.ts`（遅延生成 Proxy。転送できる操作はすべて実クライアントへ転送し、bind した関数は同一性を保つ）/ `prisma-client.ts` / `pg-search-path.ts`（`search_path` の引用規則。`tests/pg-search-path.test.ts` が固定）/ `constants.ts`（UI 文言・enum ラベル）/ `api-types.ts`。
+- `src/app/*` — App Router。API は OpenAPI の `servers.url`（`/api/v1`）に合わせて `src/app/api/v1/*` に Route Handler として実装する。`api/v1/health/route.ts` は DB 到達性を返す（compose の healthcheck が使う）。**それ以外の Route Handler はすべて `src/lib/api/handler.ts` の `route()` で包む**（認証 → 本体 → 例外の HTTP 化を 1 か所に集める。`NextResponse` ではなく素の `Response.json` を返すので、テストは HTTP を介さずハンドラを直接呼べる）。本体の定型: `requireAction(principal, 'view'|'execute'|'stop')` / `requireAdminRole` / `requirePlatformAdmin` で認可 → `readJsonBody(request, schema)` で本文 → `repos.<port>` をテナント id 付きで呼ぶ → `serializers.ts` で DTO に写す。他テナントの id は `notFoundError()`（404）。
+- `src/data/` — **Ports & Adapters**（ADR-0006）。契約は `ports/`（レコード型も Prisma 非依存）、本番は `adapters/prisma/`（Prisma を直接 import してよい唯一の場所）、テストは `adapters/memory/`。Composition Root は `index.ts` の `getRepos()` で、テストは `setReposForTesting()` で差し替える（`NODE_ENV=production` では throw）。新しいエンティティ操作は「Port → memory → prisma → API テスト → 契約テスト」の順で足す。一意制約違反は `DuplicateError` に翻訳（→ 422）、削除の可否は `'deleted' | 'not_found' | 'restricted'` の戻り値（→ 204 / 404 / 409）。一覧は `createdAt → id` 順・カーソルは最終行の id・存在しないカーソルは空ページ（両アダプタで同じ）。
+- `src/domain/` — Prisma/Next 非依存の純粋ロジック（`npm run db:generate` 無しでもユニットテストが動く）。`rbac.ts` の許可表 `PERMISSIONS`（`viewer` / `operator` / `admin` × `view` / `execute` / `stop`）が**唯一の真実の源**で、`canPerform(role, action)` は未知の値を拒否する（fail-closed）。`tests/rbac.test.ts` が 9 パターンを、`tests/api/rbac-matrix.test.ts` が API 経路で同じ 9 パターン（テスト名 `RBAC 行列: <役割> × <操作>` は `scripts/gate-step1.mjs` が照合するので変えない）を固定する。`money.ts` はマイクロ USD の文字列 → BigInt 変換（BIGINT の範囲外は null）。
+- `src/lib/` — 横断インフラ: `prisma.ts`（遅延生成 Proxy。転送できる操作はすべて実クライアントへ転送し、bind した関数は同一性を保つ）/ `prisma-client.ts` / `pg-search-path.ts`（`search_path` の引用規則。`tests/pg-search-path.test.ts` が固定）/ `constants.ts`（UI 文言・enum ラベル・API の上限値と日本語エラー文言 `API_MESSAGES`。Route Handler に文言を直書きしない）/ `api-types.ts` / `tokens.ts`（トークンの生成・SHA-256・定数時間比較。接頭辞 `aop_u_` = ユーザートークン、`aop_k_` = API キー）/ `api/`（`auth.ts` 認証・`guard.ts` 認可・`body.ts` 本文検証 415→413→400→422・`pagination.ts`・`serializers.ts`・`handler.ts`・`errors.ts`）/ `validations/`（Zod 4 スキーマ。長さ上限は OpenAPI と一致させる）。
 - `scripts/gate-stepN.mjs` — Step ごとの受け入れ基準の検査（ADR-0004）。
-- `tests/` — Vitest（`environment: 'node'`）。DB を触る挙動は Step6 の契約テスト（`*.contract.prisma.test.ts`、別 DB、`RUN_PRISMA_CONTRACT=1` のときだけ）へ寄せる。設定の写しを見張る検出網: `docker-seed-files`（Dockerfile の seed 用 COPY 列挙 = seed の import グラフ）/ `node-runtime-alignment`（`.nvmrc` / Dockerfile / `engines.node` / CI 配線 / `@types/node` の major 一致）/ `dependabot-eslint-guard`（eslint major 保留の存在と期限切れ）。
+- `tests/` — Vitest（`environment: 'node'`）。`tests/api/*.test.ts` は memory アダプタで Route Handler を直接呼ぶ API テスト（`tests/api/helpers.ts` の `setupSeed()` が 2 テナント × 3 役割のユーザーとトークンを seed し、`call()` がハンドラを呼ぶ）。DB を触る挙動は契約テスト（`tests/data/*.contract.prisma.test.ts`、専用 DB、`RUN_PRISMA_CONTRACT=1` のときだけ。`beforeEach` で `TRUNCATE "Tenant" CASCADE`）へ寄せる。設定の写しを見張る検出網: `docker-seed-files`（Dockerfile の seed 用 COPY 列挙 = seed の import グラフ）/ `node-runtime-alignment`（`.nvmrc` / Dockerfile / `engines.node` / CI 配線 / `@types/node` の major 一致）/ `dependabot-eslint-guard`（eslint major 保留の存在と期限切れ）。
 
 ### マルチテナントと RBAC（設計の不変条件）
 
 - 全テーブルが `tenantId` を持つ行スコープ方式（ADR-0002）。**Server Action / Route Handler は冒頭で認証情報から `tenantId` を取り出し、`where` に必ず差し込む**（足し忘れはクロステナント漏洩）。他テナントの資源は 404 で隠す（403 だと存在が漏れる）。
-- 書き込み系の API は RBAC 違反を 403 で返し、OpenAPI 定義にも `403` を宣言する。
+- 書き込み系の API は RBAC 違反を 403 で返し、OpenAPI 定義にも `403` を宣言する。認証は Bearer 2 種（ADR-0005）: ユーザートークン（`UserToken`。ハッシュ保存・既定 90 日・失効/期限切れ/ユーザー無効化はすべて同じ 401）と、`GET/POST /tenants` 専用のプラットフォーム管理者トークン（環境変数 `PLATFORM_ADMIN_TOKEN`、32 文字以上。未設定・短すぎは「存在しない」扱い = fail-closed。テナント内の資源には閲覧も含め 403）。`admin` ロール限定の操作（ユーザー招待・役割変更・無効化・トークン発行/失効）は `requireAdminRole` で役割そのものを比べる（`role === 'admin'` を許す唯一の用途）。自分自身の無効化と最後の有効な `admin` の降格・無効化は 409。ユーザーは削除せず無効化する（`disabledAt`）。
 - 金額はマイクロ USD の整数（`BigInt`、1 USD = 1,000,000）で持ち、JSON では文字列で運ぶ（浮動小数誤差を避ける）。
 - API キーは SHA-256 ハッシュ（`keyHash`）と先頭数文字（`prefix`）だけを保存し、平文は発行応答でしか返さない。
 - 監査ログ（`AuditLog`）は追記専用。Step4 で改ざん検知（ハッシュ連鎖）を足す。削除の規則（履歴は `Restrict`、設定は `Cascade`、`actorId` は `Restrict`、子テーブルは複合 FK `(tenantId, 親id)`）は `docs/spec.md` §3「削除の規則」が正本。

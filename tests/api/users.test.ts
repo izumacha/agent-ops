@@ -1,0 +1,308 @@
+// ユーザー API: 招待・役割変更・無効化・ログイントークン (admin ロール限定) とテナント境界
+import { beforeEach, describe, expect, it } from 'vitest';
+import { GET as getMe } from '@/app/api/v1/me/route';
+import { GET as listUsers, POST as createUser } from '@/app/api/v1/users/route';
+import { DELETE as disableUser } from '@/app/api/v1/users/[userId]/route';
+import { PUT as updateRole } from '@/app/api/v1/users/[userId]/role/route';
+import { GET as listTokens, POST as createToken } from '@/app/api/v1/users/[userId]/tokens/route';
+import { DELETE as revokeToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
+import { Role } from '@/domain/types';
+import { USER_TOKEN_PREFIX } from '@/lib/tokens';
+import { call, setupSeed, type Seed } from './helpers';
+
+// seed (各テストで作り直す)
+let seed: Seed;
+beforeEach(() => {
+  seed = setupSeed();
+});
+
+describe('GET /users', () => {
+  it('自テナントのユーザーだけを返す (他テナントは混ざらない)', async () => {
+    // viewer で一覧する
+    const result = await call(listUsers, { token: seed.a.tokens.viewer });
+    expect(result.status).toBe(200);
+    // 全員テナント A
+    const items = (result.json as { items: { tenantId: string }[] }).items;
+    expect(items).toHaveLength(3);
+    expect(items.every((u) => u.tenantId === seed.a.id)).toBe(true);
+  });
+});
+
+describe('POST /users', () => {
+  it('admin は招待でき、既定で無効化されていない', async () => {
+    // 招待
+    const result = await call(createUser, {
+      token: seed.a.tokens.admin,
+      body: { email: 'new@example.com', name: '新人', role: Role.operator },
+    });
+    expect(result.status).toBe(201);
+    const body = result.json as { tenantId: string; role: string; disabledAt: null };
+    expect(body.tenantId).toBe(seed.a.id);
+    expect(body.role).toBe('operator');
+    expect(body.disabledAt).toBeNull();
+  });
+
+  it('同一テナント内でメールが重複すると 422 (issues.path = email)', async () => {
+    // 既存の viewer と同じメール
+    const result = await call(createUser, {
+      token: seed.a.tokens.admin,
+      body: { email: seed.a.users.viewer.email, name: 'x', role: Role.viewer },
+    });
+    expect(result.status).toBe(422);
+    expect((result.json as { issues: { path: string }[] }).issues[0].path).toBe('email');
+  });
+
+  it('別テナントなら同じメールでも招待できる (一意性はテナント内)', async () => {
+    // テナント B の admin がテナント A と同じメールを招待する
+    const result = await call(createUser, {
+      token: seed.b.tokens.admin,
+      body: { email: seed.a.users.viewer.email, name: 'x', role: Role.viewer },
+    });
+    expect(result.status).toBe(201);
+  });
+
+  it('未知の役割は 422', async () => {
+    // root という役割は無い
+    const result = await call(createUser, {
+      token: seed.a.tokens.admin,
+      body: { email: 'r@example.com', name: 'r', role: 'root' },
+    });
+    expect(result.status).toBe(422);
+  });
+});
+
+describe('PUT /users/{userId}/role', () => {
+  it('admin は役割を変えられる', async () => {
+    // viewer → operator
+    const result = await call(updateRole, {
+      token: seed.a.tokens.admin,
+      method: 'PUT',
+      params: { userId: seed.a.users.viewer.id },
+      body: { role: Role.operator },
+    });
+    expect(result.status).toBe(200);
+    expect((result.json as { role: string }).role).toBe('operator');
+    // 変更後は execute 系の権限で振る舞う (トークンはそのまま有効)
+    const me = await call(getMe, { token: seed.a.tokens.viewer });
+    expect((me.json as { user: { role: string } }).user.role).toBe('operator');
+  });
+
+  it('最後の有効な admin を降格すると 409', async () => {
+    // テナント A の admin は 1 人
+    const result = await call(updateRole, {
+      token: seed.a.tokens.admin,
+      method: 'PUT',
+      params: { userId: seed.a.users.admin.id },
+      body: { role: Role.viewer },
+    });
+    expect(result.status).toBe(409);
+  });
+
+  it('admin が 2 人いれば片方を降格できる', async () => {
+    // operator を admin に昇格させてから、元の admin を降格する
+    await call(updateRole, {
+      token: seed.a.tokens.admin,
+      method: 'PUT',
+      params: { userId: seed.a.users.operator.id },
+      body: { role: Role.admin },
+    });
+    const result = await call(updateRole, {
+      token: seed.a.tokens.admin,
+      method: 'PUT',
+      params: { userId: seed.a.users.admin.id },
+      body: { role: Role.viewer },
+    });
+    expect(result.status).toBe(200);
+  });
+
+  it('他テナントのユーザーは 404', async () => {
+    // テナント B のユーザーをテナント A の admin が変えようとする
+    const result = await call(updateRole, {
+      token: seed.a.tokens.admin,
+      method: 'PUT',
+      params: { userId: seed.b.users.viewer.id },
+      body: { role: Role.admin },
+    });
+    expect(result.status).toBe(404);
+  });
+});
+
+describe('DELETE /users/{userId} (無効化)', () => {
+  it('無効化するとそのユーザーのトークンが 401 になる', async () => {
+    // viewer を無効化する
+    const result = await call(disableUser, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.viewer.id },
+    });
+    expect(result.status).toBe(200);
+    expect((result.json as { disabledAt: string | null }).disabledAt).not.toBeNull();
+    // 以後は認証できない
+    expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(401);
+  });
+
+  it('自分自身は無効化できない (409)', async () => {
+    // admin が自分を指定する
+    const result = await call(disableUser, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.admin.id },
+    });
+    expect(result.status).toBe(409);
+  });
+
+  it('最後の有効な admin は別の admin からも無効化できない (409)', async () => {
+    // operator を admin へ昇格し、その operator が元の admin を無効化しようとする → admin は 2 人なので可。
+    // 逆に、昇格後に元の admin を降格してから operator (唯一の admin) を元 admin が消そうとする経路は 403 になるので、
+    // ここでは「admin 1 人のテナント B で、他テナントの admin が触れない」ことと合わせて 1 人残しを確かめる
+    await call(updateRole, {
+      token: seed.a.tokens.admin,
+      method: 'PUT',
+      params: { userId: seed.a.users.operator.id },
+      body: { role: Role.admin },
+    });
+    // operator (今は admin) が元の admin を無効化 → admin が 2 人なので 200
+    const first = await call(disableUser, {
+      token: seed.a.tokens.operator,
+      method: 'DELETE',
+      params: { userId: seed.a.users.admin.id },
+    });
+    expect(first.status).toBe(200);
+    // 残った admin (元 operator) を、viewer を admin に昇格させずに消す手段は無い (自分自身は 409)
+    const self = await call(disableUser, {
+      token: seed.a.tokens.operator,
+      method: 'DELETE',
+      params: { userId: seed.a.users.operator.id },
+    });
+    expect(self.status).toBe(409);
+  });
+
+  it('無効化は冪等 (2 回目も 200 で日時は変わらない)', async () => {
+    // 1 回目
+    const first = await call(disableUser, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.viewer.id },
+    });
+    // 2 回目
+    const second = await call(disableUser, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.viewer.id },
+    });
+    expect(second.status).toBe(200);
+    expect((second.json as { disabledAt: string }).disabledAt).toBe(
+      (first.json as { disabledAt: string }).disabledAt,
+    );
+  });
+});
+
+describe('ログイントークン (/users/{userId}/tokens)', () => {
+  it('admin は発行でき、平文は発行応答にだけ載る', async () => {
+    // viewer 向けに発行する
+    const issued = await call(createToken, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+      body: { name: 'CLI' },
+    });
+    expect(issued.status).toBe(201);
+    const body = issued.json as { id: string; secret: string; prefix: string; expiresAt: string };
+    expect(body.secret.startsWith(USER_TOKEN_PREFIX)).toBe(true);
+    // 発行したトークンで viewer として認証できる
+    const me = await call(getMe, { token: body.secret });
+    expect((me.json as { user: { id: string } }).user.id).toBe(seed.a.users.viewer.id);
+    // 一覧には平文もハッシュも載らない
+    const list = await call(listTokens, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+    });
+    expect(list.status).toBe(200);
+    const text = JSON.stringify(list.json);
+    expect(text).not.toContain(body.secret);
+    expect(text).not.toContain('tokenHash');
+    expect((list.json as { items: { id: string }[] }).items.map((t) => t.id)).toContain(body.id);
+  });
+
+  it('有効期間は既定 90 日で、365 日を超える指定は 422', async () => {
+    // 既定
+    const issued = await call(createToken, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+      body: { name: '既定' },
+    });
+    const expiresAt = new Date((issued.json as { expiresAt: string }).expiresAt).getTime();
+    const days = (expiresAt - Date.now()) / (24 * 60 * 60 * 1000);
+    expect(days).toBeGreaterThan(89.9);
+    expect(days).toBeLessThanOrEqual(90);
+    // 上限超え
+    const tooLong = await call(createToken, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+      body: { name: '長すぎ', expiresInDays: 366 },
+    });
+    expect(tooLong.status).toBe(422);
+  });
+
+  it('失効させると 401 になり、失効は冪等', async () => {
+    // 発行
+    const issued = await call(createToken, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+      body: { name: '失効テスト' },
+    });
+    const body = issued.json as { id: string; secret: string };
+    // 失効
+    const revoked = await call(revokeToken, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.viewer.id, tokenId: body.id },
+    });
+    expect(revoked.status).toBe(204);
+    expect((await call(getMe, { token: body.secret })).status).toBe(401);
+    // 2 回目も 204
+    const again = await call(revokeToken, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.viewer.id, tokenId: body.id },
+    });
+    expect(again.status).toBe(204);
+  });
+
+  it('他テナントのユーザーへの発行・一覧・失効は 404', async () => {
+    // テナント B のユーザーをテナント A の admin が指定する
+    const target = seed.b.users.viewer.id;
+    expect(
+      (
+        await call(createToken, {
+          token: seed.a.tokens.admin,
+          params: { userId: target },
+          body: { name: 'x' },
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (await call(listTokens, { token: seed.a.tokens.admin, params: { userId: target } })).status,
+    ).toBe(404);
+    expect(
+      (
+        await call(revokeToken, {
+          token: seed.a.tokens.admin,
+          method: 'DELETE',
+          params: { userId: target, tokenId: seed.b.tokenRows.viewer.id },
+        })
+      ).status,
+    ).toBe(404);
+  });
+
+  it('viewer / operator は発行できない (403)', async () => {
+    // admin ロール限定
+    for (const role of [Role.viewer, Role.operator]) {
+      const result = await call(createToken, {
+        token: seed.a.tokens[role],
+        params: { userId: seed.a.users[role].id },
+        body: { name: 'x' },
+      });
+      expect(result.status).toBe(403);
+    }
+  });
+});

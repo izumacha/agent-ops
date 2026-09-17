@@ -1,4 +1,4 @@
-# Agent Ops — 仕様書（Step0）
+# Agent Ops — 仕様書（Step1 時点）
 
 > このファイルはプロダクトの**正本（Source of Truth）**。ユースケース・ER 図・API 一覧を持ち、
 > 実装（`prisma/schema.prisma` / `openapi/openapi.yaml`）と衝突したら**先にこの文書を改訂してから**実装を変える。
@@ -17,16 +17,17 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 
 ### UC-01 テナントを作成する（Step1）
 
-- 主体: プラットフォーム管理者（テナントの外側。§4 の権限語彙を参照）
+- 主体: プラットフォーム管理者（テナントの外側。§4 の権限語彙を参照。環境変数 `PLATFORM_ADMIN_TOKEN` で認証。ADR-0005）
 - 事前条件: なし
-- 流れ: 名前を指定してテナントを作成 → 最初の `admin` ユーザーを招待
+- 流れ: 名前と最初の `admin` のメール・表示名を指定してテナントを作成 → テナント・`admin` ユーザー・その admin のログイントークンが 1 トランザクションで作られ、トークンの平文は作成応答でのみ返る
 - 事後条件: 以後の全データはこのテナントに紐づき、他テナントからは見えない
 
 ### UC-02 ユーザーを招待し役割を付与する（Step1）
 
 - 主体: `admin`
-- 流れ: メール・表示名・役割を指定して招待 → 役割は後から変更可能
-- 例外: `admin` 以外が呼ぶと 403
+- 流れ: メール・表示名・役割を指定して招待 → 役割は後から変更可能 → ログイントークンは `admin` が発行・失効する（既定 90 日・最長 365 日）
+- 例外: `admin` 以外が呼ぶと 403。最後の有効な `admin` の降格・無効化、自分自身の無効化は 409
+- 補足: ユーザーは削除せず無効化する（`disabledAt`）。無効化されたユーザーのトークンは 401 になる
 
 ### UC-03 エージェントを登録する（Step1）
 
@@ -83,6 +84,8 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 ```mermaid
 erDiagram
   Tenant ||--o{ User : has
+  Tenant ||--o{ UserToken : has
+  User ||--o{ UserToken : "logs in with"
   Tenant ||--o{ Agent : has
   Tenant ||--o{ ApiKey : has
   Tenant ||--o{ UsageEvent : has
@@ -111,6 +114,16 @@ erDiagram
     string tenantId FK
     string email
     Role role
+    datetime disabledAt
+  }
+  UserToken {
+    string id PK
+    string tenantId FK
+    string userId FK
+    string prefix
+    string tokenHash
+    datetime expiresAt
+    datetime revokedAt
   }
   Agent {
     string id PK
@@ -190,18 +203,18 @@ erDiagram
 
 - **履歴（`UsageEvent` / `EvaluationRun` / `Incident`）は親の削除で消さない（`Restrict`）。** コスト履歴は請求の根拠、インシデントは停止理由の記録なので、履歴を持つエージェントは削除できず `stop` で止める（`DELETE /agents/{id}` は 409）。実行履歴を持つ評価セット、発火済みのルールも同様（ルールは `enabled=false` で無効化）。
 - **設定（`ApiKey` / `GuardrailRule`）はエージェントと一緒に消える（`Cascade`）。** `ApiKey.agentId` を `SetNull` にすると削除で「テナント共通キー」へ黙って昇格し権限が広がるため、Cascade にする。
-- **監査ログの操作者（`AuditLog.actorId`）は `Restrict`。** 監査ログを持つユーザーは削除せず無効化する（Step1 で `User` に無効化フラグを足す）。テナント解約は `Cascade` でデータ一式を消す（テナント単位の消去要求に応えるため）。
-- **子テーブルは複合 FK `(tenantId, 親id)` で親を参照する。** 「別テナントのエージェント／セット／ルールを指す行」をクエリ規律だけでなく DB 制約でも拒否する（`Agent` / `EvaluationSet` / `GuardrailRule` に `@@unique([tenantId, id])`）。
+- **監査ログの操作者（`AuditLog.actorId`）は `Restrict`。** 監査ログを持つユーザーは削除せず無効化する（`User.disabledAt`。`DELETE /users/{userId}` は無効化）。ユーザーのログイントークン（`UserToken`）は設定なので `Cascade`。テナント解約は `Cascade` でデータ一式を消す（テナント単位の消去要求に応えるため）。
+- **子テーブルは複合 FK `(tenantId, 親id)` で親を参照する。** 「別テナントのエージェント／セット／ルール／ユーザーを指す行」をクエリ規律だけでなく DB 制約でも拒否する（`Agent` / `EvaluationSet` / `GuardrailRule` / `User` に `@@unique([tenantId, id])`）。
 
 ## 4. API 一覧
 
-定義の正本は [`openapi/openapi.yaml`](../openapi/openapi.yaml)（`npm run gen` で型を生成）。ベースパスは `/api/v1`、認証は Bearer（API キーまたはセッション）。他テナントの資源は存在を隠すため 404 を返す。
+定義の正本は [`openapi/openapi.yaml`](../openapi/openapi.yaml)（`npm run gen` で型を生成）。ベースパスは `/api/v1`、認証は Bearer（ユーザートークン `aop_u_...`、またはテナント作成・列挙専用のプラットフォーム管理者トークン。ADR-0005）。他テナントの資源は存在を隠すため 404 を返す。一覧は `limit`（既定 50・最大 200）と `cursor`（前応答の `nextCursor`）でページ送りする。
 
 「必要権限」列の語彙は 3 種類で、混ぜない。
 
 - **`view` / `execute` / `stop`** — テナント内 RBAC の操作。`src/domain/rbac.ts` の許可表 `PERMISSIONS`（役割 3 × 操作 3）が唯一の真実の源。
 - **`admin` ロール限定** — ユーザー招待・役割変更のような「役割そのものを扱う」操作。3 操作の表とは別軸で、実装は「役割が `admin` であること」を明示的に確かめる（`role === 'admin'` を許す唯一の用途）。Step1 の 403 テスト（役割 3 × 操作 3）に加えて、`viewer` / `operator` がこれらを呼ぶと 403 になることも固定する。
-- **プラットフォーム管理者** — テナントを作る・列挙する操作。テナントの外側にいるため RBAC の表では表現しない。誰をプラットフォーム管理者とみなすか（環境変数の許可リスト、または `User` のフラグ）は Step1 の着手時に ADR で決める。
+- **プラットフォーム管理者** — テナントを作る・列挙する操作。テナントの外側にいるため RBAC の表では表現しない。環境変数 `PLATFORM_ADMIN_TOKEN` と一致する Bearer トークンで認証し、テナント内の資源には閲覧も含めて触れない（403。ADR-0005）。
 
 | メソッド | パス                       | operationId      | 必要権限       | Step |
 | -------- | -------------------------- | ---------------- | -------------- | ---- |
@@ -209,9 +222,14 @@ erDiagram
 | GET      | `/tenants`                 | `listTenants`    | プラットフォーム管理者 | 1    |
 | POST     | `/tenants`                 | `createTenant`   | プラットフォーム管理者 | 1    |
 | GET      | `/tenants/{tenantId}`      | `getTenant`      | view           | 1    |
+| GET      | `/me`                      | `getMe`          | テナントのユーザー（役割不問） | 1    |
 | GET      | `/users`                   | `listUsers`      | view           | 1    |
 | POST     | `/users`                   | `createUser`     | `admin` ロール限定          | 1    |
+| DELETE   | `/users/{userId}`          | `disableUser`    | `admin` ロール限定          | 1    |
 | PUT      | `/users/{userId}/role`     | `updateUserRole` | `admin` ロール限定          | 1    |
+| GET      | `/users/{userId}/tokens`   | `listUserTokens` | `admin` ロール限定          | 1    |
+| POST     | `/users/{userId}/tokens`   | `createUserToken` | `admin` ロール限定         | 1    |
+| DELETE   | `/users/{userId}/tokens/{tokenId}` | `revokeUserToken` | `admin` ロール限定 | 1    |
 | GET      | `/agents`                  | `listAgents`     | view           | 1    |
 | POST     | `/agents`                  | `createAgent`    | execute        | 1    |
 | GET      | `/agents/{agentId}`        | `getAgent`       | view           | 1    |
@@ -227,7 +245,7 @@ Step2 以降（プロキシ `/proxy/*`、集計 `/usage/daily`、評価 `/evalua
 
 ## 5. 非機能要件（抜粋）
 
-- **セキュリティ**: 全 Server Action / Route Handler で認証・RBAC・`tenantId` の絞り込みを強制（CLAUDE.md §9）。API キーはハッシュのみ保存。監査ログは追記専用。
+- **セキュリティ**: 全 Server Action / Route Handler で認証・RBAC・`tenantId` の絞り込みを強制（CLAUDE.md §9）。API キー・ユーザートークンはハッシュのみ保存。JSON 本文は 64 KiB まで（413）、`Content-Type` は `application/json` 限定（415）。監査ログは追記専用。
 - **性能**: 一覧は必ず上限（既定 50、最大 200）。プロキシの追加遅延 p95 ≦ 50ms。
 - **可観測性**: `/api/v1/health` で DB 到達性を返す。エラーは内部詳細を出さずサーバログへ。
 - **移植性**: PostgreSQL 16 / Node 22 / Docker。ローカルと CI で検証が完結する（人手の外部手順に依存しない）。

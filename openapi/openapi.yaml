@@ -1,6 +1,8 @@
 # Agent Ops REST API の OpenAPI 定義 (正本)。
 # `npm run gen` が src/generated/openapi.d.ts に TypeScript 型を生成し、ルートハンドラはその型を使う。
-# 実装は Step1 で行い、この定義と一致することを API テストで固定する (docs/adr/0003-openapi-first.md)。
+# Step1 で src/app/api/v1/* に実装済み。この定義と一致することを tests/api/*.test.ts で固定する (docs/adr/0003-openapi-first.md)。
+# 認証は Bearer (docs/adr/0005-bearer-token-auth.md): ユーザートークン (aop_u_...) か、テナント作成・列挙専用の
+# プラットフォーム管理者トークン (環境変数 PLATFORM_ADMIN_TOKEN)。
 openapi: 3.1.0
 info:
   title: Agent Ops API
@@ -15,7 +17,7 @@ tags:
   - name: tenants
     description: テナント (Step1)
   - name: users
-    description: ユーザーと役割 (Step1)
+    description: ユーザー・役割・ログイントークン (Step1)
   - name: agents
     description: エージェント台帳 (Step1)
   - name: api-keys
@@ -62,7 +64,7 @@ paths:
     post:
       tags: [tenants]
       operationId: createTenant
-      summary: テナント作成
+      summary: テナント作成 (プラットフォーム管理者のみ)。最初の admin ユーザーとそのログイントークンを同時に作る (UC-01)
       requestBody:
         required: true
         content:
@@ -71,11 +73,11 @@ paths:
               $ref: '#/components/schemas/TenantCreate'
       responses:
         '201':
-          description: 作成した
+          description: 作成した (adminToken.secret はこの応答でのみ返す)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Tenant'
+                $ref: '#/components/schemas/TenantCreated'
         '403':
           $ref: '#/components/responses/Forbidden'
         '422':
@@ -86,7 +88,7 @@ paths:
     get:
       tags: [tenants]
       operationId: getTenant
-      summary: テナント取得
+      summary: 自テナントの取得 (view 権限。他テナントの id は 404)
       responses:
         '200':
           description: テナント
@@ -96,6 +98,20 @@ paths:
                 $ref: '#/components/schemas/Tenant'
         '404':
           $ref: '#/components/responses/NotFound'
+  /me:
+    get:
+      tags: [users]
+      operationId: getMe
+      summary: 認証中のユーザーと所属テナント (テナントのユーザーのみ)
+      responses:
+        '200':
+          description: 自分の情報
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /users:
     get:
       tags: [users]
@@ -132,13 +148,33 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/ValidationError'
+  /users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    delete:
+      tags: [users]
+      operationId: disableUser
+      summary: ユーザー無効化 (admin ロール限定)。監査ログの操作者は削除できないため、削除の代わりに無効化する。自分自身・最後の有効な admin は 409
+      responses:
+        '200':
+          description: 無効化後のユーザー
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /users/{userId}/role:
     parameters:
       - $ref: '#/components/parameters/UserId'
     put:
       tags: [users]
       operationId: updateUserRole
-      summary: 役割変更 (admin ロール限定)
+      summary: 役割変更 (admin ロール限定)。最後の有効な admin を降格する変更は 409
       requestBody:
         required: true
         content:
@@ -160,8 +196,69 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/ValidationError'
+  /users/{userId}/tokens:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [users]
+      operationId: listUserTokens
+      summary: ユーザーのログイントークン一覧 (admin ロール限定。平文は含まない)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserTokenList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [users]
+      operationId: createUserToken
+      summary: ログイントークン発行 (admin ロール限定。平文はこの応答でのみ返す)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserTokenCreate'
+      responses:
+        '201':
+          description: 発行した
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserTokenIssued'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /users/{userId}/tokens/{tokenId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/TokenId'
+    delete:
+      tags: [users]
+      operationId: revokeUserToken
+      summary: ログイントークン失効 (admin ロール限定)
+      responses:
+        '204':
+          description: 失効した
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /agents:
     get:
       tags: [agents]
@@ -308,7 +405,7 @@ paths:
     post:
       tags: [api-keys]
       operationId: createApiKey
-      summary: API キー発行 (execute 権限。平文はこの応答でのみ返す)
+      summary: API キー発行 (execute 権限。平文はこの応答でのみ返す。agentId が自テナントに無ければ 422)
       requestBody:
         required: true
         content:
@@ -332,7 +429,7 @@ paths:
     delete:
       tags: [api-keys]
       operationId: revokeApiKey
-      summary: API キー失効 (stop 権限)
+      summary: API キー失効 (stop 権限。失効済みのキーへの再実行も 204)
       responses:
         '204':
           description: 失効した
@@ -345,7 +442,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: 発行済み API キー、またはログインセッションのトークン
+      description: ユーザーのログイントークン (aop_u_...)、またはテナント作成・列挙専用のプラットフォーム管理者トークン (環境変数 PLATFORM_ADMIN_TOKEN)。API キー (aop_k_...) は Step2 のプロキシ専用でこの API では使えない
   parameters:
     Limit:
       name: limit
@@ -376,6 +473,12 @@ components:
         type: string
     AgentId:
       name: agentId
+      in: path
+      required: true
+      schema:
+        type: string
+    TokenId:
+      name: tokenId
       in: path
       required: true
       schema:
@@ -469,12 +572,32 @@ components:
           format: date-time
     TenantCreate:
       type: object
-      required: [name]
+      required: [name, adminEmail, adminName]
       properties:
         name:
           type: string
           minLength: 1
           maxLength: 100
+        adminEmail:
+          type: string
+          format: email
+          maxLength: 254
+          description: 最初の admin ユーザーのメール
+        adminName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 最初の admin ユーザーの表示名
+    TenantCreated:
+      type: object
+      required: [tenant, admin, adminToken]
+      properties:
+        tenant:
+          $ref: '#/components/schemas/Tenant'
+        admin:
+          $ref: '#/components/schemas/User'
+        adminToken:
+          $ref: '#/components/schemas/UserTokenIssued'
     TenantList:
       type: object
       required: [items]
@@ -487,7 +610,7 @@ components:
           type: string
     User:
       type: object
-      required: [id, tenantId, email, name, role, createdAt]
+      required: [id, tenantId, email, name, role, disabledAt, createdAt]
       properties:
         id:
           type: string
@@ -500,9 +623,78 @@ components:
           type: string
         role:
           $ref: '#/components/schemas/Role'
+        disabledAt:
+          type: [string, 'null']
+          format: date-time
+          description: 無効化日時 (有効なら null)。無効化されたユーザーのトークンは 401 になる
         createdAt:
           type: string
           format: date-time
+    Me:
+      type: object
+      required: [user, tenant]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        tenant:
+          $ref: '#/components/schemas/Tenant'
+    UserToken:
+      type: object
+      required: [id, userId, prefix, name, createdAt, expiresAt, revokedAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        prefix:
+          type: string
+          description: 先頭数文字 (特定用。秘密ではない)
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: 有効期限 (既定 90 日、最長 365 日。無期限は作れない)
+        revokedAt:
+          type: [string, 'null']
+          format: date-time
+          description: 失効日時 (有効なら null)
+    UserTokenCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: '用途メモ (例: CLI、CI)'
+        expiresInDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 90
+    UserTokenIssued:
+      allOf:
+        - $ref: '#/components/schemas/UserToken'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: 平文トークン。発行時の応答でのみ返し、以後は取得できない
+    UserTokenList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserToken'
+        nextCursor:
+          type: string
     UserCreate:
       type: object
       required: [email, name, role]

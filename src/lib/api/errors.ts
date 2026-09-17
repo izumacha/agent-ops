@@ -1,0 +1,47 @@
+// API のエラー表現。Route Handler は ApiError を throw し、handler.ts が JSON 応答へ写す
+import type { ApiErrorDto } from '@/lib/api-types';
+import { API_MESSAGES } from '@/lib/constants';
+
+// 入力検証の詳細 (OpenAPI の Error.issues と同じ形)
+export type ApiIssue = { path: string; message: string };
+
+// HTTP ステータス付きの例外
+export class ApiError extends Error {
+  // HTTP ステータス
+  readonly status: number;
+  // 入力検証の詳細 (422 のとき)
+  readonly issues?: ApiIssue[];
+
+  // ステータス・利用者向け文言・任意の詳細を受け取る
+  constructor(status: number, message: string, issues?: ApiIssue[]) {
+    // 文言を親クラスへ
+    super(message);
+    // 名前を型名に合わせる
+    this.name = 'ApiError';
+    // ステータスと詳細を保持する
+    this.status = status;
+    this.issues = issues;
+  }
+}
+
+// OpenAPI の Error スキーマに沿った JSON 応答を作る
+export function errorResponse(status: number, message: string, issues?: ApiIssue[]): Response {
+  // issues は 422 のときだけ載せる (undefined のキーは JSON に出ない)
+  const body: ApiErrorDto = { status, message, ...(issues ? { issues } : {}) };
+  // JSON で返す
+  return Response.json(body, { status });
+}
+
+// よく使う例外の生成ヘルパー (文言は constants.ts の API_MESSAGES から引く)
+
+// 404: 見つからない (他テナントの資源もこれで隠す)
+export function notFoundError(): ApiError {
+  // 存在の有無を区別しない固定文言
+  return new ApiError(404, API_MESSAGES.notFound);
+}
+
+// 409: 現在の状態では実行できない
+export function conflictError(message: string): ApiError {
+  // 理由は呼び出し側が文言表から選ぶ
+  return new ApiError(409, message);
+}

@@ -1,0 +1,34 @@
+# ADR-0005: 認証は Bearer トークン 2 種（ユーザートークン／プラットフォーム管理者トークン）で行う
+
+- **ステータス**: 採択
+- **日付**: 2026-09-17
+
+## 背景
+
+Step1 で REST API（テナント・ユーザー・エージェント・API キー）を実装するにあたり、「誰が呼んでいるか」を決める仕組みが要る。`docs/spec.md` §4 は権限の語彙を 3 種類（RBAC の 3 操作／`admin` ロール限定／プラットフォーム管理者）と定め、「誰をプラットフォーム管理者とみなすか」は Step1 の着手時に決めるとしていた。
+
+制約:
+
+- 検証はローカル＋CI で完結させる（外部 IdP・メール送信に依存しない）。
+- API は Step2 のプロキシ（API キー `aop_k_...` で認証）と同じ Bearer 方式にそろえ、クライアント実装を 1 種類にする。
+- ログイン画面（Step5）はまだ無い。UI が付いてもトークン方式は API クライアント・CLI・CI から引き続き必要。
+
+## 決定
+
+1. **ユーザートークン（`UserToken`）**: `User` に紐づく Bearer トークン。平文は `aop_u_` + 256 ビット乱数の base64url で、DB には SHA-256 ハッシュ（`tokenHash`）と表示用の先頭（`prefix`）だけを保存する。有効期限は既定 90 日・最長 365 日で無期限は作れない。失効（`revokedAt`）・期限切れ・ユーザー無効化（`User.disabledAt`）はすべて同じ 401 で返し、どの理由かは応答で区別しない。
+2. **プラットフォーム管理者トークン**: 環境変数 `PLATFORM_ADMIN_TOKEN`（32 文字以上）。`GET/POST /tenants` だけに使え、テナント内の資源には（閲覧すら）触れない（403）。未設定・短すぎる値は「プラットフォーム管理者は存在しない」として扱う（fail-closed）。比較はハッシュ化後の定数時間比較。
+3. **ブートストラップ**: `POST /tenants` はテナント・最初の `admin` ユーザー・その admin のトークンを 1 トランザクションで作り、平文をこの応答でのみ返す。以後のトークンは `admin` ロール限定の `POST /users/{userId}/tokens` で発行し、`DELETE .../tokens/{tokenId}` で失効させる。seed 済みのローカル環境では `scripts/issue-user-token.ts` で発行する。
+4. **ユーザーは削除せず無効化する**（`DELETE /users/{userId}` = `disabledAt` を入れる）。監査ログの操作者（`AuditLog.actorId`）が `Restrict` だから（`docs/spec.md` §3）。自分自身と最後の有効な `admin` は無効化・降格できない（409）。
+5. API キー（`aop_k_...`）は Step2 のプロキシ専用で、管理 API の認証には使えない（401）。
+
+## 理由
+
+- 秘密をハッシュで保存する既存方針（API キー）と同じ形にし、実装と検証（`tests/api/auth.test.ts`）を共有できる。
+- 「テナントの admin でも他テナントを作れない」をトークンの種類で分けると、RBAC の表に「テナント外」の行を混ぜずに済む。
+- 401 の理由を区別しないのは、失効・期限・無効化の状態を外から探れなくするため。
+
+## 結果
+
+- `prisma/schema.prisma` に `UserToken` と `User.disabledAt`、`User @@unique([tenantId, id])`（複合 FK の参照先）を追加（マイグレーション `20260917000000_add_user_token`）。
+- 認証は `src/lib/api/auth.ts`、認可ガードは `src/lib/api/guard.ts`（`requireAction` / `requireAdminRole` / `requirePlatformAdmin`）に集約。Route Handler はこれ以外の経路で権限を判定しない。
+- Step5 でブラウザ向けのログイン（セッション Cookie）を足すときは、Cookie → ユーザートークンの発行、という形でこの ADR の上に重ねる（置き換えない）。

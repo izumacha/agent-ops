@@ -1,0 +1,111 @@
+// テナント API: 作成 (admin + トークン同時発行)・一覧・取得
+import { beforeEach, describe, expect, it } from 'vitest';
+import { GET as getMe } from '@/app/api/v1/me/route';
+import { GET as listTenants, POST as createTenant } from '@/app/api/v1/tenants/route';
+import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
+import { USER_TOKEN_PREFIX } from '@/lib/tokens';
+import { call, PLATFORM_TOKEN, setupSeed, type Seed } from './helpers';
+
+// seed (各テストで作り直す)
+let seed: Seed;
+beforeEach(() => {
+  seed = setupSeed();
+});
+
+// 作成応答の形
+interface Created {
+  tenant: { id: string; name: string; plan: string };
+  admin: { id: string; role: string; email: string };
+  adminToken: { secret: string; prefix: string; expiresAt: string };
+}
+
+describe('POST /tenants', () => {
+  it('テナントと最初の admin と、その admin として使えるトークンを返す (UC-01)', async () => {
+    // プラットフォーム管理者で作成する
+    const result = await call(createTenant, {
+      token: PLATFORM_TOKEN,
+      body: { name: '新テナント', adminEmail: 'owner@example.com', adminName: 'オーナー' },
+    });
+    expect(result.status).toBe(201);
+    // 3 つが揃っていること
+    const body = result.json as Created;
+    expect(body.tenant.name).toBe('新テナント');
+    expect(body.tenant.plan).toBe('free');
+    expect(body.admin.role).toBe('admin');
+    expect(body.adminToken.secret.startsWith(USER_TOKEN_PREFIX)).toBe(true);
+    expect(body.adminToken.secret.startsWith(body.adminToken.prefix)).toBe(true);
+    // 返ったトークンでその admin として認証できること
+    const me = await call(getMe, { token: body.adminToken.secret });
+    expect(me.status).toBe(200);
+    expect((me.json as { user: { id: string } }).user.id).toBe(body.admin.id);
+  });
+
+  it('入力検証: 名前・メール・表示名が不正なら 422 で issues を返す', async () => {
+    // 空の名前・不正メール・表示名欠落
+    const result = await call(createTenant, {
+      token: PLATFORM_TOKEN,
+      body: { name: '', adminEmail: 'not-an-email' },
+    });
+    expect(result.status).toBe(422);
+    // どのフィールドかが issues に載る
+    const issues = (result.json as { issues: { path: string }[] }).issues.map((i) => i.path);
+    expect(issues).toEqual(expect.arrayContaining(['name', 'adminEmail', 'adminName']));
+  });
+
+  it('テナントの admin では作れない (403)', async () => {
+    // テナント内の admin
+    const result = await call(createTenant, {
+      token: seed.a.tokens.admin,
+      body: { name: 'x', adminEmail: 'x@example.com', adminName: 'x' },
+    });
+    expect(result.status).toBe(403);
+  });
+});
+
+describe('GET /tenants', () => {
+  it('limit と cursor でページ送りできる', async () => {
+    // seed の 2 テナントを 1 件ずつ取る
+    const first = await call(listTenants, { token: PLATFORM_TOKEN, query: 'limit=1' });
+    expect(first.status).toBe(200);
+    const page1 = first.json as { items: { id: string }[]; nextCursor?: string };
+    expect(page1.items).toHaveLength(1);
+    expect(page1.nextCursor).toBeDefined();
+    // 続き
+    const second = await call(listTenants, {
+      token: PLATFORM_TOKEN,
+      query: `limit=1&cursor=${page1.nextCursor}`,
+    });
+    const page2 = second.json as { items: { id: string }[]; nextCursor?: string };
+    expect(page2.items).toHaveLength(1);
+    expect(page2.items[0].id).not.toBe(page1.items[0].id);
+    expect(page2.nextCursor).toBeUndefined();
+  });
+
+  it('limit が上限を超える・0・数字でないときは 422', async () => {
+    // 上限超え / 0 / 文字
+    for (const query of ['limit=201', 'limit=0', 'limit=abc']) {
+      expect((await call(listTenants, { token: PLATFORM_TOKEN, query })).status).toBe(422);
+    }
+  });
+});
+
+describe('GET /tenants/{tenantId}', () => {
+  it('自テナントは取得できる (viewer でも view 権限があれば可)', async () => {
+    // 自分のテナント
+    const result = await call(getTenant, {
+      token: seed.a.tokens.viewer,
+      params: { tenantId: seed.a.id },
+    });
+    expect(result.status).toBe(200);
+    expect((result.json as { id: string }).id).toBe(seed.a.id);
+  });
+
+  it('他テナントの id は 404 で隠す (admin でも)', async () => {
+    // テナント B の id をテナント A の admin が指定する
+    const result = await call(getTenant, {
+      token: seed.a.tokens.admin,
+      params: { tenantId: seed.b.id },
+    });
+    expect(result.status).toBe(404);
+  });
+});

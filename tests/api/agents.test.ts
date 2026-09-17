@@ -135,6 +135,25 @@ describe('リクエスト本文の防御', () => {
     expect(result.status).toBe(400);
   });
 
+  it('UTF-8 として不正なバイト列を含む本文は 400 (置換して保存しない)', async () => {
+    // 有効な JSON の途中に不正なバイト (0xFF 0xFE) を混ぜる
+    const head = Buffer.from('{"name":"bad-', 'utf8');
+    const tail = Buffer.from('","provider":"anthropic","model":"m"}', 'utf8');
+    const body = Buffer.concat([head, Buffer.from([0xff, 0xfe]), tail]);
+    const request = new Request('http://test.local/api/v1/x', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${seed.a.tokens.operator}`,
+        'content-type': 'application/json',
+      },
+      body,
+    });
+    const response = await createAgent(request, { params: Promise.resolve({}) });
+    expect(response.status).toBe(400);
+    // 保存されていない
+    expect([...seed.store.agents.values()].some((a) => a.name.startsWith('bad-'))).toBe(false);
+  });
+
   it('本文が上限を超えれば 413', async () => {
     // 上限 + 1 バイトの本文 (説明文に詰める)
     const padding = 'a'.repeat(JSON_BODY_MAX_BYTES);

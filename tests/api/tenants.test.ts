@@ -83,11 +83,22 @@ describe('GET /tenants', () => {
     expect(page2.nextCursor).toBeUndefined();
   });
 
-  it('limit が上限を超える・0・数字でないときは 422', async () => {
-    // 上限超え / 0 / 文字
-    for (const query of ['limit=201', 'limit=0', 'limit=abc']) {
-      expect((await call(listTenants, { token: PLATFORM_TOKEN, query })).status).toBe(422);
+  it('limit が上限を超える・0・数字でない・10 進整数以外 (16 進・指数・符号・空白) は 422', async () => {
+    // 上限超え / 0 / 文字 / 16 進 / 指数 / 符号 / 空白 / 小数
+    for (const query of [
+      'limit=201',
+      'limit=0',
+      'limit=abc',
+      'limit=0x10',
+      'limit=1e2',
+      'limit=%2B5',
+      'limit=%207%20',
+      'limit=1.5',
+    ]) {
+      expect((await call(listTenants, { token: PLATFORM_TOKEN, query })).status, query).toBe(422);
     }
+    // 10 進整数は通る
+    expect((await call(listTenants, { token: PLATFORM_TOKEN, query: 'limit=2' })).status).toBe(200);
   });
 });
 

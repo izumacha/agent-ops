@@ -63,8 +63,13 @@ export async function readBodyWithinByteLimit(request: Request, maxBytes: number
     // 打ち切り・完了のどちらでもストリームを解放する (§8 リソースを確実に解放する)
     reader.releaseLock();
   }
-  // UTF-8 として連結する
-  return new TextDecoder().decode(Buffer.concat(chunks));
+  // UTF-8 として連結する。不正なバイト列は置換 (U+FFFD) せず失敗させる (JSON は UTF-8 必須 (RFC 8259 §8.1)。
+  // 黙って置換すると、送り主の意図と違う名前が保存されて一意判定もその文字列で行われる)
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+  } catch {
+    throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
+  }
 }
 
 /**

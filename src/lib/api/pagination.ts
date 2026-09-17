@@ -10,9 +10,18 @@ import {
 } from '@/lib/constants';
 import { validateWith } from './body';
 
+// 10 進の整数だけを受ける文字列 (z.coerce.number() は Number() 変換なので 0x10 / 1e2 / +5 / 空白付きも通り、
+// OpenAPI の type: integer より受理集合が広くなる。契約どおり 10 進の数字だけを通す。桁数は上限値より十分大きい 6 桁まで)
+const decimalInteger = z
+  .string()
+  .regex(/^[0-9]{1,6}$/, { message: API_MESSAGES.invalidLimit })
+  .transform(Number);
+
 // limit は 1〜最大値の整数 (省略時は既定値)、cursor は前応答の nextCursor (符号化されたキーセット。形が違えば 422)
 export const pageQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(PAGE_LIMIT_MAX).default(PAGE_LIMIT_DEFAULT),
+  limit: decimalInteger
+    .pipe(z.number().int().min(1).max(PAGE_LIMIT_MAX))
+    .default(PAGE_LIMIT_DEFAULT),
   cursor: z
     .string()
     .min(1)

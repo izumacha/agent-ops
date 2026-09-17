@@ -2,14 +2,14 @@
 // Restrict / Cascade・ページネーション) を本番実装で固定する。
 // RUN_PRISMA_CONTRACT=1 のときだけ走り、beforeEach で全テーブルを TRUNCATE するため開発 DB を指さないこと
 // (CI は専用 DB agent_ops_contract を作って流す。CLAUDE.md §2)
+// prisma アダプタとクライアント結線は **動的 import** で読む (静的に import すると生成物 src/generated/prisma が
+// テストの収集時に要求され、skipIf で飛ばすはずの `npm run test` が `db:generate` 無しでは落ちる)
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createPrismaRepos } from '@/data/adapters/prisma';
 import { DuplicateError } from '@/data/errors';
 import { decodeCursor } from '@/data/page';
 import type { Repositories } from '@/data/ports';
 import { Provider, Role } from '@/domain/types';
 import type { PrismaClient } from '@/generated/prisma';
-import { createPrismaClient } from '@/lib/prisma-client';
 import { userTokenExpiresAt } from '@/lib/tokens';
 
 // 明示フラグが無ければ丸ごとスキップする
@@ -37,8 +37,12 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   let client: PrismaClient;
   let repos: Repositories;
 
-  // 接続する
-  beforeAll(() => {
+  // 接続する (生成物へ依存するモジュールはここで初めて読む)
+  beforeAll(async () => {
+    const [{ createPrismaClient }, { createPrismaRepos }] = await Promise.all([
+      import('@/lib/prisma-client'),
+      import('@/data/adapters/prisma'),
+    ]);
     client = createPrismaClient();
     repos = createPrismaRepos(client);
   });

@@ -1,5 +1,5 @@
 // エージェント登録・更新の入力スキーマ (OpenAPI の AgentCreate / AgentUpdate と一致させる)
-import { z } from 'zod';
+import { z } from './zod';
 import { longText, microUsd, provider, shortText } from './common';
 
 // 登録 (省略した description / budgetMicroUsd は未設定)

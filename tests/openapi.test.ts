@@ -25,6 +25,7 @@ type Operation = {
   tags?: string[];
   responses?: Record<string, unknown>;
   security?: unknown[];
+  requestBody?: unknown;
 };
 type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
 type Spec = {
@@ -74,11 +75,25 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
 
   // 認証が要る操作はすべて 403 を契約に持つ (書き込み系は RBAC 違反、読み取り系もプラットフォーム管理者トークンで
   // テナント内の資源を読もうとすると 403 になる。テナント境界そのものは 404 で隠すが、主体の種類違いは 403)
-  it('認証が必要なオペレーションは 403 (権限違反) の応答を宣言している', () => {
+  it('認証が必要なオペレーションは 401 (認証失敗) と 403 (権限違反) の応答を宣言している', () => {
     // 定義側が `security: []` で公開と宣言したオペレーションは対象外 (パス名の決め打ちで写しを持たない)
     for (const { path, method, op } of operations) {
       if (Array.isArray(op.security) && op.security.length === 0) continue;
-      expect(Object.keys(op.responses ?? {}), `${method.toUpperCase()} ${path}`).toContain('403');
+      const codes = Object.keys(op.responses ?? {});
+      expect(codes, `${method.toUpperCase()} ${path}`).toContain('401');
+      expect(codes, `${method.toUpperCase()} ${path}`).toContain('403');
+    }
+  });
+
+  // 本文を受けるオペレーションは body.ts が返す 400 / 413 / 415 を契約に持つ
+  it('本文を受けるオペレーションは 400 / 413 / 415 の応答を宣言している', () => {
+    // requestBody を持つオペレーションだけが対象
+    for (const { path, method, op } of operations) {
+      if (op.requestBody === undefined) continue;
+      const codes = Object.keys(op.responses ?? {});
+      for (const code of ['400', '413', '415']) {
+        expect(codes, `${method.toUpperCase()} ${path} に ${code} が無い`).toContain(code);
+      }
     }
   });
 

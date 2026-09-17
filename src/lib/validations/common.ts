@@ -1,8 +1,5 @@
 // 各スキーマで共有する部品 (長さ上限は OpenAPI 定義と一致させる)
-import { z } from 'zod';
-
-// Zod の既定メッセージを日本語にする (issues.message も他の文言と同じく日本語で返す。全スキーマがこのモジュールを経由する)
-z.config(z.locales.ja());
+import { z } from './zod';
 import { parseMicroUsd } from '@/domain/money';
 import { API_MESSAGES } from '@/lib/constants';
 import { normalizeEmail } from '@/domain/email';

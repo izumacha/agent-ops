@@ -46,9 +46,8 @@ class MemoryTenants implements TenantsPort {
   // 全テナントを一覧する
   async list(query: PageQuery): Promise<Page<TenantRecord>> {
     // 表の全行をページに切る
-    const page = paginate(this.store.tenants.values(), query);
-    // 複製して返す
-    return page;
+    // ページに切る (行の複製は paginate() が担う)
+    return paginate(this.store.tenants.values(), query);
   }
 
   // id で引く
@@ -116,8 +115,8 @@ class MemoryUsers implements UsersPort {
   // 一覧
   async list(tenantId: string, query: PageQuery): Promise<Page<UserRecord>> {
     // テナントで絞ってからページに切る
-    const page = paginate(this.rowsOf(tenantId), query);
-    return page;
+    // ページに切る (行の複製は paginate() が担う)
+    return paginate(this.rowsOf(tenantId), query);
   }
 
   // id で引く (テナント境界を跨がない)
@@ -241,8 +240,8 @@ class MemoryUserTokens implements UserTokensPort {
       (row) => row.tenantId === tenantId && row.userId === userId,
     );
     // ページに切る
-    const page = paginate(rows, query);
-    return page;
+    // ページに切る (行の複製は paginate() が担う)
+    return paginate(rows, query);
   }
 
   // 失効
@@ -274,8 +273,8 @@ class MemoryAgents implements AgentsPort {
       (row) => filter?.status === undefined || row.status === filter.status,
     );
     // ページに切る
-    const page = paginate(rows, query);
-    return page;
+    // ページに切る (行の複製は paginate() が担う)
+    return paginate(rows, query);
   }
 
   // id で引く (テナント境界を跨がない)
@@ -374,8 +373,8 @@ class MemoryApiKeys implements ApiKeysPort {
   async list(tenantId: string, query: PageQuery): Promise<Page<ApiKeyRecord>> {
     // テナントで絞ってページに切る
     const rows = [...this.store.apiKeys.values()].filter((row) => row.tenantId === tenantId);
-    const page = paginate(rows, query);
-    return page;
+    // ページに切る (行の複製は paginate() が担う)
+    return paginate(rows, query);
   }
 
   // id で引く (テナント境界を跨がない)

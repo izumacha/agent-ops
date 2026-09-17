@@ -1,5 +1,5 @@
 // API キー発行の入力スキーマ (OpenAPI の ApiKeyCreate と一致させる)
-import { z } from 'zod';
+import { z } from './zod';
 import { shortText } from './common';
 
 // 用途名と、任意で紐づけるエージェント

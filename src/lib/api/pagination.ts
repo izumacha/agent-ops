@@ -1,5 +1,5 @@
 // 一覧のクエリ文字列 (limit / cursor) を PageQuery へ検証・正規化する
-import { z } from 'zod';
+import { z } from '@/lib/validations/zod';
 import type { PageQuery } from '@/data';
 import { decodeCursor } from '@/data/page';
 import {

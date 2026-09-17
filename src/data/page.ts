@@ -35,11 +35,19 @@ export function decodeCursor(cursor: string): CursorKey | null {
   return { createdAt: new Date(Number(millis)), id };
 }
 
-// 行がカーソルの位置より後ろにあるか ((createdAt, id) の辞書式比較)
+// 一覧の並び順 (createdAt 昇順 → id 昇順) の比較関数。負なら a が前、正なら a が後ろ、0 なら同じ位置。
+// 並べる側 (memory の sort) と続きを決める側 (isAfterCursor) が同じ 1 つの比較を使う
+export function compareCursorKeys(a: CursorKey, b: CursorKey): number {
+  // 作成日時で比べる
+  const byTime = a.createdAt.getTime() - b.createdAt.getTime();
+  // 同時刻なら id の文字列順で決める (順序を決定的にする)
+  return byTime !== 0 ? byTime : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+// 行がカーソルの位置より後ろにあるか
 export function isAfterCursor(row: CursorKey, key: CursorKey): boolean {
-  // 作成日時で比べ、同時刻なら id で比べる
-  const byTime = row.createdAt.getTime() - key.createdAt.getTime();
-  return byTime !== 0 ? byTime > 0 : row.id > key.id;
+  // 同じ比較関数で「後ろ」を判定する
+  return compareCursorKeys(row, key) > 0;
 }
 
 // 1 件多く取った行を 1 ページに整形する (次ページがあれば最終行のキーセットを nextCursor にする)

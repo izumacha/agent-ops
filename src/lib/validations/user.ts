@@ -1,5 +1,5 @@
 // ユーザー招待・役割変更の入力スキーマ (OpenAPI の UserCreate / updateUserRole と一致させる)
-import { z } from 'zod';
+import { z } from './zod';
 import { email, role, shortText } from './common';
 
 // 招待

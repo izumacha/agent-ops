@@ -1,5 +1,5 @@
 // ユーザートークン発行の入力スキーマ (OpenAPI の UserTokenCreate と一致させる)
-import { z } from 'zod';
+import { z } from './zod';
 import { USER_TOKEN_DEFAULT_TTL_DAYS, USER_TOKEN_MAX_TTL_DAYS } from '@/lib/constants';
 import { shortText } from './common';
 

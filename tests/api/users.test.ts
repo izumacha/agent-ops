@@ -342,7 +342,7 @@ describe('ログイントークン (/users/{userId}/tokens)', () => {
 describe('memory アダプタの last_admin 判定 (API 経路では操作者自身が最後の admin になるため、データ層で固定する)', () => {
   it('唯一の有効な admin の降格・無効化は last_admin、admin を足せば通る', async () => {
     // seed のテナント A は admin 1 人
-    const repos = (await import('@/data')).getRepos();
+    const repos = await (await import('@/data')).getRepos();
     expect(await repos.users.updateRole(seed.a.id, seed.a.users.admin.id, Role.viewer)).toEqual({
       status: 'last_admin',
     });

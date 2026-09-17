@@ -52,7 +52,7 @@ export function route<P = Record<string, never>>(handler: Handler<P>) {
     // 例外はすべて HTTP 応答へ写す
     try {
       // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
-      const repos = getRepos();
+      const repos = await getRepos();
       // 認証 (失敗は 401 の ApiError)
       const principal = await authenticate(request, repos);
       // 動的セグメントを解決する

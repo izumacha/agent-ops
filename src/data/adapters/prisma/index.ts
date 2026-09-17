@@ -2,7 +2,7 @@
 // Prisma を直接 import してよいのはこのディレクトリと結線箇所 (src/lib/prisma*.ts) だけ (ESLint が強制する)。
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
 import { DuplicateError } from '@/data/errors';
-import { requireCursorKey, toPage, type CursorKey } from '@/data/page';
+import { toPage, type CursorKey } from '@/data/page';
 import type {
   AgentFilter,
   AgentRecord,
@@ -68,9 +68,7 @@ function afterCursorWhere(key: CursorKey) {
 function pageArgs<W>(query: PageQuery, where: W) {
   // カーソルがあれば位置の条件を足す
   const scoped =
-    query.cursor !== undefined
-      ? { AND: [where, afterCursorWhere(requireCursorKey(query.cursor))] }
-      : where;
+    query.cursor !== undefined ? { AND: [where, afterCursorWhere(query.cursor)] } : where;
   // where・並び順・件数をまとめて返す
   return {
     where: scoped,

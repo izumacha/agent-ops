@@ -3,12 +3,18 @@
 // memory アダプタと API テストが `npm run db:generate` 無しでも動くようにするため
 import type { AgentStatus, Plan, Provider, Role } from '@/domain/types';
 
+// カーソルが指す位置 (createdAt, id)。符号化・復号の規則は src/data/page.ts
+export interface CursorKey {
+  createdAt: Date;
+  id: string;
+}
+
 // 一覧取得の入力 (件数と続きの位置)
 export interface PageQuery {
   // 取得件数 (呼び出し側で 1〜最大値に正規化済み)
   limit: number;
-  // 前回応答の nextCursor (無ければ先頭から)
-  cursor?: string;
+  // 前回応答の nextCursor を API 層で復号した位置 (無ければ先頭から)。復号は API 層で 1 回だけ行う
+  cursor?: CursorKey;
 }
 
 // 一覧取得の出力 (次ページがあるときだけ nextCursor を持つ)

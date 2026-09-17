@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createPrismaRepos } from '@/data/adapters/prisma';
 import { DuplicateError } from '@/data/errors';
-import { decodeCursor, encodeCursor } from '@/data/page';
+import { decodeCursor } from '@/data/page';
 import type { Repositories } from '@/data/ports';
 import { Provider, Role } from '@/domain/types';
 import type { PrismaClient } from '@/generated/prisma';
@@ -225,14 +225,17 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       createdAt: p1.items[1].createdAt,
       id: p1.items[1].id,
     });
-    const p2 = await repos.agents.list(a.tenant.id, { limit: 2, cursor: p1.nextCursor });
+    const p2 = await repos.agents.list(a.tenant.id, {
+      limit: 2,
+      cursor: decodeCursor(p1.nextCursor!)!,
+    });
     expect(p2.items).toHaveLength(1);
     expect(p2.nextCursor).toBeUndefined();
     // 重複無し・作成順
     const names = [...p1.items, ...p2.items].map((r) => r.name);
     expect(names).toEqual(['x', 'y', 'z']);
     // 末尾より後ろの位置 (未来の時刻) をカーソルにすると空ページ
-    const beyond = encodeCursor({ createdAt: new Date(Date.now() + 60_000), id: 'zzz' });
+    const beyond = { createdAt: new Date(Date.now() + 60_000), id: 'zzz' };
     expect((await repos.agents.list(a.tenant.id, { limit: 2, cursor: beyond })).items).toHaveLength(
       0,
     );
@@ -315,20 +318,23 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // 他テナントの行の位置をカーソルにしても、その位置より後ろの自テナントの行 (a2, a3) が 1 件も飛ばずに返る
     const afterOther = await repos.agents.list(a.tenant.id, {
       limit: 10,
-      cursor: encodeCursor(other),
+      cursor: { createdAt: other.createdAt, id: other.id },
     });
     expect(afterOther.items.map((r) => r.id)).toEqual([a2.id, a3.id]);
     // カーソル行 (a1) を削除しても、そのカーソルで続きが取れる
     const p1 = await repos.agents.list(a.tenant.id, { limit: 1 });
     expect(p1.items[0].id).toBe(a1.id);
     expect(await repos.agents.delete(a.tenant.id, a1.id)).toBe('deleted');
-    const p2 = await repos.agents.list(a.tenant.id, { limit: 10, cursor: p1.nextCursor });
+    const p2 = await repos.agents.list(a.tenant.id, {
+      limit: 10,
+      cursor: decodeCursor(p1.nextCursor!)!,
+    });
     expect(p2.items.map((r) => r.id)).toEqual([a2.id, a3.id]);
     // 絞り込み (status) とカーソルの併用: stopped の a2 を除いた続き
     await repos.agents.setStatus(a.tenant.id, a2.id, 'stopped');
     const activeAfter = await repos.agents.list(
       a.tenant.id,
-      { limit: 10, cursor: p1.nextCursor },
+      { limit: 10, cursor: decodeCursor(p1.nextCursor!)! },
       { status: 'active' },
     );
     expect(activeAfter.items.map((r) => r.id)).toEqual([a3.id]);

@@ -6,6 +6,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 // YAML パーサ (OpenAPI 定義は YAML)
 import { parse } from 'yaml';
+import {
+  PAGE_CURSOR_MAX_LENGTH,
+  PAGE_LIMIT_DEFAULT,
+  PAGE_LIMIT_MAX,
+  USER_TOKEN_DEFAULT_TTL_DAYS,
+  USER_TOKEN_MAX_TTL_DAYS,
+} from '@/lib/constants';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -20,7 +27,15 @@ type Operation = {
   security?: unknown[];
 };
 type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
-type Spec = { openapi: string; paths: Record<string, PathItem>; tags?: { name: string }[] };
+type Spec = {
+  openapi: string;
+  paths: Record<string, PathItem>;
+  tags?: { name: string }[];
+  components: {
+    parameters: Record<string, { schema: Record<string, unknown> }>;
+    schemas: Record<string, { properties?: Record<string, Record<string, unknown>> }>;
+  };
+};
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
 
 // 全オペレーションを (パス, メソッド, 定義) の並びに平坦化する
@@ -65,5 +80,19 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       if (Array.isArray(op.security) && op.security.length === 0) continue;
       expect(Object.keys(op.responses ?? {}), `${method.toUpperCase()} ${path}`).toContain('403');
     }
+  });
+
+  // 上限値の写しを固定する (OpenAPI 定義と constants.ts の両方に同じ数値があり、片方だけ変えても lint / typecheck は緑のため)
+  it('一覧の limit / cursor とトークン有効期間の上限は constants.ts と一致する', () => {
+    // Limit パラメータ
+    const limit = spec.components.parameters.Limit.schema;
+    expect(limit.default).toBe(PAGE_LIMIT_DEFAULT);
+    expect(limit.maximum).toBe(PAGE_LIMIT_MAX);
+    // Cursor パラメータ
+    expect(spec.components.parameters.Cursor.schema.maxLength).toBe(PAGE_CURSOR_MAX_LENGTH);
+    // トークン有効期間
+    const expiresInDays = spec.components.schemas.UserTokenCreate.properties?.expiresInDays;
+    expect(expiresInDays?.default).toBe(USER_TOKEN_DEFAULT_TTL_DAYS);
+    expect(expiresInDays?.maximum).toBe(USER_TOKEN_MAX_TTL_DAYS);
   });
 });

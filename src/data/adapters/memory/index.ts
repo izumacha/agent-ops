@@ -48,7 +48,7 @@ class MemoryTenants implements TenantsPort {
     // 表の全行をページに切る
     const page = paginate(this.store.tenants.values(), query);
     // 複製して返す
-    return { ...page, items: page.items.map(clone) };
+    return page;
   }
 
   // id で引く
@@ -117,7 +117,7 @@ class MemoryUsers implements UsersPort {
   async list(tenantId: string, query: PageQuery): Promise<Page<UserRecord>> {
     // テナントで絞ってからページに切る
     const page = paginate(this.rowsOf(tenantId), query);
-    return { ...page, items: page.items.map(clone) };
+    return page;
   }
 
   // id で引く (テナント境界を跨がない)
@@ -242,7 +242,7 @@ class MemoryUserTokens implements UserTokensPort {
     );
     // ページに切る
     const page = paginate(rows, query);
-    return { ...page, items: page.items.map(clone) };
+    return page;
   }
 
   // 失効
@@ -275,7 +275,7 @@ class MemoryAgents implements AgentsPort {
     );
     // ページに切る
     const page = paginate(rows, query);
-    return { ...page, items: page.items.map(clone) };
+    return page;
   }
 
   // id で引く (テナント境界を跨がない)
@@ -375,7 +375,7 @@ class MemoryApiKeys implements ApiKeysPort {
     // テナントで絞ってページに切る
     const rows = [...this.store.apiKeys.values()].filter((row) => row.tenantId === tenantId);
     const page = paginate(rows, query);
-    return { ...page, items: page.items.map(clone) };
+    return page;
   }
 
   // id で引く (テナント境界を跨がない)

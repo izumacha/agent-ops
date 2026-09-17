@@ -17,7 +17,16 @@ export const pageQuerySchema = z.object({
     .string()
     .min(1)
     .max(PAGE_CURSOR_MAX_LENGTH)
-    .refine((value) => decodeCursor(value) !== null, { message: API_MESSAGES.invalidCursor })
+    .transform((value, ctx) => {
+      // 位置へ復号する (ここで 1 回だけ。アダプタには復号済みの位置が届く)
+      const key = decodeCursor(value);
+      // 形が違えば検証エラー
+      if (key === null) {
+        ctx.addIssue({ code: 'custom', message: API_MESSAGES.invalidCursor });
+        return z.NEVER;
+      }
+      return key;
+    })
     .optional(),
 });
 

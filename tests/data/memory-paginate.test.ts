@@ -26,9 +26,9 @@ describe('paginate', () => {
     const p1 = paginate(rows, { limit: 2 });
     expect(p1.items.map((r) => r.id)).toEqual(['a', 'b']);
     expect(decodeCursor(p1.nextCursor!)).toEqual({ createdAt: T0, id: 'b' });
-    const p2 = paginate(rows, { limit: 2, cursor: p1.nextCursor });
+    const p2 = paginate(rows, { limit: 2, cursor: decodeCursor(p1.nextCursor!)! });
     expect(p2.items.map((r) => r.id)).toEqual(['c', 'd']);
-    const p3 = paginate(rows, { limit: 2, cursor: p2.nextCursor });
+    const p3 = paginate(rows, { limit: 2, cursor: decodeCursor(p2.nextCursor!)! });
     expect(p3.items.map((r) => r.id)).toEqual(['e']);
     expect(p3.nextCursor).toBeUndefined();
   });
@@ -42,7 +42,7 @@ describe('paginate', () => {
 
   it('一覧に無い行の位置をカーソルにしても、その位置より後ろの行が続きとして取れる (行が消えても途切れない)', () => {
     // 'c' と同時刻で id が 'c' より後・'d' より前の位置 (削除された行を模す)
-    const cursor = encodeCursor({ createdAt: new Date(T0.getTime() + 1000), id: 'cc' });
+    const cursor = { createdAt: new Date(T0.getTime() + 1000), id: 'cc' };
     expect(paginate(rows, { limit: 10, cursor }).items.map((r) => r.id)).toEqual(['d', 'e']);
   });
 
@@ -53,6 +53,7 @@ describe('paginate', () => {
       '',
       Buffer.from('abc').toString('base64url'),
       Buffer.from('12:').toString('base64url'),
+      Buffer.from('12:a\u0000b').toString('base64url'),
     ]) {
       expect(decodeCursor(value), value).toBeNull();
     }

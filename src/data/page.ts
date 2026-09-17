@@ -3,13 +3,10 @@
 //   - カーソルは「前ページ最終行の (createdAt, id)」を符号化したキーセット (行 id そのものではない)。
 //     行 id をカーソルにすると、その行が次ページ取得までに削除されたとき続きが取れず一覧が黙って途切れる。
 //     キーセットなら比較で位置が決まるので行が消えても続きが取れ、行の存在を探る手掛かりにもならない
-import type { Page } from './ports/types';
+import type { CursorKey, Page } from './ports/types';
 
-// カーソルが指す位置 (createdAt, id)
-export interface CursorKey {
-  createdAt: Date;
-  id: string;
-}
+// 位置の型を再公開する (利用側は page.ts だけを import すればよい)
+export type { CursorKey };
 
 // 符号化前の区切り文字 (id は cuid なので ':' を含まない)
 const CURSOR_SEPARATOR = ':';
@@ -53,14 +50,4 @@ export function toPage<T extends CursorKey>(rows: T[], limit: number): Page<T> {
   const items = hasMore ? rows.slice(0, limit) : rows;
   // 次ページがあれば最終行の位置をカーソルにする
   return hasMore ? { items, nextCursor: encodeCursor(items[items.length - 1]) } : { items };
-}
-
-// アダプタがカーソル文字列を位置へ戻す (API 層で検証済みの値しか来ない前提。壊れていれば例外 = プログラムの誤り)
-export function requireCursorKey(cursor: string): CursorKey {
-  // 復号する
-  const key = decodeCursor(cursor);
-  // 検証をすり抜けた不正値は握り潰さない
-  if (!key) throw new Error('カーソルの形式が不正です (API 層で検証されるはずの値)。');
-  // 位置
-  return key;
 }

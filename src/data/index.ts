@@ -1,7 +1,7 @@
 // Composition Root: API 層が使うリポジトリの束を 1 か所で決める。
-// 本番は prisma アダプタ (遅延生成の singleton 経由)、テストは setReposForTesting で memory アダプタへ差し替える
-import { prisma } from '@/lib/prisma';
-import { createPrismaRepos } from './adapters/prisma';
+// 本番は prisma アダプタ (遅延生成の singleton 経由)、テストは setReposForTesting で memory アダプタへ差し替える。
+// prisma アダプタと singleton は**動的 import** で読む: 静的に import すると Prisma の生成物 (src/generated/prisma) が
+// このモジュールごと要求され、memory アダプタで動くはずの API テストが `npm run db:generate` 無しでは動かなくなる (ADR-0006)
 import type { Repositories } from './ports';
 
 // テストが差し込んだ束 (未設定なら本番の束を使う)
@@ -10,11 +10,18 @@ let overrideRepos: Repositories | undefined;
 let prismaRepos: Repositories | undefined;
 
 // 現在有効なリポジトリの束を返す (Route Handler はこれだけを呼ぶ)
-export function getRepos(): Repositories {
+export async function getRepos(): Promise<Repositories> {
   // テストの差し替えがあればそれを優先する
   if (overrideRepos) return overrideRepos;
   // 本番の束を初回だけ組み立てる (prisma singleton は遅延生成の Proxy なので、ここでも DB にはまだ触らない)
-  prismaRepos ??= createPrismaRepos(prisma);
+  if (!prismaRepos) {
+    // 生成物へ依存する 2 モジュールを初回だけ読み込む
+    const [{ prisma }, { createPrismaRepos }] = await Promise.all([
+      import('@/lib/prisma'),
+      import('./adapters/prisma'),
+    ]);
+    prismaRepos = createPrismaRepos(prisma);
+  }
   // 本番の束
   return prismaRepos;
 }

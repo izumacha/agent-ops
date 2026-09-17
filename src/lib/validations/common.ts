@@ -16,20 +16,18 @@ export const role = z.enum(Object.values(Role));
 export const provider = z.enum(Object.values(Provider));
 // エージェントの稼働状態
 export const agentStatus = z.enum(Object.values(AgentStatus));
-// マイクロ USD (文字列 → BigInt。形と範囲は domain/money が判定する)
-export const microUsd = z
-  .string()
-  .max(19)
-  .transform((value, ctx) => {
-    // 純粋関数で変換する
-    const parsed = parseMicroUsd(value);
-    // 変換できなければ検証エラーにする
-    if (parsed === null) {
-      ctx.addIssue({ code: 'custom', message: API_MESSAGES.microUsdOutOfRange });
-      return z.NEVER;
-    }
-    // BigInt を返す
-    return parsed;
-  });
+// マイクロ USD (文字列 → BigInt。桁数・形・範囲はすべて domain/money が判定し、文言は 1 か所から出す。
+// ここに .max(19) を置くと 20 桁以上だけ Zod の汎用文言になり、同じ「範囲外」で文言が割れる)
+export const microUsd = z.string().transform((value, ctx) => {
+  // 純粋関数で変換する
+  const parsed = parseMicroUsd(value);
+  // 変換できなければ検証エラーにする
+  if (parsed === null) {
+    ctx.addIssue({ code: 'custom', message: API_MESSAGES.microUsdOutOfRange });
+    return z.NEVER;
+  }
+  // BigInt を返す
+  return parsed;
+});
 // 説明文 (最大 1000 文字)。前後の空白は除く
 export const longText = z.string().trim().max(1000);

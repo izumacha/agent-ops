@@ -9,7 +9,7 @@ import {
 import { POST as resumeAgent } from '@/app/api/v1/agents/[agentId]/resume/route';
 import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { AgentStatus, Provider } from '@/domain/types';
-import { JSON_BODY_MAX_BYTES } from '@/lib/constants';
+import { API_MESSAGES, JSON_BODY_MAX_BYTES } from '@/lib/constants';
 import { call, setupSeed, teardownSeed, type Seed } from './helpers';
 
 // seed (各テストで作り直す)
@@ -54,14 +54,26 @@ describe('POST /agents', () => {
     expect((result.json as { budgetMicroUsd: string }).budgetMicroUsd).toBe('9223372036854775807');
   });
 
-  it('予算が BIGINT の範囲を超える・負数・小数・数値型なら 422', async () => {
-    // 範囲超え / 負数 / 小数 / 数値型
-    for (const budgetMicroUsd of ['9223372036854775808', '-1', '1.5', 100]) {
+  it('予算が BIGINT の範囲を超える・20 桁・負数・小数・数値型なら 422 (範囲外の文言は 1 種類)', async () => {
+    // 範囲超え (19 桁) / 20 桁 / 負数 / 小数 / 数値型
+    for (const budgetMicroUsd of [
+      '9223372036854775808',
+      '10000000000000000000',
+      '-1',
+      '1.5',
+      100,
+    ]) {
       const result = await call(createAgent, {
         token: seed.a.tokens.operator,
         body: { ...VALID, budgetMicroUsd },
       });
       expect(result.status, String(budgetMicroUsd)).toBe(422);
+      // 文字列で形が違う・範囲外のときは、桁数によらず同じ文言 (数値型は型エラーの文言)
+      if (typeof budgetMicroUsd === 'string') {
+        const issues = (result.json as { issues: { path: string; message: string }[] }).issues;
+        expect(issues[0].path).toBe('budgetMicroUsd');
+        expect(issues[0].message).toBe(API_MESSAGES.microUsdOutOfRange);
+      }
     }
   });
 

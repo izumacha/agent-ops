@@ -30,7 +30,7 @@ export const AGENT_STATUS_LABELS: Readonly<Record<AgentStatus, string>> = {
 export const PAGE_LIMIT_DEFAULT = 50;
 // 一覧の最大件数 (OpenAPI の Limit パラメータの maximum と一致させる。§8 一覧は必ず上限を持つ)
 export const PAGE_LIMIT_MAX = 200;
-// カーソル文字列の最大長 (id は cuid なので十分。異常に長い値を弾く)
+// カーソル文字列の最大長 (ミリ秒と id を符号化した値なので十分。異常に長い値を弾く)
 export const PAGE_CURSOR_MAX_LENGTH = 200;
 // ユーザートークンの既定の有効期間 (日)
 export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;

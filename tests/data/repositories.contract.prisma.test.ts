@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createPrismaRepos } from '@/data/adapters/prisma';
 import { DuplicateError } from '@/data/errors';
-import { encodeCursor } from '@/data/page';
+import { decodeCursor, encodeCursor } from '@/data/page';
 import type { Repositories } from '@/data/ports';
 import { Provider, Role } from '@/domain/types';
 import type { PrismaClient } from '@/generated/prisma';
@@ -205,7 +205,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.apiKeys.findById(a.tenant.id, key!.id)).toBeNull();
   });
 
-  it('一覧は createdAt → id 順で、カーソルで続きが取れ、存在しないカーソルは空', async () => {
+  it('一覧は createdAt → id 順で、nextCursor は最終行の位置を符号化した値、末尾より後ろの位置は空', async () => {
     // 3 件
     const a = await makeTenant(repos, 'A');
     for (const name of ['x', 'y', 'z']) {
@@ -221,15 +221,19 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // 2 件ずつ
     const p1 = await repos.agents.list(a.tenant.id, { limit: 2 });
     expect(p1.items).toHaveLength(2);
-    expect(p1.nextCursor).toBe(p1.items[1].id);
+    expect(decodeCursor(p1.nextCursor!)).toEqual({
+      createdAt: p1.items[1].createdAt,
+      id: p1.items[1].id,
+    });
     const p2 = await repos.agents.list(a.tenant.id, { limit: 2, cursor: p1.nextCursor });
     expect(p2.items).toHaveLength(1);
     expect(p2.nextCursor).toBeUndefined();
     // 重複無し・作成順
     const names = [...p1.items, ...p2.items].map((r) => r.name);
     expect(names).toEqual(['x', 'y', 'z']);
-    // 未知のカーソル
-    expect((await repos.agents.list(a.tenant.id, { limit: 2, cursor: 'nope' })).items).toHaveLength(
+    // 末尾より後ろの位置 (未来の時刻) をカーソルにすると空ページ
+    const beyond = encodeCursor({ createdAt: new Date(Date.now() + 60_000), id: 'zzz' });
+    expect((await repos.agents.list(a.tenant.id, { limit: 2, cursor: beyond })).items).toHaveLength(
       0,
     );
   });

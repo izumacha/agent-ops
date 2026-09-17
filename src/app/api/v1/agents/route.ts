@@ -3,29 +3,30 @@ import { readJsonBody, validateWith } from '@/lib/api/body';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { parsePageQuery } from '@/lib/api/pagination';
+import { PAGE_QUERY_KEYS, pageQuerySchema, pickQuery } from '@/lib/api/pagination';
 import { toListDto, toAgentDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
-import { z } from 'zod';
 import { agentCreateSchema } from '@/lib/validations/agent';
 import { agentStatus } from '@/lib/validations/common';
 
 // 認証に依存するので静的化しない
 export const dynamic = 'force-dynamic';
-// 一覧の絞り込みクエリ (status は省略可)。オブジェクトで検証するのは、失敗時の issues.path に 'status' を載せるため
-const agentListQuerySchema = z.object({ status: agentStatus.optional() });
+// 一覧のクエリ (limit / cursor に status を足す)。1 つのスキーマで検証し、複数の誤りを 1 応答の issues で返す
+const agentListQuerySchema = pageQuerySchema.extend({ status: agentStatus.optional() });
+// 読むクエリのキー
+const AGENT_LIST_QUERY_KEYS = [...PAGE_QUERY_KEYS, 'status'] as const;
 
 // GET /agents (listAgents)
 export const GET = route(async ({ request, principal, repos }) => {
   // view 権限
   const { tenantId } = requireAction(principal, 'view');
-  // クエリを読む
-  const url = new URL(request.url);
-  const { status } = validateWith(agentListQuerySchema, {
-    status: url.searchParams.get('status') ?? undefined,
-  });
+  // クエリをまとめて検証する
+  const { status, ...pageQuery } = validateWith(
+    agentListQuerySchema,
+    pickQuery(new URL(request.url), AGENT_LIST_QUERY_KEYS),
+  );
   // 自テナントで絞って一覧する
-  const page = await repos.agents.list(tenantId, parsePageQuery(url), { status });
+  const page = await repos.agents.list(tenantId, pageQuery, { status });
   // DTO へ写す
   const body: ApiSchemas['AgentList'] = toListDto(page, toAgentDto);
   return Response.json(body);

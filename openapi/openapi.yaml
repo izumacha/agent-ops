@@ -61,6 +61,8 @@ paths:
                 $ref: '#/components/schemas/TenantList'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
     post:
       tags: [tenants]
       operationId: createTenant
@@ -131,6 +133,8 @@ paths:
                 $ref: '#/components/schemas/UserList'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
     post:
       tags: [users]
       operationId: createUser
@@ -225,6 +229,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
     post:
       tags: [users]
       operationId: createUserToken
@@ -286,6 +292,8 @@ paths:
                 $ref: '#/components/schemas/AgentList'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
     post:
       tags: [agents]
       operationId: createAgent
@@ -414,6 +422,8 @@ paths:
                 $ref: '#/components/schemas/ApiKeyList'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
     post:
       tags: [api-keys]
       operationId: createApiKey

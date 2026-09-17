@@ -54,6 +54,12 @@ export function notFoundError(): ApiError {
   return new ApiError(HTTP_STATUS.NOT_FOUND, API_MESSAGES.notFound);
 }
 
+// 422: 入力検証エラー (どのフィールドが・なぜ を issues で伝える)
+export function validationError(issues: ApiIssue[]): ApiError {
+  // 共通の文言に詳細を添える
+  return new ApiError(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.validation, issues);
+}
+
 // 409: 現在の状態では実行できない
 export function conflictError(message: string): ApiError {
   // 理由は呼び出し側が文言表から選ぶ

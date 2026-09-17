@@ -1,7 +1,7 @@
 // リクエスト本文の読み取りと検証 (Content-Type・サイズ上限・JSON 構文・Zod スキーマ)
 import type { ZodType } from 'zod';
 import { API_MESSAGES, JSON_BODY_MAX_BYTES } from '@/lib/constants';
-import { ApiError, type ApiIssue } from './errors';
+import { ApiError, validationError, type ApiIssue } from './errors';
 import { HTTP_STATUS } from './http-status';
 
 // 受け付けるメディア型
@@ -23,13 +23,7 @@ export function validateWith<T>(schema: ZodType<T>, value: unknown): T {
   // 例外を投げない safeParse で検証する
   const result = schema.safeParse(value);
   // 失敗なら 422 に詳細を添える
-  if (!result.success) {
-    throw new ApiError(
-      HTTP_STATUS.UNPROCESSABLE_ENTITY,
-      API_MESSAGES.validation,
-      toIssues(result.error),
-    );
-  }
+  if (!result.success) throw validationError(toIssues(result.error));
   // 検証済みの値
   return result.data;
 }

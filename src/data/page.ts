@@ -29,10 +29,11 @@ export function decodeCursor(cursor: string): CursorKey | null {
   // 区切りで 2 つに分ける
   const separator = decoded.indexOf(CURSOR_SEPARATOR);
   if (separator <= 0 || separator === decoded.length - 1) return null;
-  // ミリ秒は 10 進整数、id は空でない
+  // ミリ秒は 10 進整数 (15 桁以内 = Date の範囲内)、id は cuid とテスト用 id に使う文字だけ
+  // (base64url は任意のバイト列を復号できるため、NUL などが DB へ渡って 500 になるのを形の検査で防ぐ)
   const millis = decoded.slice(0, separator);
   const id = decoded.slice(separator + 1);
-  if (!/^[0-9]{1,15}$/.test(millis) || id.length === 0) return null;
+  if (!/^[0-9]{1,15}$/.test(millis) || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
   // 位置として返す
   return { createdAt: new Date(Number(millis)), id };
 }

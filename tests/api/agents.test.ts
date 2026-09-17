@@ -164,10 +164,15 @@ describe('GET /agents と /agents/{agentId}', () => {
     expect((stopped.json as { items: { id: string }[] }).items.map((a) => a.id)).toEqual([
       seed.a.agent.id,
     ]);
-    // 未知の状態は 422
+    // 未知の状態は 422。limit の誤りと同時なら 1 応答の issues に両方載る
+    const invalid = await call(listAgents, {
+      token: seed.a.tokens.viewer,
+      query: 'status=x&limit=0',
+    });
+    expect(invalid.status).toBe(422);
     expect(
-      (await call(listAgents, { token: seed.a.tokens.viewer, query: 'status=x' })).status,
-    ).toBe(422);
+      (invalid.json as { issues: { path: string }[] }).issues.map((i) => i.path).sort(),
+    ).toEqual(['limit', 'status']);
   });
 
   it('カーソルでページ送りでき、カーソル行が削除されても続きが取れ、壊れたカーソルは 422', async () => {

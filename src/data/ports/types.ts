@@ -15,7 +15,7 @@ export interface PageQuery {
 export interface Page<T> {
   // 取得した行
   items: T[];
-  // 次ページの先頭を指すカーソル (最終行の id。次ページが無ければ undefined)
+  // 次ページの先頭を指すカーソル (最終行の位置 (createdAt, id) を符号化した不透明な値。src/data/page.ts。次ページが無ければ undefined)
   nextCursor?: string;
 }
 

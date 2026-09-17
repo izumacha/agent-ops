@@ -1,5 +1,5 @@
 // /api/v1/api-keys: API キーの一覧 (view) と発行 (execute)。UC-04。平文は発行応答でのみ返す
-import { ApiError } from '@/lib/api/errors';
+import { validationError } from '@/lib/api/errors';
 import { readJsonBody } from '@/lib/api/body';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
@@ -41,11 +41,7 @@ export const POST = route(async ({ request, principal, repos }) => {
     name: input.name,
   });
   // 指定したエージェントが自テナントに無ければ入力エラー (他テナントの id も同じ応答で存在を隠す)
-  if (!key) {
-    throw new ApiError(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.validation, [
-      { path: 'agentId', message: API_MESSAGES.agentNotInTenant },
-    ]);
-  }
+  if (!key) throw validationError([{ path: 'agentId', message: API_MESSAGES.agentNotInTenant }]);
   // 平文を添えて 201 で返す
   const body: ApiSchemas['ApiKeyIssued'] = { ...toApiKeyDto(key), secret };
   return Response.json(body, { status: HTTP_STATUS.CREATED });

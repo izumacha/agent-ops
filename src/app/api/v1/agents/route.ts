@@ -2,6 +2,7 @@
 import { readJsonBody, validateWith } from '@/lib/api/body';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
+import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
 import { toAgentDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
@@ -46,5 +47,5 @@ export const POST = route(async ({ request, principal, repos }) => {
     budgetMicroUsd: input.budgetMicroUsd ?? null,
   });
   // 201 で返す
-  return Response.json(toAgentDto(agent), { status: 201 });
+  return Response.json(toAgentDto(agent), { status: HTTP_STATUS.CREATED });
 });

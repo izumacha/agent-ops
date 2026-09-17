@@ -459,6 +459,8 @@ components:
       description: ページネーションカーソル (前回応答の nextCursor)
       schema:
         type: string
+        minLength: 1
+        maxLength: 200
     TenantId:
       name: tenantId
       in: path
@@ -827,6 +829,8 @@ components:
           maxLength: 100
         agentId:
           type: string
+          minLength: 1
+          maxLength: 100
     ApiKeyIssued:
       allOf:
         - $ref: '#/components/schemas/ApiKey'

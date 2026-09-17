@@ -5,14 +5,14 @@ import { Role } from '@/domain/types';
 import { API_MESSAGES } from '@/lib/constants';
 import type { Principal, UserPrincipal } from './auth';
 import { ApiError } from './errors';
-
-// HTTP 403 (認証はできているが権限が無い)
-const FORBIDDEN = 403;
+import { HTTP_STATUS } from './http-status';
 
 // テナントのユーザーであることを要求する (プラットフォーム管理者はテナント内の資源に触れない)
 export function requireTenantUser(principal: Principal): UserPrincipal {
   // プラットフォーム管理者ならテナント境界の外側なので拒否する
-  if (principal.kind !== 'user') throw new ApiError(FORBIDDEN, API_MESSAGES.tenantScopeRequired);
+  if (principal.kind !== 'user') {
+    throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.tenantScopeRequired);
+  }
   // テナントのユーザー
   return principal;
 }
@@ -22,7 +22,9 @@ export function requireAction(principal: Principal, action: Action): UserPrincip
   // まずテナントのユーザーであること
   const user = requireTenantUser(principal);
   // 許可表で判定する (未知の役割は canPerform が拒否する = fail-closed)
-  if (!canPerform(user.user.role, action)) throw new ApiError(FORBIDDEN, API_MESSAGES.forbidden);
+  if (!canPerform(user.user.role, action)) {
+    throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.forbidden);
+  }
   // 許可された
   return user;
 }
@@ -33,7 +35,8 @@ export function requireAdminRole(principal: Principal): UserPrincipal {
   // まずテナントのユーザーであること
   const user = requireTenantUser(principal);
   // 役割が admin であること
-  if (user.user.role !== Role.admin) throw new ApiError(FORBIDDEN, API_MESSAGES.forbidden);
+  if (user.user.role !== Role.admin)
+    throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.forbidden);
   // 許可された
   return user;
 }
@@ -42,6 +45,6 @@ export function requireAdminRole(principal: Principal): UserPrincipal {
 export function requirePlatformAdmin(principal: Principal): void {
   // テナントのユーザーは、たとえ admin でも他テナントを作れない
   if (principal.kind !== 'platform') {
-    throw new ApiError(FORBIDDEN, API_MESSAGES.platformAdminRequired);
+    throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.platformAdminRequired);
   }
 }

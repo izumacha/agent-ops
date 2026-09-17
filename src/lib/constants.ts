@@ -34,6 +34,8 @@ export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;
 export const USER_TOKEN_MAX_TTL_DAYS = 365;
 // プラットフォーム管理者トークン (環境変数) に要求する最小長。短い値は設定ミスとみなして使わない (fail-closed)
 export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
+// テナント作成時に最初の admin へ発行するログイントークンの用途名 (UserToken.name に保存され一覧に出る)
+export const USER_TOKEN_BOOTSTRAP_NAME = '初期管理者トークン';
 // JSON 本文の上限 (バイト)。Step1 の入力は短い文字列だけなので小さく保つ (§9 リクエストサイズ上限)
 export const JSON_BODY_MAX_BYTES = 64 * 1024;
 
@@ -52,6 +54,7 @@ export const API_MESSAGES = {
   payloadTooLarge: 'リクエスト本文が大きすぎます。',
   lastAdmin: '最後の有効な管理者の役割変更・無効化はできません。',
   selfDisable: '自分自身を無効化することはできません。',
+  userDisabled: 'このユーザーは無効化されています。',
   agentHasHistory:
     '利用・評価・インシデントの履歴があるエージェントは削除できません。停止 (stop) を使ってください。',
   agentNotInTenant: '指定したエージェントが見つかりません。',

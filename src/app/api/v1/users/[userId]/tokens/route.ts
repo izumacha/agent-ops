@@ -1,18 +1,18 @@
 // /api/v1/users/{userId}/tokens: ログイントークンの一覧・発行 (admin ロール限定。ADR-0005)
 import { readJsonBody } from '@/lib/api/body';
-import { notFoundError } from '@/lib/api/errors';
+import { conflictError, notFoundError } from '@/lib/api/errors';
 import { requireAdminRole } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
+import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
 import { toUserTokenDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
-import { displayPrefix, generateSecret, hashSecret } from '@/lib/tokens';
+import { API_MESSAGES } from '@/lib/constants';
+import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '@/lib/tokens';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 
 // 認証に依存するので静的化しない
 export const dynamic = 'force-dynamic';
-// 1 日のミリ秒 (有効期限の計算)
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 // GET /users/{userId}/tokens (listUserTokens)
 export const GET = route<{ userId: string }>(async ({ request, params, principal, repos }) => {
@@ -44,6 +44,8 @@ export const POST = route<{ userId: string }>(async ({ request, params, principa
   // 対象ユーザー (自テナント内。他テナントは 404)
   const target = await repos.users.findById(tenantId, params.userId);
   if (!target) throw notFoundError();
+  // 無効化されたユーザーには発行しない (発行できても認証で必ず 401 になる「使えない資格情報」を作らない)
+  if (target.disabledAt !== null) throw conflictError(API_MESSAGES.userDisabled);
   // 平文を生成し、ハッシュだけを保存する
   const secret = generateSecret('user');
   const token = await repos.userTokens.create({
@@ -52,10 +54,10 @@ export const POST = route<{ userId: string }>(async ({ request, params, principa
     prefix: displayPrefix(secret),
     tokenHash: hashSecret(secret),
     name: input.name,
-    expiresAt: new Date(Date.now() + input.expiresInDays * DAY_MS),
+    expiresAt: userTokenExpiresAt(input.expiresInDays),
   });
   if (!token) throw notFoundError();
   // 平文を添えて 201 で返す
   const body: ApiSchemas['UserTokenIssued'] = { ...toUserTokenDto(token), secret };
-  return Response.json(body, { status: 201 });
+  return Response.json(body, { status: HTTP_STATUS.CREATED });
 });

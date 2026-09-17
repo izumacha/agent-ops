@@ -21,6 +21,7 @@ import type {
   TenantRecord,
   TenantsPort,
   UpdateAgentInput,
+  UserMutationResult,
   UserRecord,
   UserTokenLookup,
   UserTokenRecord,
@@ -35,6 +36,8 @@ import { Prisma, type PrismaClient } from '@/generated/prisma';
 const UNIQUE_VIOLATION = 'P2002';
 // 外部キー制約違反 (Restrict による削除拒否もこれ)
 const FOREIGN_KEY_VIOLATION = 'P2003';
+// 更新・削除対象の行が無い (update の where に一致する行が無い)
+const RECORD_NOT_FOUND = 'P2025';
 
 // Prisma の既知エラーが指定コードかを判定する
 function isPrismaError(error: unknown, code: string): boolean {
@@ -60,6 +63,31 @@ function pageArgs(query: PageQuery) {
   };
 }
 
+// カーソルが「この一覧の絞り込み条件の中」に実在するかを確かめる。Prisma の cursor は id だけで行を解決し
+// where と AND しないため、他テナント・絞り込み外の id を渡すと (a) 空ではなく正規の先頭行を 1 件飛ばしたページが
+// 返り、(b) 空/非空の差で他テナントの id の存在が分かる。memory アダプタ (絞り込み後に探すので空) と同じにする
+async function cursorInScope(
+  query: PageQuery,
+  find: (id: string) => Promise<{ id: string } | null>,
+): Promise<boolean> {
+  // カーソル無しなら常に範囲内
+  if (query.cursor === undefined) return true;
+  // 絞り込み条件付きで引けたときだけ範囲内
+  return (await find(query.cursor)) !== null;
+}
+
+// P2025 (対象行が無い) を null に翻訳して update を実行する (事前の存在確認を省き、その間に消える窓も無くす)
+async function updateOrNull<T>(update: () => Promise<T>): Promise<T | null> {
+  // 更新を試みる
+  try {
+    return await update();
+  } catch (error) {
+    // 対象が無ければ null (テナント境界外も同じ)
+    if (isPrismaError(error, RECORD_NOT_FOUND)) return null;
+    throw error;
+  }
+}
+
 // 1 件多く取った結果を Page へ整形する
 function toPage<T extends { id: string }>(rows: T[], limit: number): Page<T> {
   // 次ページがあるか (limit+1 件取れたか)
@@ -80,6 +108,11 @@ class PrismaTenants implements TenantsPort {
 
   // 全テナントを一覧する (プラットフォーム管理者専用。テナント境界の外側)
   async list(query: PageQuery): Promise<Page<TenantRecord>> {
+    // カーソルが実在しなければ空ページ
+    const inScope = await cursorInScope(query, (id) =>
+      this.db.tenant.findUnique({ where: { id }, select: { id: true } }),
+    );
+    if (!inScope) return { items: [] };
     // 1 件多く取って Page へ整形する
     const rows = await this.db.tenant.findMany(pageArgs(query));
     return toPage(rows, query.limit);
@@ -132,6 +165,11 @@ class PrismaUsers implements UsersPort {
 
   // 一覧 (テナントで絞る)
   async list(tenantId: string, query: PageQuery): Promise<Page<UserRecord>> {
+    // カーソルが自テナントに実在しなければ空ページ
+    const inScope = await cursorInScope(query, (id) =>
+      this.db.user.findUnique({ where: { tenantId_id: { tenantId, id } }, select: { id: true } }),
+    );
+    if (!inScope) return { items: [] };
     // テナント条件 + ページ引数
     const rows = await this.db.user.findMany({ where: { tenantId }, ...pageArgs(query) });
     return toPage(rows, query.limit);
@@ -141,6 +179,46 @@ class PrismaUsers implements UsersPort {
   async findById(tenantId: string, id: string): Promise<UserRecord | null> {
     // 複合一意 (tenantId, id) で検索する
     return this.db.user.findUnique({ where: { tenantId_id: { tenantId, id } } });
+  }
+
+  // メールで引く (複合一意 (tenantId, email))
+  async findByEmail(tenantId: string, email: string): Promise<UserRecord | null> {
+    // 複合一意で検索する
+    return this.db.user.findUnique({ where: { tenantId_email: { tenantId, email } } });
+  }
+
+  // 「最後の有効な admin」判定つきの更新を、テナント行の行ロックで直列化して行う。
+  // count → update を素朴に並べると、2 人の admin が互いを同時に降格/無効化したとき両方の count が 2 を返して
+  // admin が 0 人になる。同じテナントの要求を FOR UPDATE で 1 本ずつ通し、判定と更新を同じトランザクションに置く
+  private async mutateGuardingLastAdmin(
+    tenantId: string,
+    id: string,
+    // 対象を admin から外す操作か (true なら「最後の admin」判定を行う)
+    removesAdmin: (target: UserRecord) => boolean,
+    // 実際の更新 (トランザクション内で呼ぶ)
+    apply: (tx: Db, target: UserRecord) => Promise<UserRecord>,
+  ): Promise<UserMutationResult> {
+    // 1 トランザクションで判定と更新を行う
+    return this.db.$transaction(async (tx: Db): Promise<UserMutationResult> => {
+      // テナント行をロックし、同じテナントへの同種の要求を直列化する (存在しないテナントなら対象も無い)
+      const locked = await tx.$queryRaw<
+        { id: string }[]
+      >`SELECT id FROM "Tenant" WHERE id = ${tenantId} FOR UPDATE`;
+      if (locked.length === 0) return { status: 'not_found' };
+      // 対象 (テナント境界内)
+      const target = await tx.user.findUnique({ where: { tenantId_id: { tenantId, id } } });
+      if (!target) return { status: 'not_found' };
+      // 対象が有効な admin で、操作で admin から外れるなら、他に有効な admin が居ることを要求する
+      if (target.role === Role.admin && target.disabledAt === null && removesAdmin(target)) {
+        // 対象以外の有効な admin の人数
+        const others = await tx.user.count({
+          where: { tenantId, role: Role.admin, disabledAt: null, id: { not: id } },
+        });
+        if (others === 0) return { status: 'last_admin' };
+      }
+      // 更新する
+      return { status: 'ok', user: await apply(tx, target) };
+    });
   }
 
   // 作成 (メール重複は DuplicateError)
@@ -153,33 +231,33 @@ class PrismaUsers implements UsersPort {
     }
   }
 
-  // 役割変更 (見つからなければ null)
-  async updateRole(tenantId: string, id: string, role: Role): Promise<UserRecord | null> {
-    // 存在確認 (テナント境界内)
-    const existing = await this.findById(tenantId, id);
-    if (!existing) return null;
-    // 役割を更新する
-    return this.db.user.update({ where: { tenantId_id: { tenantId, id } }, data: { role } });
+  // 役割変更 (最後の有効な admin を admin 以外へ変える要求は 'last_admin')
+  async updateRole(tenantId: string, id: string, role: Role): Promise<UserMutationResult> {
+    // admin 以外へ変えるときだけ「最後の admin」判定を行う
+    return this.mutateGuardingLastAdmin(
+      tenantId,
+      id,
+      () => role !== Role.admin,
+      (tx) => tx.user.update({ where: { tenantId_id: { tenantId, id } }, data: { role } }),
+    );
   }
 
-  // 無効化 (見つからなければ null。既に無効なら日時はそのまま)
-  async disable(tenantId: string, id: string): Promise<UserRecord | null> {
-    // 存在確認 (テナント境界内)
-    const existing = await this.findById(tenantId, id);
-    if (!existing) return null;
-    // 既に無効ならそのまま返す
-    if (existing.disabledAt !== null) return existing;
-    // 無効化日時を入れる
-    return this.db.user.update({
-      where: { tenantId_id: { tenantId, id } },
-      data: { disabledAt: new Date() },
-    });
-  }
-
-  // 有効な admin の人数
-  async countActiveAdmins(tenantId: string): Promise<number> {
-    // テナント内の有効な admin を数える
-    return this.db.user.count({ where: { tenantId, role: Role.admin, disabledAt: null } });
+  // 無効化 (最後の有効な admin は 'last_admin'。既に無効なら日時はそのまま)
+  async disable(tenantId: string, id: string): Promise<UserMutationResult> {
+    // 無効化は常に admin から外す操作
+    return this.mutateGuardingLastAdmin(
+      tenantId,
+      id,
+      () => true,
+      // 既に無効なら更新せずそのまま返す (最初の日時を保つ)
+      (tx, target) =>
+        target.disabledAt !== null
+          ? Promise.resolve(target)
+          : tx.user.update({
+              where: { tenantId_id: { tenantId, id } },
+              data: { disabledAt: new Date() },
+            }),
+    );
   }
 }
 
@@ -216,6 +294,11 @@ class PrismaUserTokens implements UserTokensPort {
 
   // あるユーザーのトークン一覧
   async list(tenantId: string, userId: string, query: PageQuery): Promise<Page<UserTokenRecord>> {
+    // カーソルがこのユーザーのトークンとして実在しなければ空ページ
+    const inScope = await cursorInScope(query, (id) =>
+      this.db.userToken.findFirst({ where: { id, tenantId, userId }, select: { id: true } }),
+    );
+    if (!inScope) return { items: [] };
     // テナント + ユーザーで絞る
     const rows = await this.db.userToken.findMany({
       where: { tenantId, userId },
@@ -224,15 +307,15 @@ class PrismaUserTokens implements UserTokensPort {
     return toPage(rows, query.limit);
   }
 
-  // 失効 (見つからなければ null)
+  // 失効 (見つからなければ null。既に失効済みなら日時はそのまま)
   async revoke(tenantId: string, userId: string, id: string): Promise<UserTokenRecord | null> {
-    // 存在確認 (テナント・ユーザー境界内)
-    const existing = await this.db.userToken.findFirst({ where: { id, tenantId, userId } });
-    if (!existing) return null;
-    // 既に失効済みならそのまま
-    if (existing.revokedAt !== null) return existing;
-    // 失効日時を入れる
-    return this.db.userToken.update({ where: { id }, data: { revokedAt: new Date() } });
+    // まだ有効な行だけに失効日時を入れる (条件付き更新なので、存在確認との間の窓が無い)
+    await this.db.userToken.updateMany({
+      where: { id, tenantId, userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    // 現在の行を返す (境界外なら null)
+    return this.db.userToken.findFirst({ where: { id, tenantId, userId } });
   }
 }
 
@@ -243,11 +326,15 @@ class PrismaAgents implements AgentsPort {
 
   // 一覧 (テナント + 状態で絞る)
   async list(tenantId: string, query: PageQuery, filter?: AgentFilter): Promise<Page<AgentRecord>> {
-    // 状態の指定があれば where に足す
-    const rows = await this.db.agent.findMany({
-      where: { tenantId, ...(filter?.status !== undefined ? { status: filter.status } : {}) },
-      ...pageArgs(query),
-    });
+    // 絞り込み条件 (状態の指定があれば足す)
+    const where = { tenantId, ...(filter?.status !== undefined ? { status: filter.status } : {}) };
+    // カーソルが絞り込みの中に実在しなければ空ページ
+    const inScope = await cursorInScope(query, (id) =>
+      this.db.agent.findFirst({ where: { id, ...where }, select: { id: true } }),
+    );
+    if (!inScope) return { items: [] };
+    // 1 件多く取って Page へ整形する
+    const rows = await this.db.agent.findMany({ where, ...pageArgs(query) });
     return toPage(rows, query.limit);
   }
 
@@ -267,26 +354,24 @@ class PrismaAgents implements AgentsPort {
     }
   }
 
-  // 更新 (undefined は変更しない)
+  // 更新 (undefined は変更しない。対象が無ければ null、名前重複は DuplicateError)
   async update(tenantId: string, id: string, patch: UpdateAgentInput): Promise<AgentRecord | null> {
-    // 存在確認 (テナント境界内)
-    const existing = await this.findById(tenantId, id);
-    if (!existing) return null;
-    // 指定されたプロパティだけ更新し、名前重複は翻訳する
+    // 複合一意 (tenantId, id) で 1 クエリで更新し、無ければ null・重複は翻訳する
     try {
-      return await this.db.agent.update({ where: { tenantId_id: { tenantId, id } }, data: patch });
+      return await updateOrNull(() =>
+        this.db.agent.update({ where: { tenantId_id: { tenantId, id } }, data: patch }),
+      );
     } catch (error) {
       rethrowDuplicate(error, 'name');
     }
   }
 
-  // 状態変更
+  // 状態変更 (対象が無ければ null)
   async setStatus(tenantId: string, id: string, status: AgentStatus): Promise<AgentRecord | null> {
-    // 存在確認 (テナント境界内)
-    const existing = await this.findById(tenantId, id);
-    if (!existing) return null;
-    // 状態を更新する
-    return this.db.agent.update({ where: { tenantId_id: { tenantId, id } }, data: { status } });
+    // 複合一意 (tenantId, id) で 1 クエリで更新する
+    return updateOrNull(() =>
+      this.db.agent.update({ where: { tenantId_id: { tenantId, id } }, data: { status } }),
+    );
   }
 
   // 削除 (履歴があれば Restrict FK が拒否する → 'restricted')
@@ -310,6 +395,11 @@ class PrismaApiKeys implements ApiKeysPort {
 
   // 一覧 (テナントで絞る。失効済みも含む)
   async list(tenantId: string, query: PageQuery): Promise<Page<ApiKeyRecord>> {
+    // カーソルが自テナントに実在しなければ空ページ
+    const inScope = await cursorInScope(query, (id) =>
+      this.db.apiKey.findFirst({ where: { id, tenantId }, select: { id: true } }),
+    );
+    if (!inScope) return { items: [] };
     // テナント条件 + ページ引数
     const rows = await this.db.apiKey.findMany({ where: { tenantId }, ...pageArgs(query) });
     return toPage(rows, query.limit);
@@ -333,15 +423,15 @@ class PrismaApiKeys implements ApiKeysPort {
     }
   }
 
-  // 失効 (見つからなければ null)
+  // 失効 (見つからなければ null。既に失効済みなら日時はそのまま)
   async revoke(tenantId: string, id: string): Promise<ApiKeyRecord | null> {
-    // 存在確認 (テナント境界内)
-    const existing = await this.findById(tenantId, id);
-    if (!existing) return null;
-    // 既に失効済みならそのまま
-    if (existing.revokedAt !== null) return existing;
-    // 失効日時を入れる
-    return this.db.apiKey.update({ where: { id }, data: { revokedAt: new Date() } });
+    // まだ有効な行だけに失効日時を入れる (条件付き更新なので、存在確認との間の窓が無い)
+    await this.db.apiKey.updateMany({
+      where: { id, tenantId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    // 現在の行を返す (境界外なら null)
+    return this.findById(tenantId, id);
   }
 }
 

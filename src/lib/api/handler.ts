@@ -4,10 +4,7 @@ import { DuplicateError, getRepos, type Repositories } from '@/data';
 import { API_MESSAGES } from '@/lib/constants';
 import { authenticate, type Principal } from './auth';
 import { ApiError, errorResponse } from './errors';
-
-// HTTP ステータス
-const UNPROCESSABLE = 422;
-const INTERNAL_ERROR = 500;
+import { HTTP_STATUS } from './http-status';
 
 // Next.js 16 の Route Handler が受け取る第 2 引数 (動的セグメントは Promise で届く)
 export interface RouteContext<P> {
@@ -35,13 +32,13 @@ function toErrorResponse(error: unknown): Response {
   if (error instanceof ApiError) return errorResponse(error.status, error.message, error.issues);
   // 一意制約違反は 422 に、どのフィールドかを添える
   if (error instanceof DuplicateError) {
-    return errorResponse(UNPROCESSABLE, API_MESSAGES.validation, [
+    return errorResponse(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.validation, [
       { path: error.field, message: API_MESSAGES.duplicate },
     ]);
   }
-  // それ以外は内部エラー。詳細はサーバログにだけ残す (§9)
-  console.error('[api] 予期しないエラー:', error instanceof Error ? error.message : error);
-  return errorResponse(INTERNAL_ERROR, API_MESSAGES.internal);
+  // それ以外は内部エラー。応答には出さず、サーバログにはスタックトレースごと残す (§6 文脈を付けてログに残す / §9)
+  console.error('[api] 予期しないエラー:', error);
+  return errorResponse(HTTP_STATUS.INTERNAL_SERVER_ERROR, API_MESSAGES.internal);
 }
 
 /**
@@ -71,5 +68,5 @@ export function route<P = Record<string, never>>(handler: Handler<P>) {
 // 204 No Content
 export function noContent(): Response {
   // 本文無しの応答
-  return new Response(null, { status: 204 });
+  return new Response(null, { status: HTTP_STATUS.NO_CONTENT });
 }

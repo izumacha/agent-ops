@@ -151,10 +151,9 @@ describe('DELETE /users/{userId} (無効化)', () => {
     expect(result.status).toBe(409);
   });
 
-  it('最後の有効な admin は別の admin からも無効化できない (409)', async () => {
-    // operator を admin へ昇格し、その operator が元の admin を無効化しようとする → admin は 2 人なので可。
-    // 逆に、昇格後に元の admin を降格してから operator (唯一の admin) を元 admin が消そうとする経路は 403 になるので、
-    // ここでは「admin 1 人のテナント B で、他テナントの admin が触れない」ことと合わせて 1 人残しを確かめる
+  it('admin が 2 人なら片方を無効化でき、残った 1 人は自分自身を無効化できない (409)', async () => {
+    // API 経路では「最後の admin」は必ず操作者自身になる (自分以外を無効化する時点で有効 admin は 2 人以上) ので、
+    // ここで確かめる 409 は selfDisable。データ層の last_admin 判定そのものは契約テストと下の memory の経路で固定する
     await call(updateRole, {
       token: seed.a.tokens.admin,
       method: 'PUT',
@@ -175,6 +174,21 @@ describe('DELETE /users/{userId} (無効化)', () => {
       params: { userId: seed.a.users.operator.id },
     });
     expect(self.status).toBe(409);
+  });
+
+  it('無効化したユーザーにはトークンを発行できない (409)', async () => {
+    // viewer を無効化してから発行を試みる
+    await call(disableUser, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.viewer.id },
+    });
+    const result = await call(createToken, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+      body: { name: 'x' },
+    });
+    expect(result.status).toBe(409);
   });
 
   it('無効化は冪等 (2 回目も 200 で日時は変わらない)', async () => {
@@ -304,5 +318,25 @@ describe('ログイントークン (/users/{userId}/tokens)', () => {
       });
       expect(result.status).toBe(403);
     }
+  });
+});
+
+describe('memory アダプタの last_admin 判定 (API 経路では操作者自身が最後の admin になるため、データ層で固定する)', () => {
+  it('唯一の有効な admin の降格・無効化は last_admin、admin を足せば通る', async () => {
+    // seed のテナント A は admin 1 人
+    const repos = (await import('@/data')).getRepos();
+    expect(await repos.users.updateRole(seed.a.id, seed.a.users.admin.id, Role.viewer)).toEqual({
+      status: 'last_admin',
+    });
+    expect(await repos.users.disable(seed.a.id, seed.a.users.admin.id)).toEqual({
+      status: 'last_admin',
+    });
+    // operator を admin へ昇格させると、元の admin を降格できる
+    expect(
+      (await repos.users.updateRole(seed.a.id, seed.a.users.operator.id, Role.admin)).status,
+    ).toBe('ok');
+    expect(
+      (await repos.users.updateRole(seed.a.id, seed.a.users.admin.id, Role.viewer)).status,
+    ).toBe('ok');
   });
 });

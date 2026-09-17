@@ -2,6 +2,7 @@
 import { readJsonBody } from '@/lib/api/body';
 import { requireAction, requireAdminRole } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
+import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
 import { toUserDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
@@ -30,8 +31,9 @@ export const POST = route(async ({ request, principal, repos }) => {
   const { tenantId } = requireAdminRole(principal);
   // 本文を検証する
   const input = await readJsonBody(request, userCreateSchema);
-  // 自テナントに作る (メール重複は DuplicateError → 422)
-  const user = await repos.users.create({ tenantId, ...input });
+  // 自テナントに作る (メール重複は DuplicateError → 422)。tenantId は入力の後ろに置き、
+  // 検証済みの入力に何が含まれていてもテナントを上書きできない形にする
+  const user = await repos.users.create({ ...input, tenantId });
   // 201 で返す
-  return Response.json(toUserDto(user), { status: 201 });
+  return Response.json(toUserDto(user), { status: HTTP_STATUS.CREATED });
 });

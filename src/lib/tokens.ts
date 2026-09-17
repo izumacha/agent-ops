@@ -11,8 +11,17 @@ const SECRET_RANDOM_BYTES = 32;
 // 一覧表示用に残す先頭の文字数 (接頭辞を除く)。特定には十分で、推測には足りない長さ
 const DISPLAY_PREFIX_CHARS = 6;
 
+// 1 日のミリ秒 (有効期限の計算)
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 // トークンの種類
 export type SecretKind = 'user' | 'apiKey';
+
+// 「今から days 日後」の有効期限を作る (テナント作成・トークン発行・CLI が同じ計算を使う。§6 DRY)
+export function userTokenExpiresAt(days: number, now: Date = new Date()): Date {
+  // 日数 × 1 日のミリ秒を足す
+  return new Date(now.getTime() + days * DAY_MS);
+}
 
 // 種類ごとの接頭辞
 const PREFIX_BY_KIND: Readonly<Record<SecretKind, string>> = {

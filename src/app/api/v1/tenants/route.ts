@@ -5,16 +5,13 @@ import { route } from '@/lib/api/handler';
 import { parsePageQuery } from '@/lib/api/pagination';
 import { toTenantDto, toUserDto, toUserTokenDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
-import { USER_TOKEN_DEFAULT_TTL_DAYS } from '@/lib/constants';
-import { displayPrefix, generateSecret, hashSecret } from '@/lib/tokens';
+import { HTTP_STATUS } from '@/lib/api/http-status';
+import { USER_TOKEN_BOOTSTRAP_NAME, USER_TOKEN_DEFAULT_TTL_DAYS } from '@/lib/constants';
+import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '@/lib/tokens';
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 
 // 認証に依存するので静的化しない
 export const dynamic = 'force-dynamic';
-// 1 日のミリ秒 (有効期限の計算)
-const DAY_MS = 24 * 60 * 60 * 1000;
-// 最初の admin に発行するトークンの用途名
-const BOOTSTRAP_TOKEN_NAME = '初期管理者トークン';
 
 // GET /tenants: 一覧 (listTenants)
 export const GET = route(async ({ request, principal, repos }) => {
@@ -45,8 +42,8 @@ export const POST = route(async ({ request, principal, repos }) => {
     token: {
       prefix: displayPrefix(secret),
       tokenHash: hashSecret(secret),
-      name: BOOTSTRAP_TOKEN_NAME,
-      expiresAt: new Date(Date.now() + USER_TOKEN_DEFAULT_TTL_DAYS * DAY_MS),
+      name: USER_TOKEN_BOOTSTRAP_NAME,
+      expiresAt: userTokenExpiresAt(USER_TOKEN_DEFAULT_TTL_DAYS),
     },
   });
   // DTO へ写し、平文を添えて 201 で返す
@@ -55,5 +52,5 @@ export const POST = route(async ({ request, principal, repos }) => {
     admin: toUserDto(created.admin),
     adminToken: { ...toUserTokenDto(created.token), secret },
   };
-  return Response.json(body, { status: 201 });
+  return Response.json(body, { status: HTTP_STATUS.CREATED });
 });

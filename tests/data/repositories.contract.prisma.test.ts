@@ -232,24 +232,96 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     );
   });
 
-  it('無効化は冪等で、有効な admin の人数は無効化を反映する', async () => {
+  it('最後の有効な admin の降格・無効化は last_admin で拒否し、無効化は冪等', async () => {
     // admin 1 人
     const a = await makeTenant(repos, 'A');
-    expect(await repos.users.countActiveAdmins(a.tenant.id)).toBe(1);
-    // 2 人目の admin を無効化
+    // 唯一の admin は降格も無効化もできない
+    expect(await repos.users.updateRole(a.tenant.id, a.admin.id, Role.viewer)).toEqual({
+      status: 'last_admin',
+    });
+    expect(await repos.users.disable(a.tenant.id, a.admin.id)).toEqual({ status: 'last_admin' });
+    // admin のまま (役割の再設定) は通る
+    expect((await repos.users.updateRole(a.tenant.id, a.admin.id, Role.admin)).status).toBe('ok');
+    // 2 人目の admin を足すと、片方を無効化できる
     const second = await repos.users.create({
       tenantId: a.tenant.id,
       email: 'second@example.com',
       name: '2',
       role: Role.admin,
     });
-    expect(await repos.users.countActiveAdmins(a.tenant.id)).toBe(2);
     const once = await repos.users.disable(a.tenant.id, second.id);
     const twice = await repos.users.disable(a.tenant.id, second.id);
-    expect(once?.disabledAt).not.toBeNull();
-    expect(twice?.disabledAt?.getTime()).toBe(once?.disabledAt?.getTime());
-    expect(await repos.users.countActiveAdmins(a.tenant.id)).toBe(1);
+    expect(once.status).toBe('ok');
+    expect(twice.status).toBe('ok');
+    if (once.status === 'ok' && twice.status === 'ok') {
+      // 冪等 (最初の日時を保つ)
+      expect(once.user.disabledAt).not.toBeNull();
+      expect(twice.user.disabledAt?.getTime()).toBe(once.user.disabledAt?.getTime());
+    }
+    // 残った admin はまた最後の 1 人
+    expect(await repos.users.disable(a.tenant.id, a.admin.id)).toEqual({ status: 'last_admin' });
     // 他テナントからは触れない
-    expect(await repos.users.disable('other', second.id)).toBeNull();
+    expect(await repos.users.disable('other', second.id)).toEqual({ status: 'not_found' });
+    expect(await repos.users.findByEmail(a.tenant.id, 'second@example.com')).not.toBeNull();
+    expect(await repos.users.findByEmail('other', 'second@example.com')).toBeNull();
+  });
+
+  it('並行する降格要求でも有効な admin が 0 人にならない (行ロックで直列化)', async () => {
+    // admin 2 人 (X, Y)
+    const a = await makeTenant(repos, 'A');
+    const y = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'y@example.com',
+      name: 'Y',
+      role: Role.admin,
+    });
+    // 互いを同時に降格する
+    const results = await Promise.all([
+      repos.users.updateRole(a.tenant.id, a.admin.id, Role.viewer),
+      repos.users.updateRole(a.tenant.id, y.id, Role.viewer),
+    ]);
+    // 片方は ok、片方は last_admin
+    expect(results.map((r) => r.status).sort()).toEqual(['last_admin', 'ok']);
+    // 有効な admin が 1 人残っている
+    const remaining = await client.user.count({
+      where: { tenantId: a.tenant.id, role: Role.admin, disabledAt: null },
+    });
+    expect(remaining).toBe(1);
+  });
+
+  it('他テナントの id・絞り込み外の id をカーソルに渡すと空ページ (存在を漏らさず、1 行も飛ばさない)', async () => {
+    // テナント A に 2 件、テナント B に 1 件
+    const a = await makeTenant(repos, 'A');
+    const b = await makeTenant(repos, 'B');
+    const mk = (tenantId: string, name: string) =>
+      repos.agents.create({
+        tenantId,
+        name,
+        description: null,
+        provider: Provider.anthropic,
+        model: 'm',
+        budgetMicroUsd: null,
+      });
+    await mk(a.tenant.id, 'a1');
+    const a2 = await mk(a.tenant.id, 'a2');
+    const other = await mk(b.tenant.id, 'b1');
+    // 他テナントの id をカーソルにしても、A の行は 1 つも返らない
+    expect(
+      (await repos.agents.list(a.tenant.id, { limit: 10, cursor: other.id })).items,
+    ).toHaveLength(0);
+    // 絞り込み (active) の外にある stopped の id をカーソルにしても空
+    await repos.agents.setStatus(a.tenant.id, a2.id, 'stopped');
+    expect(
+      (await repos.agents.list(a.tenant.id, { limit: 10, cursor: a2.id }, { status: 'active' }))
+        .items,
+    ).toHaveLength(0);
+    // 絞り込みの中にある id なら「その続き」が返る (stopped は a2 だけなので続きは空、先頭からは 1 件)
+    expect(
+      (await repos.agents.list(a.tenant.id, { limit: 10, cursor: a2.id }, { status: 'stopped' }))
+        .items,
+    ).toHaveLength(0);
+    expect(
+      (await repos.agents.list(a.tenant.id, { limit: 10 }, { status: 'stopped' })).items,
+    ).toHaveLength(1);
   });
 });

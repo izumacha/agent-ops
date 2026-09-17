@@ -5,12 +5,12 @@ import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, UserRecord, UserTokenRecord } from '@/data';
 import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
 import type { RouteContext } from '@/lib/api/handler';
-import { displayPrefix, generateSecret, hashSecret } from '@/lib/tokens';
+import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '@/lib/tokens';
 
 // テストで使うプラットフォーム管理者トークン (32 文字以上)
 export const PLATFORM_TOKEN = 'test-platform-admin-token-0123456789abcdef';
-// 1 日のミリ秒
-const DAY_MS = 24 * 60 * 60 * 1000;
+// seed するトークンの有効期間 (日)
+const SEED_TOKEN_TTL_DAYS = 30;
 
 // seed したテナント 1 つ分の情報
 export interface SeededTenant {
@@ -72,7 +72,7 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
       tokenHash: hashSecret(secret),
       name: 'テスト用',
       createdAt: now,
-      expiresAt: new Date(now.getTime() + 30 * DAY_MS),
+      expiresAt: userTokenExpiresAt(SEED_TOKEN_TTL_DAYS, now),
       revokedAt: null,
     };
     store.userTokens.set(token.id, token);

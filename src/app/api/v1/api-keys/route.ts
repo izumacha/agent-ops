@@ -3,6 +3,7 @@ import { ApiError } from '@/lib/api/errors';
 import { readJsonBody } from '@/lib/api/body';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
+import { HTTP_STATUS } from '@/lib/api/http-status';
 import { parsePageQuery } from '@/lib/api/pagination';
 import { toApiKeyDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
@@ -12,8 +13,6 @@ import { apiKeyCreateSchema } from '@/lib/validations/api-key';
 
 // 認証に依存するので静的化しない
 export const dynamic = 'force-dynamic';
-// 入力検証エラー
-const UNPROCESSABLE = 422;
 
 // GET /api-keys (listApiKeys)
 export const GET = route(async ({ request, principal, repos }) => {
@@ -46,11 +45,11 @@ export const POST = route(async ({ request, principal, repos }) => {
   });
   // 指定したエージェントが自テナントに無ければ入力エラー (他テナントの id も同じ応答で存在を隠す)
   if (!key) {
-    throw new ApiError(UNPROCESSABLE, API_MESSAGES.validation, [
+    throw new ApiError(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.validation, [
       { path: 'agentId', message: API_MESSAGES.agentNotInTenant },
     ]);
   }
   // 平文を添えて 201 で返す
   const body: ApiSchemas['ApiKeyIssued'] = { ...toApiKeyDto(key), secret };
-  return Response.json(body, { status: 201 });
+  return Response.json(body, { status: HTTP_STATUS.CREATED });
 });

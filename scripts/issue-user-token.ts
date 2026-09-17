@@ -11,12 +11,10 @@ import { createPrismaClient } from '../src/lib/prisma-client';
 // 既定の有効期間
 import { USER_TOKEN_DEFAULT_TTL_DAYS, USER_TOKEN_MAX_TTL_DAYS } from '../src/lib/constants';
 // トークン生成
-import { displayPrefix, generateSecret, hashSecret } from '../src/lib/tokens';
+import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '../src/lib/tokens';
 
 // seed が作る既定テナントの id (prisma/seed.ts と同じ値)
 const DEFAULT_TENANT_ID = 'default-tenant';
-// 1 日のミリ秒
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 // CLI 本体
 async function main(): Promise<void> {
@@ -39,11 +37,10 @@ async function main(): Promise<void> {
   // DB へ接続する
   const client = createPrismaClient();
   const repos = createPrismaRepos(client);
-  // 対象ユーザーをテナント内で探す (一覧からメールで引く。件数は小さい前提の開発用)
+  // 対象ユーザーをテナント内でメールで引く (テナント内で一意)
   try {
-    // 上限いっぱいまで読む (テナント内のユーザーは Step1 では少数)
-    const page = await repos.users.list(values.tenant!, { limit: 200 });
-    const user = page.items.find((row) => row.email === values.email);
+    // 複合一意 (tenantId, email) で検索する
+    const user = await repos.users.findByEmail(values.tenant!, values.email);
     if (!user)
       throw new Error(`ユーザーが見つかりません: ${values.email} (tenant=${values.tenant})`);
     if (user.disabledAt !== null) throw new Error('このユーザーは無効化されています。');
@@ -55,7 +52,7 @@ async function main(): Promise<void> {
       prefix: displayPrefix(secret),
       tokenHash: hashSecret(secret),
       name: values.name!,
-      expiresAt: new Date(Date.now() + days * DAY_MS),
+      expiresAt: userTokenExpiresAt(days),
     });
     if (!token) throw new Error('トークンを発行できませんでした。');
     // 平文はここで 1 度だけ表示する

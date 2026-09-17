@@ -6,6 +6,7 @@ import type { Repositories, UserRecord } from '@/data';
 import { API_MESSAGES, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { hashSecret, isUserToken, secretsEqual } from '@/lib/tokens';
 import { ApiError } from './errors';
+import { HTTP_STATUS } from './http-status';
 
 // テナント内のユーザーとして認証された主体
 export interface UserPrincipal {
@@ -26,22 +27,23 @@ export interface PlatformPrincipal {
 // 認証された主体
 export type Principal = UserPrincipal | PlatformPrincipal;
 
-// HTTP 401 (認証情報が無い・無効)
-const UNAUTHORIZED = 401;
 // Authorization ヘッダの認証方式
 const BEARER_SCHEME = 'bearer';
+// 短すぎる PLATFORM_ADMIN_TOKEN の警告を出したか (設定ミスは 1 度だけ知らせる。
+// 毎リクエストで出すと、未認証の総当たりでエラーログを埋められる)
+let warnedShortPlatformToken = false;
 
 // Authorization ヘッダから Bearer トークンを取り出す (無ければ 401)
 function extractBearerToken(request: Request): string {
   // ヘッダを読む
   const header = request.headers.get('authorization');
   // 無ければ認証情報無し
-  if (!header) throw new ApiError(UNAUTHORIZED, API_MESSAGES.unauthorized);
+  if (!header) throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized);
   // 方式とトークンに分ける (方式名は大文字小文字を区別しない)
   const [scheme, token, ...rest] = header.trim().split(/\s+/);
   // Bearer 以外・トークン無し・余分な語があれば 401
   if (scheme?.toLowerCase() !== BEARER_SCHEME || !token || rest.length > 0) {
-    throw new ApiError(UNAUTHORIZED, API_MESSAGES.unauthorized);
+    throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized);
   }
   // トークン本体
   return token;
@@ -55,9 +57,13 @@ function matchesPlatformAdminToken(token: string): boolean {
   if (!configured) return false;
   // 短すぎる値は設定ミスとみなし、使わない (弱いトークンで全テナントを作れる状態を作らない)
   if (configured.length < PLATFORM_ADMIN_TOKEN_MIN_LENGTH) {
-    console.error(
-      `[auth] PLATFORM_ADMIN_TOKEN が短すぎます (${PLATFORM_ADMIN_TOKEN_MIN_LENGTH} 文字以上が必要)。無視します。`,
-    );
+    // 設定ミスの警告は初回だけ出す
+    if (!warnedShortPlatformToken) {
+      warnedShortPlatformToken = true;
+      console.error(
+        `[auth] PLATFORM_ADMIN_TOKEN が短すぎます (${PLATFORM_ADMIN_TOKEN_MIN_LENGTH} 文字以上が必要)。無視します。`,
+      );
+    }
     return false;
   }
   // 定数時間で比較する
@@ -73,11 +79,11 @@ async function authenticateUserToken(
   // 平文は保存していないので、ハッシュで引く
   const found = await repos.userTokens.findByHash(hashSecret(token));
   // 無ければ無効
-  if (!found) throw new ApiError(UNAUTHORIZED, API_MESSAGES.invalidToken);
+  if (!found) throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken);
   // 失効済み・期限切れ・ユーザー無効化はすべて同じ 401 (どれかを区別して返すとトークンの状態が漏れる)
   const { token: record, user } = found;
   if (record.revokedAt !== null || record.expiresAt <= now || user.disabledAt !== null) {
-    throw new ApiError(UNAUTHORIZED, API_MESSAGES.invalidToken);
+    throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken);
   }
   // テナント内のユーザーとして認証成功
   return { kind: 'user', user, tenantId: user.tenantId, tokenId: record.id };
@@ -99,5 +105,5 @@ export async function authenticate(
   // ユーザートークンの形でなければプラットフォーム管理者トークンとして照合する
   if (matchesPlatformAdminToken(token)) return { kind: 'platform' };
   // どちらでもなければ無効
-  throw new ApiError(UNAUTHORIZED, API_MESSAGES.invalidToken);
+  throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken);
 }

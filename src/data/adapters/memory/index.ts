@@ -21,6 +21,7 @@ import type {
   TenantRecord,
   TenantsPort,
   UpdateAgentInput,
+  UserMutationResult,
   UserRecord,
   UserTokenLookup,
   UserTokenRecord,
@@ -126,6 +127,23 @@ class MemoryUsers implements UsersPort {
     return row && row.tenantId === tenantId ? clone(row) : null;
   }
 
+  // メールで引く (テナント内で一意)
+  async findByEmail(tenantId: string, email: string): Promise<UserRecord | null> {
+    // テナント内でメールが一致する行
+    const row = this.rowsOf(tenantId).find((candidate) => candidate.email === email);
+    return row ? clone(row) : null;
+  }
+
+  // 「この行を admin から外すと有効な admin が 0 人になるか」(行そのものは除いて数える)
+  private wouldLeaveNoAdmin(row: UserRecord): boolean {
+    // 対象が有効な admin でなければ人数は変わらない
+    if (row.role !== Role.admin || row.disabledAt !== null) return false;
+    // 対象以外の有効な admin が 1 人も居なければ拒否
+    return !this.rowsOf(row.tenantId).some(
+      (other) => other.id !== row.id && other.role === Role.admin && other.disabledAt === null,
+    );
+  }
+
   // 作成 (メール重複は DuplicateError)
   async create(input: CreateUserInput): Promise<UserRecord> {
     // 同テナントに同じメールがあれば一意制約違反
@@ -150,33 +168,30 @@ class MemoryUsers implements UsersPort {
     return clone(row);
   }
 
-  // 役割変更
-  async updateRole(tenantId: string, id: string, role: Role): Promise<UserRecord | null> {
+  // 役割変更 (判定と更新の間に await が無いので、メモリ実装では自明に原子的)
+  async updateRole(tenantId: string, id: string, role: Role): Promise<UserMutationResult> {
     // 対象行 (テナント境界内)
     const row = this.store.users.get(id);
-    if (!row || row.tenantId !== tenantId) return null;
+    if (!row || row.tenantId !== tenantId) return { status: 'not_found' };
+    // 最後の有効な admin を admin 以外へ変える要求は拒否する
+    if (role !== Role.admin && this.wouldLeaveNoAdmin(row)) return { status: 'last_admin' };
     // 役割と更新日時を書き換える
     row.role = role;
     row.updatedAt = this.store.now();
-    return clone(row);
+    return { status: 'ok', user: clone(row) };
   }
 
-  // 無効化
-  async disable(tenantId: string, id: string): Promise<UserRecord | null> {
+  // 無効化 (判定と更新の間に await が無いので、メモリ実装では自明に原子的)
+  async disable(tenantId: string, id: string): Promise<UserMutationResult> {
     // 対象行 (テナント境界内)
     const row = this.store.users.get(id);
-    if (!row || row.tenantId !== tenantId) return null;
+    if (!row || row.tenantId !== tenantId) return { status: 'not_found' };
+    // 最後の有効な admin は無効化できない
+    if (this.wouldLeaveNoAdmin(row)) return { status: 'last_admin' };
     // まだ有効なら無効化日時を入れる (既に無効なら最初の日時を保つ)
     row.disabledAt ??= this.store.now();
     row.updatedAt = this.store.now();
-    return clone(row);
-  }
-
-  // 有効な admin の人数
-  async countActiveAdmins(tenantId: string): Promise<number> {
-    // 役割が admin かつ無効化されていない行を数える
-    return this.rowsOf(tenantId).filter((row) => row.role === Role.admin && row.disabledAt === null)
-      .length;
+    return { status: 'ok', user: clone(row) };
   }
 }
 

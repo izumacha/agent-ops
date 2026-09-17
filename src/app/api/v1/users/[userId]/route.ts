@@ -4,7 +4,6 @@ import { requireAdminRole } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { toUserDto } from '@/lib/api/serializers';
 import { API_MESSAGES } from '@/lib/constants';
-import { Role } from '@/domain/types';
 
 // 認証に依存するので静的化しない
 export const dynamic = 'force-dynamic';
@@ -15,18 +14,10 @@ export const DELETE = route<{ userId: string }>(async ({ params, principal, repo
   const { user: actor, tenantId } = requireAdminRole(principal);
   // 自分自身は無効化できない (テナントから締め出されるのを防ぐ)
   if (params.userId === actor.id) throw conflictError(API_MESSAGES.selfDisable);
-  // 対象 (自テナント内。他テナントは 404)
-  const target = await repos.users.findById(tenantId, params.userId);
-  if (!target) throw notFoundError();
-  // 最後の有効な admin は無効化できない (誰も管理できなくなる)
-  if (target.role === Role.admin && target.disabledAt === null) {
-    // 有効な admin の人数
-    const admins = await repos.users.countActiveAdmins(tenantId);
-    if (admins <= 1) throw conflictError(API_MESSAGES.lastAdmin);
-  }
-  // 無効化する (既に無効なら日時はそのまま)
-  const disabled = await repos.users.disable(tenantId, params.userId);
-  if (!disabled) throw notFoundError();
+  // 無効化する (他テナントは not_found、最後の有効な admin は last_admin。判定と更新はデータ層が原子的に行う)
+  const result = await repos.users.disable(tenantId, params.userId);
+  if (result.status === 'not_found') throw notFoundError();
+  if (result.status === 'last_admin') throw conflictError(API_MESSAGES.lastAdmin);
   // 無効化後のユーザーを返す
-  return Response.json(toUserDto(disabled));
+  return Response.json(toUserDto(result.user));
 });

@@ -294,3 +294,17 @@ describe('停止・復帰・削除', () => {
     expect(seed.store.agents.has(seed.a.agent.id)).toBe(true);
   });
 });
+
+describe('本文の上限はストリームで数える (Content-Length を偽っても 413)', () => {
+  it('Content-Length を小さく偽った巨大本文でも 413 になり、全量を読み切らない', async () => {
+    // 上限を超える本文を、申告サイズだけ小さくして送る
+    const payload = JSON.stringify({ ...VALID, description: 'a'.repeat(JSON_BODY_MAX_BYTES) });
+    const result = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      method: 'POST',
+      rawBody: payload,
+      headers: { 'content-type': 'application/json', 'content-length': '10' },
+    });
+    expect(result.status).toBe(413);
+  });
+});

@@ -120,10 +120,11 @@ export async function authenticate(
 ): Promise<Principal> {
   // Bearer トークンを取り出す
   const token = extractBearerToken(request);
-  // 接頭辞で照合経路を振り分ける
-  if (isUserToken(token)) return authenticateUserToken(token, repos, now);
-  // ユーザートークンの形でなければプラットフォーム管理者トークンとして照合する
+  // まずプラットフォーム管理者トークンと照合する (DB を触らない定数時間比較なので先に置ける。
+  // 後に置くと、運用者が aop_u_ で始まる値を設定したときユーザートークンの経路へ吸われて永遠に一致しない)
   if (matchesPlatformAdminToken(token)) return { kind: 'platform' };
+  // ユーザートークンの形なら DB のハッシュと照合する
+  if (isUserToken(token)) return authenticateUserToken(token, repos, now);
   // どちらでもなければ無効
   throw invalidTokenError();
 }

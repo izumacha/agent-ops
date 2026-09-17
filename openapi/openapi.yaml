@@ -616,7 +616,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     PayloadTooLarge:
-      description: リクエスト本文が上限 (64 KiB) を超えている
+      description: リクエスト本文が上限 (src/lib/constants.ts の JSON_BODY_MAX_BYTES) を超えている
       content:
         application/json:
           schema:

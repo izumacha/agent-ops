@@ -37,6 +37,22 @@ export function generateSecret(kind: SecretKind): string {
   return `${PREFIX_BY_KIND[kind]}${random}`;
 }
 
+// 発行の一式 (平文・表示用の先頭・保存用のハッシュ)。発行箇所はこれを使い、3 つの関数を個別に呼ばない
+// (表示している平文と保存したハッシュが別の文字列から作られる取り違えを防ぐ)
+export interface IssuedSecret {
+  secret: string;
+  prefix: string;
+  hash: string;
+}
+
+// 新しい秘密を発行する (平文はこの戻り値でしか手に入らない)
+export function issueSecret(kind: SecretKind): IssuedSecret {
+  // 平文を作る
+  const secret = generateSecret(kind);
+  // 表示用の先頭と保存用のハッシュを同じ平文から作る
+  return { secret, prefix: displayPrefix(secret), hash: hashSecret(secret) };
+}
+
 // 平文トークンの SHA-256 ハッシュ (16 進)。DB にはこれだけを保存する
 export function hashSecret(secret: string): string {
   // SHA-256 で不可逆にする (トークンは高エントロピーなのでソルト無しでよい)

@@ -17,7 +17,7 @@ import {
   USER_TOKEN_MAX_TTL_DAYS,
 } from '../src/lib/constants';
 // トークン生成
-import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '../src/lib/tokens';
+import { issueSecret, userTokenExpiresAt } from '../src/lib/tokens';
 
 // CLI 本体
 async function main(): Promise<void> {
@@ -47,13 +47,13 @@ async function main(): Promise<void> {
     if (!user)
       throw new Error(`ユーザーが見つかりません: ${values.email} (tenant=${values.tenant})`);
     if (user.disabledAt !== null) throw new Error('このユーザーは無効化されています。');
-    // 平文を生成し、ハッシュだけ保存する
-    const secret = generateSecret('user');
+    // 平文を発行し、ハッシュだけ保存する
+    const issued = issueSecret('user');
     const token = await repos.userTokens.create({
       tenantId: user.tenantId,
       userId: user.id,
-      prefix: displayPrefix(secret),
-      tokenHash: hashSecret(secret),
+      prefix: issued.prefix,
+      tokenHash: issued.hash,
       name: values.name!,
       expiresAt: userTokenExpiresAt(days),
     });
@@ -62,7 +62,7 @@ async function main(): Promise<void> {
     console.log(
       `発行しました (${user.email} / ${user.role} / 期限 ${token.expiresAt.toISOString()})`,
     );
-    console.log(`Authorization: Bearer ${secret}`);
+    console.log(`Authorization: Bearer ${issued.secret}`);
   } finally {
     // 接続を閉じる
     await client.$disconnect();

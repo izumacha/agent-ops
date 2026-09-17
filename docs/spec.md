@@ -245,7 +245,7 @@ Step2 以降（プロキシ `/proxy/*`、集計 `/usage/daily`、評価 `/evalua
 
 ## 5. 非機能要件（抜粋）
 
-- **セキュリティ**: 全 Server Action / Route Handler で認証・RBAC・`tenantId` の絞り込みを強制（CLAUDE.md §9）。API キー・ユーザートークンはハッシュのみ保存。JSON 本文は 64 KiB まで（413）、`Content-Type` は `application/json` 限定（415）。監査ログは追記専用。
+- **セキュリティ**: 全 Server Action / Route Handler で認証・RBAC・`tenantId` の絞り込みを強制（CLAUDE.md §9）。API キー・ユーザートークンはハッシュのみ保存。JSON 本文は上限（`src/lib/constants.ts` の `JSON_BODY_MAX_BYTES`）まで（413）、`Content-Type` は `application/json` 限定（415）。監査ログは追記専用。
 - **性能**: 一覧は必ず上限（既定 50、最大 200）。プロキシの追加遅延 p95 ≦ 50ms。
 - **可観測性**: `/api/v1/health` で DB 到達性を返す。エラーは内部詳細を出さずサーバログへ。
 - **移植性**: PostgreSQL 16 / Node 22 / Docker。ローカルと CI で検証が完結する（人手の外部手順に依存しない）。

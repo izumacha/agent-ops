@@ -49,10 +49,11 @@ export async function readBodyWithinByteLimit(request: Request, maxBytes: number
       const { done, value } = await reader.read();
       // 終端なら抜ける
       if (done) break;
-      // 合計を更新し、上限超過なら残りを受け取らずに打ち切って 413 (§8 供給元も止める)
+      // 合計を更新し、上限超過なら残りを読まずに 413。reader.cancel() は呼ばない —
+      // Next.js の本文ストリームは cancel を受けると下層の IncomingMessage ごと破棄し、送信済みの 413 が届く前に
+      // 接続が切れる (クライアントには ECONNRESET に見える)。読むのをやめて応答を返せば、残りは Node が捨てる
       total += value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel();
         throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
       }
       // 上限内なら取っておく

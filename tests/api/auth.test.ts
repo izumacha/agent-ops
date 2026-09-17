@@ -76,6 +76,12 @@ describe('プラットフォーム管理者トークン', () => {
     expect(result.status).toBe(200);
   });
 
+  it('aop_u_ で始まる値を設定してもプラットフォーム管理者として認証できる (ユーザートークンの経路に吸われない)', async () => {
+    // 運用者がユーザートークンと同じ接頭辞の値を設定したケース
+    process.env.PLATFORM_ADMIN_TOKEN = 'aop_u_platform-0123456789abcdefghijklmnopqrstuvwxyz';
+    expect((await call(listTenants, { token: process.env.PLATFORM_ADMIN_TOKEN })).status).toBe(200);
+  });
+
   it('一致しなければ 401', async () => {
     // 末尾だけ違うトークン
     expect((await call(listTenants, { token: `${PLATFORM_TOKEN}x` })).status).toBe(401);

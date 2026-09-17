@@ -7,7 +7,7 @@ import { toListDto, toTenantDto, toUserDto, toUserTokenDto } from '@/lib/api/ser
 import type { ApiSchemas } from '@/lib/api-types';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { USER_TOKEN_BOOTSTRAP_NAME, USER_TOKEN_DEFAULT_TTL_DAYS } from '@/lib/constants';
-import { displayPrefix, generateSecret, hashSecret, userTokenExpiresAt } from '@/lib/tokens';
+import { issueSecret, userTokenExpiresAt } from '@/lib/tokens';
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 
 // 認証に依存するので静的化しない
@@ -30,15 +30,15 @@ export const POST = route(async ({ request, principal, repos }) => {
   requirePlatformAdmin(principal);
   // 本文を検証する
   const input = await readJsonBody(request, tenantCreateSchema);
-  // admin のログイントークンを生成する (平文はこの応答でのみ返す)
-  const secret = generateSecret('user');
+  // admin のログイントークンを発行する (平文はこの応答でのみ返す)
+  const issued = issueSecret('user');
   // 3 行を原子的に作る
   const created = await repos.tenants.createWithAdmin({
     name: input.name,
     admin: { email: input.adminEmail, name: input.adminName },
     token: {
-      prefix: displayPrefix(secret),
-      tokenHash: hashSecret(secret),
+      prefix: issued.prefix,
+      tokenHash: issued.hash,
       name: USER_TOKEN_BOOTSTRAP_NAME,
       expiresAt: userTokenExpiresAt(USER_TOKEN_DEFAULT_TTL_DAYS),
     },
@@ -47,7 +47,7 @@ export const POST = route(async ({ request, principal, repos }) => {
   const body: ApiSchemas['TenantCreated'] = {
     tenant: toTenantDto(created.tenant),
     admin: toUserDto(created.admin),
-    adminToken: { ...toUserTokenDto(created.token), secret },
+    adminToken: { ...toUserTokenDto(created.token), secret: issued.secret },
   };
   return Response.json(body, { status: HTTP_STATUS.CREATED });
 });

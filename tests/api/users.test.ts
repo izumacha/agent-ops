@@ -54,11 +54,11 @@ describe('POST /users', () => {
     expect((result.json as { issues: { path: string }[] }).issues[0].path).toBe('email');
   });
 
-  it('メールは小文字に正規化され、大文字小文字違いの重複も 422', async () => {
-    // 大文字混じりで招待する
+  it('メールは前後の空白を除いて小文字に正規化され、大文字小文字違いの重複も 422', async () => {
+    // 前後の空白と大文字混じりで招待する (CLI の --email と同じ規則で受ける)
     const created = await call(createUser, {
       token: seed.a.tokens.admin,
-      body: { email: 'Alice@Example.com', name: 'Alice', role: Role.viewer },
+      body: { email: ' Alice@Example.com ', name: 'Alice', role: Role.viewer },
     });
     expect(created.status).toBe(201);
     expect((created.json as { email: string }).email).toBe('alice@example.com');

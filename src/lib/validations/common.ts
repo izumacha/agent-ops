@@ -7,9 +7,11 @@ import { AgentStatus, Provider, Role } from '@/domain/types';
 
 // 表示名など短い文字列 (1〜100 文字)。前後の空白を除いてから長さを見る (空白だけの名前や末尾空白違いの「同名」を作らない)
 export const shortText = z.string().trim().min(1).max(100);
-// メールアドレス (RFC 5321 の上限 254 文字)。小文字に正規化する (テナント内の一意性 (tenantId, email) と
-// findByEmail が大文字小文字の違いで別人扱いしないため。正規化の規則は normalizeEmail が唯一の定義)
-export const email = z.email().max(254).transform(normalizeEmail);
+// メールアドレス (RFC 5321 の上限 254 文字)。前後の空白を除いてから形を見て、小文字に正規化する
+// (テナント内の一意性 (tenantId, email) と findByEmail が大文字小文字の違いで別人扱いしないため。正規化の規則は
+// normalizeEmail が唯一の定義。z.email() は前後の空白を弾くので、先に trim しないと CLI (normalizeEmail で trim
+// してから検索) と API で受理集合が食い違う)
+export const email = z.string().trim().pipe(z.email().max(254)).transform(normalizeEmail);
 // 役割 (正準の enum から導く)
 export const role = z.enum(Object.values(Role));
 // LLM プロバイダ

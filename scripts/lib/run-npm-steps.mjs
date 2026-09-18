@@ -12,7 +12,7 @@ export function banner(text) {
 }
 
 // npm を引数付きで実行し、終了コードを返す (出力はそのまま流す)
-export function runNpm(args, options = {}) {
+export function runNpm(args) {
   // Windows の npm は .cmd なので shell 経由で起動する
   // (Node 22 は .cmd/.bat の shell 無し spawn を EINVAL で拒否する。引数は固定配列と一時ファイルのパスだけなので
   //  インジェクションの余地は無いが、shell 経由では空白を含む引数 (例: ユーザー名に空白があるときの一時パス) が
@@ -22,7 +22,6 @@ export function runNpm(args, options = {}) {
     cwd: process.cwd(),
     stdio: 'inherit',
     shell: IS_WINDOWS,
-    ...options,
   });
   // npm 自体を起動できなかった (PATH に無い・実行権限が無い) ときは原因を残す (§6 エラーを握り潰さない)
   if (result.error) console.error(`[gate] npm を起動できません: ${result.error.message}`);

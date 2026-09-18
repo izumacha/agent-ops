@@ -84,6 +84,8 @@ model Tenant {
   guardrailRules GuardrailRule[] // ガードレール
   incidents      Incident[] // インシデント
   auditLogs      AuditLog[] // 監査ログ
+
+  @@index([createdAt]) // 一覧 (GET /tenants の createdAt 順のカーソル送り)
 }
 
 // ユーザー (テナント内の操作主体)
@@ -122,8 +124,8 @@ model UserToken {
   // 発行先ユーザー。複合 FK で「同じテナントのユーザー」であることを DB が保証する。ユーザー削除でトークンも消える
   user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
 
-  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
-  @@index([userId]) // ユーザー別一覧・Cascade 解決用
+  @@index([tenantId, createdAt]) // 認証時のテナント絞り込み + createdAt 順
+  @@index([tenantId, userId, createdAt]) // ユーザー別一覧 (絞り込み + createdAt 順のカーソル送り)・複合 FK の Cascade 解決用
 }
 
 // エージェント (管理対象の AI エージェント台帳)

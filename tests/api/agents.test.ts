@@ -168,16 +168,13 @@ describe('リクエスト本文の防御', () => {
     const head = Buffer.from('{"name":"bad-', 'utf8');
     const tail = Buffer.from('","provider":"anthropic","model":"m"}', 'utf8');
     const body = Buffer.concat([head, Buffer.from([0xff, 0xfe]), tail]);
-    const request = new Request('http://test.local/api/v1/x', {
+    const result = await call(createAgent, {
+      token: seed.a.tokens.operator,
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${seed.a.tokens.operator}`,
-        'content-type': 'application/json',
-      },
-      body,
+      rawBody: body,
+      headers: { 'content-type': 'application/json' },
     });
-    const response = await createAgent(request, { params: Promise.resolve({}) });
-    expect(response.status).toBe(400);
+    expect(result.status).toBe(400);
     // 保存されていない
     expect([...seed.store.agents.values()].some((a) => a.name.startsWith('bad-'))).toBe(false);
   });
@@ -192,17 +189,13 @@ describe('リクエスト本文の防御', () => {
     });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
-      const request = new Request('http://test.local/api/v1/x', {
+      const result = await call(createAgent, {
+        token: seed.a.tokens.operator,
         method: 'POST',
-        headers: {
-          authorization: `Bearer ${seed.a.tokens.operator}`,
-          'content-type': 'application/json',
-        },
-        body: disconnected,
-        duplex: 'half',
-      } as RequestInit);
-      const response = await createAgent(request, { params: Promise.resolve({}) });
-      expect(response.status).toBe(400);
+        rawBody: disconnected,
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(result.status).toBe(400);
       // 障害ログは積まれない
       expect(errorSpy).not.toHaveBeenCalled();
       // 切断以外の読み取り失敗はこれまでどおり内部エラー (500) として記録する
@@ -211,18 +204,12 @@ describe('リクエスト本文の防御', () => {
           controller.error(new Error('disk failure'));
         },
       });
-      const other = await createAgent(
-        new Request('http://test.local/api/v1/x', {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${seed.a.tokens.operator}`,
-            'content-type': 'application/json',
-          },
-          body: broken,
-          duplex: 'half',
-        } as RequestInit),
-        { params: Promise.resolve({}) },
-      );
+      const other = await call(createAgent, {
+        token: seed.a.tokens.operator,
+        method: 'POST',
+        rawBody: broken,
+        headers: { 'content-type': 'application/json' },
+      });
       expect(other.status).toBe(500);
       expect(errorSpy).toHaveBeenCalledTimes(1);
     } finally {

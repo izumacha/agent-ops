@@ -135,8 +135,8 @@ export interface CallOptions<P> {
   token?: string;
   // JSON 本文 (指定時は Content-Type を付ける)
   body?: unknown;
-  // 生の本文 (JSON 構文エラーなどを試すとき)
-  rawBody?: string;
+  // 生の本文 (JSON 構文エラー・不正なバイト列・途中で失敗するストリームを試すとき)
+  rawBody?: string | Uint8Array | ReadableStream<Uint8Array>;
   // 追加ヘッダ
   headers?: Record<string, string>;
   // 動的セグメント
@@ -170,14 +170,15 @@ export async function call<P = Record<string, never>>(
       : options.body !== undefined
         ? JSON.stringify(options.body)
         : undefined;
-  // リクエストを作る
+  // リクエストを作る (本文がストリームのときは fetch 仕様が duplex: 'half' を要求する)
   const request = new Request(
     `http://test.local/api/v1/x${options.query ? `?${options.query}` : ''}`,
     {
       method: options.method ?? (body !== undefined ? 'POST' : 'GET'),
       headers,
       body,
-    },
+      ...(body instanceof ReadableStream ? { duplex: 'half' } : {}),
+    } as RequestInit,
   );
   // ハンドラを呼ぶ (params は Next.js 16 と同じく Promise で渡す)
   const response = await handler(request, {

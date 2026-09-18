@@ -374,18 +374,30 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
         await tx.$queryRawUnsafe('SELECT 1');
       }),
     ).rejects.toThrow(/安全でない生 SQL/);
-    // クライアントを返す経路 (拡張・親) から 1 ホップで外へ出られないこと。実測では
-    // `$extends({})` と `tx.$parent` の両方から、ガードを通らない生 SQL に到達できた。
-    // とくに拡張は「Composition Root で createPrismaRepos(prisma.$extends(...)) に差し替える」
-    // という自然な運用改善の形で入りうるので、データ層全体が黙って無防備になる
-    const extended = (
-      client as unknown as { $extends: (options: object) => typeof client }
-    ).$extends({});
-    expect(() => extended.$queryRawUnsafe('SELECT 1')).toThrow(/安全でない生 SQL/);
+    // 拡張クライアントは作らせない。実測では拡張の中 (client / model の this) から素の実体が漏れ、
+    // しかも「Composition Root で createPrismaRepos(prisma.$extends(...)) に差し替える」という
+    // 自然な運用改善の形で入りうるので、データ層全体が黙って無防備になる
+    expect(() =>
+      (client as unknown as { $extends: (options: object) => unknown }).$extends({}),
+    ).toThrow(/安全でない生 SQL/);
+    // クライアントを辿れるオブジェクトから 1 ホップで外へ出られないこと。
+    // モデルデリゲート (prisma.tenant / tx.user) にも $parent が生えており、実測ではそこから
+    // ガードを通らない生 SQL に到達できた (アダプタは全メソッドでデリゲートを触るので本命の経路)
+    expect(() =>
+      (client.tenant as unknown as { $parent: typeof client }).$parent.$queryRawUnsafe('SELECT 1'),
+    ).toThrow(/安全でない生 SQL/);
     await expect(
       client.$transaction(async (tx) => {
         // tx から親クライアントを辿る
         await (tx as unknown as { $parent: typeof client }).$parent.$queryRawUnsafe('SELECT 1');
+      }),
+    ).rejects.toThrow(/安全でない生 SQL/);
+    await expect(
+      client.$transaction(async (tx) => {
+        // tx のモデルデリゲートから親クライアントを辿る
+        await (tx.user as unknown as { $parent: typeof client }).$parent.$queryRawUnsafe(
+          'SELECT 1',
+        );
       }),
     ).rejects.toThrow(/安全でない生 SQL/);
     // 内部用の入口 (危険な名前を列挙する形では漏れる綴り) も塞がっていること

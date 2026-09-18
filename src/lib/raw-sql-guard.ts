@@ -6,16 +6,20 @@
 // 任意 SQL を実行できた (pg_sleep が実際に効き、他テナントのユーザーの存在判定もできた)。
 // 綴りを追いかける限りこの追跡は終わらないので、値そのものを見る実行時チェックへ寄せる。
 // 静的検査 (tests/raw-sql.test.ts) は「危険な書き方が増えたことに気付く」ための網として併用する。
+
 // タグ付きテンプレートで使うメソッド (埋め込む値を検査してから通す)。**ここに挙げたものだけが通る**
 const TAGGED_RAW_METHODS = new Set<string>(['$queryRaw', '$executeRaw']);
 // 生 SQL の入口の綴り。危険な名前を列挙するのではなく「$ で始まり Raw を含む」という形で捉える —
-// 列挙にすると、漏れた入口 ($queryRawInternal / $executeRawInternal / $runCommandRaw など、
-// 実測でいずれも実際に SQL が走った) がそのままガードの外に残る。
+// 列挙にすると、漏れた入口がそのままガードの外に残る (実測では $queryRawInternal /
+// $executeRawInternal から実際に SQL が走った。$runCommandRaw は MongoDB 専用で PostgreSQL には
+// 存在しないが、形で捉える以上ここも自然に含まれる)。
 // 安全なもの ($queryRawTyped) まで塞ぐが、fail-closed 側に倒す (必要になったら許可側へ明示的に足す)
 const RAW_METHOD_PATTERN = /^\$.*Raw/;
-// クライアント自身 (またはそれを返す関数) を持つプロパティ。同じ包みへ入れ直さないと 1 ホップで外へ出られる —
-// 実測では `tx.$parent` と `client.$extends({})` の両方から、ガードを通らない生 SQL に到達できた
-const CLIENT_VALUED_PROPERTIES = new Set<string>(['$extends', '$parent']);
+// 拡張クライアントを作るメソッド。**包み直さず、呼んだ時点で落とす** —
+// Prisma の拡張は `client` / `model` の中で `this` や Prisma.getExtensionContext(this) として
+// **素の拡張クライアント**を渡すので、戻り値だけを包んでも中から外へ出られる (実測で SQL が走った)。
+// 拡張が本当に要るようになったら、そのとき「ガードをどう掛けるか」を決めてからここを開ける
+const CLIENT_EXTENDING_METHOD = '$extends';
 
 // 生 SQL の使い方が安全でないときに投げる例外 (呼び出し側で握り潰さず、そのまま落とす)
 export class UnsafeRawSqlError extends Error {
@@ -103,17 +107,15 @@ function remember(
   return value;
 }
 
-// オブジェクトなら同じ包みへ入れ、そうでなければそのまま返す
-function wrapIfObject(value: unknown): unknown {
-  // クライアントとして使える形 (オブジェクト) だけ包む
-  return typeof value === 'object' && value !== null ? guardRawSql(value) : value;
-}
-
 /**
  * Prisma クライアント (とトランザクション内のクライアント) を包み、生 SQL の危険な使い方を実行時に閉じる。
- * `$transaction` のコールバックが受け取るクライアントも、`$extends` / `$parent` が返すクライアントも
- * 同じ包みへ入れ直す — どれか 1 つでも素通しにすると、実際に生 SQL を書いている場所 (行ロック) から
- * 1 ホップでガードの外へ出られる。
+ *
+ * **クライアントから読めるオブジェクトはすべて同じ包みへ入れ直す。** 特定のプロパティ
+ * (`$parent` など) だけを包む形にすると、そこから漏れた 1 ホップで外へ出られる — 実測では
+ * モデルデリゲート (`prisma.tenant` / `tx.user`) にも `$parent` が生えており、そこから素の
+ * クライアントを取り出して任意 SQL を実行できた。`$transaction` のコールバックが受け取る
+ * クライアントも同じ包みへ入れる (実際に生 SQL を書いている行ロックはその中にある)。
+ * 拡張 (`$extends`) だけは包み直さず禁止する (理由は定数の注記)。
  */
 export function guardRawSql<T extends object>(client: T): T {
   // 同じ実体には同じ包みを返す (包み直すたびに別の Proxy を作ると、`$parent` を往復しただけで
@@ -127,16 +129,15 @@ export function guardRawSql<T extends object>(client: T): T {
     get(target, property) {
       // 実体の値を取り出す
       const value = Reflect.get(target, property);
-      // 文字列のプロパティ名だけを対象にする (Symbol は素通し)
+      // 名前で判定する分岐は文字列のプロパティだけ (Symbol は下の「オブジェクトなら包む」で扱う)
       if (typeof property === 'string') {
-        // クライアントを返すプロパティは、返ってくるものを同じ包みへ入れ直す
-        if (CLIENT_VALUED_PROPERTIES.has(property)) {
-          return remember(target, property, value, () =>
-            typeof value === 'function'
-              ? (...args: unknown[]) =>
-                  wrapIfObject((value as (...a: unknown[]) => unknown).apply(target, args))
-              : wrapIfObject(value),
-          );
+        // 拡張クライアントを作るメソッドは呼ばせない (戻り値を包んでも拡張の中から素の実体が漏れる)
+        if (property === CLIENT_EXTENDING_METHOD && typeof value === 'function') {
+          return remember(target, property, value, () => () => {
+            throw new UnsafeRawSqlError(
+              `${property} は使用禁止 (拡張の中から包みの外のクライアントを取り出せるため)。`,
+            );
+          });
         }
         // タグ付きテンプレートのメソッドは、埋め込む値を検査してから通す
         if (TAGGED_RAW_METHODS.has(property)) {
@@ -176,11 +177,18 @@ export function guardRawSql<T extends object>(client: T): T {
         }
       }
       // メソッドは this が実クライアントを指すように束ねて返す (毎回束ね直すと参照が食い違うので覚えておく)
-      return typeof value === 'function'
-        ? remember(target, property, value, () =>
-            (value as (...a: unknown[]) => unknown).bind(target),
-          )
-        : value;
+      if (typeof value === 'function') {
+        return remember(target, property, value, () =>
+          (value as (...a: unknown[]) => unknown).bind(target),
+        );
+      }
+      // オブジェクト (モデルデリゲート・$parent・Symbol キーで持っている内部の参照) は同じ包みへ入れる。
+      // ここを素通しにすると、`tx.user.$parent` のように 1 ホップでガードの外のクライアントに届く
+      if (typeof value === 'object' && value !== null) {
+        return remember(target, property, value, () => guardRawSql(value));
+      }
+      // それ以外 (数値・文字列など) はそのまま返す
+      return value;
     },
   });
   // 次に同じ実体を包むときのために覚えておく

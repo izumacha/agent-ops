@@ -96,21 +96,37 @@ describe('guardRawSql', () => {
     expect(client.$queryRawInternal).not.toHaveBeenCalled();
   });
 
-  it('クライアントを返す経路 ($extends / $parent) も包み直す', () => {
-    // 拡張クライアントと親クライアントを返す実体
+  it('拡張クライアントは作らせない (拡張の中から包みの外の実体が漏れるため)', () => {
+    // 拡張が新しいクライアントを返す実体
     const inner = fakeClient();
     const client = {
       ...fakeClient(),
       // 拡張は「オプションを受け取って新しいクライアントを返す」形 (引数は使わないので受けない)
       $extends: vi.fn(() => inner),
-      $parent: inner,
     };
     const guarded = guardRawSql(client);
-    // 拡張の戻り値から危険な呼び方はできない (1 ホップで包みの外へ出られない)
+    // 戻り値を包むのではなく、呼ぶこと自体を拒否する — 拡張は client / model の中で
+    // 素の拡張クライアントを this として渡すので、戻り値だけ包んでも中から外へ出られる
     const extend = guarded.$extends as unknown as (options: object) => typeof inner;
-    expect(() => extend({}).$queryRawUnsafe('SELECT 1')).toThrow(UnsafeRawSqlError);
-    // 親クライアントも同じ (トランザクション内の tx からここを辿れる)
+    expect(() => extend({})).toThrow(UnsafeRawSqlError);
+    // 本物の拡張は 1 度も呼ばれていない
+    expect(client.$extends).not.toHaveBeenCalled();
+  });
+
+  it('クライアントを辿れるオブジェクト (親・モデルデリゲート) も包み直す', () => {
+    // 親クライアントと、$parent を持つモデルデリゲートを備えた実体
+    const inner = fakeClient();
+    const client = {
+      ...fakeClient(),
+      $parent: inner,
+      // Prisma のモデルデリゲートは $parent を持つ (実測)。ここが素通しだと 1 ホップで外へ出られる
+      user: { findMany: vi.fn().mockResolvedValue([]), $parent: inner },
+    };
+    const guarded = guardRawSql(client);
+    // 親クライアント経由
     expect(() => guarded.$parent.$queryRawUnsafe('SELECT 1')).toThrow(UnsafeRawSqlError);
+    // モデルデリゲート経由 (アダプタはすべてのメソッドでデリゲートを触るので、ここが本命の経路)
+    expect(() => guarded.user.$parent.$queryRawUnsafe('SELECT 1')).toThrow(UnsafeRawSqlError);
     // 本物には届いていない
     expect(inner.$queryRawUnsafe).not.toHaveBeenCalled();
   });
@@ -141,7 +157,7 @@ describe('guardRawSql', () => {
     // 包んだクライアント
     const client = fakeClient();
     const guarded = guardRawSql(client);
-    // モデル経由の操作は素通し
+    // モデル経由の操作は素通し (包んでも通常の呼び出しは壊れない)
     await guarded.user.findMany();
     expect(client.user.findMany).toHaveBeenCalledTimes(1);
   });

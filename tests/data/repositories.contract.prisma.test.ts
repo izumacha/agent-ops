@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DuplicateError } from '@/data/errors';
 import { decodeCursor } from '@/data/page';
 import type { Repositories } from '@/data/ports';
-import { AgentStatus, Provider, Role } from '@/domain/types';
+import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
 import { userTokenExpiresAt } from '@/lib/tokens';
 // 接続先が契約テスト専用 DB であることの確認 (入口ガード・setupFiles と同じ関数を呼ぶ)
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
@@ -41,6 +41,21 @@ async function makeTenant(repos: Repositories, label: string) {
       expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
     },
   });
+}
+
+// 「入力の各項目が、そのまま保存されているか」を入力のキーから導いて確かめる。
+// 本番アダプタは入力を `data:` へ丸ごと渡さず 1 項目ずつ写しているので、写し先を別の値へ書き換えても
+// 「項目の過不足」を見る型検査は通ってしまう (型は値の出どころまでは表せない)。実測では role を admin 固定に、
+// expiresAt を 100 年後固定にする変異がどちらも全件緑だった — 前者は招待が権限昇格になり、後者は
+// ADR-0005 の「無期限は作れない」が本番でだけ崩れる。
+// 列名を手で並べず入力のキーから回すので、入力に項目が増えれば表明も自動で広がる
+function expectStoredAsGiven(row: Record<string, unknown>, input: Record<string, unknown>) {
+  // 入力が空なら走査が空振りしている (fail-closed)
+  expect(Object.keys(input).length).toBeGreaterThan(0);
+  // 入力の各項目が保存された行に同じ値で載っていること
+  for (const [key, value] of Object.entries(input)) {
+    expect(row[key], `${key} が入力どおりに保存されていない`).toEqual(value);
+  }
 }
 
 describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
@@ -340,6 +355,67 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   // 更新は「更新してよい項目」だけを DB へ渡す。検証済みの本文を丸ごと渡す実装だと、
   // 契約と Zod に項目が増えた瞬間に status や tenantId まで届く (実測で権限の迂回とテナント移動に到達した)。
   // memory アダプタは項目ごとに代入するのでこの差は API テストからは見えない
+  // 更新側と対になる作成側の表明。writer を外して入力を丸ごと渡す形へ戻すと、呼び出し側が行 id や
+  // 初期状態・無効化日時・失効日時まで決められる (実測でそこまで到達した)。値の往復だけを見ていると
+  // この巻き戻しは全件緑のまま通るので、「余分な項目が届かないこと」を別に固定する
+  it('作成は許した項目だけを書き、余分な項目は DB へ届かない', async () => {
+    // テナントを 1 つ
+    const a = await makeTenant(repos, 'CreateExtra');
+    const tenantId = a.tenant.id;
+    // 型の上では渡せない項目を混ぜてユーザーを作る (Port の型を迂回した呼び出しを再現する)
+    const user = await repos.users.create({
+      tenantId,
+      email: 'create-extra@example.com',
+      name: '余分',
+      role: Role.viewer,
+      id: 'attacker-chosen-user',
+      disabledAt: new Date(),
+    } as never);
+    // 行 id は DB が決め、無効化済みでは作られないこと
+    expect(user.id).not.toBe('attacker-chosen-user');
+    expect(user.disabledAt).toBeNull();
+    // エージェントも同じ (状態を suspended で作らせない)
+    const agent = await repos.agents.create({
+      tenantId,
+      name: 'create-extra-bot',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+      id: 'attacker-chosen-agent',
+      status: AgentStatus.suspended,
+    } as never);
+    expect(agent.id).not.toBe('attacker-chosen-agent');
+    expect(agent.status).toBe(AgentStatus.active);
+    // API キーも同じ (最初から失効済みのキーを作らせない)
+    const key = await repos.apiKeys.create({
+      tenantId,
+      agentId: null,
+      prefix: 'aop_k_extra',
+      keyHash: `hash-create-extra-${Date.now()}`,
+      name: '余分キー',
+      id: 'attacker-chosen-key',
+      revokedAt: new Date(),
+    } as never);
+    expect(key?.id).not.toBe('attacker-chosen-key');
+    expect(key?.revokedAt).toBeNull();
+    // ログイントークンも同じ (最初から失効済みのトークンを作らせない)
+    const issued = await repos.userTokens.create({
+      tenantId,
+      userId: user.id,
+      prefix: 'aop_u_extra',
+      tokenHash: `hash-create-extra-token-${Date.now()}`,
+      name: '余分トークン',
+      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+      id: 'attacker-chosen-token',
+      revokedAt: new Date(),
+    } as never);
+    expect(issued.status).toBe('ok');
+    if (issued.status !== 'ok') return;
+    expect(issued.token.id).not.toBe('attacker-chosen-token');
+    expect(issued.token.revokedAt).toBeNull();
+  });
+
   it('更新は許した項目だけを書き、余分な項目は DB へ届かない', async () => {
     // 2 テナントと A のエージェント
     const a = await makeTenant(repos, 'PatchA');
@@ -937,5 +1013,100 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       { status: 'active' },
     );
     expect(activeAfter.items.map((r) => r.id)).toEqual([a3.id]);
+  });
+  // 作成系は「項目の過不足」を型で固定しているが、各項目の値の配線は型では表せない。
+  // API テストは memory アダプタで走るので、prisma 側の 1 行を書き換えても本番だけが壊れる
+  it('作成した行は入力どおりの値で保存される (テナント・ユーザー・トークン・エージェント・API キー)', async () => {
+    // テナント (最初の admin とブートストラップトークンも同時に作る)
+    const bootstrapToken = {
+      prefix: 'aop_u_boot',
+      tokenHash: `hash-roundtrip-${Date.now()}`,
+      name: 'ブートストラップ',
+      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+    };
+    const created = await repos.tenants.createWithAdmin({
+      name: '往復テナント',
+      admin: { email: 'roundtrip-admin@example.com', name: '往復管理者' },
+      token: bootstrapToken,
+    });
+    const tenantId = created.tenant.id;
+    // テナントの表示名とプラン (プランは入力で決めさせず free 固定)
+    expect(await repos.tenants.findById(tenantId)).toMatchObject({
+      name: '往復テナント',
+      plan: Plan.free,
+    });
+    // 最初の admin (役割は必ず admin)
+    expectStoredAsGiven(
+      { ...created.admin },
+      {
+        tenantId,
+        email: 'roundtrip-admin@example.com',
+        name: '往復管理者',
+        role: Role.admin,
+      },
+    );
+    // ブートストラップトークンは全項目そのまま
+    const bootstrapStored = await repos.userTokens.findByHash(bootstrapToken.tokenHash);
+    expectStoredAsGiven(
+      { ...bootstrapStored!.token },
+      { tenantId, userId: created.admin.id, ...bootstrapToken },
+    );
+
+    // 招待したユーザー (既定値と区別できるよう admin 以外の役割にする)
+    const userInput = {
+      tenantId,
+      email: 'roundtrip-user@example.com',
+      name: '往復ユーザー',
+      role: Role.operator,
+    };
+    const user = await repos.users.create(userInput);
+    // 作成の戻り値と、読み直した行の両方で確かめる (戻り値だけだと「応答は正しいが DB は違う」を見逃す)
+    expectStoredAsGiven({ ...user }, userInput);
+    expectStoredAsGiven({ ...(await repos.users.findById(tenantId, user.id))! }, userInput);
+
+    // 発行したトークン (有効期限・接頭辞・用途名がそのまま入っていること)
+    const tokenInput = {
+      tenantId,
+      userId: user.id,
+      prefix: 'aop_u_round',
+      tokenHash: `hash-roundtrip-user-${Date.now()}`,
+      name: '往復トークン',
+      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+    };
+    const issued = await repos.userTokens.create(tokenInput);
+    expect(issued.status).toBe('ok');
+    expectStoredAsGiven(
+      { ...(await repos.userTokens.findByHash(tokenInput.tokenHash))!.token },
+      tokenInput,
+    );
+
+    // エージェント (説明と予算は null と区別できる値にする)
+    const agentInput = {
+      tenantId,
+      name: '往復エージェント',
+      description: '往復の説明',
+      provider: Provider.openai,
+      model: 'gpt-往復',
+      budgetMicroUsd: 1_234n,
+    };
+    const agent = await repos.agents.create(agentInput);
+    expectStoredAsGiven({ ...agent }, agentInput);
+    expectStoredAsGiven({ ...(await repos.agents.findById(tenantId, agent.id))! }, agentInput);
+    // 状態は入力で決めさせず既定の active から始まる
+    expect(agent.status).toBe(AgentStatus.active);
+
+    // API キー (エージェント紐づけ・接頭辞・用途名)
+    const keyInput = {
+      tenantId,
+      agentId: agent.id,
+      prefix: 'aop_k_round',
+      keyHash: `hash-roundtrip-key-${Date.now()}`,
+      name: '往復キー',
+    };
+    const key = await repos.apiKeys.create(keyInput);
+    expectStoredAsGiven({ ...key! }, keyInput);
+    expectStoredAsGiven({ ...(await repos.apiKeys.findById(tenantId, key!.id))! }, keyInput);
+    // 失効日時は発行時には入らない
+    expect(key!.revokedAt).toBeNull();
   });
 });

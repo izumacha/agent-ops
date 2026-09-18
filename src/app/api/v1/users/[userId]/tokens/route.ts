@@ -38,7 +38,12 @@ export const POST = route<{ userId: string }>(async ({ request, params, principa
   const result = await repos.userTokens.create({
     tenantId,
     userId: params.userId,
-    ...issued.input,
+    // 発行の一式は展開せず 1 項目ずつ書き写す (展開を後ろに置くと、将来 input に tenantId や
+    // userId が増えたとき呼び出し側の指定を黙って上書きする)
+    prefix: issued.input.prefix,
+    tokenHash: issued.input.tokenHash,
+    name: issued.input.name,
+    expiresAt: issued.input.expiresAt,
   });
   // 他テナント・存在しないユーザーは 404
   if (result.status === 'not_found') throw notFoundError();

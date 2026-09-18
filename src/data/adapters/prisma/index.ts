@@ -236,25 +236,26 @@ class PrismaTenants implements TenantsPort {
         // プランは free から始める (切り替えは課金を入れる後の Step で足す。いまは入力で決めさせない)
         data: { name: input.name, plan: Plan.free },
       });
-      // admin ユーザー行 (役割は必ず admin)
+      // admin ユーザー行 (役割は必ず admin。ここだけ writer を通さないと、CreateUserInput に項目が増えたとき
+      // 「テナント最初の admin」だけが黙って落ちる — いちばん静かに壊れて困る経路なので同じ規約にそろえる)
       const admin = await tx.user.create({
-        data: {
+        data: userCreateData({
           tenantId: tenant.id,
           email: input.admin.email,
           name: input.admin.name,
           role: Role.admin,
-        },
+        }),
       });
-      // トークン行
+      // トークン行 (ブートストラップ用。上と同じ理由で writer を通す)
       const token = await tx.userToken.create({
-        data: {
+        data: userTokenCreateData({
           tenantId: tenant.id,
           userId: admin.id,
           prefix: input.token.prefix,
           tokenHash: input.token.tokenHash,
           name: input.token.name,
           expiresAt: input.token.expiresAt,
-        },
+        }),
       });
       // 3 行を返す
       return { tenant, admin, token };

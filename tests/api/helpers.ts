@@ -29,6 +29,8 @@ export interface SeededTenant {
 // seed 全体
 export interface Seed {
   store: MemoryStore;
+  // 差し替えた Port の束 (「どの Port が呼ばれたか」まで見たいテストが使う)
+  repos: ReturnType<typeof createMemoryRepos>;
   a: SeededTenant;
   b: SeededTenant;
 }
@@ -113,7 +115,12 @@ function setupSeed(): Seed {
   platformTokenBefore = process.env.PLATFORM_ADMIN_TOKEN;
   process.env.PLATFORM_ADMIN_TOKEN = PLATFORM_TOKEN;
   // 2 テナント分を seed する
-  return { store: repos.store, a: seedTenant(repos.store, 'A'), b: seedTenant(repos.store, 'B') };
+  return {
+    store: repos.store,
+    repos,
+    a: seedTenant(repos.store, 'A'),
+    b: seedTenant(repos.store, 'B'),
+  };
 }
 
 // setupSeed の後始末: Composition Root と環境変数を元へ戻す (ファイル単位の隔離に頼らず、別ファイルへ漏らさない)

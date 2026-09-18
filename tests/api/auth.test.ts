@@ -1,5 +1,5 @@
 // Bearer 認証の経路: ヘッダ無し・形式違い・未知・失効・期限切れ・無効化ユーザー・プラットフォーム管理者
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants } from '@/app/api/v1/tenants/route';
 import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
@@ -135,6 +135,19 @@ describe('プラットフォーム管理者トークン', () => {
   it('一致しなければ 401', async () => {
     // 末尾だけ違うトークン
     expect((await call(listTenants, { token: `${PLATFORM_TOKEN}x` })).status).toBe(401);
+  });
+
+  it('API キーの形のトークンでは DB を引かない (未認証で叩ける入口を絞る)', async () => {
+    // ハッシュ照合 (未認証で到達できる唯一の DB アクセス) を見張る
+    const findByHash = vi.spyOn(seed.repos.userTokens, 'findByHash');
+    // API キーの形は API では使えない。形で弾くので DB までは行かない
+    expect((await call(getMe, { token: generateSecret('apiKey') })).status).toBe(401);
+    expect(findByHash).not.toHaveBeenCalled();
+    // ユーザートークンの形なら照合まで行く (「いつでも呼ばれない」実装でも緑にならないように対で見る)。
+    // 結果はどちらも 401 なので、状態だけを見ていると形の判定を外しても気付けない — 呼ばれたかどうかを見る
+    expect((await call(getMe, { token: generateSecret('user') })).status).toBe(401);
+    expect(findByHash).toHaveBeenCalledTimes(1);
+    findByHash.mockRestore();
   });
 
   it('環境変数が未設定なら誰もプラットフォーム管理者になれない', async () => {

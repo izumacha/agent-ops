@@ -75,3 +75,7 @@ export const API_MESSAGES = {
   microUsdOutOfRange: `0 以上 ${MICRO_USD_MAX.toString()} 以下の整数を文字列で指定してください。`,
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;
+
+// 保存を禁じる Cache-Control の値。route() が全応答に付けるのと、route() を通らない /health が
+// 自分で付けるのとで同じ値を使うため、ここを唯一の参照元にする
+export const NO_STORE_CACHE_CONTROL = 'no-store';

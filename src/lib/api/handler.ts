@@ -1,7 +1,7 @@
 // Route Handler の共通ラッパー: 認証 → ハンドラ本体 → 例外の HTTP 応答化 を 1 か所にまとめる。
 // 各ルートは route(async ({ principal, repos, params, request }) => Response) の形で書く
 import { DuplicateError, getRepos, type Repositories } from '@/data';
-import { API_MESSAGES } from '@/lib/constants';
+import { API_MESSAGES, NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 import { authenticate, type Principal } from './auth';
 import { ApiError, errorResponse, validationError } from './errors';
 import { HTTP_STATUS } from './http-status';
@@ -76,9 +76,6 @@ function describeError(error: unknown): Record<string, unknown> {
  * RFC 9111 は Authorization 付きの要求を既定で共有キャッシュに保存させないが、`/api/*` を一律にキャッシュする
  * 設定はよくあるので、アプリ側でも明示する (テナント境界をアプリの where 条件だけに頼らない)
  */
-// 保存を禁じる Cache-Control の値 (route() を通らない /health も同じ値を使うので唯一の参照元にする)
-export const NO_STORE_CACHE_CONTROL = 'no-store';
-
 function withPrivateCacheHeaders(response: Response): Response {
   // 既存のヘッダを引き継ぐ
   const headers = new Headers(response.headers);

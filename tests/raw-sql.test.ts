@@ -11,13 +11,29 @@ import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 import { forEachNode, parseSourceFiles } from './lib/source-files';
 
-// 値を素通しする (＝禁止する) Prisma の API 名
-const UNSAFE_MEMBERS = ['$queryRawUnsafe', '$executeRawUnsafe', 'raw', 'sql'] as const;
+// 値を素通しする (＝禁止する) メソッド名 (レシーバは問わない)
+const UNSAFE_MEMBERS = ['$queryRawUnsafe', '$executeRawUnsafe'] as const;
+// SQL 断片を作る API 名。レシーバが `Prisma` のときだけ禁止する — 名前だけで禁じると、無関係な
+// オブジェクトの `.raw` / `.sql` まで落ちる (実際この規約を実装しているガード自身が引っかかった)。
+// 誤検知はいずれ「検査を緩める」圧力になるので、精度の側に寄せる
+const FRAGMENT_MEMBERS = ['raw', 'sql'] as const;
+// SQL 断片を作るオブジェクトの名前
+const FRAGMENT_OWNER = 'Prisma';
 // パラメータ化される (＝許す) タグ付きテンプレートの API 名
 const TAGGED_MEMBERS = ['$queryRaw', '$executeRaw'] as const;
 
 // src 全体の構文木 (1 度だけ作る)
 const FILES = parseSourceFiles();
+
+// メンバ参照のレシーバ名を返す (Prisma.raw なら Prisma。該当しなければ null)
+function receiverName(node: ts.Node): string | null {
+  // プロパティアクセスで、左側が単なる識別子のときだけ名前を返す
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+    return node.expression.text;
+  }
+  // それ以外は対象外
+  return null;
+}
 
 // メンバ呼び出し・メンバ参照の「最後の名前」を返す (x.y.z なら z。該当しなければ null)
 function memberName(node: ts.Node): string | null {
@@ -44,9 +60,19 @@ describe('生 SQL の書き方', () => {
       forEachNode(source, (node) => {
         // 参照している名前を取り出す
         const name = memberName(node);
-        // 禁止した API に一致すれば記録する
-        if (name !== null && (UNSAFE_MEMBERS as readonly string[]).includes(name)) {
+        // 名前が読めなければ対象外
+        if (name === null) return;
+        // 値を素通しするメソッドはレシーバを問わず禁止する
+        if ((UNSAFE_MEMBERS as readonly string[]).includes(name)) {
           found.push(`${path}: ${name}`);
+          return;
+        }
+        // SQL 断片を作る API は、レシーバが Prisma のときだけ禁止する
+        if (
+          (FRAGMENT_MEMBERS as readonly string[]).includes(name) &&
+          receiverName(node) === FRAGMENT_OWNER
+        ) {
+          found.push(`${path}: ${FRAGMENT_OWNER}.${name}`);
         }
       });
     }

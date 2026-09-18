@@ -25,12 +25,8 @@ export class UnsafeRawSqlError extends Error {
 function isTemplateStringsArray(value: unknown): value is TemplateStringsArray {
   // まず配列であること
   if (!Array.isArray(value)) return false;
-  // 生文字列の側を取り出す。`value.raw` と直接書かないのは、`raw` という名前の読み取りを
-  // 禁止する lint と静的検査 (tests/raw-sql.test.ts) にこの行が引っかかるため
-  // (規約を実装している当のファイルが規約に触れる形。読み方を変えて意図を明示する)
-  const rawStrings = Reflect.get(value, 'raw');
-  // そちらも配列ならタグ付きテンプレートの第 1 引数
-  return Array.isArray(rawStrings);
+  // 生文字列の側も配列ならタグ付きテンプレートの第 1 引数
+  return Array.isArray((value as { raw?: unknown }).raw);
 }
 
 // 埋め込んでよい値か (パラメータとして安全に送れるものだけ許す)

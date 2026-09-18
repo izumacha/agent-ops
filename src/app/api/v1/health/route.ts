@@ -6,8 +6,8 @@ import { prisma } from '@/lib/prisma';
 import type { HealthDto } from '@/lib/api-types';
 // HTTP ステータスの唯一の参照元 (§6)
 import { HTTP_STATUS } from '@/lib/api/http-status';
-// 保存を禁じる Cache-Control の値 (route() が全ルートへ付けているのと同じ値)
-import { NO_STORE_CACHE_CONTROL } from '@/lib/api/handler';
+// 保存を禁じる Cache-Control の値 (route() が全ルートへ付けているのと同じ値。唯一の参照元は constants)
+import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 
 // 応答に付けるキャッシュ制御 (成功・失敗のどちらにも同じものを付ける)
 const CACHE_HEADERS = { 'Cache-Control': NO_STORE_CACHE_CONTROL };

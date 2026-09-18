@@ -972,6 +972,71 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect((await running).map((result) => result.status)).toEqual(['ok', 'ok']);
   });
 
+  // 同じ不変条件をエージェント行のロックにも掛ける。API キー発行は紐づけ先のエージェント行を
+  // FOR KEY SHARE で押さえる (削除だけを待たせ、状態変更や他のキー発行は妨げない)。
+  // FOR UPDATE へ強めても全件緑のまま通っていた (実測。実 DB では子テーブルの INSERT が 2 秒待たされた)。
+  // Step2 で UsageEvent が同じ親を参照すると、キー発行 1 本がそのエージェントの全トラフィックを止める
+  it('エージェント行のロックも子テーブルの FK 検査と衝突しない (FOR UPDATE へ強めていない)', async () => {
+    // 紐づけ先のエージェント
+    const a = await makeTenant(repos, 'AgentKeyShare');
+    const agent = await repos.agents.create({
+      tenantId: a.tenant.id,
+      name: 'keyshare-bot',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+    });
+    // ロックを離す合図
+    let release = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // ロックを掴んだ合図
+    let signalHeld = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    // 子テーブルの INSERT が親行に取るのと同じ弱いロックを掴んだまま待つ
+    const holding = client.$transaction(
+      async (tx) => {
+        // エージェント行を弱いロックで掴む
+        await tx.$queryRaw`SELECT id FROM "Agent" WHERE "tenantId" = ${a.tenant.id} AND id = ${agent.id} FOR KEY SHARE`;
+        // 掴めたことを知らせる
+        signalHeld();
+        // 合図が来るまで保持する
+        await released;
+      },
+      { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
+    );
+    // 掴むまで始めない
+    await held;
+    // 掴まれたままでも発行が進むこと (強いロックなら待たされる)
+    const running = repos.apiKeys.create({
+      tenantId: a.tenant.id,
+      agentId: agent.id,
+      prefix: 'aop_k_ks',
+      keyHash: `hash-agent-keyshare-${Date.now()}`,
+      name: '弱いロックの検査',
+    });
+    try {
+      // 待たされずに終わること
+      const finishedFirst = await Promise.race([
+        running.then(() => 'finished' as const),
+        new Promise<'blocked'>((resolve) =>
+          setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS),
+        ),
+      ]);
+      expect(finishedFirst).toBe('finished');
+    } finally {
+      // 失敗しても必ず離す
+      release();
+      await holding;
+    }
+    // 発行できていること
+    expect((await running)?.agentId).toBe(agent.id);
+  });
+
   it('並行する降格要求でも有効な admin が 0 人にならない (行ロックで直列化)', async () => {
     // admin 2 人 (X, Y)
     const a = await makeTenant(repos, 'A');

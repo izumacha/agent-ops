@@ -212,7 +212,8 @@ class PrismaUsers implements UsersPort {
 
   // 「最後の有効な admin」判定つきの更新を、テナント行の行ロックで直列化して行う。
   // count → update を素朴に並べると、2 人の admin が互いを同時に降格/無効化したとき両方の count が 2 を返して
-  // admin が 0 人になる。同じテナントの要求を FOR UPDATE で 1 本ずつ通し、判定と更新を同じトランザクションに置く
+  // admin が 0 人になる。同じテナントの要求を行ロックで 1 本ずつ通し、判定と更新を同じトランザクションに置く
+  // (ロックの強さは FOR NO KEY UPDATE。理由は下の注記のとおりで、FOR UPDATE へ強めてはいけない)
   private async mutateGuardingLastAdmin(
     tenantId: string,
     id: string,

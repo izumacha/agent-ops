@@ -58,6 +58,7 @@ type Spec = {
   components: {
     parameters: Record<string, { schema: Record<string, unknown> }>;
     schemas: Record<string, SchemaObject>;
+    responses?: Record<string, unknown>;
   };
 };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
@@ -96,49 +97,76 @@ function collectRequestBodies(): {
   );
 }
 
-// $ref がスキーマを指すときの接頭辞 (OpenAPI の components.schemas への参照)
-const SCHEMA_REF_PREFIX = '#/components/schemas/';
+// $ref が components を指すときの接頭辞
+const COMPONENT_REF_PREFIX = '#/components/';
 
-// $ref からスキーマ名を取り出す (末尾の 1 語がスキーマ名)
+// $ref からスキーマ名を取り出す (末尾の 1 語が名前)
 function refName(ref: string): string {
   // '#/components/schemas/Agent' → 'Agent'
   return ref.split('/').pop() as string;
 }
 
-// 入れ子のどこにあっても components.schemas への $ref を集める (応答は content / 配列 / 合成の下に隠れる)
-function schemaRefsIn(node: unknown): string[] {
+// 入れ子のどこにあっても components への $ref を集める (応答は content / 配列 / 合成の下に隠れる)。
+// schemas 以外 (responses など) も拾うのが要点 — 応答は components.responses 経由で書かれることが多く、
+// schemas だけを拾うと「共通の応答へ括り出す」ふつうのリファクタでスキーマが静かに走査から外れる
+function componentRefsIn(node: unknown): string[] {
   // 配列は要素ごとに潜る
-  if (Array.isArray(node)) return node.flatMap(schemaRefsIn);
+  if (Array.isArray(node)) return node.flatMap(componentRefsIn);
   // オブジェクト以外は参照を持たない
   if (node === null || typeof node !== 'object') return [];
-  // キーが $ref でスキーマを指していれば名前を拾い、そうでなければ値の中へ潜る
+  // キーが $ref で components を指していればその参照を拾い、そうでなければ値の中へ潜る
   return Object.entries(node as Record<string, unknown>).flatMap(([key, value]) =>
-    key === '$ref' && typeof value === 'string' && value.startsWith(SCHEMA_REF_PREFIX)
-      ? [refName(value)]
-      : schemaRefsIn(value),
+    key === '$ref' && typeof value === 'string' && value.startsWith(COMPONENT_REF_PREFIX)
+      ? [value]
+      : componentRefsIn(value),
   );
 }
 
-// 応答として使われるスキーマ名を推移的に集める。
+// $ref を components の実体へ解決する (解決できなければ undefined)
+function resolveComponentRef(ref: string): unknown {
+  // '#/components/<section>/<name>' を節と名前に分ける
+  const [, , section, name] = ref.split('/');
+  // 節ごとの表から引く
+  return (spec.components as unknown as Record<string, Record<string, unknown> | undefined>)[
+    section
+  ]?.[name];
+}
+
+// 与えた起点から到達できるスキーマ名を推移的に集める。
 // 「本文を除外する」のではなく「応答だけを対象にする」ので、本文専用だったスキーマを応答にも
 // 使い始めた瞬間に検査対象へ入る (除外側で名前を並べると、その瞬間に静かに外れる)
-function collectResponseSchemaNames(): Set<string> {
-  // 応答の宣言から直接参照されているスキーマ名を起点にする
-  const pending = operations.flatMap(({ op }) => schemaRefsIn(op.responses ?? {}));
-  // 集めた名前
+function collectSchemaNamesFrom(roots: unknown[]): Set<string> {
+  // これから中を見る定義
+  const pending = [...roots];
+  // 既に辿った参照 (循環で止まらなくなるのを防ぐ)
+  const visited = new Set<string>();
+  // 集めたスキーマ名
   const found = new Set<string>();
-  // 参照をたどり尽くすまで繰り返す ($ref の連鎖・合成の枝も対象に入れる)
+  // 参照をたどり尽くすまで繰り返す
   while (pending.length > 0) {
-    // 次の名前
-    const name = pending.pop() as string;
-    // 既に見た名前は辿らない (循環参照で止まらなくなるのを防ぐ)
-    if (found.has(name)) continue;
-    found.add(name);
-    // その定義の中の参照も対象にする
-    pending.push(...schemaRefsIn(spec.components.schemas[name] ?? {}));
+    // 次の定義の中にある参照をすべて見る
+    for (const ref of componentRefsIn(pending.pop())) {
+      // 既に辿った参照は飛ばす
+      if (visited.has(ref)) continue;
+      visited.add(ref);
+      // 参照先の実体
+      const resolved = resolveComponentRef(ref);
+      // 解決できない参照はそこから先が丸ごと走査から落ちるので落とす (fail-closed)
+      expect(resolved, `${ref} を解決できない`).toBeDefined();
+      // スキーマを指す参照なら名前を集める (それ以外の節は解決先へ潜るだけ)
+      if (ref.startsWith(`${COMPONENT_REF_PREFIX}schemas/`)) found.add(refName(ref));
+      // 参照先の中身も辿る
+      pending.push(resolved);
+    }
   }
-  // 応答から到達できるスキーマ名
+  // 到達できたスキーマ名
   return found;
+}
+
+// 応答として使われるスキーマ名 (全オペレーションの responses が起点)
+function collectResponseSchemaNames(): Set<string> {
+  // 各オペレーションの応答宣言から辿る
+  return collectSchemaNamesFrom(operations.map(({ op }) => op.responses ?? {}));
 }
 
 // スキーマ本体と allOf / oneOf / anyOf の枝を平坦に並べる (枝は入れ子にできるので再帰する)。
@@ -338,8 +366,9 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   // (serializers.ts が全プロパティを組み立てる)。required から漏れると生成される型で省略可能になり、
   // 「未設定 (null)」と「そもそも欠落」を区別しない書き方が型検査を通ってしまう
   it('応答スキーマの null を取りうるプロパティは required に入っている', () => {
-    // 応答から到達できるスキーマだけを対象にする (本文専用のスキーマは PATCH の「省略＝変更しない」を
-    // 表すため null 許容を required にできない。逆に本文と応答で同じスキーマを使い始めたら対象に入る)
+    // 応答から到達できるスキーマだけを対象にする。本文専用のスキーマ (作成の POST 本文と部分更新の PATCH 本文)
+    // は対象外 — PATCH の「省略＝変更しない」は null 許容を required にできないため。
+    // 逆に、本文用だったスキーマを応答にも使い始めたらその瞬間に対象へ入る
     const responseNames = collectResponseSchemaNames();
     // 1 つも集められなければ走査が壊れている (fail-closed)
     expect(responseNames.size).toBeGreaterThan(0);
@@ -367,6 +396,28 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     }
     // 1 件も見ていなければ走査が壊れている
     expect(checked).toBeGreaterThan(0);
+  });
+
+  // 走査が components.responses を辿れていることを、導出とは独立な手掛かりで照合する
+  // (同じ導出でガードを書くと、導出が狭まったときガードも一緒に狭まり「違反ゼロ＝緑」で無力化される)
+  it('共通の応答定義から参照されるスキーマも required 検査の対象に入っている', () => {
+    // 共通の応答定義 (401 / 403 / 404 …をまとめたもの)
+    const declared = Object.values(spec.components.responses ?? {});
+    // 1 つも無ければ手掛かりが消えている (fail-closed)
+    expect(declared.length).toBeGreaterThan(0);
+    // そこから直接参照されているスキーマ名
+    const names = declared
+      .flatMap((response) => componentRefsIn(response))
+      .filter((ref) => ref.startsWith(`${COMPONENT_REF_PREFIX}schemas/`))
+      .map(refName);
+    // 1 つも無ければ同上
+    expect(names.length).toBeGreaterThan(0);
+    // 走査が集めた名前
+    const responseNames = collectResponseSchemaNames();
+    // 共通の応答から参照されるスキーマはすべて走査対象であること
+    for (const name of names) {
+      expect(responseNames.has(name), `${name} が応答スキーマの走査に入っていない`).toBe(true);
+    }
   });
 
   // 上の表に載せ忘れた maxLength が野放しにならないようにする (包含リストだけだと、表に無いプロパティは

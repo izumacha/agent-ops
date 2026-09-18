@@ -40,3 +40,27 @@ export function contractDatabaseProblem(url) {
     ` (今の指定: ${database ?? '解釈できない形'})`
   );
 }
+
+/**
+ * 契約テストの接続先ガード本体。走った印を置き、専用 DB でなければ throw する。
+ * 印と判定を同じ関数に入れるのが要点 — 印だけ別に置くと、判定を消しても印は付いたままになり
+ * 「結線を見張るテスト」が緑のまま通る (実測)。env を引数に取るのはテストから直接呼べるようにするため
+ * @param {Record<string, string | undefined>} [env] 読み取る環境変数 (既定は実際の環境)
+ */
+export function runContractDatabaseGuard(env = process.env) {
+  // 走った印 (結線が外れていないことをテストが確かめる)
+  globalThis[CONTRACT_GUARD_MARKER] = true;
+  // 契約テストを走らせる合図が無ければ、DB を触るテストは丸ごと skip されるので判定も要らない
+  if (env.RUN_PRISMA_CONTRACT !== '1') return;
+  // 駄目な理由 (専用 DB なら null)
+  const problem = contractDatabaseProblem(env.DATABASE_URL);
+  // 専用 DB でなければ、テストを 1 件も走らせずに落とす (fail-closed)。
+  // 逃げ道も文言に書く — 契約テストを流すつもりが無いのに全テストが赤くなると、
+  // 「うるさいから」とガードごと外される動機になる (赤が常態になった検査はいずれ緩められる)
+  if (problem !== null) {
+    throw new Error(
+      `契約テストは専用 DB でだけ実行してください: ${problem}` +
+        '（契約テストを流さないときは RUN_PRISMA_CONTRACT を外してください）',
+    );
+  }
+}

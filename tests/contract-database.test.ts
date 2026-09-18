@@ -7,6 +7,7 @@ import {
   CONTRACT_DATABASE_SUFFIX,
   CONTRACT_GUARD_MARKER,
   contractDatabaseProblem,
+  runContractDatabaseGuard,
 } from '../scripts/lib/contract-database.mjs';
 
 describe('契約テスト専用 DB の判定', () => {
@@ -49,7 +50,32 @@ describe('契約テスト専用 DB の判定', () => {
   // 設定の中身ではなく「実際に走った印」を見るので、結線の書き方 (setupFiles / 別の仕組み) を
   // 変えても検査ごと無力化されない
   it('契約 DB のガードが全テストファイルの前に走っている', () => {
-    // ガードが置く印 (ガード本体を import せずに確かめる)
+    // ガードが置く印 (判定を骨抜きにされていないことは下のテストが別に見る)
     expect((globalThis as Record<string, unknown>)[CONTRACT_GUARD_MARKER]).toBe(true);
+  });
+
+  // ガード本体の振る舞い。結線 (上のテスト) だけを見ていると、判定の中身を消しても印は残るので
+  // 全件緑のまま通ってしまう。環境変数を注入して直接呼び、止めるべきときに止まることを固定する
+  it('ガードは契約テストを流すときだけ、専用 DB 以外を止める', () => {
+    // 合図が無ければ何もしない (ユニットテストだけを流す普段の実行)
+    expect(() =>
+      runContractDatabaseGuard({ DATABASE_URL: 'postgresql://u:p@h:5432/agent_ops' }),
+    ).not.toThrow();
+    // 合図があり専用 DB なら通す
+    expect(() =>
+      runContractDatabaseGuard({
+        RUN_PRISMA_CONTRACT: '1',
+        DATABASE_URL: 'postgresql://u:p@h:5432/agent_ops_contract',
+      }),
+    ).not.toThrow();
+    // 合図があり開発 DB なら止める
+    expect(() =>
+      runContractDatabaseGuard({
+        RUN_PRISMA_CONTRACT: '1',
+        DATABASE_URL: 'postgresql://u:p@h:5432/agent_ops',
+      }),
+    ).toThrow(/専用 DB/);
+    // 接続先が未設定でも止める (判定できないものは拒否 = fail-closed)
+    expect(() => runContractDatabaseGuard({ RUN_PRISMA_CONTRACT: '1' })).toThrow(/専用 DB/);
   });
 });

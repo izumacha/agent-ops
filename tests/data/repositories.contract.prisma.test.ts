@@ -132,6 +132,51 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect((await repos.agents.findById(a.tenant.id, agent.id))?.budgetMicroUsd).toBe(123n);
   });
 
+  // 一覧はどれも `where.tenantId` の 1 行だけがテナント境界を支えている。API テストは memory アダプタで
+  // 走るので prisma の where は通らず、ここで呼ばない一覧は「tenantId を外しても全件緑」になる
+  // (実際 users / apiKeys / userTokens の一覧は外しても緑で、他テナントのメール・API キーが見えた)
+  it('ユーザー・API キー・トークンの一覧は自テナントの行しか返さない', async () => {
+    // 2 テナント (それぞれ admin と初期トークンを持つ)
+    const a = await makeTenant(repos, 'ListA');
+    const b = await makeTenant(repos, 'ListB');
+    // A に追加のユーザー
+    const extra = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'member@example.com',
+      name: '追加の人',
+      role: Role.viewer,
+    });
+    // A にテナント共通の API キー (エージェントには紐づけないので null にはならない)
+    const key = await repos.apiKeys.create({
+      tenantId: a.tenant.id,
+      agentId: null,
+      prefix: 'aop_k_list',
+      keyHash: 'hash-list-a',
+      name: 'A のキー',
+    });
+    // ユーザー一覧: B から見ると B の admin だけ (A の 2 人は見えない)
+    const usersOfB = await repos.users.list(b.tenant.id, { limit: 10 });
+    expect(usersOfB.items.map((row) => row.id)).toEqual([b.admin.id]);
+    // A から見ると A の 2 人だけ
+    const usersOfA = await repos.users.list(a.tenant.id, { limit: 10 });
+    expect(new Set(usersOfA.items.map((row) => row.id))).toEqual(new Set([a.admin.id, extra.id]));
+    // 発行できていること (エージェントに紐づけない発行は null にならない)
+    expect(key).not.toBeNull();
+    // API キー一覧: B からは 0 件、A からは 1 件
+    expect((await repos.apiKeys.list(b.tenant.id, { limit: 10 })).items).toHaveLength(0);
+    expect(
+      (await repos.apiKeys.list(a.tenant.id, { limit: 10 })).items.map((row) => row.id),
+    ).toEqual([key?.id]);
+    // トークン一覧: 他テナントの id を渡しても自テナントの行しか返らない (A の admin の id を B で引く)
+    expect(
+      (await repos.userTokens.list(b.tenant.id, a.admin.id, { limit: 10 })).items,
+    ).toHaveLength(0);
+    // 自テナントなら初期トークンが 1 件
+    expect(
+      (await repos.userTokens.list(a.tenant.id, a.admin.id, { limit: 10 })).items,
+    ).toHaveLength(1);
+  });
+
   it('API キー・ユーザートークンの複合 FK は別テナントの親を DB で拒否する (null)', async () => {
     // テナント A のエージェント、テナント B のキー発行
     const a = await makeTenant(repos, 'A');

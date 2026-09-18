@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import { STEP0_STEPS } from './lib/step0-steps.mjs';
 // 共通の実行ヘルパー
 import { banner, runNpm, runSteps } from './lib/run-npm-steps.mjs';
+// 受け入れ基準の判定 (純粋関数。挙動は tests/gate-scripts.test.ts が固定する)
+import { evaluateStep1Report } from './lib/gate-report.mjs';
 
 // 受け入れ基準: テスト件数の下限
 const REQUIRED_PASSED_TESTS = 60;
@@ -67,36 +69,21 @@ if (reportError !== undefined) {
 console.log(
   `\n[gate:step1] tests: passed=${report.numPassedTests} failed=${report.numFailedTests} skipped=${report.numPendingTests} (必要: passed >= ${REQUIRED_PASSED_TESTS}, failed = 0)`,
 );
-// 失敗があれば赤
-if (testStatus !== 0 || report.numFailedTests !== 0) {
-  console.error('[gate:step1] 失敗: テストが落ちています');
-  process.exit(1);
-}
-// 件数が足りなければ赤
-if (report.numPassedTests < REQUIRED_PASSED_TESTS) {
-  console.error(`[gate:step1] 失敗: pass したテストが ${REQUIRED_PASSED_TESTS} 件未満です`);
-  process.exit(1);
-}
 
-// 3. RBAC 行列の全パターンが存在し pass していること
-banner('RBAC 行列 (役割 3 × 操作 3)');
-// 全テストの (フルネーム, 結果) を平坦化する
-const results = report.testResults.flatMap((file) =>
-  file.assertionResults.map((test) => ({ name: test.fullName, status: test.status })),
-);
-// 見つからない・落ちているパターンを集める
-const missing = [];
-for (const role of ROLES) {
-  for (const action of ACTIONS) {
-    // 名前に「RBAC 行列: <役割> × <操作>」を含む pass したテストがあるか
-    const needle = `${MATRIX_TEST_PREFIX}${role} × ${action}`;
-    const hit = results.find((test) => test.name.includes(needle) && test.status === 'passed');
-    if (!hit) missing.push(`${role} × ${action}`);
-  }
-}
-// 1 つでも欠けていれば赤
-if (missing.length > 0) {
-  console.error(`[gate:step1] 失敗: RBAC 行列のテストが不足/失敗: ${missing.join(', ')}`);
+// 2'. + 3. テストの成否・件数・RBAC 行列 (役割 3 × 操作 3) をまとめて判定する。
+// 判定そのものは純粋関数に置き、ユニットテストで挙動を固定している (scripts/lib/gate-report.mjs)
+banner('受け入れ基準の判定 (テスト件数 / RBAC 行列)');
+const failures = evaluateStep1Report({
+  testStatus,
+  report,
+  requiredPassedTests: REQUIRED_PASSED_TESTS,
+  roles: ROLES,
+  actions: ACTIONS,
+  matrixPrefix: MATRIX_TEST_PREFIX,
+});
+// 満たしていない基準があればすべて表示して赤
+if (failures.length > 0) {
+  for (const failure of failures) console.error(`[gate:step1] 失敗: ${failure}`);
   process.exit(1);
 }
 console.log(`[gate:step1] RBAC 行列 ${ROLES.length * ACTIONS.length} パターンすべて pass`);

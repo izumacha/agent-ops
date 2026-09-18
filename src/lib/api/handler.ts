@@ -1,9 +1,10 @@
 // Route Handler の共通ラッパー: 認証 → ハンドラ本体 → 例外の HTTP 応答化 を 1 か所にまとめる。
 // 各ルートは route(async ({ principal, repos, params, request }) => Response) の形で書く
 import { DuplicateError, getRepos, type Repositories } from '@/data';
+import { isResourceId } from '@/domain/resource-id';
 import { API_MESSAGES, NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 import { authenticate, type Principal } from './auth';
-import { ApiError, errorResponse, validationError } from './errors';
+import { ApiError, errorResponse, notFoundError, validationError } from './errors';
 import { HTTP_STATUS } from './http-status';
 
 // Next.js 16 の Route Handler が受け取る第 2 引数 (動的セグメントは Promise で届く)
@@ -71,6 +72,26 @@ function describeError(error: unknown): Record<string, unknown> {
 }
 
 /**
+ * URL の動的セグメント (パスに現れる id) の形を確かめる。形が違えばそんな資源は存在しないので 404。
+ *
+ * Next.js はパスセグメントを percent-decode してから渡すので、`/agents/%00` は NUL を含む文字列として
+ * ここへ届く。素通しすると PostgreSQL が 0x00 を含む text を拒否して 500 になり、認証さえ通れば
+ * 最小権限の viewer でも 500 とスタックのログを無制限に積める (実測)。**この壊れ方は API テストからは
+ * 見えない** — memory アダプタでは「表に無い」だけなので同じ入力が 404 に見える (ADR-0006 の死角)。
+ *
+ * 判定はルートごとではなく route() の中で全セグメントに掛ける。ルートが増えても書き足す場所が無いので、
+ * 新しい `[id]` を足した人が検証を忘れることが起きない (Step1 の動的セグメントはすべて資源 id)。
+ */
+function assertResourceIdParams(params: unknown): void {
+  // 動的セグメントを持たないルートは何も見ない
+  if (typeof params !== 'object' || params === null) return;
+  // どの値も資源 id の形であること (配列で届く catch-all セグメントも isResourceId が false にする)
+  for (const value of Object.values(params)) {
+    if (!isResourceId(value)) throw notFoundError();
+  }
+}
+
+/**
  * 応答に「保存するな・Authorization で分けろ」を付ける。全ルートがテナント固有の内容を返すので、
  * URL だけを鍵にするキャッシュ (CDN・リバースプロキシ) が別テナントへ配ってしまうのを防ぐ。
  * RFC 9111 は Authorization 付きの要求を既定で共有キャッシュに保存させないが、`/api/*` を一律にキャッシュする
@@ -123,6 +144,8 @@ export function route<P = Record<string, never>>(handler: Handler<P>) {
       const principal = await authenticate(request, repos);
       // 動的セグメントを解決する
       const params = await context.params;
+      // 資源 id の形でないセグメントは本体へ渡さず 404 にする (DB へ渡すと 500 になる値を入口で止める)
+      assertResourceIdParams(params);
       // 本体を実行する (応答にはキャッシュ禁止のヘッダを付ける)
       return withPrivateCacheHeaders(await handler({ request, params, principal, repos }));
     } catch (error) {

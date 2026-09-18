@@ -3,6 +3,7 @@
 // 「status を PATCH に入れたのに何も起きない」といった無言の無視が起きる (誤りは 422 で返す)
 import { z } from './zod';
 import { parseMicroUsd } from '@/domain/money';
+import { isResourceId } from '@/domain/resource-id';
 import {
   API_MESSAGES,
   EMAIL_MAX_LENGTH,
@@ -12,8 +13,28 @@ import {
 import { normalizeEmail } from '@/domain/email';
 import { AgentStatus, Provider, Role } from '@/domain/types';
 
+// 制御文字 (C0 と DEL)。改行・タブ・復帰だけは複数行の説明文で意味を持つので、長い文字列でのみ許す。
+// **弾く理由は「同じ値に化ける」こと** — 本番では Next / undici の本文パイプラインが NUL を黙って落とすため
+// `ag<NUL>ent` と `agent` が同じ名前として保存され、一意判定も後者で行われる (実測)。一方テストが組み立てる
+// Request では NUL が残るので、検証を書かないとテストと本番で「見ている本文」が違う。明示的に弾けば両方で同じ
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/;
+// 改行・タブ・復帰を除いた制御文字
+const CONTROL_CHARACTERS_EXCEPT_BREAKS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
 // 表示名など短い文字列 (1〜100 文字)。前後の空白を除いてから長さを見る (空白だけの名前や末尾空白違いの「同名」を作らない)
-export const shortText = z.string().trim().min(1).max(SHORT_TEXT_MAX_LENGTH);
+export const shortText = z
+  .string()
+  .trim()
+  .min(1)
+  .max(SHORT_TEXT_MAX_LENGTH)
+  // 1 行の表示名なので改行・タブも含めて制御文字は一切許さない
+  .refine((value) => !CONTROL_CHARACTERS.test(value), { message: API_MESSAGES.controlCharacters });
+
+// 資源 id (本文に載る id。パスセグメントと同じ規則で見る。規則は @/domain/resource-id が唯一の定義)
+export const resourceId = z
+  .string()
+  .trim()
+  .refine(isResourceId, { message: API_MESSAGES.invalidResourceId });
 // メールアドレス (RFC 5321 の上限 254 文字)。前後の空白を除いてから形を見て、小文字に正規化する
 // (テナント内の一意性 (tenantId, email) と findByEmail が大文字小文字の違いで別人扱いしないため。正規化の規則は
 // normalizeEmail が唯一の定義。z.email() は前後の空白を弾くので、先に trim しないと CLI (normalizeEmail で trim
@@ -44,4 +65,12 @@ export const microUsd = z.string().transform((value, ctx) => {
 });
 // 説明文 (1〜1000 文字)。前後の空白は除き、空白だけは弾く (未設定は null / 省略で表す。'' を通すと
 // 「未設定」の表現が null と '' の 2 通りに割れる)
-export const longText = z.string().trim().min(1).max(LONG_TEXT_MAX_LENGTH);
+export const longText = z
+  .string()
+  .trim()
+  .min(1)
+  .max(LONG_TEXT_MAX_LENGTH)
+  // 複数行の説明文なので改行・タブ・復帰は許し、それ以外の制御文字は弾く
+  .refine((value) => !CONTROL_CHARACTERS_EXCEPT_BREAKS.test(value), {
+    message: API_MESSAGES.controlCharacters,
+  });

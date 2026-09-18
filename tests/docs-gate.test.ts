@@ -71,16 +71,25 @@ describe('Step0 の設計成果物', () => {
   // その値を照合する検査が無かった。実測では件数の下限を 0 にしても、役割の一覧を 1 要素にしても全件緑で、
   // 役割が 4 種に増えてもゲートは 3 × 3 しか要求しないままだった
   it('gate:step1 のしきい値がロードマップと RBAC の許可表と一致する', () => {
+    // 見るゲートスクリプトの名前 (Step 番号はここから導く。番号の写しを別に持たない)
+    const gateScript = 'gate-step1.mjs';
     // ゲートの本文
-    const gate = readFileSync(join(process.cwd(), 'scripts', 'gate-step1.mjs'), 'utf8');
+    const gate = readFileSync(join(process.cwd(), 'scripts', gateScript), 'utf8');
     // テスト件数の下限 (読めなければ検出網が死んでいるので落とす)
     const required = gate.match(/^const REQUIRED_PASSED_TESTS = (\d+);$/m);
     expect(required, 'REQUIRED_PASSED_TESTS を読めない').not.toBeNull();
-    // ロードマップの受け入れ基準に同じ件数が書かれていること。
-    // **数字の途中に一致させない** — 単なる部分一致にすると、下限を 0 にした変異が
-    // 「60 件以上」の末尾に一致して素通りする (実測で全件緑のまま通った)
+    // ロードマップの「その Step の行」だけを見る。**表全体を対象にしない** — 別の行にある
+    // 「ADR 3 件以上」(Step0 の基準) にたまたま一致するので、下限を 3 にした変異が素通りする
+    // (実測で全件緑のまま通った)。数字の途中への一致も許さない (0 にすると「60 件以上」の末尾に当たる)
+    const stepNumber = /^gate-step(\d+)\.mjs$/.exec(gateScript)?.[1];
+    expect(stepNumber, 'ゲートスクリプト名から Step 番号を読めない').toBeDefined();
     const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
-    expect(roadmap, 'ロードマップの件数とゲートの下限がずれている').toMatch(
+    // 表の行のうち、先頭の列がその Step 番号で始まるもの
+    const stepRow = roadmap
+      .split('\n')
+      .find((line) => new RegExp(`^\\|\\s*${stepNumber}\\s`).test(line));
+    expect(stepRow, `ロードマップに Step ${stepNumber} の行が無い`).toBeDefined();
+    expect(stepRow ?? '', 'ロードマップの件数とゲートの下限がずれている').toMatch(
       new RegExp(`(?<![0-9])${required?.[1]} 件以上`),
     );
     // 役割と操作の一覧が許可表と一致すること (許可表が唯一の真実の源。ゲートはその写しを持っている)

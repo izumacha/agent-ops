@@ -18,6 +18,7 @@ import {
   USER_TOKEN_MAX_TTL_DAYS,
 } from '@/lib/constants';
 import { MICRO_USD_MAX } from '@/domain/money';
+import { RESOURCE_ID_MAX_LENGTH } from '@/domain/resource-id';
 import type { ZodObject, ZodTypeAny } from 'zod';
 import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
@@ -455,6 +456,7 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       SHORT_TEXT_MAX_LENGTH,
       LONG_TEXT_MAX_LENGTH,
       EMAIL_MAX_LENGTH,
+      RESOURCE_ID_MAX_LENGTH,
       MICRO_USD_MAX.toString().length,
     ]);
     // components.schemas のプロパティを走査する
@@ -494,7 +496,7 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
         description: LONG_TEXT_MAX_LENGTH,
         model: SHORT_TEXT_MAX_LENGTH,
       },
-      ApiKeyCreate: { name: SHORT_TEXT_MAX_LENGTH },
+      ApiKeyCreate: { name: SHORT_TEXT_MAX_LENGTH, agentId: RESOURCE_ID_MAX_LENGTH },
     };
     // スキーマごとに宣言された maxLength を突き合わせる
     for (const [schemaName, properties] of Object.entries(expected)) {

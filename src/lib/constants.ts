@@ -57,6 +57,8 @@ export const API_MESSAGES = {
   platformAdminRequired: 'この操作はプラットフォーム管理者だけが行えます。',
   notFound: '見つかりません。',
   validation: '入力内容に誤りがあります。',
+  invalidResourceId: 'id の形式が不正です。',
+  controlCharacters: '制御文字は使用できません。',
   emptyPatch: '変更する項目を 1 つ以上指定してください。',
   duplicate: '既に同じ値が存在します。',
   invalidJson: 'リクエスト本文を JSON として解釈できません。',

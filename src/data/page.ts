@@ -3,6 +3,7 @@
 //   - カーソルは「前ページ最終行の (createdAt, id)」を符号化したキーセット (行 id そのものではない)。
 //     行 id をカーソルにすると、その行が次ページ取得までに削除されたとき続きが取れず一覧が黙って途切れる。
 //     キーセットなら比較で位置が決まるので行が消えても続きが取れ、行の存在を探る手掛かりにもならない
+import { isResourceId } from '@/domain/resource-id';
 import type { CursorKey, Page, PageQuery } from './ports/types';
 
 // 位置の型を再公開する (利用側は page.ts だけを import すればよい)
@@ -26,11 +27,11 @@ export function decodeCursor(cursor: string): CursorKey | null {
   // 区切りで 2 つに分ける
   const separator = decoded.indexOf(CURSOR_SEPARATOR);
   if (separator <= 0 || separator === decoded.length - 1) return null;
-  // ミリ秒は 10 進整数 (15 桁以内 = Date の範囲内)、id は cuid とテスト用 id に使う文字だけ
-  // (base64url は任意のバイト列を復号できるため、NUL などが DB へ渡って 500 になるのを形の検査で防ぐ)
+  // ミリ秒は 10 進整数 (15 桁以内 = Date の範囲内)、id は資源 id の形 (規則は @/domain/resource-id が唯一の定義。
+  // base64url は任意のバイト列を復号できるため、NUL などが DB へ渡って 500 になるのを形の検査で防ぐ)
   const millis = decoded.slice(0, separator);
   const id = decoded.slice(separator + 1);
-  if (!/^[0-9]{1,15}$/.test(millis) || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
+  if (!/^[0-9]{1,15}$/.test(millis) || !isResourceId(id)) return null;
   // 位置として返す
   return { createdAt: new Date(Number(millis)), id };
 }

@@ -1027,9 +1027,10 @@ components:
           minLength: 1
           maxLength: 100
         agentId:
+          description: 紐づけるエージェントの id (資源 id の形。形が違う値は 422)
           type: string
           minLength: 1
-          maxLength: 100
+          maxLength: 64
     ApiKeyIssued:
       allOf:
         - $ref: '#/components/schemas/ApiKey'

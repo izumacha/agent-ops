@@ -1,7 +1,7 @@
 // アプリ名の一元管理
 import { APP_NAME } from '@/lib/constants';
 
-// トップページ (Step0 では骨組みのみ。Step5 でダッシュボードに置き換える)
+// トップページ (いまは案内だけの骨組み。Step5 でダッシュボードに置き換える)
 export default function HomePage() {
   // 見出しと現在の段階を表示する
   return (

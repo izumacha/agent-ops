@@ -10,9 +10,6 @@ import { USER_TOKEN_BOOTSTRAP_NAME, USER_TOKEN_DEFAULT_TTL_DAYS } from '@/lib/co
 import { issueUserToken } from '@/lib/tokens';
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // GET /tenants: 一覧 (listTenants)
 export const GET = route(async ({ request, principal, repos }) => {
   // プラットフォーム管理者だけ

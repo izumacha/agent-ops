@@ -11,9 +11,6 @@ import { API_MESSAGES } from '@/lib/constants';
 import { issueUserToken } from '@/lib/tokens';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // GET /users/{userId}/tokens (listUserTokens)
 export const GET = route<{ userId: string }>(async ({ request, params, principal, repos }) => {
   // admin ロールであること

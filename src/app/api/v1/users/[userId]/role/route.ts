@@ -7,9 +7,6 @@ import { toUserDto } from '@/lib/api/serializers';
 import { API_MESSAGES } from '@/lib/constants';
 import { userRoleSchema } from '@/lib/validations/user';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // PUT /users/{userId}/role (updateUserRole)
 export const PUT = route<{ userId: string }>(async ({ request, params, principal, repos }) => {
   // admin ロールであること

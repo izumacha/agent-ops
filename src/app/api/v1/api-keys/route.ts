@@ -11,9 +11,6 @@ import { API_MESSAGES } from '@/lib/constants';
 import { issueSecret } from '@/lib/tokens';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // GET /api-keys (listApiKeys)
 export const GET = route(async ({ request, principal, repos }) => {
   // view 権限

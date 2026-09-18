@@ -3,9 +3,6 @@ import { notFoundError } from '@/lib/api/errors';
 import { requireAdminRole } from '@/lib/api/guard';
 import { noContent, route } from '@/lib/api/handler';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // DELETE /users/{userId}/tokens/{tokenId} (revokeUserToken)
 export const DELETE = route<{ userId: string; tokenId: string }>(
   async ({ params, principal, repos }) => {

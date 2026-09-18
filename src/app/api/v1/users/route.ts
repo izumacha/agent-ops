@@ -8,9 +8,6 @@ import { toListDto, toUserDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { userCreateSchema } from '@/lib/validations/user';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // GET /users (listUsers)
 export const GET = route(async ({ request, principal, repos }) => {
   // view 権限

@@ -9,8 +9,6 @@ import type { ApiSchemas } from '@/lib/api-types';
 import { agentCreateSchema } from '@/lib/validations/agent';
 import { agentStatus } from '@/lib/validations/common';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
 // 一覧のクエリ (limit / cursor に status を足す)。1 つのスキーマで検証し、複数の誤りを 1 応答の issues で返す
 const agentListQuerySchema = pageQuerySchema.extend({ status: agentStatus.optional() });
 // 読むクエリのキー

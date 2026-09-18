@@ -5,9 +5,6 @@ import { route } from '@/lib/api/handler';
 import { toTenantDto, toUserDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // GET /me (getMe)
 export const GET = route(async ({ principal, repos }) => {
   // テナントのユーザーであること (プラットフォーム管理者には「自分」が無い)

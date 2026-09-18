@@ -4,9 +4,6 @@ import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { toTenantDto } from '@/lib/api/serializers';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // GET /tenants/{tenantId} (getTenant)
 export const GET = route<{ tenantId: string }>(async ({ params, principal, repos }) => {
   // view 権限のテナントユーザーであること

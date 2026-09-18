@@ -5,9 +5,6 @@ import { route } from '@/lib/api/handler';
 import { toAgentDto } from '@/lib/api/serializers';
 import { AgentStatus } from '@/domain/types';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // POST /agents/{agentId}/resume (resumeAgent)
 export const POST = route<{ agentId: string }>(async ({ params, principal, repos }) => {
   // stop 権限 (復帰も「止める権限を持つ人」の操作。UC-09)

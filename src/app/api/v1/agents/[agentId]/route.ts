@@ -7,9 +7,6 @@ import { toAgentDto } from '@/lib/api/serializers';
 import { API_MESSAGES } from '@/lib/constants';
 import { agentUpdateSchema } from '@/lib/validations/agent';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // GET /agents/{agentId} (getAgent)
 export const GET = route<{ agentId: string }>(async ({ params, principal, repos }) => {
   // view 権限

@@ -3,9 +3,6 @@ import { notFoundError } from '@/lib/api/errors';
 import { requireAction } from '@/lib/api/guard';
 import { noContent, route } from '@/lib/api/handler';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // DELETE /api-keys/{apiKeyId} (revokeApiKey)
 export const DELETE = route<{ apiKeyId: string }>(async ({ params, principal, repos }) => {
   // stop 権限

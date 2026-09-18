@@ -5,9 +5,6 @@ import { route } from '@/lib/api/handler';
 import { toUserDto } from '@/lib/api/serializers';
 import { API_MESSAGES } from '@/lib/constants';
 
-// 認証に依存するので静的化しない
-export const dynamic = 'force-dynamic';
-
 // DELETE /users/{userId} (disableUser)
 export const DELETE = route<{ userId: string }>(async ({ params, principal, repos }) => {
   // admin ロールであること

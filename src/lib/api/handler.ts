@@ -26,6 +26,22 @@ export interface HandlerInput<P> {
 // ハンドラ本体の型
 export type Handler<P> = (input: HandlerInput<P>) => Promise<Response>;
 
+// 内部エラーのログに残す形: 種類 (name / code) と発生箇所 (スタックフレーム) だけで、message は含めない。
+// ORM の検証エラーなどは message にクエリ引数 (= メールアドレス・名前といった利用者の入力) をそのまま埋め込むため、
+// message ごと出すと PII がログに流れる (§9 ログに残す前に個人情報をマスクする)
+function describeError(error: unknown): Record<string, unknown> {
+  // Error でなければ型だけ
+  if (!(error instanceof Error)) return { type: typeof error };
+  // スタックの 1 行目は message なので落とし、フレームだけを残す
+  const frames = (error.stack ?? '')
+    .split('\n')
+    .slice(1)
+    .map((line) => line.trim());
+  // code は Node のシステムエラー (ECONNREFUSED 等) や ORM のエラー番号が入る
+  const code = 'code' in error ? (error as { code?: unknown }).code : undefined;
+  return { name: error.name, code, frames };
+}
+
 // 例外を HTTP 応答へ写す
 function toErrorResponse(error: unknown): Response {
   // 明示的な API エラーはそのまま (ApiError → Response の写しはここ 1 か所)
@@ -38,8 +54,8 @@ function toErrorResponse(error: unknown): Response {
       validationError([{ path: error.field, message: API_MESSAGES.duplicate }]),
     );
   }
-  // それ以外は内部エラー。応答には出さず、サーバログにはスタックトレースごと残す (§6 文脈を付けてログに残す / §9)
-  console.error('[api] 予期しないエラー:', error);
+  // それ以外は内部エラー。応答には出さず、サーバログに残す (§6 文脈を付けてログに残す / §9)
+  console.error('[api] 予期しないエラー:', describeError(error));
   return errorResponse(HTTP_STATUS.INTERNAL_SERVER_ERROR, API_MESSAGES.internal);
 }
 

@@ -9,6 +9,9 @@ import type {
 } from '@/data/ports';
 
 // 表の束
+// 連番 id の桁数 (0 埋め。テストで作る行数より十分大きい)
+const ID_SEQUENCE_DIGITS = 6;
+
 export class MemoryStore {
   // テナント (id → 行)
   readonly tenants = new Map<string, TenantRecord>();
@@ -29,8 +32,10 @@ export class MemoryStore {
   nextId(kind: string): string {
     // 連番を進める
     this.sequence += 1;
-    // 例: agent_3
-    return `${kind}_${this.sequence}`;
+    // 例: agent_000003。0 埋めするのは、同時刻の行を id の辞書順で並べたとき (compareCursorKeys) に挿入順と
+    // 一致させるため (agent_10 < agent_9 になると prisma の cuid (単調増加) と並びが食い違い、順序に依存する
+    // テストが時計次第で通ったり落ちたりする)
+    return `${kind}_${String(this.sequence).padStart(ID_SEQUENCE_DIGITS, '0')}`;
   }
 
   // 現在時刻 (テストで時間を固定したいときはここを差し替える)

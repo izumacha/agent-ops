@@ -29,6 +29,23 @@ export function runNpm(args) {
   return result.status ?? 1;
 }
 
+/**
+ * 満たしていない基準が 1 つでもあれば、理由をすべて表示して非 0 終了する (ゲートの最後の 1 歩)。
+ *
+ * **process.exit はこのファイルに集める。** 判定結果を捨てる形はスクリプト本体に書くと 1 行消すだけで
+ * 成立し、実測では「必ず落ちるテスト」を置いても `[gate:step1] 失敗: …` を表示したうえで
+ * `=== gate:step1 緑 ===` と出て exit 0 になった。ここに置けば子プロセス経由で挙動を固定できる
+ * (tests/gate-scripts.test.ts)。
+ */
+export function exitIfFailures(gateName, failures) {
+  // 満たしていない基準が無ければ何もしない
+  if (failures.length === 0) return;
+  // 理由をすべて表示する (1 つ直すたびに走らせ直さなくて済むように)
+  for (const failure of failures) console.error(`[${gateName}] 失敗: ${failure}`);
+  // 非 0 終了 (CI はこれを見て赤にする)
+  process.exit(1);
+}
+
 // 名前付きのステップを順に実行し、失敗したらその場で非 0 終了する
 export function runSteps(gateName, steps) {
   // 1 つずつ実行する

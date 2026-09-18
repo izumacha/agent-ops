@@ -15,8 +15,12 @@ const ROOT = process.cwd();
 function readYaml(...segments: string[]): Record<string, unknown> {
   // ファイルを読む
   const text = readFileSync(join(ROOT, ...segments), 'utf8');
-  // 解釈する
-  const parsed = parse(text) as Record<string, unknown> | null;
+  // 解釈する。**マージキー (`<<: *anchor`) を解決する** — compose も GitHub Actions も
+  // アンカーの取り込みを受け付けるので、既定の parse だと `services.db.ports` が undefined になり
+  // 代わりに `'<<'` というリテラルキーが残る。実測では `x-exposed: &exposed` に
+  // `ports: ['0.0.0.0:5432:5432']` を置いて db へ取り込むだけで、`docker compose config` は
+  // 0.0.0.0 への公開を出力するのに全件緑のまま通った
+  const parsed = parse(text, { merge: true }) as Record<string, unknown> | null;
   // オブジェクトとして読めること
   expect(parsed, `${segments.join('/')} を解釈できない`).toBeTypeOf('object');
   expect(parsed).not.toBeNull();
@@ -48,11 +52,15 @@ function collectComposeServices(): { file: string; name: string; service: Compos
     // services 節 (無いファイルもありうる)
     const services = (readYaml(file).services ?? {}) as Record<string, ComposeService | undefined>;
     // (ファイル, サービス名, 定義) の並びにする
-    return Object.entries(services).map(([name, service]) => ({
-      file,
-      name,
-      service: service ?? {},
-    }));
+    return Object.entries(services).map(([name, service]) => {
+      // 解決できていないマージキーが残っていたら、その中身は走査から丸ごと外れている (fail-closed)
+      expect(
+        Object.keys(service ?? {}),
+        `${file} の ${name} に未解決のマージキーが残っている`,
+      ).not.toContain('<<');
+      // 走査に使う形へ揃える
+      return { file, name, service: service ?? {} };
+    });
   });
 }
 

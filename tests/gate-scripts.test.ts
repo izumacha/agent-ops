@@ -5,12 +5,38 @@
 //   - `if (report.numPassedTests < REQUIRED_PASSED_TESTS)` を `if (false && ...)` にする
 //   - runSteps の `process.exit(1)` を外し、lint / typecheck / format の失敗を素通りさせる
 // 前者は判定を純粋関数へ出して挙動を直接固定し、後者は実際に子プロセスを起動して終了コードを見る。
-// **残る境界**: 「判定関数を呼ばない」形へ書き換える変異は署名からは見分けられない (規約とレビューで守る)
+// 「判定結果を捨てる」形 (`process.exit(1)` の 1 行削除) も実測で全件緑のまま通り、しかも実際に落ちる
+// テストを置いても `=== gate:step1 緑 ===` と出て exit 0 になったので、終了コードの扱いを
+// `exitIfFailures` へ集約して同じ子プロセス方式で固定した。
+// **残る境界**: `scripts/gate-step1.mjs` から `exitIfFailures(...)` の呼び出し行ごと消す変異は
+// 署名からは見分けられない (規約とレビューで守る。判定の塊が丸ごと消える差分なので目には付く)
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { evaluateStep1Report, missingMatrixCases } from '../scripts/lib/gate-report.mjs';
+
+// 子プロセスでヘルパーを 1 つ呼び、終了コードと「その後に到達したか」を返す。
+// **なぜ子プロセスなのか**: process.exit の有無は戻り値に現れないので、同じプロセス内では確かめられない
+function runInChild(statements: string[]): { status: number | null; stdout: string } {
+  // ヘルパーの場所 (子プロセスから import する)
+  const lib = pathToFileURL(join(ROOT, 'scripts', 'lib', 'run-npm-steps.mjs')).href;
+  // import → 呼び出し → 到達印 の順に並べる
+  const code = [
+    `const { exitIfFailures, runSteps } = await import(${JSON.stringify(lib)});`,
+    `void exitIfFailures; void runSteps;`,
+    ...statements,
+    `console.log('REACHED_END');`,
+  ].join('\n');
+  // 実行する (npm を起動するステップがあるので余裕を持った上限にする)
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  // 終了コードと標準出力
+  return { status: result.status, stdout: result.stdout };
+}
 
 // リポジトリのルート
 const ROOT = process.cwd();
@@ -119,23 +145,32 @@ describe('evaluateStep1Report', () => {
 
 describe('runSteps', () => {
   it('ステップが失敗したらその場で非 0 終了する (後続を実行しない)', () => {
-    // ヘルパーの場所 (子プロセスから import する)
-    const lib = pathToFileURL(join(ROOT, 'scripts', 'lib', 'run-npm-steps.mjs')).href;
     // 存在しない npm script を 1 つ実行させ、そのあとに到達しないことを見る
-    const code = [
-      `const { runSteps } = await import(${JSON.stringify(lib)});`,
+    const result = runInChild([
       `runSteps('テスト', [{ name: '失敗するステップ', args: ['run', '__agent_ops_missing_script__'] }]);`,
-      `console.log('REACHED_END');`,
-    ].join('\n');
-    // 子プロセスで実行する (process.exit を消すと 0 で終わり、続きまで到達する)
-    const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
-      cwd: ROOT,
-      encoding: 'utf8',
-      timeout: 120_000,
-    });
-    // 非 0 終了であること
+    ]);
+    // 非 0 終了であること (process.exit を消すと 0 で終わり、続きまで到達する)
     expect(result.status, 'ゲートが失敗を素通りしている').not.toBe(0);
     // 後続へ進んでいないこと
     expect(result.stdout).not.toContain('REACHED_END');
+  });
+});
+
+describe('exitIfFailures', () => {
+  it('満たしていない基準があれば非 0 終了する (判定結果を捨てない)', () => {
+    // 理由を 1 つ渡す
+    const result = runInChild([`exitIfFailures('テスト', ['件数が足りません']);`]);
+    // 非 0 終了で、続きへ進んでいないこと。**ここが実測で一番危なかった** —
+    // この 1 行を消すと、失敗の理由を表示したうえで「ゲート緑」と出て exit 0 になった
+    expect(result.status, 'ゲートが判定結果を捨てている').not.toBe(0);
+    expect(result.stdout).not.toContain('REACHED_END');
+  });
+
+  it('基準を満たしていれば何もしない (正常時に落とさない)', () => {
+    // 失敗が無いときは処理を続ける
+    const result = runInChild([`exitIfFailures('テスト', []);`]);
+    // 正常終了し、続きまで到達すること
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('REACHED_END');
   });
 });

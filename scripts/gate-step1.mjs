@@ -13,7 +13,7 @@ import { join } from 'node:path';
 // Step0 の検証コマンド一覧 (写しを持たず再利用する)
 import { STEP0_STEPS } from './lib/step0-steps.mjs';
 // 共通の実行ヘルパー
-import { banner, runNpm, runSteps } from './lib/run-npm-steps.mjs';
+import { banner, exitIfFailures, runNpm, runSteps } from './lib/run-npm-steps.mjs';
 // 受け入れ基準の判定 (純粋関数。挙動は tests/gate-scripts.test.ts が固定する)
 import { evaluateStep1Report } from './lib/gate-report.mjs';
 
@@ -81,11 +81,8 @@ const failures = evaluateStep1Report({
   actions: ACTIONS,
   matrixPrefix: MATRIX_TEST_PREFIX,
 });
-// 満たしていない基準があればすべて表示して赤
-if (failures.length > 0) {
-  for (const failure of failures) console.error(`[gate:step1] 失敗: ${failure}`);
-  process.exit(1);
-}
+// 満たしていない基準があればすべて表示して赤 (終了コードの扱いは run-npm-steps.mjs に集約)
+exitIfFailures('gate:step1', failures);
 console.log(`[gate:step1] RBAC 行列 ${ROLES.length * ACTIONS.length} パターンすべて pass`);
 
 // 4. npm audit で high 以上が 0 件であること

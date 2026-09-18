@@ -1,10 +1,11 @@
-// 契約テストを流してよい接続先の規則。`npm run test:contract` の入口ガード (scripts/require-contract-env.mjs) と
-// 契約テスト本体 (tests/data/*.contract.prisma.test.ts) の両方がここを読む。
-// 2 か所で見張るのは、入口ガードを通らない起動 (vitest の直叩き / IDE のテストランナー / --watch) があるため。
+// 契約テストを流してよい接続先の規則。`npm run test:contract` の入口ガード (scripts/require-contract-env.mjs)・
+// vitest の setupFiles (tests/setup/contract-database-guard.ts)・契約テスト本体
+// (tests/data/*.contract.prisma.test.ts) がここを読む。
+// 複数の位置で見張るのは、入口ガードを通らない起動 (vitest の直叩き / IDE のテストランナー / --watch) があるため。
 // ただし規則そのものを両方へ書き写すと片方だけ古くなるので、判定はこのファイルだけに置く (§6 DRY)
 
-// ガードが走ったことを示す印を置く場所 (globalThis のキー)。ガード本体ではなくここに置くのは、
-// 印を確かめるテストがガード本体を import すると、その import 自体で印が付いてしまい検査にならないため
+// ガードが走ったことを示す印を置く場所 (globalThis のキー)。印を立てるのは下の runContractDatabaseGuard で、
+// この定数は名前を配るだけ (import しただけでは印が付かないので、印を確かめるテストから参照できる)
 export const CONTRACT_GUARD_MARKER = '__agentOpsContractDatabaseGuardRan';
 
 // 契約テスト専用 DB の名前に要求する接尾辞 (CI と CLAUDE.md §2 が使う agent_ops_contract に合わせる)

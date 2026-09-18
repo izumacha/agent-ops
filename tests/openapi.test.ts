@@ -44,12 +44,17 @@ type Operation = {
 };
 type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
 type SchemaObject = {
-  properties?: Record<string, Record<string, unknown>>;
+  type?: unknown;
+  maxLength?: number;
+  properties?: Record<string, SchemaObject>;
+  items?: SchemaObject;
   additionalProperties?: unknown;
   required?: string[];
   allOf?: SchemaObject[];
   oneOf?: SchemaObject[];
   anyOf?: SchemaObject[];
+  // 上に挙げていないキーワード (description / default / maximum など) もそのまま読めるようにする
+  [keyword: string]: unknown;
 };
 type Spec = {
   openapi: string;
@@ -151,7 +156,8 @@ function collectSchemaNamesFrom(roots: unknown[]): Set<string> {
       visited.add(ref);
       // 参照先の実体
       const resolved = resolveComponentRef(ref);
-      // 解決できない参照はそこから先が丸ごと走査から落ちるので落とす (fail-closed)
+      // 解決できない参照はそこから先が丸ごと走査から落ちるので落とす (fail-closed)。
+      // この 1 行自体を消しても壊れた $ref は `npm run gen` が必ず落とすので、担保は二重になっている
       expect(resolved, `${ref} を解決できない`).toBeDefined();
       // スキーマを指す参照なら名前を集める (それ以外の節は解決先へ潜るだけ)
       if (ref.startsWith(`${COMPONENT_REF_PREFIX}schemas/`)) found.add(refName(ref));
@@ -172,13 +178,17 @@ function collectResponseSchemaNames(): Set<string> {
 // スキーマ本体と allOf / oneOf / anyOf の枝を平坦に並べる (枝は入れ子にできるので再帰する)。
 // $ref だけの枝は properties を持たないので何も足さない (参照先はそれ自身が走査対象になる)
 function objectBranches(schema: SchemaObject): SchemaObject[] {
-  // 自分自身と、合成の枝をそれぞれ展開したもの
-  return [
-    schema,
-    ...[...(schema.allOf ?? []), ...(schema.oneOf ?? []), ...(schema.anyOf ?? [])].flatMap(
-      objectBranches,
-    ),
+  // 合成の枝 (allOf / oneOf / anyOf)
+  const composed = [...(schema.allOf ?? []), ...(schema.oneOf ?? []), ...(schema.anyOf ?? [])];
+  // その場で書かれた入れ子のオブジェクト (プロパティの値と配列の要素)。$ref の枝は参照先自身が
+  // 走査対象になるので何も足さない。ここへ降りないと、入れ子の中の null 許容が検査から漏れる
+  // (実際 Error.issues.items のような「配列の要素として直接書いたオブジェクト」が素通りしていた)
+  const nested = [
+    ...Object.values(schema.properties ?? {}),
+    ...(schema.items ? [schema.items] : []),
   ];
+  // 自分自身と、枝・入れ子をそれぞれ展開したもの
+  return [schema, ...[...composed, ...nested].flatMap(objectBranches)];
 }
 
 // 全オペレーションを (パス, メソッド, 定義) の並びに平坦化する
@@ -202,6 +212,21 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     expect(ids.every((id) => typeof id === 'string' && id.length > 0)).toBe(true);
     // 重複が無いこと
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  // 走査が拾うメソッドの外へオペレーションを足すと、401 / 403 / 500 の宣言検査を含む
+  // この検査一式から静かに外れる。パス項目のキーが既知のものだけであることを固定する
+  it('パス項目に未知のキー (走査しないメソッド) が無い', () => {
+    // オペレーション以外に書けるキー (OpenAPI 3.1 のパス項目)
+    const nonOperationKeys = ['summary', 'description', 'servers', 'parameters', '$ref'];
+    // 許すキーの集合
+    const allowed = new Set<string>([...HTTP_METHODS, ...nonOperationKeys]);
+    // パスごとにキーを確かめる
+    for (const [path, item] of Object.entries(spec.paths)) {
+      for (const key of Object.keys(item)) {
+        expect(allowed.has(key), `${path} の ${key} は走査対象外`).toBe(true);
+      }
+    }
   });
 
   // 未宣言タグ (typo) を落とす
@@ -434,7 +459,7 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     for (const [schemaName, schema] of Object.entries(spec.components.schemas)) {
       for (const [property, definition] of Object.entries(schema.properties ?? {})) {
         // maxLength を宣言していないプロパティは対象外
-        const max = (definition as { maxLength?: number }).maxLength;
+        const max = definition.maxLength;
         if (max === undefined) continue;
         // 既知の定数のいずれかであること
         expect(

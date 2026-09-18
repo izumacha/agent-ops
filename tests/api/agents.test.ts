@@ -193,10 +193,12 @@ describe('リクエスト本文の防御', () => {
       expect(result.status).toBe(400);
       // 障害ログは積まれない
       expect(errorSpy).not.toHaveBeenCalled();
-      // 切断以外の読み取り失敗はこれまでどおり内部エラー (500) として記録する
+      // 切断以外の読み取り失敗はこれまでどおり内部エラー (500) として記録する。message は複数行で利用者の入力
+      // (メールアドレス) を含む形にし、ログに残らないことを確かめる (ORM の検証エラーがこの形。§9)
+      const leakyMessage = 'disk failure\nInvalid invocation:\n{ email: "alice@example.com" }';
       const broken = new ReadableStream<Uint8Array>({
         pull(controller) {
-          controller.error(new Error('disk failure'));
+          controller.error(new Error(leakyMessage));
         },
       });
       const other = await call(createAgent, {
@@ -207,6 +209,12 @@ describe('リクエスト本文の防御', () => {
       });
       expect(other.status).toBe(500);
       expect(errorSpy).toHaveBeenCalledTimes(1);
+      // ログには種類と発生箇所だけが残り、message (利用者の入力) は 1 文字も残らない
+      const logged = JSON.stringify(errorSpy.mock.calls[0]);
+      expect(logged).toContain('"name":"Error"');
+      expect(logged).toContain('at ');
+      expect(logged).not.toContain('alice@example.com');
+      expect(logged).not.toContain('disk failure');
     } finally {
       errorSpy.mockRestore();
     }

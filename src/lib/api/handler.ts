@@ -32,11 +32,12 @@ export type Handler<P> = (input: HandlerInput<P>) => Promise<Response>;
 function describeError(error: unknown): Record<string, unknown> {
   // Error でなければ型だけ
   if (!(error instanceof Error)) return { type: typeof error };
-  // スタックの 1 行目は message なので落とし、フレームだけを残す
+  // 「    at ...」の行 (呼び出し位置) だけを残す。1 行目を落とすだけでは複数行の message (ORM のエラーは典型) の
+  // 2 行目以降がフレームとして残るため、形で選ぶ
   const frames = (error.stack ?? '')
     .split('\n')
-    .slice(1)
-    .map((line) => line.trim());
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('at '));
   // code は Node のシステムエラー (ECONNREFUSED 等) や ORM のエラー番号が入る
   const code = 'code' in error ? (error as { code?: unknown }).code : undefined;
   return { name: error.name, code, frames };

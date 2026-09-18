@@ -47,6 +47,7 @@ async function main(): Promise<void> {
   const { name, expiresInDays: days } = parsed.data;
   // DB へ接続する
   const client = createPrismaClient();
+  // prisma アダプタで Port を束ねる
   const repos = createPrismaRepos(client);
   // 対象ユーザーをテナント内でメールで引く (テナント内で一意)
   try {

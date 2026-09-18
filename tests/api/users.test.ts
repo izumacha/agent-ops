@@ -1,5 +1,6 @@
 // ユーザー API: 招待・役割変更・無効化・ログイントークン (admin ロール限定) とテナント境界
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { getRepos } from '@/data';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listUsers, POST as createUser } from '@/app/api/v1/users/route';
 import { DELETE as disableUser } from '@/app/api/v1/users/[userId]/route';
@@ -8,15 +9,10 @@ import { GET as listTokens, POST as createToken } from '@/app/api/v1/users/[user
 import { DELETE as revokeToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
 import { Role } from '@/domain/types';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
-import { call, setupSeed, teardownSeed, type Seed } from './helpers';
+import { call, seedEachTest } from './helpers';
 
-// seed (各テストで作り直す)
-let seed: Seed;
-beforeEach(() => {
-  seed = setupSeed();
-});
-// 後始末 (Composition Root と環境変数を戻す)
-afterEach(teardownSeed);
+// seed (各テストで作り直し、後始末も helpers が行う)
+const seed = seedEachTest();
 
 describe('GET /users', () => {
   it('自テナントのユーザーだけを返す (他テナントは混ざらない)', async () => {
@@ -342,7 +338,7 @@ describe('ログイントークン (/users/{userId}/tokens)', () => {
 describe('memory アダプタの last_admin 判定 (API 経路では操作者自身が最後の admin になるため、データ層で固定する)', () => {
   it('唯一の有効な admin の降格・無効化は last_admin、admin を足せば通る', async () => {
     // seed のテナント A は admin 1 人
-    const repos = await (await import('@/data')).getRepos();
+    const repos = await getRepos();
     expect(await repos.users.updateRole(seed.a.id, seed.a.users.admin.id, Role.viewer)).toEqual({
       status: 'last_admin',
     });

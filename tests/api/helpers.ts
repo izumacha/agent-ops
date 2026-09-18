@@ -1,5 +1,6 @@
 // API テスト共通のヘルパー: memory アダプタへ差し替え、2 テナント分のユーザーとトークンを seed し、
 // Route Handler を HTTP を介さずに直接呼ぶ (本番と同じ認証・認可・検証の経路を通す)
+import { afterEach, beforeEach } from 'vitest';
 import { setReposForTesting } from '@/data';
 import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, UserRecord, UserTokenRecord } from '@/data';
@@ -45,9 +46,11 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
     createdAt: now,
     updatedAt: now,
   });
-  // 役割ごとにユーザーとトークンを作る
+  // 役割ごとのユーザー行
   const users = {} as Record<Role, UserRecord>;
+  // 役割ごとの平文トークン
   const tokens = {} as Record<Role, string>;
+  // 役割ごとのトークン行
   const tokenRows = {} as Record<Role, UserTokenRecord>;
   for (const role of Object.values(Role)) {
     // ユーザー行 (実在しないドメインのアドレス)
@@ -120,6 +123,24 @@ export function teardownSeed(): void {
   // 環境変数を元の値へ (元が未設定なら消す)
   if (platformTokenBefore === undefined) delete process.env.PLATFORM_ADMIN_TOKEN;
   else process.env.PLATFORM_ADMIN_TOKEN = platformTokenBefore;
+}
+
+/**
+ * 各テストの前に seed を作り直し、後で後始末する (API テストの全ファイルが同じ手順を使うので 1 か所に置く)。
+ * 返す入れ物は毎回 Object.assign で中身だけ入れ替えるので、テスト本文は `seed.a.tokens.admin` のように
+ * 変数のまま参照できる
+ */
+export function seedEachTest(): Seed {
+  // 中身は beforeEach で入れる
+  const holder = {} as Seed;
+  // 各テストの前に seed を作り直す
+  beforeEach(() => {
+    Object.assign(holder, setupSeed());
+  });
+  // 後始末 (Composition Root と環境変数を戻す)
+  afterEach(teardownSeed);
+  // 入れ物を返す
+  return holder;
 }
 
 // Route Handler の関数型 (route() が返す形)

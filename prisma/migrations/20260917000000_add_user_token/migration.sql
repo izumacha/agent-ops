@@ -1,3 +1,7 @@
+-- Step1: ログイントークン (UserToken) と User.disabledAt の追加、一覧のカーソル送り (createdAt, id 順) に合わせた索引の整理。
+-- 単独の tenantId 索引は (tenantId, createdAt) に置き換える。UserToken の索引は認証用の tokenHash 一意索引と
+-- ユーザー別一覧用の (tenantId, userId, createdAt) だけ (テナント全体のトークン一覧は無い。テナント Cascade は先頭列で受ける)。
+
 -- DropIndex
 DROP INDEX "User_tenantId_idx";
 
@@ -29,10 +33,10 @@ CREATE TABLE "UserToken" (
 CREATE UNIQUE INDEX "UserToken_tokenHash_key" ON "UserToken"("tokenHash");
 
 -- CreateIndex
-CREATE INDEX "UserToken_tenantId_createdAt_idx" ON "UserToken"("tenantId", "createdAt");
+CREATE INDEX "UserToken_tenantId_userId_createdAt_idx" ON "UserToken"("tenantId", "userId", "createdAt");
 
 -- CreateIndex
-CREATE INDEX "UserToken_userId_idx" ON "UserToken"("userId");
+CREATE INDEX "Tenant_createdAt_idx" ON "Tenant"("createdAt");
 
 -- CreateIndex
 CREATE INDEX "User_tenantId_createdAt_idx" ON "User"("tenantId", "createdAt");

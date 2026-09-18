@@ -1,5 +1,5 @@
 // エージェント API: 登録・取得・更新・削除・停止・復帰、入力検証、本文の防御、テナント境界、ページネーション
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { GET as listAgents, POST as createAgent } from '@/app/api/v1/agents/route';
 import {
   DELETE as deleteAgent,
@@ -10,15 +10,10 @@ import { POST as resumeAgent } from '@/app/api/v1/agents/[agentId]/resume/route'
 import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { AgentStatus, Provider } from '@/domain/types';
 import { API_MESSAGES, JSON_BODY_MAX_BYTES } from '@/lib/constants';
-import { call, setupSeed, teardownSeed, type Seed } from './helpers';
+import { call, seedEachTest } from './helpers';
 
-// seed (各テストで作り直す)
-let seed: Seed;
-beforeEach(() => {
-  seed = setupSeed();
-});
-// 後始末 (Composition Root と環境変数を戻す)
-afterEach(teardownSeed);
+// seed (各テストで作り直し、後始末も helpers が行う)
+const seed = seedEachTest();
 
 // 有効な登録本文
 const VALID = { name: '要約ボット', provider: Provider.anthropic, model: 'claude-sonnet-4-6' };

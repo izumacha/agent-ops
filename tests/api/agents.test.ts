@@ -1,5 +1,5 @@
 // エージェント API: 登録・取得・更新・削除・停止・復帰、入力検証、本文の防御、テナント境界、ページネーション
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GET as listAgents, POST as createAgent } from '@/app/api/v1/agents/route';
 import {
   DELETE as deleteAgent,
@@ -94,6 +94,34 @@ describe('POST /agents', () => {
     ).toBe(422);
   });
 
+  it('空白だけの説明文は 422 (未設定は省略か null で表す)', async () => {
+    // 登録
+    const created = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      body: { ...VALID, description: '   ' },
+    });
+    expect(created.status).toBe(422);
+    expect((created.json as { issues: { path: string }[] }).issues.map((i) => i.path)).toEqual([
+      'description',
+    ]);
+    // 更新 ('' も同じく弾き、null は通る)
+    const updatedEmpty = await call(updateAgent, {
+      token: seed.a.tokens.operator,
+      method: 'PATCH',
+      params: { agentId: seed.a.agent.id },
+      body: { description: '' },
+    });
+    expect(updatedEmpty.status).toBe(422);
+    const updatedNull = await call(updateAgent, {
+      token: seed.a.tokens.operator,
+      method: 'PATCH',
+      params: { agentId: seed.a.agent.id },
+      body: { description: null },
+    });
+    expect(updatedNull.status).toBe(200);
+    expect((updatedNull.json as { description: string | null }).description).toBeNull();
+  });
+
   it('未知のプロバイダ・空の名前は 422', async () => {
     // 未知のプロバイダ
     expect(
@@ -152,6 +180,54 @@ describe('リクエスト本文の防御', () => {
     expect(response.status).toBe(400);
     // 保存されていない
     expect([...seed.store.agents.values()].some((a) => a.name.startsWith('bad-'))).toBe(false);
+  });
+
+  it('送信途中でクライアントが切断した本文は 400 (500 と障害ログにしない)', async () => {
+    // 読むと Node の切断エラー (code = ECONNRESET) で失敗するストリーム
+    const reset = Object.assign(new Error('aborted'), { code: 'ECONNRESET' });
+    const disconnected = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(reset);
+      },
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const request = new Request('http://test.local/api/v1/x', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${seed.a.tokens.operator}`,
+          'content-type': 'application/json',
+        },
+        body: disconnected,
+        duplex: 'half',
+      } as RequestInit);
+      const response = await createAgent(request, { params: Promise.resolve({}) });
+      expect(response.status).toBe(400);
+      // 障害ログは積まれない
+      expect(errorSpy).not.toHaveBeenCalled();
+      // 切断以外の読み取り失敗はこれまでどおり内部エラー (500) として記録する
+      const broken = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.error(new Error('disk failure'));
+        },
+      });
+      const other = await createAgent(
+        new Request('http://test.local/api/v1/x', {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${seed.a.tokens.operator}`,
+            'content-type': 'application/json',
+          },
+          body: broken,
+          duplex: 'half',
+        } as RequestInit),
+        { params: Promise.resolve({}) },
+      );
+      expect(other.status).toBe(500);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('本文が上限を超えれば 413', async () => {

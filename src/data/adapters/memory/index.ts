@@ -185,9 +185,11 @@ class MemoryUsers implements UsersPort {
     if (!row || row.tenantId !== tenantId) return { status: 'not_found' };
     // 最後の有効な admin は無効化できない
     if (this.wouldLeaveNoAdmin(row)) return { status: 'last_admin' };
-    // まだ有効なら無効化日時を入れる (既に無効なら最初の日時を保つ)
-    row.disabledAt ??= this.store.now();
-    row.updatedAt = this.store.now();
+    // まだ有効なら無効化日時と更新日時を入れる (既に無効なら prisma と同じく何も書き換えない)
+    if (row.disabledAt === null) {
+      row.disabledAt = this.store.now();
+      row.updatedAt = row.disabledAt;
+    }
     return { status: 'ok', user: clone(row) };
   }
 }

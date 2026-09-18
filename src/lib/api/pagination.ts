@@ -2,6 +2,7 @@
 import { z } from '@/lib/validations/zod';
 import type { PageQuery } from '@/data';
 import { decodeCursor } from '@/data/page';
+import { parseDecimalInteger } from '@/domain/decimal-integer';
 import {
   API_MESSAGES,
   PAGE_CURSOR_MAX_LENGTH,
@@ -10,12 +11,18 @@ import {
 } from '@/lib/constants';
 import { validateWith } from './body';
 
-// 10 進の整数だけを受ける文字列 (z.coerce.number() は Number() 変換なので 0x10 / 1e2 / +5 / 空白付きも通り、
-// OpenAPI の type: integer より受理集合が広くなる。契約どおり 10 進の数字だけを通す。桁数は上限値より十分大きい 6 桁まで)
-const decimalInteger = z
-  .string()
-  .regex(/^[0-9]{1,6}$/, { message: API_MESSAGES.invalidLimit })
-  .transform(Number);
+// 10 進の整数だけを受ける文字列 (判定は domain/decimal-integer が唯一の定義。CLI の --days と共有する)
+const decimalInteger = z.string().transform((value, ctx) => {
+  // 純粋関数で変換する
+  const parsed = parseDecimalInteger(value);
+  // 形が違えば検証エラーにする
+  if (parsed === null) {
+    ctx.addIssue({ code: 'custom', message: API_MESSAGES.invalidLimit });
+    return z.NEVER;
+  }
+  // 数値を返す
+  return parsed;
+});
 
 // limit は 1〜最大値の整数 (省略時は既定値)、cursor は前応答の nextCursor (符号化されたキーセット。形が違えば 422)
 export const pageQuerySchema = z.object({

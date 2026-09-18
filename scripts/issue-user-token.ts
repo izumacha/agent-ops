@@ -7,6 +7,8 @@ import 'dotenv/config';
 import { parseArgs } from 'node:util';
 // prisma アダプタとクライアント結線
 import { createPrismaRepos } from '../src/data/adapters/prisma';
+// 10 進整数の判定 (API の limit と同じ規則。0x10 / 1e2 / ' 5 ' を通さない)
+import { parseDecimalInteger } from '../src/domain/decimal-integer';
 // メールの正規化 (API と同じ規則で検索する)
 import { normalizeEmail } from '../src/domain/email';
 import { createPrismaClient } from '../src/lib/prisma-client';
@@ -32,9 +34,9 @@ async function main(): Promise<void> {
   });
   // メールは必須
   if (!values.email) throw new Error('--email <メールアドレス> を指定してください。');
-  // 日数は 1〜上限の整数
-  const days = Number(values.days);
-  if (!Number.isInteger(days) || days < 1 || days > USER_TOKEN_MAX_TTL_DAYS) {
+  // 日数は 1〜上限の 10 進整数 (API と同じ判定関数で読む)
+  const days = parseDecimalInteger(values.days);
+  if (days === null || days < 1 || days > USER_TOKEN_MAX_TTL_DAYS) {
     throw new Error(`--days は 1〜${USER_TOKEN_MAX_TTL_DAYS} の整数で指定してください。`);
   }
   // DB へ接続する

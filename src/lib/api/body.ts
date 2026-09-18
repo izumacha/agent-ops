@@ -7,6 +7,17 @@ import { HTTP_STATUS } from './http-status';
 // 受け付けるメディア型
 const JSON_MEDIA_TYPE = 'application/json';
 
+// Node が接続の切断で投げるエラーか (IncomingMessage は code = 'ECONNRESET' の Error で本文ストリームを失敗させる)
+function isConnectionReset(error: unknown): boolean {
+  // Error オブジェクトの code を見る
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'ECONNRESET'
+  );
+}
+
 // Zod の検証失敗を OpenAPI の issues 形式へ写す
 export function toIssues(error: {
   issues: { path: PropertyKey[]; message: string }[];
@@ -59,6 +70,16 @@ export async function readBodyWithinByteLimit(request: Request, maxBytes: number
       // 上限内なら取っておく
       chunks.push(value);
     }
+  } catch (error) {
+    // 上限超過 (ApiError) はそのまま
+    if (error instanceof ApiError) throw error;
+    // 送信の途中でクライアントが切断すると read() が Node の切断エラーで reject する。サーバの障害ではないので
+    // 500 と障害ログ (handler.ts の console.error) にせず 400 で終える (日常の切断で本物の内部エラーが埋もれない)
+    if (request.signal.aborted || isConnectionReset(error)) {
+      throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.bodyIncomplete);
+    }
+    // それ以外の失敗は内部エラーとして上へ
+    throw error;
   } finally {
     // 打ち切り・完了のどちらでもストリームを解放する (§8 リソースを確実に解放する)
     reader.releaseLock();

@@ -29,5 +29,6 @@ export const microUsd = z.string().transform((value, ctx) => {
   // BigInt を返す
   return parsed;
 });
-// 説明文 (最大 1000 文字)。前後の空白は除く
-export const longText = z.string().trim().max(1000);
+// 説明文 (1〜1000 文字)。前後の空白は除き、空白だけは弾く (未設定は null / 省略で表す。'' を通すと
+// 「未設定」の表現が null と '' の 2 通りに割れる)
+export const longText = z.string().trim().min(1).max(1000);

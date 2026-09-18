@@ -54,6 +54,7 @@ export const API_MESSAGES = {
   validation: '入力内容に誤りがあります。',
   duplicate: '既に同じ値が存在します。',
   invalidJson: 'リクエスト本文を JSON として解釈できません。',
+  bodyIncomplete: 'リクエスト本文を最後まで受け取れませんでした。',
   unsupportedMediaType: 'Content-Type は application/json にしてください。',
   payloadTooLarge: 'リクエスト本文が大きすぎます。',
   lastAdmin: '最後の有効な管理者の役割変更・無効化はできません。',

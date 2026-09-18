@@ -270,6 +270,8 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       // 冪等 (最初の日時を保つ)
       expect(once.user.disabledAt).not.toBeNull();
       expect(twice.user.disabledAt?.getTime()).toBe(once.user.disabledAt?.getTime());
+      // 2 回目は何も書き換えない (updatedAt も進まない。memory アダプタと同じ契約)
+      expect(twice.user.updatedAt.getTime()).toBe(once.user.updatedAt.getTime());
     }
     // 残った admin はまた最後の 1 人
     expect(await repos.users.disable(a.tenant.id, a.admin.id)).toEqual({ status: 'last_admin' });

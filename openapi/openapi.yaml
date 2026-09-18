@@ -610,7 +610,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     BadRequest:
-      description: リクエスト本文を JSON として解釈できない
+      description: リクエスト本文を JSON として解釈できない (本文が最後まで届かなかった場合を含む)
       content:
         application/json:
           schema:
@@ -891,6 +891,7 @@ components:
           maxLength: 100
         description:
           type: string
+          minLength: 1
           maxLength: 1000
         provider:
           $ref: '#/components/schemas/Provider'
@@ -913,6 +914,7 @@ components:
           maxLength: 100
         description:
           type: [string, 'null']
+          minLength: 1
           maxLength: 1000
         model:
           type: string

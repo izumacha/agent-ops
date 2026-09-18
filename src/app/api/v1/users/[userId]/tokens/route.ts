@@ -15,15 +15,13 @@ import { userTokenCreateSchema } from '@/lib/validations/user-token';
 export const GET = route<{ userId: string }>(async ({ request, params, principal, repos }) => {
   // admin ロールであること
   const { tenantId } = requireAdminRole(principal);
+  // ページ指定を先に検証する (他の一覧と同じく、不正な limit / cursor は対象の有無より先に 422)
+  const query = parsePageQuery(new URL(request.url));
   // 対象ユーザー (自テナント内。他テナントは 404)
   const target = await repos.users.findById(tenantId, params.userId);
   if (!target) throw notFoundError();
   // 一覧する (平文は持っていないので漏れようがない)
-  const page = await repos.userTokens.list(
-    tenantId,
-    target.id,
-    parsePageQuery(new URL(request.url)),
-  );
+  const page = await repos.userTokens.list(tenantId, target.id, query);
   // DTO へ写す
   const body: ApiSchemas['UserTokenList'] = toListDto(page, toUserTokenDto);
   return Response.json(body);

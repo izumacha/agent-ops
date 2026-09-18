@@ -190,6 +190,68 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     });
   });
 
+  it('失効はテナント・ユーザー境界の内側だけで効き、二度目は日時を保つ (漏れた資格情報のキルスイッチ)', async () => {
+    // 2 テナント (A のトークン・キーを B から失効できないこと確かめる)
+    const a = await makeTenant(repos, 'A');
+    const b = await makeTenant(repos, 'B');
+    // A の 2 人目のユーザー (トークンの発行先違いを確かめる)
+    const other = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'other-revoke@example.com',
+      name: 'o',
+      role: Role.operator,
+    });
+    // A の admin にトークンを 1 本発行する
+    const issued = await repos.userTokens.create({
+      tenantId: a.tenant.id,
+      userId: a.admin.id,
+      prefix: 'aop_u_r',
+      tokenHash: `hash-revoke-${Date.now()}`,
+      name: 'r',
+      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+    });
+    expect(issued.status).toBe('ok');
+    if (issued.status !== 'ok') return;
+    // 境界の外からの失効は null を返すだけでなく、行を書き換えてもいけない (戻り値は読み直し側の条件でも null に
+    // なるため、実際に失効していないことを別途確かめる — さもないと更新側の条件漏れを見逃す)
+    const stillActive = async () =>
+      (await repos.userTokens.findByHash(issued.token.tokenHash))?.token.revokedAt ?? null;
+    // 別テナントからは失効できない (null)
+    expect(await repos.userTokens.revoke(b.tenant.id, a.admin.id, issued.token.id)).toBeNull();
+    expect(await stillActive()).toBeNull();
+    // 同テナントでも発行先が違えば失効できない (userId の条件が効いていること)
+    expect(await repos.userTokens.revoke(a.tenant.id, other.id, issued.token.id)).toBeNull();
+    expect(await stillActive()).toBeNull();
+    // 正しい組み合わせなら失効する
+    const revoked = await repos.userTokens.revoke(a.tenant.id, a.admin.id, issued.token.id);
+    expect(revoked?.revokedAt).not.toBeNull();
+    // 二度目は日時を保つ (冪等)
+    const again = await repos.userTokens.revoke(a.tenant.id, a.admin.id, issued.token.id);
+    expect(again?.revokedAt?.getTime()).toBe(revoked?.revokedAt?.getTime());
+    // 失効したトークンはハッシュで引けても revokedAt が入る (認証側が 401 にする材料)
+    expect(
+      (await repos.userTokens.findByHash(issued.token.tokenHash))?.token.revokedAt,
+    ).not.toBeNull();
+    // API キーも同じ規則 (テナント共通キーで確かめる)
+    const key = await repos.apiKeys.create({
+      tenantId: a.tenant.id,
+      agentId: null,
+      prefix: 'aop_k_r',
+      keyHash: `key-revoke-${Date.now()}`,
+      name: 'r',
+    });
+    expect(key).not.toBeNull();
+    if (!key) return;
+    // 別テナントからは失効できない (行も書き換わらない)
+    expect(await repos.apiKeys.revoke(b.tenant.id, key.id)).toBeNull();
+    expect((await repos.apiKeys.findById(a.tenant.id, key.id))?.revokedAt).toBeNull();
+    // 正しいテナントなら失効し、二度目も日時を保つ
+    const revokedKey = await repos.apiKeys.revoke(a.tenant.id, key.id);
+    expect(revokedKey?.revokedAt).not.toBeNull();
+    const againKey = await repos.apiKeys.revoke(a.tenant.id, key.id);
+    expect(againKey?.revokedAt?.getTime()).toBe(revokedKey?.revokedAt?.getTime());
+  });
+
   it('履歴 (UsageEvent) を持つエージェントは削除できず、履歴が無ければ専用キーごと消える', async () => {
     // エージェント + 専用キー
     const a = await makeTenant(repos, 'A');

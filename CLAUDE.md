@@ -53,7 +53,7 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agent_ops_contract RU
 
 CI（`.github/workflows/ci.yml`）は `gate` ジョブ（ジョブ名＝ステータスチェック名は Step が進んでも変えず、実装済みの最新 Step のゲートを回す。どの Step かはステップ名で示す）、PostgreSQL サービスコンテナで `db:deploy` → `db:seed`（2 回流して冪等性確認）→ 専用 DB での契約テスト → `build` を行う `migrate-and-build` ジョブ、`docker compose up` で `/api/v1/health` が healthy になることを確かめる `docker-smoke` ジョブの 3 本。§14 の「PR 前に通すローカル検証」は `npm run gate:step1` と `npm run build`（ゲートは常に実装済みの最新 Step のものを回す。`docs/roadmap.md` ゲート運用ルール 2）。
 
-`npm audit` の high 0 はゲートの一部。Prisma 7.10 の CLI が固定する推移依存（`deepmerge-ts` / `mysql2`）の high は `package.json` の `overrides` で解決版へ差し替えている（この API は PostgreSQL しか使わず、`mysql2` は実行時に到達しない）。Prisma を上げて上流が解決版を取り込んだら `overrides` を外す。
+`npm audit` の high 0 はゲートの一部。Prisma 7.10 の CLI が固定する推移依存（`deepmerge-ts` / `mysql2`）の high は `package.json` の `overrides` で解決版へ差し替えている（この API は PostgreSQL しか使わず、`mysql2` は実行時に到達しない）。**上流 (`@prisma/config` / `prisma`) はこれらを完全一致でピンしているので、`overrides` はそのピンを跨いで major を上げている**（現状 `prisma generate` / `migrate deploy` は動作を確認済み）。Prisma を上げて上流が解決版を取り込んだら `overrides` を外す。外す前に Prisma を大きく上げるときは、`overrides` を外した状態で `npm audit` と `prisma migrate deploy` の両方を確かめる。
 
 ## 3. アーキテクチャ
 

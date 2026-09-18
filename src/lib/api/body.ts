@@ -19,9 +19,7 @@ function isConnectionReset(error: unknown): boolean {
 }
 
 // Zod の検証失敗を OpenAPI の issues 形式へ写す
-export function toIssues(error: {
-  issues: { path: PropertyKey[]; message: string }[];
-}): ApiIssue[] {
+function toIssues(error: { issues: { path: PropertyKey[]; message: string }[] }): ApiIssue[] {
   // path は配列なので '.' で繋ぎ、message はそのまま
   return error.issues.map((issue) => ({
     path: issue.path.map(String).join('.'),
@@ -44,7 +42,7 @@ export function validateWith<T>(schema: ZodType<T>, value: unknown): T {
  * Content-Length を偽る・省く (chunked) 要求に対して上限が効かない。ストリームを読みながら数え、
  * 超えた時点で読むのをやめて 413 にする
  */
-export async function readBodyWithinByteLimit(request: Request, maxBytes: number): Promise<string> {
+async function readBodyWithinByteLimit(request: Request, maxBytes: number): Promise<string> {
   // 本文が無ければ空文字
   if (!request.body) return '';
   // ストリームを少しずつ読む
@@ -97,7 +95,13 @@ export async function readBodyWithinByteLimit(request: Request, maxBytes: number
  * JSON 本文を読み、Zod スキーマで検証して返す。
  * 415 (Content-Type 違い) → 413 (サイズ超過) → 400 (JSON 構文) → 422 (スキーマ) の順に落とす
  */
-export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Promise<T> {
+export async function readJsonBody<T>(
+  request: Request,
+  schema: ZodType<T>,
+  // 本文の上限。既定は全経路共通の値で、ルート別の枠が要るときはここへ渡す (申告サイズの事前拒否と実測の両方が
+  // 同じ値を使う。片方だけ定数を直に読むと「正直に申告した本文だけ 413」という向きの逆転が起きる)
+  maxBytes: number = JSON_BODY_MAX_BYTES,
+): Promise<T> {
   // Content-Type が application/json であること (パラメータ付き "application/json; charset=utf-8" も許す)
   const contentType = request.headers.get('content-type') ?? '';
   if (contentType.split(';')[0].trim().toLowerCase() !== JSON_MEDIA_TYPE) {
@@ -105,11 +109,11 @@ export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Pro
   }
   // 申告サイズが上限を超えていれば読む前に落とす (正直な申告への早期拒否。実測は下で必ず行う)
   const declared = Number(request.headers.get('content-length') ?? '0');
-  if (Number.isFinite(declared) && declared > JSON_BODY_MAX_BYTES) {
+  if (Number.isFinite(declared) && declared > maxBytes) {
     throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
   }
   // 本文を上限バイトまでで読む (申告が無い・嘘でも超えた時点で 413)
-  const text = await readBodyWithinByteLimit(request, JSON_BODY_MAX_BYTES);
+  const text = await readBodyWithinByteLimit(request, maxBytes);
   // JSON として解釈する (壊れていれば 400)
   let parsed: unknown;
   try {

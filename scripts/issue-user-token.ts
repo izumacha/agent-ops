@@ -42,9 +42,12 @@ async function main(): Promise<void> {
     expiresInDays: parseDecimalInteger(values.days!) ?? Number.NaN,
   });
   if (!parsed.success) {
-    // どの引数がどう誤りかを 1 行ずつ示す (name → --name、expiresInDays → --days)
+    // スキーマのフィールド名 → CLI のフラグ名 (表に無いフィールドはフィールド名のまま出す。決め打ちで --days に
+    // 寄せると、スキーマに項目が増えたとき誤ったフラグを直させることになる)
+    const flagOf: Record<string, string> = { name: '--name', expiresInDays: '--days' };
+    // どの引数がどう誤りかを 1 行ずつ示す
     const lines = parsed.error.issues.map(
-      (issue) => `--${issue.path[0] === 'name' ? 'name' : 'days'}: ${issue.message}`,
+      (issue) => `${flagOf[String(issue.path[0])] ?? String(issue.path[0])}: ${issue.message}`,
     );
     throw new Error(`引数が不正です。\n${lines.join('\n')}`);
   }

@@ -9,7 +9,6 @@ import { DuplicateError } from '@/data/errors';
 import { decodeCursor } from '@/data/page';
 import type { Repositories } from '@/data/ports';
 import { Provider, Role } from '@/domain/types';
-import type { PrismaClient } from '@/generated/prisma';
 import { userTokenExpiresAt } from '@/lib/tokens';
 
 // 明示フラグが無ければ丸ごとスキップする
@@ -33,17 +32,19 @@ async function makeTenant(repos: Repositories, label: string) {
 }
 
 describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
-  // 実 DB へのクライアントとリポジトリ
-  let client: PrismaClient;
+  // 実 DB へのクライアント (本番と同じ遅延生成 Proxy) とリポジトリ
+  let client: typeof import('@/lib/prisma').prisma;
   let repos: Repositories;
 
-  // 接続する (生成物へ依存するモジュールはここで初めて読む)
+  // 接続する (生成物へ依存するモジュールはここで初めて読む)。素の createPrismaClient() ではなく本番の Composition Root と
+  // 同じ src/lib/prisma の Proxy を通す — $transaction / $queryRaw が Proxy 越しに正しく転送されることまで、
+  // 本番で実際に走る配線で確かめる (素のクライアントだと Proxy の退行を全テスト緑のまま見逃す)
   beforeAll(async () => {
-    const [{ createPrismaClient }, { createPrismaRepos }] = await Promise.all([
-      import('@/lib/prisma-client'),
+    const [{ prisma }, { createPrismaRepos }] = await Promise.all([
+      import('@/lib/prisma'),
       import('@/data/adapters/prisma'),
     ]);
-    client = createPrismaClient();
+    client = prisma;
     repos = createPrismaRepos(client);
   });
 

@@ -10,8 +10,6 @@ export const agentCreateSchema = z.object({
   model: shortText,
   budgetMicroUsd: microUsd.optional(),
 });
-// 検証後の型
-export type AgentCreateInput = z.infer<typeof agentCreateSchema>;
 
 // 更新 (省略したプロパティは変更しない。null は未設定へ戻す)
 export const agentUpdateSchema = z.object({
@@ -20,5 +18,3 @@ export const agentUpdateSchema = z.object({
   model: shortText.optional(),
   budgetMicroUsd: microUsd.nullable().optional(),
 });
-// 検証後の型
-export type AgentUpdateInput = z.infer<typeof agentUpdateSchema>;

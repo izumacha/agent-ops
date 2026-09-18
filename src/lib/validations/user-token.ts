@@ -13,5 +13,3 @@ export const userTokenCreateSchema = z.object({
     .max(USER_TOKEN_MAX_TTL_DAYS)
     .default(USER_TOKEN_DEFAULT_TTL_DAYS),
 });
-// 検証後の型
-export type UserTokenCreateInput = z.infer<typeof userTokenCreateSchema>;

@@ -7,5 +7,3 @@ export const apiKeyCreateSchema = z.object({
   name: shortText,
   agentId: shortText.optional(),
 });
-// 検証後の型
-export type ApiKeyCreateInput = z.infer<typeof apiKeyCreateSchema>;

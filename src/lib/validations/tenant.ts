@@ -8,5 +8,3 @@ export const tenantCreateSchema = z.object({
   adminEmail: email,
   adminName: shortText,
 });
-// 検証後の型
-export type TenantCreateInput = z.infer<typeof tenantCreateSchema>;

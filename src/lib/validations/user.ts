@@ -8,10 +8,6 @@ export const userCreateSchema = z.object({
   name: shortText,
   role,
 });
-// 検証後の型
-export type UserCreateInput = z.infer<typeof userCreateSchema>;
 
 // 役割変更
 export const userRoleSchema = z.object({ role });
-// 検証後の型
-export type UserRoleInput = z.infer<typeof userRoleSchema>;

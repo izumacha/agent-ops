@@ -18,8 +18,10 @@ permissions:
   contents: read
 
 jobs:
-  gate-step1:
-    name: gate:step1 (gen / db:generate / lint / typecheck / tests>=60 / RBAC 3x3 / audit)
+  # ジョブ名 (= ステータスチェック名) は Step が進んでも変えない (branch protection の必須チェックが Step ごとに
+  # 「Expected — Waiting for status」で固まらないように)。どの Step のゲートかはステップ名で示す
+  gate:
+    name: gate (実装済みの最新 Step の受け入れ基準)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -34,7 +36,7 @@ jobs:
         run: npm ci
 
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run Step1 gate
+      - name: Run latest step gate (gate:step1)
         run: npm run gate:step1
 
   migrate-and-build:

@@ -1,6 +1,5 @@
 // API が使う HTTP ステータスの唯一の参照元 (各ファイルに数値を散らさない。§6)
 export const HTTP_STATUS = {
-  OK: 200,
   CREATED: 201,
   NO_CONTENT: 204,
   BAD_REQUEST: 400,

@@ -203,6 +203,33 @@ describe('リクエスト本文の防御', () => {
     expect(result.status).toBe(415);
   });
 
+  it('メディア型の大文字小文字は区別しない (Application/JSON も受け付ける)', async () => {
+    // RFC 9110 上メディア型は大文字小文字を区別しない。区別する実装にすると、そう送る
+    // 正規のクライアント (一部の HTTP ライブラリや API ゲートウェイ) が全 POST で 415 になる
+    const result = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      method: 'POST',
+      rawBody: JSON.stringify({ ...VALID, name: 'メディア型ボット' }),
+      headers: { 'content-type': 'Application/JSON; charset=UTF-8' },
+    });
+    expect(result.status).toBe(201);
+  });
+
+  it('申告サイズが上限ちょうどなら通る (境界で 1 バイト厳しくしない)', async () => {
+    // 上限ちょうどを申告する。`>=` で弾く実装にすると、上限ぴったりの本文が 413 になる
+    const payload = JSON.stringify({ ...VALID, name: '境界ボット' });
+    const result = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      method: 'POST',
+      rawBody: payload,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(JSON_BODY_MAX_BYTES),
+      },
+    });
+    expect(result.status).toBe(201);
+  });
+
   it('JSON として壊れていれば 400', async () => {
     // 閉じ括弧が無い
     const result = await call(createAgent, {

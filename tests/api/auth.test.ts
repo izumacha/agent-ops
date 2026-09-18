@@ -48,10 +48,22 @@ describe('認証 (401 の経路)', () => {
     expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(401);
   });
 
-  it('期限切れのトークンは 401', async () => {
+  it('期限切れのトークンは 401 (期限ちょうども切れているものとして扱う)', async () => {
     // 期限を過去にする
     seed.store.userTokens.get(seed.a.tokenRows.viewer.id)!.expiresAt = new Date(Date.now() - 1000);
     expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(401);
+    // 期限が「まさに今」のトークンも通さない (判定を < にすると 1 ミリ秒だけ通ってしまう)。
+    // 時計を固定してから、その時刻ちょうどを期限にする
+    const now = new Date('2026-09-18T00:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      seed.store.userTokens.get(seed.a.tokenRows.operator.id)!.expiresAt = now;
+      expect((await call(getMe, { token: seed.a.tokens.operator })).status).toBe(401);
+    } finally {
+      // 時計を戻す
+      vi.useRealTimers();
+    }
   });
 
   it('応答は保存させない (Cache-Control: no-store と Vary: Authorization)', async () => {

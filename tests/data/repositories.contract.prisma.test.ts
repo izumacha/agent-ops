@@ -7,6 +7,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DuplicateError } from '@/data/errors';
 import { decodeCursor } from '@/data/page';
+import type { CursorKey } from '@/data/ports/types';
 import type { Repositories } from '@/data/ports';
 import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
 import { userTokenExpiresAt } from '@/lib/tokens';
@@ -643,6 +644,54 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.apiKeys.findById(a.tenant.id, key!.id)).toBeNull();
   });
 
+  // 並びの第 2 キー (id) が効いていることを、同一時刻の 2 行で確かめる。
+  // 逐次作った行は createdAt が全部違うのでタイブレークが一度も効かず、orderBy から id を
+  // 落としても全件緑のまま通っていた (実測)。本番では POST /tenants が同一トランザクションで作る
+  // 3 行や、スクリプトでの連続作成が容易に同一ミリ秒 (createdAt は TIMESTAMP(3)) になり、
+  // 次ページの条件 (createdAt, id) > key から漏れた行が**一覧から黙って消える**
+  it('同じ時刻の行もページ送りで漏れない (並びの第 2 キーが効いている)', async () => {
+    // テナントとエージェント 2 件
+    const a = await makeTenant(repos, 'SameInstant');
+    const common = {
+      tenantId: a.tenant.id,
+      description: null,
+      provider: Provider.anthropic,
+      model: 'm',
+      budgetMicroUsd: null,
+    };
+    // 2 行作る (Port は行 id を決めさせないので、作ってから直接書き換える)
+    const first = await repos.agents.create({ ...common, name: 'zzz' });
+    const second = await repos.agents.create({ ...common, name: 'aaa' });
+    // 同一ミリ秒で作られた状況を再現し、**物理的な並び順と id の昇順が食い違う**ようにする
+    // (先に入った行の id を後ろにする)。こうしないと、並びから id を落としても偶然そろってしまう
+    const instant = new Date('2026-09-18T00:00:00.000Z');
+    await client.agent.update({
+      where: { id: first.id },
+      data: { id: 'agent-zzz-same-instant', createdAt: instant },
+    });
+    await client.agent.update({
+      where: { id: second.id },
+      data: { id: 'agent-aaa-same-instant', createdAt: instant },
+    });
+    // 書き換えた後の id
+    const ids = ['agent-zzz-same-instant', 'agent-aaa-same-instant'];
+    // 1 件ずつページ送りして、最後まで辿る
+    const seen: string[] = [];
+    let cursor: CursorKey | undefined;
+    for (let page = 0; page < 5; page += 1) {
+      // 1 件だけ取る
+      const result = await repos.agents.list(a.tenant.id, { limit: 1, cursor });
+      seen.push(...result.items.map((item) => item.id));
+      // 次が無ければ終わり (Page は次ページがあるときだけ nextCursor を持つ)
+      const next = result.nextCursor;
+      if (next === undefined) break;
+      // 次ページの位置 (復号できない値は来ない)
+      cursor = decodeCursor(next) ?? undefined;
+    }
+    // 2 件とも 1 度ずつ現れること (id を並びから落とすと、片方が永久に出てこない)
+    expect([...seen].sort()).toEqual([...ids].sort());
+  });
+
   it('一覧は createdAt → id 順で、nextCursor は最終行の位置を符号化した値、末尾より後ろの位置は空', async () => {
     // 3 件
     const a = await makeTenant(repos, 'A');
@@ -1006,6 +1055,65 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     }
     // どちらも成功していること
     expect((await running).map((result) => result.status)).toEqual(['ok', 'ok']);
+  });
+
+  // ロックは「強すぎないか」と「存在するか」の両方が不変条件。エージェント行のロックは強さしか
+  // 見ておらず、丸ごと外しても全件緑だった (実測)。
+  // 外すと「存在確認 → (並行する削除がコミット) → INSERT」の順になり、複合 FK 違反 (P2003) が
+  // そのまま例外として上がる。このアダプタは P2003 を意図的に翻訳していないので、本来 404 相当の
+  // 要求が 500 になり「予期しないエラー」としてログに残る。
+  // **「待たされること」では見分けられない** — ロックが無くても INSERT の FK 検査が同じ弱いロックを
+  // 取るので、どちらの実装でも待たされる。削除をコミットしてから結果を見るとはじめて差が出る
+  it('エージェント行のロックが存在する (削除とすれ違っても例外にならない)', async () => {
+    // 紐づけ先のエージェント
+    const a = await makeTenant(repos, 'AgentLockHeld');
+    const agent = await repos.agents.create({
+      tenantId: a.tenant.id,
+      name: 'lock-held-bot',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+    });
+    // コミットの合図
+    let commit = (): void => undefined;
+    const committed = new Promise<void>((resolve) => {
+      commit = resolve;
+    });
+    // 削除まで進んだ合図
+    let signalDeleted = (): void => undefined;
+    const deleted = new Promise<void>((resolve) => {
+      signalDeleted = resolve;
+    });
+    // 対象行を掴んで削除したまま、コミットを保留する
+    const deleting = client.$transaction(
+      async (tx) => {
+        // 行を掴んでから消す (まだコミットしない)
+        await tx.$queryRaw`SELECT id FROM "Agent" WHERE "tenantId" = ${a.tenant.id} AND id = ${agent.id} FOR UPDATE`;
+        await tx.$executeRaw`DELETE FROM "Agent" WHERE "tenantId" = ${a.tenant.id} AND id = ${agent.id}`;
+        // 削除まで進んだことを知らせる
+        signalDeleted();
+        // 合図が来るまでコミットしない
+        await committed;
+      },
+      { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
+    );
+    // 削除まで進むのを待ってから発行を始める
+    await deleted;
+    const running = repos.apiKeys.create({
+      tenantId: a.tenant.id,
+      agentId: agent.id,
+      prefix: 'aop_k_lock',
+      keyHash: `hash-agent-lock-${Date.now()}`,
+      name: 'ロックの存在の検査',
+    });
+    // 発行側が確認の段階まで進むだけの時間を置いてからコミットする
+    await new Promise((resolve) => setTimeout(resolve, LOCK_TEST_WAIT_MS));
+    commit();
+    await deleting;
+    // ロックがあれば「消えた後に読み直して 404 相当 (null)」で終わる。
+    // 無いと、消える前の行を見て INSERT へ進み、外部キー違反が例外として上がる
+    await expect(running).resolves.toBeNull();
   });
 
   // 同じ不変条件をエージェント行のロックにも掛ける。API キー発行は紐づけ先のエージェント行を

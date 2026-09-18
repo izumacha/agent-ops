@@ -3,6 +3,10 @@
 // 2 か所で見張るのは、入口ガードを通らない起動 (vitest の直叩き / IDE のテストランナー / --watch) があるため。
 // ただし規則そのものを両方へ書き写すと片方だけ古くなるので、判定はこのファイルだけに置く (§6 DRY)
 
+// ガードが走ったことを示す印を置く場所 (globalThis のキー)。ガード本体ではなくここに置くのは、
+// 印を確かめるテストがガード本体を import すると、その import 自体で印が付いてしまい検査にならないため
+export const CONTRACT_GUARD_MARKER = '__agentOpsContractDatabaseGuardRan';
+
 // 契約テスト専用 DB の名前に要求する接尾辞 (CI と CLAUDE.md §2 が使う agent_ops_contract に合わせる)
 export const CONTRACT_DATABASE_SUFFIX = '_contract';
 

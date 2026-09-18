@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CONTRACT_DATABASE_SUFFIX,
+  CONTRACT_GUARD_MARKER,
   contractDatabaseProblem,
 } from '../scripts/lib/contract-database.mjs';
 
@@ -24,6 +25,7 @@ describe('契約テスト専用 DB の判定', () => {
     // 拒否されるべき接続先
     const rejected = [
       'postgresql://u:p@h:5432/agent_ops', // 開発 DB (seed 済みデータが消える)
+      'postgresql://u:p@h:5432/agent_ops_contract_backup', // 接尾辞ではなく途中に含むだけ (endsWith → includes の変異を落とす)
       'postgresql://u:p@h:5432/', // DB 名が空
       'not a url', // URL として解釈できない
       '', // 空文字
@@ -39,5 +41,15 @@ describe('契約テスト専用 DB の判定', () => {
   it('要求する接尾辞は _contract', () => {
     // 定数の値
     expect(CONTRACT_DATABASE_SUFFIX).toBe('_contract');
+  });
+
+  // 判定が正しくても、呼ばれていなければ何も守らない。結線の側も固定する
+  // (設定ファイルの 1 行を消すと、契約テストを直接叩いたときに開発 DB が TRUNCATE される。
+  //  痕跡はテスト件数にも出ないので、消えたことに気付く手立てがここ以外に無い)。
+  // 設定の中身ではなく「実際に走った印」を見るので、結線の書き方 (setupFiles / 別の仕組み) を
+  // 変えても検査ごと無力化されない
+  it('契約 DB のガードが全テストファイルの前に走っている', () => {
+    // ガードが置く印 (ガード本体を import せずに確かめる)
+    expect((globalThis as Record<string, unknown>)[CONTRACT_GUARD_MARKER]).toBe(true);
   });
 });

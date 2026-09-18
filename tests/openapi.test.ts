@@ -87,13 +87,58 @@ function collectRequestBodies(): {
       if (!declared) return [];
       // $ref なら components から引き、名前をキーにする
       if (declared.$ref) {
-        const name = declared.$ref.split('/').pop() as string;
+        const name = refName(declared.$ref);
         return [{ key: name, schema: spec.components.schemas[name] }];
       }
       // インライン定義はメソッドとパスをキーにする
       return [{ key: `${method.toUpperCase()} ${path}`, schema: declared }];
     }),
   );
+}
+
+// $ref がスキーマを指すときの接頭辞 (OpenAPI の components.schemas への参照)
+const SCHEMA_REF_PREFIX = '#/components/schemas/';
+
+// $ref からスキーマ名を取り出す (末尾の 1 語がスキーマ名)
+function refName(ref: string): string {
+  // '#/components/schemas/Agent' → 'Agent'
+  return ref.split('/').pop() as string;
+}
+
+// 入れ子のどこにあっても components.schemas への $ref を集める (応答は content / 配列 / 合成の下に隠れる)
+function schemaRefsIn(node: unknown): string[] {
+  // 配列は要素ごとに潜る
+  if (Array.isArray(node)) return node.flatMap(schemaRefsIn);
+  // オブジェクト以外は参照を持たない
+  if (node === null || typeof node !== 'object') return [];
+  // キーが $ref でスキーマを指していれば名前を拾い、そうでなければ値の中へ潜る
+  return Object.entries(node as Record<string, unknown>).flatMap(([key, value]) =>
+    key === '$ref' && typeof value === 'string' && value.startsWith(SCHEMA_REF_PREFIX)
+      ? [refName(value)]
+      : schemaRefsIn(value),
+  );
+}
+
+// 応答として使われるスキーマ名を推移的に集める。
+// 「本文を除外する」のではなく「応答だけを対象にする」ので、本文専用だったスキーマを応答にも
+// 使い始めた瞬間に検査対象へ入る (除外側で名前を並べると、その瞬間に静かに外れる)
+function collectResponseSchemaNames(): Set<string> {
+  // 応答の宣言から直接参照されているスキーマ名を起点にする
+  const pending = operations.flatMap(({ op }) => schemaRefsIn(op.responses ?? {}));
+  // 集めた名前
+  const found = new Set<string>();
+  // 参照をたどり尽くすまで繰り返す ($ref の連鎖・合成の枝も対象に入れる)
+  while (pending.length > 0) {
+    // 次の名前
+    const name = pending.pop() as string;
+    // 既に見た名前は辿らない (循環参照で止まらなくなるのを防ぐ)
+    if (found.has(name)) continue;
+    found.add(name);
+    // その定義の中の参照も対象にする
+    pending.push(...schemaRefsIn(spec.components.schemas[name] ?? {}));
+  }
+  // 応答から到達できるスキーマ名
+  return found;
 }
 
 // スキーマ本体と allOf / oneOf / anyOf の枝を平坦に並べる (枝は入れ子にできるので再帰する)。
@@ -293,22 +338,17 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   // (serializers.ts が全プロパティを組み立てる)。required から漏れると生成される型で省略可能になり、
   // 「未設定 (null)」と「そもそも欠落」を区別しない書き方が型検査を通ってしまう
   it('応答スキーマの null を取りうるプロパティは required に入っている', () => {
-    // 除外は PATCH の本文だけにする (「省略＝変更しない」が null 許容と同居する唯一の形)。
-    // 本文すべてを除外すると、同じスキーマを応答にも使い始めた瞬間に検査対象から静かに外れる
-    const patchBodyNames = new Set(
-      Object.values(spec.paths).flatMap((item) => {
-        // PATCH の JSON 本文スキーマ
-        const declared = item.patch?.requestBody?.content?.['application/json']?.schema;
-        // $ref で書かれていればその名前を除外対象にする
-        return declared?.$ref ? [declared.$ref.split('/').pop() as string] : [];
-      }),
-    );
+    // 応答から到達できるスキーマだけを対象にする (本文専用のスキーマは PATCH の「省略＝変更しない」を
+    // 表すため null 許容を required にできない。逆に本文と応答で同じスキーマを使い始めたら対象に入る)
+    const responseNames = collectResponseSchemaNames();
+    // 1 つも集められなければ走査が壊れている (fail-closed)
+    expect(responseNames.size).toBeGreaterThan(0);
     // 実際に見たプロパティの数 (走査が壊れて 0 件になったら落とす = fail-closed)
     let checked = 0;
     // components.schemas を走査する
     for (const [name, schema] of Object.entries(spec.components.schemas)) {
-      // PATCH の本文は対象外
-      if (patchBodyNames.has(name)) continue;
+      // 応答に現れないスキーマは対象外
+      if (!responseNames.has(name)) continue;
       // allOf / oneOf / anyOf の枝も見る (発行応答は allOf で secret を足す形なので、枝を見ないと取りこぼす)
       for (const branch of objectBranches(schema)) {
         // その枝が必須と宣言したプロパティ名

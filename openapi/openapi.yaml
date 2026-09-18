@@ -721,6 +721,7 @@ components:
             properties:
               path:
                 type: string
+                description: "誤りのあるフィールド (入れ子は '.' 区切り)。本文全体に対する誤り、たとえば変更する項目が 1 つも無い場合は空文字"
               message:
                 type: string
     Health:
@@ -953,10 +954,11 @@ components:
           type: string
           pattern: '^[0-9]+$'
           maxLength: 19
-          description: マイクロ USD の整数 (PostgreSQL BIGINT の範囲。19 桁まで)
+          description: マイクロ USD の整数 (PostgreSQL BIGINT の範囲。19 桁まで。上限 9223372036854775807 を超える値は JSON Schema で表せないため 422 を返す)
     AgentUpdate:
       type: object
       minProperties: 1
+      additionalProperties: false
       description: 省略したプロパティは変更しない。null を送ると未設定に戻す (description / budgetMicroUsd)。1 つも指定が無い本文は 422
       properties:
         name:

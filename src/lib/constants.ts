@@ -5,8 +5,6 @@ import { AgentStatus, Role } from '@/domain/types';
 // アプリ名 (画面タイトル等で使う)
 export const APP_NAME = 'Agent Ops';
 
-// seed (prisma/seed.ts) が作る開発・デモ用テナントの固定 id (E2E・CLI・ドキュメントから参照する唯一の定義)
-export const DEFAULT_TENANT_ID = 'default-tenant';
 
 // 役割の日本語ラベル
 export const ROLE_LABELS: Readonly<Record<Role, string>> = {

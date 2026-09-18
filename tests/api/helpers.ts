@@ -104,7 +104,7 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
 let platformTokenBefore: string | undefined;
 
 // memory アダプタへ差し替え、テナント A / B を seed する (各テストの beforeEach で呼ぶ。afterEach で teardownSeed を対にする)
-export function setupSeed(): Seed {
+function setupSeed(): Seed {
   // 新しい表で memory アダプタを作る
   const repos = createMemoryRepos();
   // Composition Root を差し替える
@@ -117,7 +117,7 @@ export function setupSeed(): Seed {
 }
 
 // setupSeed の後始末: Composition Root と環境変数を元へ戻す (ファイル単位の隔離に頼らず、別ファイルへ漏らさない)
-export function teardownSeed(): void {
+function teardownSeed(): void {
   // 本番の束へ戻す
   setReposForTesting(undefined);
   // 環境変数を元の値へ (元が未設定なら消す)

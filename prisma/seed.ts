@@ -5,7 +5,7 @@ import { Plan, Provider, Role } from '../src/domain/types';
 // ドライバアダプタの結線を 1 か所に集めたファクトリ
 import { createPrismaClient } from '../src/lib/prisma-client';
 // 開発・デモ用テナントの固定 id (CLI と共有する唯一の定義)
-import { DEFAULT_TENANT_ID } from '../src/lib/constants';
+import { DEFAULT_TENANT_ID } from '../src/domain/tenant';
 
 // seed 本体: デモ用のテナント・管理者・エージェントを冪等に投入する
 async function main(): Promise<void> {

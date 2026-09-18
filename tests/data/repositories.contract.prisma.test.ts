@@ -16,6 +16,9 @@ import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mj
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
 
+// 外部キー違反の Prisma のエラーコード (「別の理由で失敗した」を取り違えないために突き合わせる)
+const FOREIGN_KEY_VIOLATION = 'P2003';
+
 // ロックの検査で「待たされている」と判定するまでの待ち時間 (ミリ秒)。ロックが無ければ降格は
 // 数ミリ秒で終わるので、これだけ待って終わらなければロック待ちだと判断できる
 const LOCK_TEST_WAIT_MS = 500;
@@ -249,6 +252,48 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.userTokens.create({ ...tokenInput, tokenHash: 't3' })).toEqual({
       status: 'disabled',
     });
+  });
+
+  // 複合 FK は「アダプタのチェックを通らない書き込み」に対する第 2 の砦。アダプタ経由でしか
+  // 確かめていないと、参照を単一列 FK へ弱めても全件緑のまま通る (実測)。DB へ直接書いて確かめる
+  it('複合 FK は DB へ直接書いても別テナントの親を拒否する (アダプタを通らない経路)', async () => {
+    // 2 テナント
+    const a = await makeTenant(repos, 'FkA');
+    const b = await makeTenant(repos, 'FkB');
+    // A のエージェント
+    const agent = await repos.agents.create({
+      tenantId: a.tenant.id,
+      name: 'fk-bot',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+    });
+    // B のテナントから A のエージェントを指す API キーは DB が拒否する
+    await expect(
+      client.apiKey.create({
+        data: {
+          tenantId: b.tenant.id,
+          agentId: agent.id,
+          prefix: 'aop_k_fk',
+          keyHash: `hash-fk-${Date.now()}`,
+          name: '越境キー',
+        },
+      }),
+    ).rejects.toMatchObject({ code: FOREIGN_KEY_VIOLATION });
+    // B のテナントから A のユーザーを指すトークンも同じく拒否される
+    await expect(
+      client.userToken.create({
+        data: {
+          tenantId: b.tenant.id,
+          userId: a.admin.id,
+          prefix: 'aop_u_fk',
+          tokenHash: `hash-fk-token-${Date.now()}`,
+          name: '越境トークン',
+          expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+        },
+      }),
+    ).rejects.toMatchObject({ code: FOREIGN_KEY_VIOLATION });
   });
 
   it('無効化済みユーザーの役割変更は昇格も降格も disabled (無効化自体は冪等なので ok)', async () => {
@@ -546,15 +591,20 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
 
   // 対象ユーザーの行ロック (lockActiveUser) にも同じ形の検査を置く。テナント行のロックだけを見ていると、
   // こちらのロック句を落としても全件緑のまま通る (実測)。外れると「無効化の直前の姿」でトークンを発行できる
-  it('同じユーザー行を掴んでいる間、トークン発行は待たされる (ユーザー行ロックの存在)', async () => {
-    // 発行先のユーザー (テナントの admin)
-    const a = await makeTenant(repos, 'HeldUserLock');
+  // 対象ユーザーの行を別トランザクションで掴んだまま操作を始め、待たされることを確かめる。
+  // lockActiveUser を呼ぶ 3 経路 (トークン発行・admin への昇格・降格/無効化) で同じ形を使う —
+  // 1 経路だけ見ていると、他の呼び出しからロックを外しても全件緑のまま通る (実測)
+  async function expectBlockedWhileUserRowLocked<T>(
+    tenantId: string,
+    userId: string,
+    start: () => Promise<T>,
+  ): Promise<T> {
     // ロックを離す合図
     let release = (): void => undefined;
     const released = new Promise<void>((resolve) => {
       release = resolve;
     });
-    // ロックを掴んだ合図 (掴む前に発行を始めると順序が数ミリ秒の運になる)
+    // ロックを掴んだ合図 (掴む前に操作を始めると順序が数ミリ秒の運になる)
     let signalHeld = (): void => undefined;
     const held = new Promise<void>((resolve) => {
       signalHeld = resolve;
@@ -562,8 +612,8 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // 別のトランザクションで対象ユーザーの行を掴んだまま待つ
     const holding = client.$transaction(
       async (tx) => {
-        // 発行が取るのと同じ行・同じ強さのロック
-        await tx.$queryRaw`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${a.tenant.id} AND id = ${a.admin.id} FOR NO KEY UPDATE`;
+        // 操作が取るのと同じ行・同じ強さのロック
+        await tx.$queryRaw`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${tenantId} AND id = ${userId} FOR NO KEY UPDATE`;
         // 掴めたことを知らせる
         signalHeld();
         // 合図が来るまで保持する
@@ -571,33 +621,137 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       },
       { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
     );
-    // 掴むまで発行を始めない
+    // 掴むまで操作を始めない
     await held;
-    // トークン発行を始める (ロックが効いていれば、掴んでいる間は終わらない)
-    const issue = repos.userTokens.create({
-      tenantId: a.tenant.id,
-      userId: a.admin.id,
-      prefix: 'aop_u_lock',
-      tokenHash: `hash-userlock-${Date.now()}`,
-      name: 'ロックの検査',
-      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
-    });
+    // 操作を始める (ロックが効いていれば、掴んでいる間は終わらない)
+    const running = start();
     try {
       // 待たされていること (先に時間切れの方が返る)
       const finishedFirst = await Promise.race([
-        issue.then(() => 'issued' as const),
+        running.then(() => 'finished' as const),
         new Promise<'blocked'>((resolve) =>
           setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS),
         ),
       ]);
       expect(finishedFirst).toBe('blocked');
     } finally {
-      // 失敗しても必ず離す
+      // 失敗しても必ず離す (掴んだまま抜けると、次のテストの TRUNCATE が待たされて道連れで落ちる)
       release();
       await holding;
     }
+    // ロックを離した後の結果を返す
+    return running;
+  }
+
+  // 「待たされる」だけでは足りない経路のための形。役割変更は最後に UPDATE を投げるので、
+  // ロックを外しても UPDATE 自体が待たされ、「待たされた」という観察では原本と区別が付かない (実測)。
+  // そこで待っている間に無効化をコミットし、**待ち終わったあとに読み直しているか**で見分ける。
+  // ロックを取っていれば読み直して 'disabled'、取っていなければ古い姿のまま 'ok' を返して
+  // 無効化済みの行に役割を書き込む (コードのコメントが避けると宣言している状態)
+  async function expectSeesDisableCommittedWhileWaiting<T>(
+    tenantId: string,
+    userId: string,
+    start: () => Promise<T>,
+  ): Promise<T> {
+    // 無効化してロックを離す合図
+    let release = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // ロックを掴んだ合図
+    let signalHeld = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    // 対象ユーザーの行を掴み、合図が来たら無効化してコミットする
+    const holding = client.$transaction(
+      async (tx) => {
+        // 操作が取るのと同じ行・同じ強さのロック
+        await tx.$queryRaw`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${tenantId} AND id = ${userId} FOR NO KEY UPDATE`;
+        // 掴めたことを知らせる
+        signalHeld();
+        // 合図が来るまで保持する
+        await released;
+        // 待っている相手に見えるべき変更 (無効化) を書いてからコミットする
+        await tx.user.update({
+          where: { tenantId_id: { tenantId, id: userId } },
+          data: { disabledAt: new Date() },
+        });
+      },
+      { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
+    );
+    // 掴むまで操作を始めない
+    await held;
+    // 操作を始める
+    const running = start();
+    try {
+      // 先に始まっていること (時間切れの方が先に返る = まだ終わっていない)
+      const finishedFirst = await Promise.race([
+        running.then(() => 'finished' as const),
+        new Promise<'blocked'>((resolve) =>
+          setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS),
+        ),
+      ]);
+      expect(finishedFirst).toBe('blocked');
+    } finally {
+      // 無効化を書いてコミットさせる (失敗しても必ず離す)
+      release();
+      await holding;
+    }
+    // コミット後の結果を返す
+    return running;
+  }
+
+  it('同じユーザー行を掴んでいる間、トークン発行は待たされる (ユーザー行ロックの存在)', async () => {
+    // 発行先のユーザー (テナントの admin)
+    const a = await makeTenant(repos, 'HeldUserLock');
+    // ロックを掴んだまま発行を始める
+    const issued = await expectBlockedWhileUserRowLocked(a.tenant.id, a.admin.id, () =>
+      repos.userTokens.create({
+        tenantId: a.tenant.id,
+        userId: a.admin.id,
+        prefix: 'aop_u_lock',
+        tokenHash: `hash-userlock-${Date.now()}`,
+        name: 'ロックの検査',
+        expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+      }),
+    );
     // ロックを離した後は発行できる
-    expect((await issue).status).toBe('ok');
+    expect(issued.status).toBe('ok');
+  });
+
+  it('昇格は待っている間にコミットされた無効化を見る (昇格経路の行ロック)', async () => {
+    // 昇格させる相手 (viewer)
+    const a = await makeTenant(repos, 'HeldPromote');
+    const target = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'promote@example.com',
+      name: '昇格する人',
+      role: Role.viewer,
+    });
+    // ロックを掴んだまま昇格を始め、待っている間に無効化をコミットする
+    const promoted = await expectSeesDisableCommittedWhileWaiting(a.tenant.id, target.id, () =>
+      repos.users.updateRole(a.tenant.id, target.id, Role.admin),
+    );
+    // 読み直していれば無効化が見えて拒否される (認証できない admin を作らない)
+    expect(promoted.status).toBe('disabled');
+  });
+
+  it('降格は待っている間にコミットされた無効化を見る (降格経路の対象行ロック)', async () => {
+    // 降格させる相手 (2 人目の admin。last_admin で弾かれないようにする)
+    const a = await makeTenant(repos, 'HeldDemote');
+    const target = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'demote@example.com',
+      name: '降格する人',
+      role: Role.admin,
+    });
+    // ロックを掴んだまま降格を始め、待っている間に無効化をコミットする
+    const demoted = await expectSeesDisableCommittedWhileWaiting(a.tenant.id, target.id, () =>
+      repos.users.updateRole(a.tenant.id, target.id, Role.viewer),
+    );
+    // 読み直していれば無効化が見えて拒否される (無効化済みユーザーの役割変更は disabled)
+    expect(demoted.status).toBe('disabled');
   });
 
   it('並行する降格要求でも有効な admin が 0 人にならない (行ロックで直列化)', async () => {

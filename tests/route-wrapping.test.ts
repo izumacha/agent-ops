@@ -6,7 +6,7 @@
 // (1) は**実際にモジュールを読み込んで印を見る** — ソースの綴りを見る形だと、`export { PUT }` のような
 // 別の書き方・OPTIONS のような別のメソッド・v1 の外のディレクトリがすべて死角になる (実測で素通りした)
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { ALLOWED_ROUTE_FILE_NAME, findRouteFiles } from './lib/route-files';
 import { pathToFileURL } from 'node:url';
@@ -58,6 +58,40 @@ describe('Route Handler の結線', () => {
         `${relativeToApp} が api/v1 の外にある`,
       ).toBe(false);
     }
+  });
+
+  // 走査の根は src/app の route.* だけ。Next はこれ以外にも配信する入口を持つので、
+  // それらが「無いこと」を固定する (存在すると、認証も認可も通らない経路がこの検査の外に生える。
+  // 実測: src/pages/api/leak.ts も src/proxy.ts も全件緑のまま 200 を返した)
+  it('App Router の route.* 以外に Next の入口が無い', () => {
+    // 存在してはいけない入口 (Pages Router・middleware・proxy。リポジトリ直下と src/ の両方を見る)
+    const forbidden = [
+      'pages',
+      'src/pages',
+      'middleware.ts',
+      'middleware.js',
+      'src/middleware.ts',
+      'src/middleware.js',
+      'proxy.ts',
+      'proxy.js',
+      'src/proxy.ts',
+      'src/proxy.js',
+    ];
+    for (const entry of forbidden) {
+      // 無いこと (足すなら、この検査と認可の網羅をどう広げるかを先に決める)
+      expect(existsSync(join(process.cwd(), entry)), `${entry} は Next の入口になる`).toBe(false);
+    }
+  });
+
+  // 走査する拡張子は Next.js の既定 pageExtensions に合わせた固定の表。設定で増やされると
+  // その分が死角になるので、設定していないこと自体を固定する (増やすなら表も同時に直す)
+  it('next.config.ts は pageExtensions を変えていない', () => {
+    // 設定ファイルの中身
+    const config = readFileSync(join(process.cwd(), 'next.config.ts'), 'utf8');
+    // 拡張子の集合をいじっていないこと
+    expect(config.includes('pageExtensions'), 'pageExtensions を変えるなら走査の表も直す').toBe(
+      false,
+    );
   });
 
   // 走査は route.tsx / route.js も拾うが、このリポジトリでは .ts だけを書く。
@@ -126,6 +160,27 @@ describe('Route Handler の結線', () => {
   });
 });
 
+// src 配下の TypeScript ファイルを集める (秘密の読み取り箇所を数えるのに使う)
+function findSourceFiles(dir: string): string[] {
+  // 直下の要素
+  return readdirSync(dir).flatMap((entry) => {
+    // 絶対パス
+    const full = join(dir, entry);
+    // ディレクトリなら潜る (生成物は対象外)
+    if (statSync(full).isDirectory()) return entry === 'generated' ? [] : findSourceFiles(full);
+    // .ts / .tsx だけを拾う
+    return /\.tsx?$/.test(entry) ? [full] : [];
+  });
+}
+
+// 関数本体に現れる return 文を、空白を詰めた形で並べる (抜け道が増えたかを見る)
+function returnsIn(body: string | undefined): string[] {
+  // 本体が読めなければ空 (呼び出し側が toBeDefined で落とす)
+  if (body === undefined) return [];
+  // return から ; までを 1 文として拾い、改行と連続する空白を 1 つに詰める
+  return [...body.matchAll(/return[^;]*;/g)].map((match) => match[0].replace(/\s+/g, ' ').trim());
+}
+
 describe('秘密の生成と比較', () => {
   // トークン生成のソース
   const tokens = readFileSync(join(process.cwd(), 'src', 'lib', 'tokens.ts'), 'utf8');
@@ -148,8 +203,24 @@ describe('秘密の生成と比較', () => {
     const body = /export function secretsEqual\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(tokens)?.[1];
     // 本体が読めること (書き方を変えたらここで気付く)
     expect(body, 'secretsEqual の定義が読めない').toBeDefined();
-    // その中で定数時間比較を使っていること
-    expect(body && /timingSafeEqual\(/.test(body)).toBe(true);
+    // 抜ける道が定数時間比較の 1 つだけであること (長さで早期に返す形を足すと落ちる。
+    // 呼び出し側をいくら厳しく見ても、比較の実装側にこの穴が空いていれば同じことになる)
+    expect(returnsIn(body), '比較から抜ける道が増えている').toEqual([
+      'return timingSafeEqual(left, right);',
+    ]);
+  });
+
+  // 秘密を読む場所が 1 か所だけであること (別の場所で読めば、そこで安い比較を書けてしまう)
+  it('PLATFORM_ADMIN_TOKEN を読むのは照合の中だけ', () => {
+    // src 全体で環境変数を読んでいる箇所
+    const reads = findSourceFiles(join(process.cwd(), 'src')).flatMap((file) =>
+      [...readFileSync(file, 'utf8').matchAll(/process\.env\.PLATFORM_ADMIN_TOKEN/g)].map(
+        () => file,
+      ),
+    );
+    // 1 か所だけで、それが認証のファイルであること
+    expect(reads).toHaveLength(1);
+    expect(reads[0]?.endsWith(join('lib', 'api', 'auth.ts'))).toBe(true);
   });
 
   // 実装が定数時間でも、呼び出し側が === に戻れば同じこと (実測で全件緑のまま通った)
@@ -160,21 +231,13 @@ describe('秘密の生成と比較', () => {
     expect(body, 'matchesPlatformAdminToken の定義が読めない').toBeDefined();
     // 定数時間比較のヘルパーを通していること
     expect(body && /secretsEqual\(/.test(body)).toBe(true);
-    // 秘密を比べる書き方がヘルパー以外に無いこと。return 文だけを見る形だと、
-    // 「secretsEqual の前に安い比較を足して早期終了する」退行 (前方一致の長さが応答時間から漏れる)
-    // が素通りする (実測)。長さの下限検査 (< による比較) は設定ミスの検出なので対象外
-    const forbidden = [
-      '===',
-      '!==',
-      '.startsWith(',
-      '.endsWith(',
-      '.includes(',
-      '.indexOf(',
-      '.slice(',
-      '.localeCompare(',
-    ];
-    for (const pattern of forbidden) {
-      expect(body?.includes(pattern), `照合の中で ${pattern} を使っている`).toBe(false);
-    }
+    // 抜ける道 (return 文) が想定どおりの 3 つだけであること。禁止する綴りを並べる形では
+    // 列挙の外側 (!= ・ charCodeAt のループ ・ 比較を別関数へ切り出す) がすべて素通りする (実測)。
+    // 「増えた抜け道は必ず落ちる」側で見れば、安い比較を足す形は書き方によらず捕まる
+    expect(returnsIn(body), '照合から抜ける道が増えている').toEqual([
+      'return false;',
+      'return false;',
+      'return secretsEqual(token, configured);',
+    ]);
   });
 });

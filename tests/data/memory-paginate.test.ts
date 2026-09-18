@@ -14,6 +14,13 @@ const rows = [
 ];
 
 describe('paginate', () => {
+  it('limit が 1 未満・整数でない呼び出しは fail-closed で落ちる (toPage の items[-1] に到達させない)', () => {
+    // 0 / 負数 / 小数はいずれも RangeError
+    for (const limit of [0, -1, 1.5]) {
+      expect(() => paginate(rows, { limit })).toThrow(RangeError);
+    }
+  });
+
   it('createdAt 昇順、同時刻は id 昇順で並ぶ', () => {
     // 全件
     const page = paginate(rows, { limit: 10 });

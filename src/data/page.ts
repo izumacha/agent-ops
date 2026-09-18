@@ -3,7 +3,7 @@
 //   - カーソルは「前ページ最終行の (createdAt, id)」を符号化したキーセット (行 id そのものではない)。
 //     行 id をカーソルにすると、その行が次ページ取得までに削除されたとき続きが取れず一覧が黙って途切れる。
 //     キーセットなら比較で位置が決まるので行が消えても続きが取れ、行の存在を探る手掛かりにもならない
-import type { CursorKey, Page } from './ports/types';
+import type { CursorKey, Page, PageQuery } from './ports/types';
 
 // 位置の型を再公開する (利用側は page.ts だけを import すればよい)
 export type { CursorKey };
@@ -48,6 +48,20 @@ export function compareCursorKeys(a: CursorKey, b: CursorKey): number {
 export function isAfterCursor(row: CursorKey, key: CursorKey): boolean {
   // 同じ比較関数で「後ろ」を判定する
   return compareCursorKeys(row, key) > 0;
+}
+
+// アダプタが実際に取る件数 (limit + 1。1 件多く取って次ページの有無を知る)。limit は API 層の Zod が 1〜最大値に
+// 正規化しているが、Zod を通らない呼び出し (CLI・バッチ・検証を挟み忘れた新しいハンドラ) に対しては
+// ここで fail-closed にする — 0 以下だと toPage が items[-1] を encodeCursor に渡して TypeError になる
+export function fetchCount(query: PageQuery): number {
+  // 1 以上の整数でなければ呼び出し側の誤り
+  if (!Number.isInteger(query.limit) || query.limit < 1) {
+    throw new RangeError(
+      `PageQuery.limit は 1 以上の整数にしてください (受け取った値: ${query.limit})`,
+    );
+  }
+  // 次ページ判定のため 1 件多く取る
+  return query.limit + 1;
 }
 
 // 1 件多く取った行を 1 ページに整形する (次ページがあれば最終行のキーセットを nextCursor にする)

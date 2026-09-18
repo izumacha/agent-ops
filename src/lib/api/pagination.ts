@@ -31,7 +31,6 @@ export const pageQuerySchema = z.object({
     .default(PAGE_LIMIT_DEFAULT),
   cursor: z
     .string()
-    .min(1)
     .max(PAGE_CURSOR_MAX_LENGTH)
     .transform((value, ctx) => {
       // 位置へ復号する (ここで 1 回だけ。アダプタには復号済みの位置が届く)

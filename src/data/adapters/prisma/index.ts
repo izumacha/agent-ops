@@ -2,7 +2,7 @@
 // Prisma を直接 import してよいのはこのディレクトリと結線箇所 (src/lib/prisma*.ts) だけ (ESLint が強制する)。
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
 import { DuplicateError } from '@/data/errors';
-import { toPage, type CursorKey } from '@/data/page';
+import { fetchCount, toPage, type CursorKey } from '@/data/page';
 import type {
   AgentFilter,
   AgentRecord,
@@ -74,7 +74,7 @@ function pageArgs<W>(query: PageQuery, where: W) {
   return {
     where: scoped,
     orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
-    take: query.limit + 1,
+    take: fetchCount(query),
   };
 }
 

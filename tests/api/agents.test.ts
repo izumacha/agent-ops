@@ -297,10 +297,14 @@ describe('GET /agents と /agents/{agentId}', () => {
       })
     ).json as { items: { id: string }[] };
     expect(afterDelete.items.map((a) => a.id)).toEqual(page2.items.map((a) => a.id));
-    // 壊れたカーソルは 422 (issues.path = cursor)
-    const broken = await call(listAgents, { token: seed.a.tokens.viewer, query: 'cursor=nope' });
-    expect(broken.status).toBe(422);
-    expect((broken.json as { issues: { path: string }[] }).issues[0].path).toBe('cursor');
+    // 壊れたカーソルは 422 (issues.path = cursor)。空文字も同じ原因 (形が違う) なので同じ文言
+    for (const query of ['cursor=nope', 'cursor=']) {
+      const broken = await call(listAgents, { token: seed.a.tokens.viewer, query });
+      expect(broken.status, query).toBe(422);
+      const issues = (broken.json as { issues: { path: string; message: string }[] }).issues;
+      expect(issues[0].path).toBe('cursor');
+      expect(issues[0].message).toBe(API_MESSAGES.invalidCursor);
+    }
   });
 
   it('他テナントのエージェントは取得・更新・削除・停止・復帰のすべてで 404', async () => {

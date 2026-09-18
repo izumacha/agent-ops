@@ -31,7 +31,8 @@ export const pageQuerySchema = z.object({
     .default(PAGE_LIMIT_DEFAULT),
   cursor: z
     .string()
-    .max(PAGE_CURSOR_MAX_LENGTH)
+    // 長さ超過も「形が違う」の一種なので同じ文言にする (上限は復号前の DoS 対策として残す)
+    .max(PAGE_CURSOR_MAX_LENGTH, { message: API_MESSAGES.invalidCursor })
     .transform((value, ctx) => {
       // 位置へ復号する (ここで 1 回だけ。アダプタには復号済みの位置が届く)
       const key = decodeCursor(value);

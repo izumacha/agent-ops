@@ -275,6 +275,10 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.users.disable(a.tenant.id, a.admin.id)).toEqual({ status: 'last_admin' });
     // admin のまま (役割の再設定) は通る
     expect((await repos.users.updateRole(a.tenant.id, a.admin.id, Role.admin)).status).toBe('ok');
+    // admin への昇格 (ロック無しの経路) でもテナント境界外は not_found
+    expect(await repos.users.updateRole('other', a.admin.id, Role.admin)).toEqual({
+      status: 'not_found',
+    });
     // 2 人目の admin を足すと、片方を無効化できる
     const second = await repos.users.create({
       tenantId: a.tenant.id,

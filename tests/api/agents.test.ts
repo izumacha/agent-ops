@@ -9,7 +9,7 @@ import {
 import { POST as resumeAgent } from '@/app/api/v1/agents/[agentId]/resume/route';
 import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { AgentStatus, Provider } from '@/domain/types';
-import { API_MESSAGES, JSON_BODY_MAX_BYTES } from '@/lib/constants';
+import { API_MESSAGES, JSON_BODY_MAX_BYTES, PAGE_CURSOR_MAX_LENGTH } from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
@@ -298,7 +298,11 @@ describe('GET /agents と /agents/{agentId}', () => {
     ).json as { items: { id: string }[] };
     expect(afterDelete.items.map((a) => a.id)).toEqual(page2.items.map((a) => a.id));
     // 壊れたカーソルは 422 (issues.path = cursor)。空文字も同じ原因 (形が違う) なので同じ文言
-    for (const query of ['cursor=nope', 'cursor=']) {
+    for (const query of [
+      'cursor=nope',
+      'cursor=',
+      `cursor=${'a'.repeat(PAGE_CURSOR_MAX_LENGTH + 1)}`,
+    ]) {
       const broken = await call(listAgents, { token: seed.a.tokens.viewer, query });
       expect(broken.status, query).toBe(422);
       const issues = (broken.json as { issues: { path: string; message: string }[] }).issues;

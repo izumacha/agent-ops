@@ -217,13 +217,18 @@ class PrismaUsers implements UsersPort {
 
   // 役割変更 (最後の有効な admin を admin 以外へ変える要求は 'last_admin')
   async updateRole(tenantId: string, id: string, role: Role): Promise<UserMutationResult> {
-    // admin 以外へ変えるときだけ「最後の admin」判定を行う
-    return this.mutateGuardingLastAdmin(
-      tenantId,
-      id,
-      () => role !== Role.admin,
-      (tx) => tx.user.update({ where: { tenantId_id: { tenantId, id } }, data: { role } }),
-    );
+    // 更新そのもの (複合一意 (tenantId, id) で 1 回)
+    const apply = (db: Db) =>
+      db.user.update({ where: { tenantId_id: { tenantId, id } }, data: { role } });
+    // admin への昇格は admin を減らさないので、テナント行のロックもトランザクションも要らない
+    // (同じテナントの役割変更・無効化を不要に待たせない)
+    if (role === Role.admin) {
+      // 対象が無ければ not_found
+      const user = await updateOrNull(() => apply(this.db));
+      return user ? { status: 'ok', user } : { status: 'not_found' };
+    }
+    // admin 以外へ変えるときは「最後の admin」判定と同じトランザクションで更新する
+    return this.mutateGuardingLastAdmin(tenantId, id, () => true, apply);
   }
 
   // 無効化 (最後の有効な admin は 'last_admin'。既に無効なら日時はそのまま)

@@ -231,6 +231,7 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               required: [role]
               properties:
                 role:
@@ -760,6 +761,7 @@ components:
           format: date-time
     TenantCreate:
       type: object
+      additionalProperties: false
       required: [name, adminEmail, adminName]
       properties:
         name:
@@ -852,6 +854,7 @@ components:
           description: 失効日時 (有効なら null)
     UserTokenCreate:
       type: object
+      additionalProperties: false
       required: [name]
       properties:
         name:
@@ -885,6 +888,7 @@ components:
           type: string
     UserCreate:
       type: object
+      additionalProperties: false
       required: [email, name, role]
       properties:
         email:
@@ -934,6 +938,7 @@ components:
           format: date-time
     AgentCreate:
       type: object
+      additionalProperties: false
       required: [name, provider, model]
       properties:
         name:
@@ -977,6 +982,7 @@ components:
           type: [string, 'null']
           pattern: '^[0-9]+$'
           maxLength: 19
+          description: マイクロ USD の整数 (PostgreSQL BIGINT の範囲。19 桁まで。上限 9223372036854775807 を超える値は JSON Schema で表せないため 422 を返す)
     AgentList:
       type: object
       required: [items]
@@ -1012,6 +1018,7 @@ components:
           description: 失効日時 (有効なら null)
     ApiKeyCreate:
       type: object
+      additionalProperties: false
       required: [name]
       properties:
         name:

@@ -3,11 +3,11 @@ import { z } from './zod';
 import { email, role, shortText } from './common';
 
 // 招待
-export const userCreateSchema = z.object({
+export const userCreateSchema = z.strictObject({
   email,
   name: shortText,
   role,
 });
 
 // 役割変更
-export const userRoleSchema = z.object({ role });
+export const userRoleSchema = z.strictObject({ role });

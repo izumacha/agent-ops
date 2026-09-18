@@ -1,4 +1,6 @@
-// 各スキーマで共有する部品 (長さ上限は OpenAPI 定義と一致させる)
+// 各スキーマで共有する部品 (長さ上限は OpenAPI 定義と一致させる)。
+// 本文のスキーマは z.strictObject を使う — 未知キーを黙って剥がすと、契約の additionalProperties: false と食い違い、
+// 「status を PATCH に入れたのに何も起きない」といった無言の無視が起きる (誤りは 422 で返す)
 import { z } from './zod';
 import { parseMicroUsd } from '@/domain/money';
 import {

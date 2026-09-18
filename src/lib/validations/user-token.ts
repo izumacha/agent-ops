@@ -4,7 +4,7 @@ import { USER_TOKEN_DEFAULT_TTL_DAYS, USER_TOKEN_MAX_TTL_DAYS } from '@/lib/cons
 import { shortText } from './common';
 
 // 用途名と有効期間 (日)。省略時は既定値、無期限は作れない
-export const userTokenCreateSchema = z.object({
+export const userTokenCreateSchema = z.strictObject({
   name: shortText,
   expiresInDays: z
     .number()

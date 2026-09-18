@@ -38,7 +38,10 @@ type Spec = {
   tags?: { name: string }[];
   components: {
     parameters: Record<string, { schema: Record<string, unknown> }>;
-    schemas: Record<string, { properties?: Record<string, Record<string, unknown>> }>;
+    schemas: Record<
+      string,
+      { properties?: Record<string, Record<string, unknown>>; additionalProperties?: unknown }
+    >;
   };
 };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
@@ -173,6 +176,37 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
           new RegExp(`export (?:const|(?:async )?function) ${method.toUpperCase()}\\b`),
         );
       }
+    }
+  });
+
+  // 予算の上限値は説明文にも書いてあるので、定数と一致することを固定する (散文の写しだけが古くなるのを防ぐ)
+  it('予算の説明に書いた上限は MICRO_USD_MAX と一致する', () => {
+    // 上限を含む説明を持つプロパティ (登録・更新の両方)
+    for (const schemaName of ['AgentCreate', 'AgentUpdate']) {
+      const description = spec.components.schemas[schemaName]?.properties?.budgetMicroUsd
+        ?.description as string | undefined;
+      expect(description, `${schemaName}.budgetMicroUsd に説明が無い`).toBeDefined();
+      expect(description, `${schemaName}.budgetMicroUsd の上限`).toContain(
+        MICRO_USD_MAX.toString(),
+      );
+    }
+  });
+
+  // 本文のスキーマは未知キーを拒否する (Zod 側は z.strictObject。契約だけ緩いと「契約上は妥当な本文が 422」になる)
+  it('本文スキーマは additionalProperties を閉じている', () => {
+    // 本文として使うスキーマ
+    for (const schemaName of [
+      'TenantCreate',
+      'UserCreate',
+      'UserTokenCreate',
+      'AgentCreate',
+      'AgentUpdate',
+      'ApiKeyCreate',
+    ]) {
+      expect(
+        spec.components.schemas[schemaName]?.additionalProperties,
+        `${schemaName} が未知キーを許している`,
+      ).toBe(false);
     }
   });
 

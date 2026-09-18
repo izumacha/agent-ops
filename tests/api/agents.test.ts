@@ -397,6 +397,25 @@ describe('PATCH /agents/{agentId}', () => {
     expect(afterClear.budgetMicroUsd).toBeNull();
   });
 
+  it('未知のキーを含む本文は 422 (黙って剥がして無視しない)', async () => {
+    // 登録: status は API では指定できない (stop / resume で変える)
+    const created = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      body: { ...VALID, status: AgentStatus.stopped },
+    });
+    expect(created.status).toBe(422);
+    // 更新: provider は変えられない
+    const updated = await call(updateAgent, {
+      token: seed.a.tokens.operator,
+      method: 'PATCH',
+      params: { agentId: seed.a.agent.id },
+      body: { name: '新しい名前', provider: Provider.openai },
+    });
+    expect(updated.status).toBe(422);
+    // 元の名前のまま (剥がして部分的に適用していない)
+    expect(seed.store.agents.get(seed.a.agent.id)?.name).toBe(seed.a.agent.name);
+  });
+
   it('空の本文は 422 (何も変えない更新で updatedAt だけ進めない)', async () => {
     // 1 つも指定が無い PATCH
     const result = await call(updateAgent, {

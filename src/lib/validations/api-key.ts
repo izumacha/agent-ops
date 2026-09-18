@@ -3,7 +3,7 @@ import { z } from './zod';
 import { shortText } from './common';
 
 // 用途名と、任意で紐づけるエージェント
-export const apiKeyCreateSchema = z.object({
+export const apiKeyCreateSchema = z.strictObject({
   name: shortText,
   agentId: shortText.optional(),
 });

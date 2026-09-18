@@ -4,7 +4,7 @@ import { longText, microUsd, provider, shortText } from './common';
 import { API_MESSAGES } from '@/lib/constants';
 
 // 登録 (省略した description / budgetMicroUsd は未設定)
-export const agentCreateSchema = z.object({
+export const agentCreateSchema = z.strictObject({
   name: shortText,
   description: longText.optional(),
   provider,
@@ -14,7 +14,7 @@ export const agentCreateSchema = z.object({
 
 // 更新 (省略したプロパティは変更しない。null は未設定へ戻す)
 export const agentUpdateSchema = z
-  .object({
+  .strictObject({
     name: shortText.optional(),
     description: longText.nullable().optional(),
     model: shortText.optional(),

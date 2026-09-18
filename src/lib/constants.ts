@@ -5,7 +5,6 @@ import { AgentStatus, Role } from '@/domain/types';
 // アプリ名 (画面タイトル等で使う)
 export const APP_NAME = 'Agent Ops';
 
-
 // 役割の日本語ラベル
 export const ROLE_LABELS: Readonly<Record<Role, string>> = {
   [Role.viewer]: '閲覧者', // viewer

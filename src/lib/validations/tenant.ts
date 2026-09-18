@@ -3,7 +3,7 @@ import { z } from './zod';
 import { email, shortText } from './common';
 
 // テナント名と最初の admin ユーザー
-export const tenantCreateSchema = z.object({
+export const tenantCreateSchema = z.strictObject({
   name: shortText,
   adminEmail: email,
   adminName: shortText,

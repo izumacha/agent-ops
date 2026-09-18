@@ -190,6 +190,42 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     });
   });
 
+  it('無効化済みユーザーの役割変更は昇格も降格も disabled (無効化自体は冪等なので ok)', async () => {
+    // admin を 2 人にして、片方を無効化できる状態にする
+    const a = await makeTenant(repos, 'A');
+    const target = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'disabled-role@example.com',
+      name: 'd',
+      role: Role.admin,
+    });
+    // 無効化する (1 回目は ok)
+    expect((await repos.users.disable(a.tenant.id, target.id)).status).toBe('ok');
+    // 昇格 (admin へ) も降格 (viewer へ) も disabled で拒否される
+    expect(await repos.users.updateRole(a.tenant.id, target.id, Role.admin)).toEqual({
+      status: 'disabled',
+    });
+    expect(await repos.users.updateRole(a.tenant.id, target.id, Role.viewer)).toEqual({
+      status: 'disabled',
+    });
+    // 役割は書き換わっていない
+    expect((await repos.users.findById(a.tenant.id, target.id))?.role).toBe(Role.admin);
+    // 無効化の再実行は冪等 (disabled ではなく ok)
+    expect((await repos.users.disable(a.tenant.id, target.id)).status).toBe('ok');
+    // 有効なユーザーの昇格は通る (無効化の判定が昇格経路を塞いでいないこと)
+    const active = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'active-role@example.com',
+      name: 'x',
+      role: Role.viewer,
+    });
+    expect((await repos.users.updateRole(a.tenant.id, active.id, Role.admin)).status).toBe('ok');
+    // 他テナントの id は not_found のまま (境界が disabled 判定より先)
+    expect(await repos.users.updateRole('other', active.id, Role.admin)).toEqual({
+      status: 'not_found',
+    });
+  });
+
   it('同テナント内の改名で名前が重複すると DuplicateError (更新経路の一意制約)', async () => {
     // 1 テナントに 2 体のエージェント
     const a = await makeTenant(repos, 'A');

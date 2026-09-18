@@ -1,4 +1,5 @@
 // 一覧のクエリ文字列 (limit / cursor) を PageQuery へ検証・正規化する
+import type { ZodObject, ZodType, ZodTypeAny } from 'zod';
 import { z } from '@/lib/validations/zod';
 import type { PageQuery } from '@/data';
 import { decodeCursor } from '@/data/page';
@@ -47,23 +48,27 @@ export const pageQuerySchema = z.object({
 });
 
 // URL のクエリから指定したキーを取り出す (無いキーは undefined のまま渡して default / optional に任せる)
-export function pickQuery(url: URL, keys: readonly string[]): Record<string, string | undefined> {
+function pickQuery(url: URL, keys: readonly string[]): Record<string, string | undefined> {
   // キーごとに値を取り出す
   return Object.fromEntries(keys.map((key) => [key, url.searchParams.get(key) ?? undefined]));
 }
 
-// スキーマが読むクエリのキーをその shape から導く (手で並べると、スキーマに項目を足したとき pickQuery が
-// その値を URL から取り出さず、既定値が黙って使われる = 指定が無視される)
-export function queryKeysOf(schema: { shape: Record<string, unknown> }): readonly string[] {
+/**
+ * URL のクエリをスキーマで検証して返す (不正値は 422)。読むキーはスキーマの shape から導くので、
+ * 「キーの一覧とスキーマが食い違って指定が黙って無視される」形を書けない (手で並べるとその事故が起きる)
+ */
+export function parseQuery<T>(
+  url: URL,
+  schema: ZodObject<Record<string, ZodTypeAny>> & ZodType<T>,
+): T {
   // shape のキーがそのままクエリ名
-  return Object.keys(schema.shape);
+  const keys = Object.keys(schema.shape);
+  // 値を取り出して検証する
+  return validateWith(schema, pickQuery(url, keys));
 }
 
-// pageQuerySchema が読むクエリのキー (このモジュール内だけで使う。外から使うときは queryKeysOf を呼ぶ)
-const PAGE_QUERY_KEYS = queryKeysOf(pageQuerySchema);
-
-// URL のクエリから PageQuery を作る (不正値は 422)
+// URL のクエリから PageQuery を作る (一覧の共通形)
 export function parsePageQuery(url: URL): PageQuery {
-  // 検証して返す
-  return validateWith(pageQuerySchema, pickQuery(url, PAGE_QUERY_KEYS));
+  // 共通のページ指定スキーマで検証する
+  return parseQuery(url, pageQuerySchema);
 }

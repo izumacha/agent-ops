@@ -1,7 +1,7 @@
 // Vitest のテスト API
 import { describe, expect, it } from 'vitest';
 // ファイル読み込み (Node 標準)
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 // YAML パーサ (OpenAPI 定義は YAML)
@@ -16,6 +16,7 @@ import {
   USER_TOKEN_DEFAULT_TTL_DAYS,
   USER_TOKEN_MAX_TTL_DAYS,
 } from '@/lib/constants';
+import { MICRO_USD_MAX } from '@/domain/money';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -112,6 +113,64 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     const expiresInDays = spec.components.schemas.UserTokenCreate.properties?.expiresInDays;
     expect(expiresInDays?.default).toBe(USER_TOKEN_DEFAULT_TTL_DAYS);
     expect(expiresInDays?.maximum).toBe(USER_TOKEN_MAX_TTL_DAYS);
+  });
+
+  // 契約に載っているオペレーションが実装されていることを機械的に確かめる (ADR-0003 の「定義 → gen → 実装」のうち
+  // 「実装」だけ検査が無く、パスを足し忘れる / ルートを改名すると契約だけが 404 を約束し続ける)
+  it('契約の全オペレーションに対応する Route Handler がある', () => {
+    // OpenAPI のパス (servers.url が /api/v1 なので、src/app/api/v1 配下に対応する)
+    for (const [path, item] of Object.entries(spec.paths)) {
+      // {param} を Next.js の [param] に置き換えたディレクトリ
+      const dir = join(
+        process.cwd(),
+        'src',
+        'app',
+        'api',
+        'v1',
+        ...path
+          .slice(1)
+          .split('/')
+          .map((segment) => segment.replace(/^\{(.+)\}$/, '[$1]')),
+      );
+      // ルートファイル
+      const file = join(dir, 'route.ts');
+      expect(existsSync(file), `${path} の Route Handler (${file}) が無い`).toBe(true);
+      // 宣言されたメソッドが export されていること (大文字の名前付き export)
+      const source = readFileSync(file, 'utf8');
+      for (const method of HTTP_METHODS) {
+        // 契約に無いメソッドは見ない
+        if (!(method in item)) continue;
+        // `export const GET = route(...)` でも `export async function GET(...)` でもよい
+        expect(source, `${method.toUpperCase()} ${path} の export が無い`).toMatch(
+          new RegExp(`export (?:const|(?:async )?function) ${method.toUpperCase()}\\b`),
+        );
+      }
+    }
+  });
+
+  // 上の表に載せ忘れた maxLength が野放しにならないようにする (包含リストだけだと、表に無いプロパティは
+  // 定数を変えても古い値のまま残り、契約と実装が食い違ったまま緑になる)
+  it('本文スキーマの maxLength は既知の定数のいずれかである', () => {
+    // 許す値 (文字列長の 3 種 + 予算の桁数)
+    const allowed = new Set([
+      SHORT_TEXT_MAX_LENGTH,
+      LONG_TEXT_MAX_LENGTH,
+      EMAIL_MAX_LENGTH,
+      MICRO_USD_MAX.toString().length,
+    ]);
+    // components.schemas のプロパティを走査する
+    for (const [schemaName, schema] of Object.entries(spec.components.schemas)) {
+      for (const [property, definition] of Object.entries(schema.properties ?? {})) {
+        // maxLength を宣言していないプロパティは対象外
+        const max = (definition as { maxLength?: number }).maxLength;
+        if (max === undefined) continue;
+        // 既知の定数のいずれかであること
+        expect(
+          allowed.has(max),
+          `${schemaName}.${property} の maxLength ${max} は定数由来でない`,
+        ).toBe(true);
+      }
+    }
   });
 
   // 文字列長の上限も同じ理由で固定する (Zod 側は constants.ts を読むので、OpenAPI だけ動かすと

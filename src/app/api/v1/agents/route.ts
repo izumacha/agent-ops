@@ -1,9 +1,9 @@
 // /api/v1/agents: エージェント台帳の一覧 (view) と登録 (execute)。UC-03
-import { readJsonBody, validateWith } from '@/lib/api/body';
+import { readJsonBody } from '@/lib/api/body';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { pageQuerySchema, pickQuery, queryKeysOf } from '@/lib/api/pagination';
+import { pageQuerySchema, parseQuery } from '@/lib/api/pagination';
 import { toListDto, toAgentDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { agentCreateSchema } from '@/lib/validations/agent';
@@ -11,18 +11,12 @@ import { agentStatus } from '@/lib/validations/common';
 
 // 一覧のクエリ (limit / cursor に status を足す)。1 つのスキーマで検証し、複数の誤りを 1 応答の issues で返す
 const agentListQuerySchema = pageQuerySchema.extend({ status: agentStatus.optional() });
-// 読むクエリのキー (スキーマの shape から導くので、項目を足しても取り出し漏れが起きない)
-const AGENT_LIST_QUERY_KEYS = queryKeysOf(agentListQuerySchema);
-
 // GET /agents (listAgents)
 export const GET = route(async ({ request, principal, repos }) => {
   // view 権限
   const { tenantId } = requireAction(principal, 'view');
   // クエリをまとめて検証する
-  const { status, ...pageQuery } = validateWith(
-    agentListQuerySchema,
-    pickQuery(new URL(request.url), AGENT_LIST_QUERY_KEYS),
-  );
+  const { status, ...pageQuery } = parseQuery(new URL(request.url), agentListQuerySchema);
   // 自テナントで絞って一覧する
   const page = await repos.agents.list(tenantId, pageQuery, { status });
   // DTO へ写す

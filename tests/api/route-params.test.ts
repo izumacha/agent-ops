@@ -38,6 +38,50 @@ describe('動的セグメントの検証', () => {
     expect(called).toBe(false);
   });
 
+  // **2 番目以降のセグメントも同じ表で試す。** 単一セグメントのケースだけだと「先頭のセグメントしか
+  // 見ない」形へ退行しても全件緑で通り (実測: 317 件のまま変わらなかった)、実在する 2 セグメントのルート
+  // `/users/{userId}/tokens/{tokenId}` でだけ 56 巡目の 500 が復活する
+  it.each(rejected)(
+    '2 番目のセグメントが %s でも本体へ渡さず 404 にする',
+    async (_label, tokenId) => {
+      // 本体が呼ばれたかどうかを記録する
+      let called = false;
+      // 2 セグメントを受けるハンドラ (実在するルートと同じ形)
+      const handler = route<{ userId: string; tokenId: string }>(async () => {
+        called = true;
+        return Response.json({ ok: true });
+      });
+      // 先頭は正しい id で、2 番目だけが不正
+      const result = await call(handler, {
+        token: seed.a.tokens.admin,
+        params: { userId: seed.a.users.admin.id, tokenId },
+      });
+      // 存在しない資源として 404
+      expect(result.status).toBe(404);
+      // 本体まで届いていない
+      expect(called).toBe(false);
+    },
+  );
+
+  it('配列で届くセグメント (catch-all) も本体へ渡さない (fail-closed)', async () => {
+    // 本体が呼ばれたかどうかを記録する
+    let called = false;
+    // catch-all ルート (`[...slug]`) の params は配列で届く。Step1 には該当ルートが無いので
+    // いまは到達しないが、「文字列でなければ拒否」という防御線を検出網に載せておく
+    const handler = route<{ slug: string }>(async () => {
+      called = true;
+      return Response.json({ ok: true });
+    });
+    // 配列を渡す (型は文字列なので、実際に届く形を再現するため変換する)
+    const result = await call(handler, {
+      token: seed.a.tokens.viewer,
+      params: { slug: ['a', 'b'] as unknown as string },
+    });
+    // 404 で止まり、本体まで届かない
+    expect(result.status).toBe(404);
+    expect(called).toBe(false);
+  });
+
   it('正しい形の id は本体まで届く (検証が広すぎて正規の要求を落としていないこと)', async () => {
     // 本体は受け取った id をそのまま返す
     const handler = route<{ agentId: string }>(async ({ params }) =>

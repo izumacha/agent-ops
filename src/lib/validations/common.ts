@@ -18,8 +18,16 @@ import { AgentStatus, Provider, Role } from '@/domain/types';
 // `ag<NUL>ent` と `agent` が同じ名前として保存され、一意判定も後者で行われる (実測)。一方テストが組み立てる
 // Request では NUL が残るので、検証を書かないとテストと本番で「見ている本文」が違う。明示的に弾けば両方で同じ
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/;
+// 対になっていないサロゲート (孤立サロゲート)。**制御文字と同じ「別の値に化ける」系統の入力**で、
+// JSON のエスケープ (`\ud800`) なら本文は純 ASCII なので UTF-8 の復号も通り、長さ・文字種の検査にも
+// 掛からないまま DB ドライバが UTF-8 へ符号化する時点で U+FFFD へ置換される。実測では
+// `"X\ud800Y"` と `"X\ud801Y"` と `"X<U+FFFD>Y"` の 3 つが同じ行に畳まれ、一意判定もその化けた値で行われた
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 // 改行・タブ・復帰を除いた制御文字
 const CONTROL_CHARACTERS_EXCEPT_BREAKS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+// 見た目だけを偽る文字 (U+202E の右横書き指示・U+200B のゼロ幅空白など) は**意図的に許す** —
+// 値としては別物なので保存も一意判定も取り違えず、Step1 は UI を持たない。表示のなりすましが
+// 問題になるのは画面を作る Step5 なので、そこで表示側の正規化とあわせて決める
 
 // 表示名など短い文字列 (1〜100 文字)。前後の空白を除いてから長さを見る (空白だけの名前や末尾空白違いの「同名」を作らない)
 export const shortText = z
@@ -28,7 +36,9 @@ export const shortText = z
   .min(1)
   .max(SHORT_TEXT_MAX_LENGTH)
   // 1 行の表示名なので改行・タブも含めて制御文字は一切許さない
-  .refine((value) => !CONTROL_CHARACTERS.test(value), { message: API_MESSAGES.controlCharacters });
+  .refine((value) => !CONTROL_CHARACTERS.test(value), { message: API_MESSAGES.controlCharacters })
+  // 保存時に U+FFFD へ化ける孤立サロゲートも許さない
+  .refine((value) => !LONE_SURROGATE.test(value), { message: API_MESSAGES.loneSurrogate });
 
 // 資源 id (本文に載る id。パスセグメントと同じ規則で見る。規則は @/domain/resource-id が唯一の定義)
 export const resourceId = z
@@ -73,4 +83,6 @@ export const longText = z
   // 複数行の説明文なので改行・タブ・復帰は許し、それ以外の制御文字は弾く
   .refine((value) => !CONTROL_CHARACTERS_EXCEPT_BREAKS.test(value), {
     message: API_MESSAGES.controlCharacters,
-  });
+  })
+  // 保存時に U+FFFD へ化ける孤立サロゲートも許さない
+  .refine((value) => !LONE_SURROGATE.test(value), { message: API_MESSAGES.loneSurrogate });

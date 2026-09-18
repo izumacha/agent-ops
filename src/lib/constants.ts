@@ -59,6 +59,7 @@ export const API_MESSAGES = {
   validation: '入力内容に誤りがあります。',
   invalidResourceId: 'id の形式が不正です。',
   controlCharacters: '制御文字は使用できません。',
+  loneSurrogate: '文字として解釈できない文字が含まれています。',
   emptyPatch: '変更する項目を 1 つ以上指定してください。',
   duplicate: '既に同じ値が存在します。',
   invalidJson: 'リクエスト本文を JSON として解釈できません。',

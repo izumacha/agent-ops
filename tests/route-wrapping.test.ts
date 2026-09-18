@@ -60,10 +60,19 @@ describe('Route Handler の結線', () => {
     }
   });
 
+  // 意図して置いている Next の入口と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。
+  // キーはリポジトリ相対のパス。表に無い綴り・場所はすべて「無いこと」を要求する
+  const ALLOWED_NEXT_ENTRIES: Record<string, string> = {
+    'src/proxy.ts':
+      'パスの percent-decode に失敗する要求を 404 で落とす入口 (素通しすると Next.js が params を' +
+      '組み立てる時点で例外になり、認証ヘッダ無しで全ルートが素の 500 を返す)。返すのは 404 か' +
+      '「次へ渡す」だけで、データを返す経路にはしない。挙動は tests/proxy.test.ts が固定する',
+  };
+
   // 走査の根は src/app の route.* だけ。Next はこれ以外にも配信する入口を持つので、
-  // それらが「無いこと」を固定する (存在すると、認証も認可も通らない経路がこの検査の外に生える。
-  // 実測: src/pages/api/leak.ts も src/proxy.ts も全件緑のまま 200 を返した)
-  it('App Router の route.* 以外に Next の入口が無い', () => {
+  // 理由を書いたもの以外は「無いこと」を固定する (存在すると、認証も認可も通らない経路がこの検査の
+  // 外に生える。実測: src/pages/api/leak.ts も src/proxy.ts も全件緑のまま 200 を返した)
+  it('App Router の route.* 以外に Next の入口が無い (理由を書いたものを除く)', () => {
     // 入口になるファイル名 (拡張子は pageExtensions の表から導く。列挙を手で書くと
     // proxy.tsx のような綴りが漏れる — 実測で未認証の 200 を返した)
     const entryBasenames = ['proxy', 'middleware'];
@@ -81,8 +90,21 @@ describe('Route Handler の結線', () => {
       ),
     ];
     for (const entry of forbidden) {
-      // 無いこと (足すなら、この検査と認可の網羅をどう広げるかを先に決める)
+      // 理由を書いた入口は許す (綴りも場所も表に書いたものだけ)
+      if (toPosix(entry) in ALLOWED_NEXT_ENTRIES) continue;
+      // それ以外は無いこと (足すなら、この検査と認可の網羅をどう広げるかを先に決める)
       expect(existsSync(join(process.cwd(), entry)), `${entry} は Next の入口になる`).toBe(false);
+    }
+  });
+
+  // 許可表が古くなっていないこと。実在しない入口を並べたままにすると、「理由を書いた例外」が
+  // 増えているように見えて実際には何も守っておらず、次に同じ綴りのファイルを置いた人が素通りする
+  it('例外として許した Next の入口は実在する', () => {
+    // 表が空なら走査が空振りしている (fail-closed)
+    expect(Object.keys(ALLOWED_NEXT_ENTRIES).length).toBeGreaterThan(0);
+    for (const entry of Object.keys(ALLOWED_NEXT_ENTRIES)) {
+      // 表のキーがリポジトリに実在すること
+      expect(existsSync(join(process.cwd(), entry)), `${entry} が存在しない`).toBe(true);
     }
   });
 

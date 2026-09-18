@@ -30,6 +30,17 @@ describe('短い文字列 (表示名)', () => {
     expect(agentCreateSchema.safeParse(validAgent({ name })).success).toBe(false);
   });
 
+  it('対になっていないサロゲートは受け付けない (保存時に U+FFFD へ化けるため)', () => {
+    // JSON の `\ud800` で送れる形。長さ・文字種の検査は通ってしまうのでここで弾く
+    const lone = `X${String.fromCharCode(0xd800)}Y`;
+    expect(agentCreateSchema.safeParse(validAgent({ name: lone })).success).toBe(false);
+  });
+
+  it('対になったサロゲート (絵文字) は受け付ける (検証が広すぎないこと)', () => {
+    // 絵文字はサロゲートペアなので正当な入力
+    expect(agentCreateSchema.safeParse(validAgent({ name: '🤖 ボット' })).success).toBe(true);
+  });
+
   it('ふつうの日本語の名前は受け付ける', () => {
     // 検証が広すぎて正規の入力を落としていないこと
     expect(agentCreateSchema.safeParse(validAgent()).success).toBe(true);
@@ -41,6 +52,12 @@ describe('長い文字列 (説明文)', () => {
     // 説明文は複数行になりうるので改行・タブは正当な入力
     const parsed = agentUpdateSchema.safeParse({ description: '1 行目\n\t2 行目' });
     expect(parsed.success).toBe(true);
+  });
+
+  it('説明文でも対になっていないサロゲートは許さない', () => {
+    // 説明文も同じ理由で化けるので弾く
+    const lone = `d${String.fromCharCode(0xdc00)}tail`;
+    expect(agentUpdateSchema.safeParse({ description: lone }).success).toBe(false);
   });
 
   it('改行以外の制御文字は許さない', () => {

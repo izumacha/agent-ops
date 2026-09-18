@@ -30,7 +30,7 @@ import {
 import { DELETE as revokeUserToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
 import { canPerform, type Action } from '@/domain/rbac';
 import { Role } from '@/domain/types';
-import { call, seedEachTest } from './helpers';
+import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
 const seed = seedEachTest();
@@ -213,6 +213,17 @@ describe('全オペレーションの認可', () => {
         // その役割のトークンで呼ぶ
         const status = await endpoint.invoke(seed.a.tokens[role]);
         // 権限不足は 403 (404 や 422 に化けていないこと = 認可が本文検証より前にあることも同時に見る)
+        expect(status).toBe(403);
+      });
+    }
+    // プラットフォーム管理者はテナントの外側の主体なので、テナント内の資源には一切触れない。
+    // 役割だけを回していると、この不変条件を担う 1 行 (requireTenantUser) を requireAdminRole の
+    // 経路で素通しにしても全件緑のまま通る (実測。ユーザー招待とトークン発行が通った)
+    if (endpoint.requires !== 'platform') {
+      it(`${operationId} はプラットフォーム管理者が呼ぶと 403`, async () => {
+        // プラットフォーム管理者トークンで呼ぶ
+        const status = await endpoint.invoke(PLATFORM_TOKEN);
+        // テナント内の資源なので 403
         expect(status).toBe(403);
       });
     }

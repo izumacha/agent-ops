@@ -398,7 +398,19 @@ class PrismaAgents implements AgentsPort {
     // 複合一意 (tenantId, id) で 1 クエリで更新し、無ければ null・重複は翻訳する
     try {
       return await updateOrNull(() =>
-        this.db.agent.update({ where: { tenantId_id: { tenantId, id } }, data: patch }),
+        this.db.agent.update({
+          where: { tenantId_id: { tenantId, id } },
+          // 受け取った本文をそのまま渡さず、更新してよい項目だけを書き出す。
+          // 丸ごと渡すと、将来 AgentUpdate に項目が増えたとき (契約と Zod を一緒に直すのが自然な直し方)
+          // status や tenantId まで DB へ届く — 実測で「execute 権限で停止できる」「行が別テナントへ移る」
+          // まで到達した。型では止まらない (変数を渡すと余分なプロパティの検査が働かない)
+          data: {
+            name: patch.name,
+            description: patch.description,
+            model: patch.model,
+            budgetMicroUsd: patch.budgetMicroUsd,
+          },
+        }),
       );
     } catch (error) {
       rethrowDuplicate(error, 'name');

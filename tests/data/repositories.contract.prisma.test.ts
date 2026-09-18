@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DuplicateError } from '@/data/errors';
 import { decodeCursor } from '@/data/page';
 import type { Repositories } from '@/data/ports';
-import { Provider, Role } from '@/domain/types';
+import { AgentStatus, Provider, Role } from '@/domain/types';
 import { userTokenExpiresAt } from '@/lib/tokens';
 // 接続先が契約テスト専用 DB であることの確認 (入口ガード・setupFiles と同じ関数を呼ぶ)
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
@@ -331,6 +331,35 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.users.updateRole('other', active.id, Role.admin)).toEqual({
       status: 'not_found',
     });
+  });
+
+  // 更新は「更新してよい項目」だけを DB へ渡す。検証済みの本文を丸ごと渡す実装だと、
+  // 契約と Zod に項目が増えた瞬間に status や tenantId まで届く (実測で権限の迂回とテナント移動に到達した)。
+  // memory アダプタは項目ごとに代入するのでこの差は API テストからは見えない
+  it('更新は許した項目だけを書き、余分な項目は DB へ届かない', async () => {
+    // 2 テナントと A のエージェント
+    const a = await makeTenant(repos, 'PatchA');
+    const b = await makeTenant(repos, 'PatchB');
+    const agent = await repos.agents.create({
+      tenantId: a.tenant.id,
+      name: 'patch-bot',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+    });
+    // 型の上では渡せない項目を混ぜて更新する (Port の型を迂回した呼び出しを再現する)
+    const updated = await repos.agents.update(a.tenant.id, agent.id, {
+      name: 'patch-bot-2',
+      status: AgentStatus.stopped,
+      tenantId: b.tenant.id,
+      provider: Provider.openai,
+    } as never);
+    // 名前だけが変わり、状態・テナント・提供元は変わらないこと
+    expect(updated?.name).toBe('patch-bot-2');
+    expect(updated?.status).toBe(AgentStatus.active);
+    expect(updated?.tenantId).toBe(a.tenant.id);
+    expect(updated?.provider).toBe(Provider.anthropic);
   });
 
   it('同テナント内の改名で名前が重複すると DuplicateError (更新経路の一意制約)', async () => {

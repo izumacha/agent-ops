@@ -6,8 +6,9 @@
 // (1) は**実際にモジュールを読み込んで印を見る** — ソースの綴りを見る形だと、`export { PUT }` のような
 // 別の書き方・OPTIONS のような別のメソッド・v1 の外のディレクトリがすべて死角になる (実測で素通りした)
 import { describe, expect, it } from 'vitest';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join, relative } from 'node:path';
+import { ALLOWED_ROUTE_FILE_NAME, findRouteFiles } from './lib/route-files';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { ROUTE_HANDLER_BRAND } from '@/lib/api/handler';
@@ -22,19 +23,6 @@ const HTTP_METHOD_EXPORTS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'O
 const UNAUTHENTICATED_ROUTES: Record<string, string> = {
   'api/v1/health/route.ts': 'DB 到達性だけを返す公開エンドポイント (compose の healthcheck が使う)',
 };
-
-// ディレクトリを再帰して route.ts を集める
-function findRouteFiles(dir: string): string[] {
-  // 直下の要素
-  return readdirSync(dir).flatMap((entry) => {
-    // 絶対パス
-    const full = join(dir, entry);
-    // ディレクトリなら潜る
-    if (statSync(full).isDirectory()) return findRouteFiles(full);
-    // route.ts だけを拾う
-    return entry === 'route.ts' ? [full] : [];
-  });
-}
 
 // パスの区切りを URL 向けに揃える
 function toPosix(path: string): string {
@@ -69,6 +57,17 @@ describe('Route Handler の結線', () => {
         toPosix(relative(API_DIR, full)).startsWith('..'),
         `${relativeToApp} が api/v1 の外にある`,
       ).toBe(false);
+    }
+  });
+
+  // 走査は route.tsx / route.js も拾うが、このリポジトリでは .ts だけを書く。
+  // 綴りを 1 つに固定しておくと、将来 pageExtensions が増えても検査の前提が崩れない
+  it('Route Handler の綴りは route.ts に統一されている', () => {
+    for (const { full, relativeToApp } of routeFiles) {
+      // ファイル名が唯一の綴りであること
+      expect(basename(full), `${relativeToApp} は ${ALLOWED_ROUTE_FILE_NAME} で書く`).toBe(
+        ALLOWED_ROUTE_FILE_NAME,
+      );
     }
   });
 
@@ -161,7 +160,21 @@ describe('秘密の生成と比較', () => {
     expect(body, 'matchesPlatformAdminToken の定義が読めない').toBeDefined();
     // 定数時間比較のヘルパーを通していること
     expect(body && /secretsEqual\(/.test(body)).toBe(true);
-    // 素の比較で返していないこと
-    expect(body && /return\s+[^;]*===/.test(body)).toBe(false);
+    // 秘密を比べる書き方がヘルパー以外に無いこと。return 文だけを見る形だと、
+    // 「secretsEqual の前に安い比較を足して早期終了する」退行 (前方一致の長さが応答時間から漏れる)
+    // が素通りする (実測)。長さの下限検査 (< による比較) は設定ミスの検出なので対象外
+    const forbidden = [
+      '===',
+      '!==',
+      '.startsWith(',
+      '.endsWith(',
+      '.includes(',
+      '.indexOf(',
+      '.slice(',
+      '.localeCompare(',
+    ];
+    for (const pattern of forbidden) {
+      expect(body?.includes(pattern), `照合の中で ${pattern} を使っている`).toBe(false);
+    }
   });
 });

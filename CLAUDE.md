@@ -51,7 +51,9 @@ DATABASE_URL='postgresql://postgres:postgres@localhost:5432/agent_ops_contract?s
 DATABASE_URL='postgresql://postgres:postgres@localhost:5432/agent_ops_contract?schema=app' RUN_PRISMA_CONTRACT=1 npm run test:contract
 ```
 
-**`?schema=app` は CI と同じにする**（`.github/workflows/ci.yml` の契約ステップ）。既定の `public` だけで流すと、接続文字列の `?schema=` を**アダプタのオプションと `search_path` の両方へ反映する**結線が一度も試されない（この結線を外しても契約テストは緑のまま通る。`?schema=` 付きなら 7 件が赤くなる）。手順を片方だけ変えると、同じ DB に対してもう一方の手順で接続したとき `relation "Tenant" does not exist` になる。
+**`?schema=app` は CI と同じにする**（`.github/workflows/ci.yml` の契約ステップ）。既定の `public` だけで流すと、接続文字列の `?schema=` を**アダプタのオプションと `search_path` の両方へ反映する**結線が一度も試されない（この結線を外しても契約テストは緑のまま通る。`?schema=` 付きなら複数件が赤くなる）。手順を片方だけ変えると、同じ DB に対してもう一方の手順で接続したとき `relation "Tenant" does not exist` になる。
+
+**契約テストの DB は共有状態**（`beforeEach` で全テーブルを `TRUNCATE`）。同じ DB へ 2 人が同時に流すと理由の分からない赤が出るので、並行して走らせるときは DB 名を分ける（接尾辞 `_contract` は保つ）。
 
 セットアップ: `cp .env.example .env && docker compose up -d db && npm ci && npm run gen && npm run db:generate && npm run db:migrate && npm run db:seed`。アプリごと Docker で動かすなら `docker compose up --build`（`app` は起動時に `prisma migrate deploy` を実行する）。**クローン後・スキーマ変更後・OpenAPI 変更後は `npm run db:generate` / `npm run gen` を実行してから `typecheck` する**（`src/generated/` は gitignore の生成物）。
 

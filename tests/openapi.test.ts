@@ -6,6 +6,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 // YAML パーサ (OpenAPI 定義は YAML)
 import { parse } from 'yaml';
+import { ALLOWED_ROUTE_FILE_NAME, ROUTE_FILE_PATTERN } from './lib/route-files';
 import {
   EMAIL_MAX_LENGTH,
   LONG_TEXT_MAX_LENGTH,
@@ -293,8 +294,9 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
           walk(join(dir, entry.name), [...segments, entry.name.replace(/^\[(.+)\]$/, '{$1}')]);
           continue;
         }
-        // route.ts があればその位置が 1 つのパス
-        if (entry.name === 'route.ts') found.push(`/${segments.join('/')}`);
+        // Route Handler のファイルがあればその位置が 1 つのパス (拡張子の違いも拾う。
+        // route.ts に決め打ちすると route.tsx / route.js が検査の外へ落ちる)
+        if (ROUTE_FILE_PATTERN.test(entry.name)) found.push(`/${segments.join('/')}`);
       }
     };
     walk(root, []);
@@ -323,8 +325,8 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
           .split('/')
           .map((segment) => segment.replace(/^\{(.+)\}$/, '[$1]')),
       );
-      // ルートファイル
-      const file = join(dir, 'route.ts');
+      // ルートファイル (綴りは tests/route-wrapping.test.ts が route.ts に固定している)
+      const file = join(dir, ALLOWED_ROUTE_FILE_NAME);
       expect(existsSync(file), `${path} の Route Handler (${file}) が無い`).toBe(true);
       // 宣言されたメソッドが export されていること (大文字の名前付き export)
       const source = readFileSync(file, 'utf8');

@@ -544,6 +544,62 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect((await demote).status).toBe('ok');
   });
 
+  // 対象ユーザーの行ロック (lockActiveUser) にも同じ形の検査を置く。テナント行のロックだけを見ていると、
+  // こちらのロック句を落としても全件緑のまま通る (実測)。外れると「無効化の直前の姿」でトークンを発行できる
+  it('同じユーザー行を掴んでいる間、トークン発行は待たされる (ユーザー行ロックの存在)', async () => {
+    // 発行先のユーザー (テナントの admin)
+    const a = await makeTenant(repos, 'HeldUserLock');
+    // ロックを離す合図
+    let release = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // ロックを掴んだ合図 (掴む前に発行を始めると順序が数ミリ秒の運になる)
+    let signalHeld = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    // 別のトランザクションで対象ユーザーの行を掴んだまま待つ
+    const holding = client.$transaction(
+      async (tx) => {
+        // 発行が取るのと同じ行・同じ強さのロック
+        await tx.$queryRaw`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${a.tenant.id} AND id = ${a.admin.id} FOR NO KEY UPDATE`;
+        // 掴めたことを知らせる
+        signalHeld();
+        // 合図が来るまで保持する
+        await released;
+      },
+      { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
+    );
+    // 掴むまで発行を始めない
+    await held;
+    // トークン発行を始める (ロックが効いていれば、掴んでいる間は終わらない)
+    const issue = repos.userTokens.create({
+      tenantId: a.tenant.id,
+      userId: a.admin.id,
+      prefix: 'aop_u_lock',
+      tokenHash: `hash-userlock-${Date.now()}`,
+      name: 'ロックの検査',
+      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+    });
+    try {
+      // 待たされていること (先に時間切れの方が返る)
+      const finishedFirst = await Promise.race([
+        issue.then(() => 'issued' as const),
+        new Promise<'blocked'>((resolve) =>
+          setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS),
+        ),
+      ]);
+      expect(finishedFirst).toBe('blocked');
+    } finally {
+      // 失敗しても必ず離す
+      release();
+      await holding;
+    }
+    // ロックを離した後は発行できる
+    expect((await issue).status).toBe('ok');
+  });
+
   it('並行する降格要求でも有効な admin が 0 人にならない (行ロックで直列化)', async () => {
     // admin 2 人 (X, Y)
     const a = await makeTenant(repos, 'A');

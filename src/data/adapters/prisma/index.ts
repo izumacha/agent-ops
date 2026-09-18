@@ -105,6 +105,28 @@ async function updateOrNull<T>(update: () => Promise<T>): Promise<T | null> {
 // トランザクション内外の両方で使えるクライアント型
 type Db = PrismaClient | Prisma.TransactionClient;
 
+// 対象ユーザーを掴めたか (掴めたなら以後 disabledAt はコミットまで変わらない)
+type LockedUser = { status: 'ok' } | { status: 'not_found' } | { status: 'disabled' };
+
+/**
+ * 対象ユーザーの行を FOR NO KEY UPDATE でロックし、テナント境界と無効化済みかを見る。
+ * disable の UPDATE は同じロックを取るので、ここで見た disabledAt はトランザクションのコミットまで変わらない
+ * (逆順なら無効化のコミット後に最新の行を読み直す)。子テーブル INSERT の FK 検査 (FOR KEY SHARE) とは衝突しない。
+ * 生 SQL なので写しを持たない — ロック句を片方だけ落とす変更は型検査もテストも素通りするため
+ */
+async function lockActiveUser(tx: Db, tenantId: string, id: string): Promise<LockedUser> {
+  // 行をロックして無効化日時だけ取る
+  const locked = await tx.$queryRaw<
+    { disabledAt: Date | null }[]
+  >`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${tenantId} AND id = ${id} FOR NO KEY UPDATE`;
+  // 同テナントに居ない
+  if (locked.length === 0) return { status: 'not_found' };
+  // 無効化済み
+  if (locked[0].disabledAt !== null) return { status: 'disabled' };
+  // 掴めた
+  return { status: 'ok' };
+}
+
 // テナント Port の prisma 実装
 class PrismaTenants implements TenantsPort {
   // クライアントを受け取る
@@ -239,15 +261,9 @@ class PrismaUsers implements UsersPort {
     // (認証できない admin を作らない)。無効化との競合を防ぐため、対象行をロックしてから判定する
     if (role === Role.admin) {
       return this.db.$transaction(async (tx: Db): Promise<UserMutationResult> => {
-        // 対象行 (テナント境界内) をロックする。disable の UPDATE と同じロックなので、ここで見た disabledAt は
-        // コミットまで変わらない
-        const locked = await tx.$queryRaw<
-          { disabledAt: Date | null }[]
-        >`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${tenantId} AND id = ${id} FOR NO KEY UPDATE`;
-        // 同テナントに居なければ not_found
-        if (locked.length === 0) return { status: 'not_found' };
-        // 無効化済みなら役割を変えない
-        if (locked[0].disabledAt !== null) return { status: 'disabled' };
+        // 対象行を掴む (他テナント・無効化済みはここで決まる)
+        const locked = await lockActiveUser(tx, tenantId, id);
+        if (locked.status !== 'ok') return locked;
         // 更新する
         return { status: 'ok', user: await apply(tx) };
       });
@@ -283,16 +299,9 @@ class PrismaUserTokens implements UserTokensPort {
   async create(input: CreateUserTokenInput): Promise<UserTokenCreateResult> {
     // 無効化との競合を防ぐため、発行先ユーザーの行をロックしてから判定する
     return this.db.$transaction(async (tx: Db): Promise<UserTokenCreateResult> => {
-      // 発行先の行 (テナント境界内) を FOR NO KEY UPDATE でロックする。disable の UPDATE は同じロックを取るので、
-      // ここで見た disabledAt がコミットまで変わらない (逆順なら、無効化のコミット後に最新の行を読み直す)。
-      // 子テーブル INSERT の FK 検査 (FOR KEY SHARE) とは衝突しない
-      const locked = await tx.$queryRaw<
-        { disabledAt: Date | null }[]
-      >`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${input.tenantId} AND id = ${input.userId} FOR NO KEY UPDATE`;
-      // 同テナントに居なければ発行しない
-      if (locked.length === 0) return { status: 'not_found' };
-      // 無効化済みなら発行しない
-      if (locked[0].disabledAt !== null) return { status: 'disabled' };
+      // 発行先の行を掴む (他テナント・無効化済みはここで決まる)
+      const locked = await lockActiveUser(tx, input.tenantId, input.userId);
+      if (locked.status !== 'ok') return locked;
       // 挿入する (複合 FK (tenantId, userId) は上の検索で満たしている)
       return { status: 'ok', token: await tx.userToken.create({ data: input }) };
     });

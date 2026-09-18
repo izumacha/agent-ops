@@ -67,6 +67,27 @@ function describeError(error: unknown): Record<string, unknown> {
     : { name: error.name, code, frames };
 }
 
+/**
+ * 応答に「保存するな・Authorization で分けろ」を付ける。全ルートがテナント固有の内容を返すので、
+ * URL だけを鍵にするキャッシュ (CDN・リバースプロキシ) が別テナントへ配ってしまうのを防ぐ。
+ * RFC 9111 は Authorization 付きの要求を既定で共有キャッシュに保存させないが、`/api/*` を一律にキャッシュする
+ * 設定はよくあるので、アプリ側でも明示する (テナント境界をアプリの where 条件だけに頼らない)
+ */
+function withPrivateCacheHeaders(response: Response): Response {
+  // 既存のヘッダを引き継ぐ
+  const headers = new Headers(response.headers);
+  // 保存させない
+  headers.set('Cache-Control', 'no-store');
+  // 万一保存されても資格情報ごとに分ける
+  headers.append('Vary', 'Authorization');
+  // 本文・状態はそのままで作り直す (204 の null 本文もそのまま通る)
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 // 例外を HTTP 応答へ写す
 function toErrorResponse(error: unknown): Response {
   // 明示的な API エラーはそのまま (ApiError → Response の写しはここ 1 か所)
@@ -99,11 +120,11 @@ export function route<P = Record<string, never>>(handler: Handler<P>) {
       const principal = await authenticate(request, repos);
       // 動的セグメントを解決する
       const params = await context.params;
-      // 本体を実行する
-      return await handler({ request, params, principal, repos });
+      // 本体を実行する (応答にはキャッシュ禁止のヘッダを付ける)
+      return withPrivateCacheHeaders(await handler({ request, params, principal, repos }));
     } catch (error) {
-      // 応答に写す
-      return toErrorResponse(error);
+      // 応答に写す (401/403 等もテナント固有なので同じヘッダを付ける)
+      return withPrivateCacheHeaders(toErrorResponse(error));
     }
   };
 }

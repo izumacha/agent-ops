@@ -52,6 +52,21 @@ describe('認証 (401 の経路)', () => {
     expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(401);
   });
 
+  it('応答は保存させない (Cache-Control: no-store と Vary: Authorization)', async () => {
+    // 成功応答 (テナント固有の内容)
+    const ok = await call(getMe, { token: seed.a.tokens.viewer });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('cache-control')).toBe('no-store');
+    expect(ok.headers.get('vary') ?? '').toContain('Authorization');
+    // 失敗応答 (401 も資格情報ごとに違う)
+    const unauthorized = await call(getMe);
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get('cache-control')).toBe('no-store');
+    expect(unauthorized.headers.get('vary') ?? '').toContain('Authorization');
+    // 401 の WWW-Authenticate は残る (ヘッダを作り直しても消えない)
+    expect(unauthorized.headers.get('www-authenticate')).toContain('Bearer');
+  });
+
   it('無効化されたユーザーのトークンは 401', async () => {
     // ユーザーを無効化する
     seed.store.users.get(seed.a.users.viewer.id)!.disabledAt = new Date();

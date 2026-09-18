@@ -13,7 +13,11 @@ import { parseDecimalInteger } from '../src/domain/decimal-integer';
 import { normalizeEmail } from '../src/domain/email';
 import { createPrismaClient } from '../src/lib/prisma-client';
 // CLI の既定の用途名と、API と同じ既定の有効期間
-import { USER_TOKEN_CLI_NAME, USER_TOKEN_DEFAULT_TTL_DAYS } from '../src/lib/constants';
+import {
+  API_MESSAGES,
+  USER_TOKEN_CLI_NAME,
+  USER_TOKEN_DEFAULT_TTL_DAYS,
+} from '../src/lib/constants';
 // 既定テナントの id (seed と共有する唯一の定義)
 import { DEFAULT_TENANT_ID } from '../src/domain/tenant';
 // 用途名と有効期間の規則 (API の POST /users/{id}/tokens と同じスキーマで検証し、規則を書き写さない)
@@ -34,11 +38,13 @@ async function main(): Promise<void> {
   });
   // メールは必須
   if (!values.email) throw new Error('--email <メールアドレス> を指定してください。');
-  // 用途名と日数は API と同じスキーマで検証する (10 進整数でない --days は NaN にして数値の検証で落とす)
-  const parsed = userTokenCreateSchema.safeParse({
-    name: values.name,
-    expiresInDays: parseDecimalInteger(values.days!) ?? Number.NaN,
-  });
+  // 日数はまず形を見る (NaN を渡して Zod の汎用文言にさせない。規則は API の limit と同じ 10 進整数)
+  const expiresInDays = parseDecimalInteger(values.days!);
+  if (expiresInDays === null) {
+    throw new Error(`引数が不正です。\n--days: ${API_MESSAGES.invalidDecimalInteger}`);
+  }
+  // 用途名と日数は API と同じスキーマで検証する (範囲はスキーマが見る)
+  const parsed = userTokenCreateSchema.safeParse({ name: values.name, expiresInDays });
   if (!parsed.success) {
     // スキーマのフィールド名 → CLI のフラグ名 (表に無いフィールドはフィールド名のまま出す。決め打ちで --days に
     // 寄せると、スキーマに項目が増えたとき誤ったフラグを直させることになる)

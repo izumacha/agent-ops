@@ -23,27 +23,92 @@ function readYaml(...segments: string[]): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+// LAN へ公開してよいサービスと、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。
+// 「db サービスの ports だけ」を見る形にすると、管理ツール (adminer 等) を 1 つ足して DB へ橋を架ける
+// 形が視界に入らない (実測で全件緑のまま通った)。主語を「どのサービスも」にして、例外を表で持つ
+const PUBLIC_SERVICE_REASONS: Record<string, string> = {
+  app: 'アプリ本体。外から使うためのサービスで、前段に認証と RBAC がある',
+};
+
+// 秘密を入れる環境変数の名前 (この形の変数に既定値を与えない)
+const SECRET_ENV_PATTERN = /(_TOKEN|_PASSWORD|_SECRET)$/;
+
+// 既定値を許す秘密と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。
+// 表に無い秘密はすべて「未設定で動く」ことを求める
+const SECRET_ENV_REASONS: Record<string, string> = {
+  'db.POSTGRES_PASSWORD':
+    'ローカル開発用 DB コンテナの初期化値。db はループバックにしか公開せず、同じ compose 内の ' +
+    'DATABASE_URL とセットでしか使わない (本番は compose ではなくマネージド DB を使う)。' +
+    'アプリの認証に使う資格情報ではないので、未設定を要求すると quickstart が動かなくなる分の利得が無い',
+};
+
 describe('docker-compose.yml', () => {
   // compose のサービス定義
   const services = readYaml('docker-compose.yml').services as Record<
     string,
-    { ports?: string[] } | undefined
+    { ports?: string[]; environment?: Record<string, string>; network_mode?: string } | undefined
   >;
 
-  it('DB はループバックにしか公開しない (資格情報ストアを LAN へ晒さない)', () => {
-    // db サービスが居ること (名前を変えたらこの検査も一緒に直す)
-    const db = services.db;
-    expect(db, 'db サービスが見つからない').toBeTypeOf('object');
-    // 公開しているポートの一覧 (省略時は公開なし)
-    const ports = db?.ports ?? [];
-    for (const mapping of ports) {
-      // ホスト側のアドレスが 127.0.0.1 (または localhost) で始まること。
-      // '5432:5432' のように書くと 0.0.0.0 に公開され、既定資格情報のまま誰でも接続できる。
-      // この DB は Bearer 認証の資格情報ストアなので、1 行 INSERT で全テナントの admin になれる
-      expect(mapping, `db の公開ポート ${mapping} がループバックに限定されていない`).toMatch(
-        /^(?:127\.0\.0\.1|localhost):/,
-      );
+  it('LAN へ公開してよいのは理由を書いたサービスだけ (それ以外はループバックに限定する)', () => {
+    // サービスを 1 つも読めなければ走査が壊れている (fail-closed)
+    expect(Object.keys(services).length).toBeGreaterThan(0);
+    for (const [name, service] of Object.entries(services)) {
+      // ホストのネットワークをそのまま使う形は publish の指定を素通りするので禁止する
+      expect(
+        service?.network_mode,
+        `${name} が network_mode でホストのネットワークを使っている`,
+      ).not.toBe('host');
+      // 理由を書いたサービスは公開してよい
+      if (name in PUBLIC_SERVICE_REASONS) continue;
+      // 公開しているポートの一覧 (省略時は公開なし)
+      for (const mapping of service?.ports ?? []) {
+        // ホスト側のアドレスが 127.0.0.1 (または localhost) で始まること。
+        // '5432:5432' のように書くと 0.0.0.0 に公開され、既定資格情報のまま誰でも接続できる。
+        // DB は Bearer 認証の資格情報ストアなので、1 行 INSERT で全テナントの admin になれる
+        expect(mapping, `${name} の公開ポート ${mapping} がループバックに限定されていない`).toMatch(
+          /^(?:127\.0\.0\.1|localhost):/,
+        );
+      }
     }
+  });
+
+  it('秘密の環境変数に既定値を与えない (未設定であることが fail-closed の前提)', () => {
+    for (const [name, service] of Object.entries(services)) {
+      // 環境変数の一覧 (マップ形式で書いている前提。配列形式にしたらこの検査も直す)
+      for (const [key, value] of Object.entries(service?.environment ?? {})) {
+        // 秘密でなければ見ない
+        if (!SECRET_ENV_PATTERN.test(key)) continue;
+        // 理由を書いた例外は許す
+        if (`${name}.${key}` in SECRET_ENV_REASONS) continue;
+        // `${VAR:-}` の形 (既定値が空) だけを許す。空でない既定値を書くと、`docker compose up` した
+        // すべての配備が「リポジトリに書かれた公開の資格情報」で動く。プラットフォーム管理者トークンは
+        // 「未設定なら誰もなれない」が唯一の fail-closed なので、既定値はそれを丸ごと無効化する
+        expect(String(value), `${name}.${key} に空でない既定値がある`).toMatch(
+          /^\$\{[A-Z0-9_]+:?-?\}$|^\$\{[A-Z0-9_]+\}$/,
+        );
+      }
+    }
+  });
+});
+
+describe('.env.example', () => {
+  // 雛形の中身
+  const example = readFileSync(join(ROOT, '.env.example'), 'utf8');
+
+  it('プラットフォーム管理者トークンは空で配る (雛形から動く資格情報を配らない)', () => {
+    // 値が空であること (雛形に実際に使える値を書くと、コピーした全員が同じ秘密を共有する)
+    expect(example).toMatch(/^PLATFORM_ADMIN_TOKEN=""?\s*$/m);
+  });
+});
+
+describe('.dockerignore', () => {
+  // 除外設定の中身
+  const ignore = readFileSync(join(ROOT, '.dockerignore'), 'utf8');
+
+  it('.env を イメージへ持ち込まない (雛形だけは例外)', () => {
+    // 開発者の .env を builder ステージの COPY . . が取り込むと、ビルドキャッシュに秘密が残る
+    expect(ignore).toMatch(/^\.env\*$/m);
+    expect(ignore).toMatch(/^!\.env\.example$/m);
   });
 });
 
@@ -56,10 +121,13 @@ describe('Dockerfile', () => {
     const runnerIndex = dockerfile.indexOf('FROM base AS runner');
     expect(runnerIndex, 'runner ステージが見つからない').toBeGreaterThan(-1);
     const runner = dockerfile.slice(runnerIndex);
-    // USER 指定があり、root でないこと。外すとコンテナ内の任意コード実行がそのまま root になる
-    const user = runner.match(/^USER\s+(\S+)/m);
-    expect(user, 'runner ステージに USER 指定が無い').not.toBeNull();
-    expect(user?.[1]).not.toBe('root');
+    // USER 指定があり、root でないこと。外すとコンテナ内の任意コード実行がそのまま root になる。
+    // **最後の USER を見る** — Docker が採用するのは最後の指定なので、最初の 1 件だけを見ると
+    // 「migrate のために root へ戻す」ともっともらしい理由を書いて後ろに USER root を足す変更が
+    // 素通りする (実測で全件緑のまま通った)
+    const users = [...runner.matchAll(/^USER\s+(\S+)/gm)];
+    expect(users.length, 'runner ステージに USER 指定が無い').toBeGreaterThan(0);
+    expect(users[users.length - 1][1]).not.toBe('root');
   });
 });
 

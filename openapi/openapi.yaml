@@ -65,6 +65,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       tags: [tenants]
       operationId: createTenant
@@ -88,6 +90,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '400':
           $ref: '#/components/responses/BadRequest'
         '413':
@@ -114,6 +118,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /me:
     get:
       tags: [users]
@@ -128,8 +134,12 @@ paths:
                 $ref: '#/components/schemas/Me'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /users:
     get:
       tags: [users]
@@ -151,6 +161,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       tags: [users]
       operationId: createUser
@@ -174,6 +186,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '400':
           $ref: '#/components/responses/BadRequest'
         '413':
@@ -202,6 +216,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /users/{userId}/role:
     parameters:
       - $ref: '#/components/parameters/UserId'
@@ -236,6 +252,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '400':
           $ref: '#/components/responses/BadRequest'
         '413':
@@ -267,6 +285,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       tags: [users]
       operationId: createUserToken
@@ -294,6 +314,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '400':
           $ref: '#/components/responses/BadRequest'
         '413':
@@ -317,6 +339,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /agents:
     get:
       tags: [agents]
@@ -342,6 +366,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       tags: [agents]
       operationId: createAgent
@@ -365,6 +391,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '400':
           $ref: '#/components/responses/BadRequest'
         '413':
@@ -391,6 +419,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     patch:
       tags: [agents]
       operationId: updateAgent
@@ -416,6 +446,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '400':
           $ref: '#/components/responses/BadRequest'
         '413':
@@ -437,6 +469,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /agents/{agentId}/stop:
     parameters:
       - $ref: '#/components/parameters/AgentId'
@@ -457,6 +491,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /agents/{agentId}/resume:
     parameters:
       - $ref: '#/components/parameters/AgentId'
@@ -477,6 +513,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /api-keys:
     get:
       tags: [api-keys]
@@ -498,6 +536,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       tags: [api-keys]
       operationId: createApiKey
@@ -521,6 +561,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
         '400':
           $ref: '#/components/responses/BadRequest'
         '413':
@@ -543,6 +585,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 components:
   securitySchemes:
     bearerAuth:
@@ -635,6 +679,12 @@ components:
             $ref: '#/components/schemas/Error'
     NotFound:
       description: 見つからない (他テナントの資源も 404 で隠す)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalServerError:
+      description: サーバー内部のエラー (応答は内部詳細を含まない。詳細はサーバログに残る)
       content:
         application/json:
           schema:
@@ -906,7 +956,8 @@ components:
           description: マイクロ USD の整数 (PostgreSQL BIGINT の範囲。19 桁まで)
     AgentUpdate:
       type: object
-      description: 省略したプロパティは変更しない。null を送ると未設定に戻す (description / budgetMicroUsd)
+      minProperties: 1
+      description: 省略したプロパティは変更しない。null を送ると未設定に戻す (description / budgetMicroUsd)。1 つも指定が無い本文は 422
       properties:
         name:
           type: string

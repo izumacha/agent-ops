@@ -60,6 +60,7 @@ export const API_MESSAGES = {
   platformAdminRequired: 'この操作はプラットフォーム管理者だけが行えます。',
   notFound: '見つかりません。',
   validation: '入力内容に誤りがあります。',
+  emptyPatch: '変更する項目を 1 つ以上指定してください。',
   duplicate: '既に同じ値が存在します。',
   invalidJson: 'リクエスト本文を JSON として解釈できません。',
   bodyIncomplete: 'リクエスト本文を最後まで受け取れませんでした。',

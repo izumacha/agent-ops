@@ -7,15 +7,28 @@ import { HTTP_STATUS } from './http-status';
 // 受け付けるメディア型
 const JSON_MEDIA_TYPE = 'application/json';
 
-// Node が接続の切断で投げるエラーか (IncomingMessage は code = 'ECONNRESET' の Error で本文ストリームを失敗させる)
+// クライアントの切断でストリームが失敗したときのエラー種別 (Node / undici が使う code と name)
+const DISCONNECT_CODES = new Set([
+  'ECONNRESET',
+  'ERR_STREAM_PREMATURE_CLOSE',
+  'UND_ERR_ABORTED',
+  'ABORT_ERR',
+]);
+
+// 切断由来のエラーか。code は cause 側に入ることがある (undici の TypeError: terminated など) ので 1 段たどる
 function isConnectionReset(error: unknown): boolean {
-  // Error オブジェクトの code を見る
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === 'ECONNRESET'
-  );
+  // 値から code / name を取り出す小さなヘルパー
+  const describe = (value: unknown): { code?: unknown; name?: unknown; cause?: unknown } =>
+    typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+  // 本体と cause の両方を見る
+  for (const candidate of [describe(error), describe(describe(error).cause)]) {
+    // code が既知の切断コードなら切断
+    if (typeof candidate.code === 'string' && DISCONNECT_CODES.has(candidate.code)) return true;
+    // AbortError は名前でしか分からないことがある
+    if (candidate.name === 'AbortError') return true;
+  }
+  // どちらでもなければ切断ではない
+  return false;
 }
 
 // Zod の検証失敗を OpenAPI の issues 形式へ写す

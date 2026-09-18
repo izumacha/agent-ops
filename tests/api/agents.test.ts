@@ -324,6 +324,26 @@ describe('GET /agents と /agents/{agentId}', () => {
     }
   });
 
+  it('範囲外の limit は桁数によらず範囲の文言で 422 (7 桁以上も「10 進の整数で」にならない)', async () => {
+    // 上限超過を 3 桁と 7 桁で試す
+    for (const limit of ['201', '1000000']) {
+      const result = await call(listAgents, {
+        token: seed.a.tokens.viewer,
+        query: `limit=${limit}`,
+      });
+      expect(result.status, limit).toBe(422);
+      const message = (result.json as { issues: { path: string; message: string }[] }).issues[0];
+      expect(message.path).toBe('limit');
+      // 形の誤り (10 進の整数で指定してください) ではなく範囲の誤りであること
+      expect(message.message, limit).not.toBe(API_MESSAGES.invalidLimit);
+    }
+    // 形の誤りはこれまでどおり invalidLimit
+    const malformed = await call(listAgents, { token: seed.a.tokens.viewer, query: 'limit=0x10' });
+    expect((malformed.json as { issues: { message: string }[] }).issues[0].message).toBe(
+      API_MESSAGES.invalidLimit,
+    );
+  });
+
   it('他テナントのエージェントは取得・更新・削除・停止・復帰のすべてで 404', async () => {
     // テナント B のエージェントをテナント A の admin が触る
     const params = { agentId: seed.b.agent.id };
@@ -375,6 +395,20 @@ describe('PATCH /agents/{agentId}', () => {
     const afterClear = cleared.json as { description: null; budgetMicroUsd: null };
     expect(afterClear.description).toBeNull();
     expect(afterClear.budgetMicroUsd).toBeNull();
+  });
+
+  it('空の本文は 422 (何も変えない更新で updatedAt だけ進めない)', async () => {
+    // 1 つも指定が無い PATCH
+    const result = await call(updateAgent, {
+      token: seed.a.tokens.operator,
+      method: 'PATCH',
+      params: { agentId: seed.a.agent.id },
+      body: {},
+    });
+    expect(result.status).toBe(422);
+    expect((result.json as { issues: { message: string }[] }).issues[0].message).toBe(
+      API_MESSAGES.emptyPatch,
+    );
   });
 
   it('改名先が既存の名前と重複すると 422', async () => {

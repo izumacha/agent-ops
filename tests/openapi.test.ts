@@ -1,7 +1,7 @@
 // Vitest のテスト API
 import { describe, expect, it } from 'vitest';
 // ファイル読み込み (Node 標準)
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 // YAML パーサ (OpenAPI 定義は YAML)
@@ -86,6 +86,8 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       const codes = Object.keys(op.responses ?? {});
       expect(codes, `${method.toUpperCase()} ${path}`).toContain('401');
       expect(codes, `${method.toUpperCase()} ${path}`).toContain('403');
+      // 500 はどのルートでも起こりうる (route() が予期しない例外をここへ落とす) ので契約にも載せる
+      expect(codes, `${method.toUpperCase()} ${path}`).toContain('500');
     }
   });
 
@@ -113,6 +115,32 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     const expiresInDays = spec.components.schemas.UserTokenCreate.properties?.expiresInDays;
     expect(expiresInDays?.default).toBe(USER_TOKEN_DEFAULT_TTL_DAYS);
     expect(expiresInDays?.maximum).toBe(USER_TOKEN_MAX_TTL_DAYS);
+  });
+
+  // 逆方向 (実装 → 契約) も見る。契約に無い Route Handler は 401/403 等の宣言検査も型生成も掛からないまま出荷される
+  it('src/app/api/v1 配下の Route Handler はすべて契約に載っている', () => {
+    // ルートの入口 (OpenAPI の servers.url に対応するディレクトリ)
+    const root = join(process.cwd(), 'src', 'app', 'api', 'v1');
+    // route.ts を再帰で集め、ディレクトリ名から契約のパスへ戻す
+    const found: string[] = [];
+    const walk = (dir: string, segments: string[]): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        // 下位ディレクトリへ潜る
+        if (entry.isDirectory()) {
+          walk(join(dir, entry.name), [...segments, entry.name.replace(/^\[(.+)\]$/, '{$1}')]);
+          continue;
+        }
+        // route.ts があればその位置が 1 つのパス
+        if (entry.name === 'route.ts') found.push(`/${segments.join('/')}`);
+      }
+    };
+    walk(root, []);
+    // 1 つも見つからなければ検査が効いていないので落とす (fail-closed)
+    expect(found.length).toBeGreaterThan(0);
+    // すべて契約に載っていること
+    for (const path of found) {
+      expect(Object.keys(spec.paths), `${path} が openapi.yaml に無い`).toContain(path);
+    }
   });
 
   // 契約に載っているオペレーションが実装されていることを機械的に確かめる (ADR-0003 の「定義 → gen → 実装」のうち

@@ -2,8 +2,10 @@
 // Number() / z.coerce.number() は 0x10 / 1e2 / +5 / ' 5 ' も通り、OpenAPI の type: integer より受理集合が広い。
 // 桁数はどの用途の上限値 (limit 200 / days 365) より十分大きい 6 桁までに固定する
 
-// 受け付ける桁数の上限
-export const DECIMAL_INTEGER_MAX_DIGITS = 6;
+// 受け付ける桁数の上限。Number で正確に表せる範囲 (2^53-1 は 16 桁) に収まる 15 桁までを受け、
+// 「桁数が多いだけの 10 進整数」は形の誤り (invalidLimit) ではなく範囲の誤り (max) として弾けるようにする
+// (6 桁に絞っていたときは ?limit=1000000 が「10 進の整数で指定してください」になり、直しようが無かった)
+export const DECIMAL_INTEGER_MAX_DIGITS = 15;
 
 // 10 進の数字だけで 1〜上限桁の文字列
 const DECIMAL_INTEGER_PATTERN = new RegExp(`^[0-9]{1,${DECIMAL_INTEGER_MAX_DIGITS}}$`);

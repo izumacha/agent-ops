@@ -13,6 +13,29 @@ import { userTokenExpiresAt } from '@/lib/tokens';
 
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
+// 専用 DB の名前に要求する接尾辞 (npm run test:contract の入口ガードと同じ規則。TRUNCATE と同じファイルにも置く —
+// vitest を直接叩く / IDE のテストランナー / --watch では入口ガードを通らないため)
+const REQUIRED_DATABASE_SUFFIX = '_contract';
+
+// 接続先が専用 DB であることを確かめる (開発 DB を指したまま走ると seed 済みデータを TRUNCATE で消す)
+function assertContractDatabase(): void {
+  // 接続文字列
+  const url = process.env.DATABASE_URL;
+  // 名前を取り出す (解釈できなければ null)
+  const database = (() => {
+    try {
+      return url ? new URL(url).pathname.replace(/^\//, '') || null : null;
+    } catch {
+      return null;
+    }
+  })();
+  // 専用 DB でなければ走らせない
+  if (database === null || !database.endsWith(REQUIRED_DATABASE_SUFFIX)) {
+    throw new Error(
+      `契約テストは "${REQUIRED_DATABASE_SUFFIX}" で終わる専用 DB でだけ実行してください (今の指定: ${database ?? '解釈できない形'})`,
+    );
+  }
+}
 // テストで発行するトークンの有効期間 (日)
 const TOKEN_TTL_DAYS = 1;
 
@@ -40,6 +63,8 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   // (getRepos の動的 import 経由) から取る — アダプタの結線が壊れても他のジョブは緑のままなので、ここで通す。
   // TRUNCATE と切断には同じ singleton (遅延生成 Proxy) を使う
   beforeAll(async () => {
+    // 接続先が専用 DB であること (TRUNCATE する前に確かめる)
+    assertContractDatabase();
     const [{ prisma }, { getRepos }] = await Promise.all([
       import('@/lib/prisma'),
       import('@/data'),

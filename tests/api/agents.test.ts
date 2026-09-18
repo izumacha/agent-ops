@@ -244,6 +244,23 @@ describe('リクエスト本文の防御', () => {
     expect(result.status).toBe(413);
   });
 
+  it('申告サイズが上限を超えていれば本文を読む前に 413 (実測は上限内でも申告で弾く)', async () => {
+    // 本文そのものは上限内で、そのまま読めば 201 になる正しい JSON
+    const result = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      method: 'POST',
+      rawBody: JSON.stringify(VALID),
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(JSON_BODY_MAX_BYTES + 1),
+      },
+    });
+    // 申告サイズだけを見て 413 (この経路が無いと本文が通って 201 になる)
+    expect(result.status).toBe(413);
+    // 保存されていない
+    expect([...seed.store.agents.values()].filter((a) => a.name === VALID.name)).toHaveLength(0);
+  });
+
   it('認証より先に本文は読まない (無認証の巨大本文も 401)', async () => {
     // トークン無しで巨大本文
     const result = await call(createAgent, {
@@ -351,6 +368,22 @@ describe('GET /agents と /agents/{agentId}', () => {
     expect((malformed.json as { issues: { message: string }[] }).issues[0].message).toBe(
       API_MESSAGES.invalidLimit,
     );
+  });
+
+  it('復号できる形でも上限より長い cursor は 422 (復号前に長さで弾く)', async () => {
+    // 形は正しい (ミリ秒:id) が、id を伸ばして上限を超えるカーソルを作る
+    const longId = 'a'.repeat(PAGE_CURSOR_MAX_LENGTH);
+    const cursor = Buffer.from(`${Date.now()}:${longId}`).toString('base64url');
+    // 上限より長いこと (テストの前提)
+    expect(cursor.length).toBeGreaterThan(PAGE_CURSOR_MAX_LENGTH);
+    const result = await call(listAgents, {
+      token: seed.a.tokens.viewer,
+      query: `cursor=${cursor}`,
+    });
+    expect(result.status).toBe(422);
+    const issues = (result.json as { issues: { path: string; message: string }[] }).issues;
+    expect(issues[0].path).toBe('cursor');
+    expect(issues[0].message).toBe(API_MESSAGES.invalidCursor);
   });
 
   it('他テナントのエージェントは取得・更新・削除・停止・復帰のすべてで 404', async () => {

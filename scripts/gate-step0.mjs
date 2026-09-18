@@ -3,7 +3,8 @@
 // 赤なら次 Step のブランチを切らない。検査項目:
 //   1. `npm run gen` (OpenAPI → 型生成) が通る
 //   2. `npm run db:generate` (Prisma クライアント生成) が通る
-//   3. lint / typecheck / test が緑 (OpenAPI 定義の存在と ADR の件数は tests/docs-gate.test.ts が test の中で検査する)
+//   3. lint / format:check / typecheck / test が緑 (OpenAPI 定義の存在と ADR の件数は tests/docs-gate.test.ts が
+//      test の中で検査する)。実際に流す一覧は scripts/lib/step0-steps.mjs が唯一の定義
 // このファイルは純粋な入口で、「直接実行されたときだけ動く」ガードは置かない
 // (import.meta.filename と process.argv[1] の比較はシンボリックリンク経由のパスで食い違い、何も検査せず緑になる)
 // 共通の実行ヘルパー

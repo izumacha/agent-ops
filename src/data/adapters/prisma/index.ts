@@ -114,7 +114,13 @@ type LockedUser = { status: 'ok' } | { status: 'not_found' } | { status: 'disabl
  * (逆順なら無効化のコミット後に最新の行を読み直す)。子テーブル INSERT の FK 検査 (FOR KEY SHARE) とは衝突しない。
  * 生 SQL なので写しを持たない — ロック句を片方だけ落とす変更は型検査もテストも素通りするため
  */
-async function lockActiveUser(tx: Db, tenantId: string, id: string): Promise<LockedUser> {
+async function lockActiveUser(
+  // トランザクション内のクライアントだけを受ける (通常のクライアントで呼ぶと文の終わりでロックが解けて
+  // 無効化との競合を防げないため、型で書けなくする)
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  id: string,
+): Promise<LockedUser> {
   // 行をロックして無効化日時だけ取る
   const locked = await tx.$queryRaw<
     { disabledAt: Date | null }[]

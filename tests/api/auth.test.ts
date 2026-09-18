@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants } from '@/app/api/v1/tenants/route';
+import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
 import { generateSecret } from '@/lib/tokens';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
 
@@ -65,6 +66,44 @@ describe('認証 (401 の経路)', () => {
     expect(unauthorized.headers.get('vary') ?? '').toContain('Authorization');
     // 401 の WWW-Authenticate は残る (ヘッダを作り直しても消えない)
     expect(unauthorized.headers.get('www-authenticate')).toContain('Bearer');
+  });
+
+  it('/me と GET /tenants/{id} は認証したユーザーのテナントを返す (テナント B でも自分の側)', async () => {
+    // テナント B のユーザーで /me
+    const me = await call(getMe, { token: seed.b.tokens.admin });
+    expect(me.status).toBe(200);
+    expect((me.json as { tenant: { id: string } }).tenant.id).toBe(seed.b.id);
+    // テナント A の id を B のトークンで引くと 404 (存在を漏らさない)
+    const foreign = await call(getTenant, {
+      token: seed.b.tokens.admin,
+      params: { tenantId: seed.a.id },
+    });
+    expect(foreign.status).toBe(404);
+    // 自テナントなら取れる
+    const own = await call(getTenant, {
+      token: seed.b.tokens.admin,
+      params: { tenantId: seed.b.id },
+    });
+    expect(own.status).toBe(200);
+    expect((own.json as { id: string }).id).toBe(seed.b.id);
+  });
+
+  it('有効なトークンでも Bearer 以外の方式・余分な語なら 401 (RFC 6750 の形だけ受ける)', async () => {
+    // 同じトークンを Basic で運ぶ
+    const basic = await call(getMe, {
+      headers: { authorization: `Basic ${seed.a.tokens.viewer}` },
+    });
+    expect(basic.status).toBe(401);
+    // Bearer の後ろに余分な語を足す
+    const extra = await call(getMe, {
+      headers: { authorization: `Bearer ${seed.a.tokens.viewer} extra` },
+    });
+    expect(extra.status).toBe(401);
+    // 正しい形なら通る (上の 2 つがトークンの無効さで落ちていないことの裏取り)
+    const ok = await call(getMe, {
+      headers: { authorization: `Bearer ${seed.a.tokens.viewer}` },
+    });
+    expect(ok.status).toBe(200);
   });
 
   it('無効化されたユーザーのトークンは 401', async () => {

@@ -156,6 +156,48 @@ describe('DELETE /users/{userId} (無効化)', () => {
     expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(401);
   });
 
+  it('他に有効な admin が居ても自分自身は無効化できない (409。文言は selfDisable)', async () => {
+    // viewer を admin に昇格させ、admin を 2 人にする
+    expect(
+      (
+        await call(updateRole, {
+          token: seed.a.tokens.admin,
+          method: 'PUT',
+          params: { userId: seed.a.users.viewer.id },
+          body: { role: Role.admin },
+        })
+      ).status,
+    ).toBe(200);
+    // 自分自身の無効化は last_admin ではなく selfDisable で 409
+    const result = await call(disableUser, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.admin.id },
+    });
+    expect(result.status).toBe(409);
+    expect((result.json as { message: string }).message).toBe(API_MESSAGES.selfDisable);
+  });
+
+  it('URL のユーザーと発行先が違うトークンは失効できない (404)', async () => {
+    // admin 宛のトークンを viewer の URL で失効させようとする
+    const token = seed.a.tokenRows.admin;
+    const wrongUser = await call(revokeToken, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.viewer.id, tokenId: token.id },
+    });
+    expect(wrongUser.status).toBe(404);
+    // 失効していない (行が書き換わらない)
+    expect(seed.store.userTokens.get(token.id)?.revokedAt).toBeNull();
+    // 正しい発行先なら失効できる
+    const correct = await call(revokeToken, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.a.users.admin.id, tokenId: token.id },
+    });
+    expect(correct.status).toBe(204);
+  });
+
   it('無効化したユーザーの役割は変えられない (409。認証できない admin を作らない)', async () => {
     // viewer を無効化する
     const target = seed.a.users.viewer;

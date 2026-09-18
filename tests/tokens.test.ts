@@ -8,7 +8,23 @@ import {
   isUserToken,
   secretsEqual,
   USER_TOKEN_PREFIX,
+  userTokenExpiresAt,
 } from '@/lib/tokens';
+
+// 「今から days 日後」の計算 (資格情報の寿命。既定値に固定されていないこと)
+describe('userTokenExpiresAt', () => {
+  // 基準時刻 (実行時刻に依存させない)
+  const now = new Date('2026-09-18T00:00:00.000Z');
+
+  it('渡した日数がそのまま反映される (既定の 90 日に固定されない)', () => {
+    // 1 日後
+    expect(userTokenExpiresAt(1, now).toISOString()).toBe('2026-09-19T00:00:00.000Z');
+    // 365 日後 (上限)
+    expect(userTokenExpiresAt(365, now).toISOString()).toBe('2027-09-18T00:00:00.000Z');
+    // 既定の 90 日
+    expect(userTokenExpiresAt(90, now).toISOString()).toBe('2026-12-17T00:00:00.000Z');
+  });
+});
 
 describe('tokens', () => {
   it('種類ごとの接頭辞が付き、毎回異なる値になる', () => {

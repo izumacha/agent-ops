@@ -363,6 +363,24 @@ class PrismaUserTokens implements UserTokensPort {
   }
 }
 
+// 更新で DB へ渡してよい項目だけを書き出す。
+// 本文を丸ごと渡すと、将来 AgentUpdate に項目が増えたとき (契約と Zod を一緒に直すのが自然な直し方)
+// status や tenantId まで DB へ届く — 実測で「execute 権限で停止できる」「行が別テナントへ移る」まで到達した。
+// 型では止まらない (変数を渡すと余分なプロパティの検査が働かない)。
+// 一方で手で並べると今度は**足し忘れ**が起きる (落ちた項目は 200 のまま黙って無視される) ので、
+// 戻り値の型を Required<UpdateAgentInput> のマップ型にして、項目が増えたら型検査が落ちるようにする
+function agentUpdateData(patch: UpdateAgentInput): {
+  [K in keyof Required<UpdateAgentInput>]: UpdateAgentInput[K];
+} {
+  // 許した項目だけを写す (undefined の項目は Prisma が「変更しない」として扱う)
+  return {
+    name: patch.name,
+    description: patch.description,
+    model: patch.model,
+    budgetMicroUsd: patch.budgetMicroUsd,
+  };
+}
+
 // エージェント Port の prisma 実装
 class PrismaAgents implements AgentsPort {
   // クライアントを受け取る
@@ -400,16 +418,8 @@ class PrismaAgents implements AgentsPort {
       return await updateOrNull(() =>
         this.db.agent.update({
           where: { tenantId_id: { tenantId, id } },
-          // 受け取った本文をそのまま渡さず、更新してよい項目だけを書き出す。
-          // 丸ごと渡すと、将来 AgentUpdate に項目が増えたとき (契約と Zod を一緒に直すのが自然な直し方)
-          // status や tenantId まで DB へ届く — 実測で「execute 権限で停止できる」「行が別テナントへ移る」
-          // まで到達した。型では止まらない (変数を渡すと余分なプロパティの検査が働かない)
-          data: {
-            name: patch.name,
-            description: patch.description,
-            model: patch.model,
-            budgetMicroUsd: patch.budgetMicroUsd,
-          },
+          // 受け取った本文をそのまま渡さず、更新してよい項目だけを書き出す (agentUpdateData)
+          data: agentUpdateData(patch),
         }),
       );
     } catch (error) {

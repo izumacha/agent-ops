@@ -360,6 +360,25 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(updated?.status).toBe(AgentStatus.active);
     expect(updated?.tenantId).toBe(a.tenant.id);
     expect(updated?.provider).toBe(Provider.anthropic);
+    // 許した項目は逆に「必ず届く」こと。手で並べた一覧から 1 つ落ちても 200 のまま黙って
+    // 無視されるだけなので、往復させて確かめる (説明・予算は null 戻しも見る)
+    const applied = await repos.agents.update(a.tenant.id, agent.id, {
+      description: '新しい説明',
+      model: 'claude-opus-4-1',
+      budgetMicroUsd: 42n,
+    });
+    expect(applied?.description).toBe('新しい説明');
+    expect(applied?.model).toBe('claude-opus-4-1');
+    expect(applied?.budgetMicroUsd).toBe(42n);
+    // null で未設定へ戻せること
+    const cleared = await repos.agents.update(a.tenant.id, agent.id, {
+      description: null,
+      budgetMicroUsd: null,
+    });
+    expect(cleared?.description).toBeNull();
+    expect(cleared?.budgetMicroUsd).toBeNull();
+    // 指定しなかった項目は保たれること
+    expect(cleared?.model).toBe('claude-opus-4-1');
   });
 
   it('同テナント内の改名で名前が重複すると DuplicateError (更新経路の一意制約)', async () => {

@@ -125,6 +125,15 @@ describe('POST /agents', () => {
     });
     expect(updatedNull.status).toBe(200);
     expect((updatedNull.json as { description: string | null }).description).toBeNull();
+    // モデル名の更新も反映されること (どの項目も「送ったのに 200 のまま変わらない」が起きないよう往復させる)
+    const updatedModel = await call(updateAgent, {
+      token: seed.a.tokens.operator,
+      method: 'PATCH',
+      params: { agentId: seed.a.agent.id },
+      body: { model: 'claude-opus-4-1' },
+    });
+    expect(updatedModel.status).toBe(200);
+    expect((updatedModel.json as { model: string }).model).toBe('claude-opus-4-1');
   });
 
   it('未知のプロバイダ・空の名前は 422', async () => {

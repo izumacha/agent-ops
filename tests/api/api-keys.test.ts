@@ -71,6 +71,30 @@ describe('POST /api-keys', () => {
   });
 });
 
+describe('GET /api-keys', () => {
+  it('他テナントで発行したキーは一覧に混ざらない (ADR-0002 の行スコープ)', async () => {
+    // テナント A・B でそれぞれ 1 本ずつ発行する
+    const keyOfA = (
+      await call(createKey, { token: seed.a.tokens.operator, body: { name: 'A の鍵' } })
+    ).json as { id: string };
+    const keyOfB = (
+      await call(createKey, { token: seed.b.tokens.operator, body: { name: 'B の鍵' } })
+    ).json as { id: string };
+    // テナント A で一覧する
+    const listOfA = await call(listKeys, { token: seed.a.tokens.viewer });
+    expect(listOfA.status).toBe(200);
+    // A の鍵は載り、B の鍵は載らない (id の一覧で照合する)
+    const idsOfA = (listOfA.json as { items: { id: string }[] }).items.map((item) => item.id);
+    expect(idsOfA).toContain(keyOfA.id);
+    expect(idsOfA).not.toContain(keyOfB.id);
+    // 反対向きも同じ (「どちらの一覧も空」で緑にならないよう、B 側からは B の鍵だけが見えることも見る)
+    const listOfB = await call(listKeys, { token: seed.b.tokens.viewer });
+    const idsOfB = (listOfB.json as { items: { id: string }[] }).items.map((item) => item.id);
+    expect(idsOfB).toContain(keyOfB.id);
+    expect(idsOfB).not.toContain(keyOfA.id);
+  });
+});
+
 describe('DELETE /api-keys/{apiKeyId}', () => {
   it('admin は失効でき、一覧に revokedAt が付く (冪等)', async () => {
     // 発行

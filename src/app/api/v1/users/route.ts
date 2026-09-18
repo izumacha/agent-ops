@@ -25,9 +25,15 @@ export const POST = route(async ({ request, principal, repos }) => {
   const { tenantId } = requireAdminRole(principal);
   // 本文を検証する
   const input = await readJsonBody(request, userCreateSchema);
-  // 自テナントに作る (メール重複は DuplicateError → 422)。tenantId は入力の後ろに置き、
-  // 検証済みの入力に何が含まれていてもテナントを上書きできない形にする
-  const user = await repos.users.create({ ...input, tenantId });
+  // 自テナントに作る (メール重複は DuplicateError → 422)。入力を展開 (spread) せず項目を 1 つずつ書き写し、
+  // 検証済みの本文に何が混ざっていても Port へ渡らない形にする (展開すると並べる順でテナントを上書きでき、
+  // Zod の strictObject が緩んだときに id や disabledAt まで素通りする)
+  const user = await repos.users.create({
+    tenantId,
+    email: input.email,
+    name: input.name,
+    role: input.role,
+  });
   // 201 で返す
   return Response.json(toUserDto(user), { status: HTTP_STATUS.CREATED });
 });

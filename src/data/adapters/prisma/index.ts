@@ -186,6 +186,23 @@ class PrismaTenants implements TenantsPort {
   }
 }
 
+// 作成で DB へ渡してよい項目だけを書き出す (更新側の agentUpdateData と同じ考え方)。
+// 受け取った入力を丸ごと渡すと、Zod の strictObject が緩んだ瞬間に本文の id や disabledAt がそのまま DB へ届く
+// (呼び出し側が行 id を決められる・最初から無効化済みのユーザーを作れる)。型では止まらない
+// (変数を渡すと余分なプロパティの検査が働かない)。
+// 戻り値の型を Required<CreateUserInput> のマップ型にして、項目が増えたら型検査が落ちるようにする
+function userCreateData(input: CreateUserInput): {
+  [K in keyof Required<CreateUserInput>]: CreateUserInput[K];
+} {
+  // 許した項目だけを写す
+  return {
+    tenantId: input.tenantId,
+    email: input.email,
+    name: input.name,
+    role: input.role,
+  };
+}
+
 // ユーザー Port の prisma 実装
 class PrismaUsers implements UsersPort {
   // クライアントを受け取る
@@ -267,7 +284,7 @@ class PrismaUsers implements UsersPort {
   async create(input: CreateUserInput): Promise<UserRecord> {
     // 挿入し、一意制約違反なら翻訳する
     try {
-      return await this.db.user.create({ data: input });
+      return await this.db.user.create({ data: userCreateData(input) });
     } catch (error) {
       rethrowDuplicate(error, 'email');
     }
@@ -275,7 +292,11 @@ class PrismaUsers implements UsersPort {
 
   // 役割変更 (最後の有効な admin を admin 以外へ変える要求は 'last_admin')
   async updateRole(tenantId: string, id: string, role: Role): Promise<UserMutationResult> {
-    // 更新そのもの (複合一意 (tenantId, id) で 1 回)
+    // 更新そのもの (複合一意 (tenantId, id) で 1 回)。
+    // ここのテナント条件は**多層防御**で、テストからは観測できない — 更新にたどり着く前に必ず
+    // lockActiveUser(tx, tenantId, id) が他テナントを 'not_found' で弾いているため、
+    // where を id だけに落としても全テストが緑のままになる。観測できないことを理由に外さないこと
+    // (弾く側を将来変えたとき、テナント境界を守る条件がこの 1 つだけになる)
     const apply = (db: Db) =>
       db.user.update({ where: { tenantId_id: { tenantId, id } }, data: { role } });
     // admin への昇格は admin を減らさないので「最後の admin」判定は要らない。ただし無効化済みかどうかは見る

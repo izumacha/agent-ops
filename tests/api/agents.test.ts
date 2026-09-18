@@ -10,7 +10,13 @@ import { POST as resumeAgent } from '@/app/api/v1/agents/[agentId]/resume/route'
 import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { decodeCursor, encodeCursor } from '@/data/page';
 import { AgentStatus, Provider } from '@/domain/types';
-import { API_MESSAGES, JSON_BODY_MAX_BYTES, PAGE_CURSOR_MAX_LENGTH } from '@/lib/constants';
+import {
+  API_MESSAGES,
+  JSON_BODY_MAX_BYTES,
+  LONG_TEXT_MAX_LENGTH,
+  PAGE_CURSOR_MAX_LENGTH,
+  SHORT_TEXT_MAX_LENGTH,
+} from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
@@ -245,6 +251,31 @@ describe('リクエスト本文の防御', () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+
+  it('文字列の長さ上限は実際に効く (上限ちょうどは通り、1 文字超えると 422)', async () => {
+    // 上限ちょうどの名前は受け付ける (上限を厳しくしすぎる変更もここで落ちる)
+    const atLimit = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      body: { ...VALID, name: 'a'.repeat(SHORT_TEXT_MAX_LENGTH) },
+    });
+    expect(atLimit.status).toBe(201);
+    // 1 文字超えた名前は 422 (Zod の .max() を外すと DB の列長で 500 になるか、そのまま保存される)
+    const tooLongName = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      body: { ...VALID, name: 'b'.repeat(SHORT_TEXT_MAX_LENGTH + 1) },
+    });
+    expect(tooLongName.status).toBe(422);
+    expect((tooLongName.json as { issues: { path: string }[] }).issues[0].path).toBe('name');
+    // 説明文 (長い方の上限) も同じ
+    const tooLongDescription = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      body: { ...VALID, name: '別の名前', description: 'c'.repeat(LONG_TEXT_MAX_LENGTH + 1) },
+    });
+    expect(tooLongDescription.status).toBe(422);
+    expect((tooLongDescription.json as { issues: { path: string }[] }).issues[0].path).toBe(
+      'description',
+    );
   });
 
   it('本文が上限を超えれば 413', async () => {

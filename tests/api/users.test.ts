@@ -8,7 +8,7 @@ import { PUT as updateRole } from '@/app/api/v1/users/[userId]/role/route';
 import { GET as listTokens, POST as createToken } from '@/app/api/v1/users/[userId]/tokens/route';
 import { DELETE as revokeToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
 import { Role } from '@/domain/types';
-import { API_MESSAGES } from '@/lib/constants';
+import { API_MESSAGES, EMAIL_MAX_LENGTH } from '@/lib/constants';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
 import { call, seedEachTest } from './helpers';
 
@@ -74,6 +74,25 @@ describe('POST /users', () => {
       body: { email: seed.a.users.viewer.email, name: 'x', role: Role.viewer },
     });
     expect(result.status).toBe(201);
+  });
+
+  it('メールの長さ上限は実際に効く (上限ちょうどは通り、1 文字超えると 422)', async () => {
+    // ドメイン部を固定し、上限ちょうど / 1 文字超えの 2 通りを作る
+    const domain = '@example.com';
+    const localPart = (total: number) => 'a'.repeat(total - domain.length);
+    // 上限ちょうどは受け付ける (上限を厳しくしすぎる変更もここで落ちる)
+    const atLimit = await call(createUser, {
+      token: seed.a.tokens.admin,
+      body: { email: localPart(EMAIL_MAX_LENGTH) + domain, name: '境界', role: Role.viewer },
+    });
+    expect(atLimit.status).toBe(201);
+    // 1 文字超えると 422 (Zod の .max() を外すと DB の列長で 500 になるか、そのまま保存される)
+    const tooLong = await call(createUser, {
+      token: seed.a.tokens.admin,
+      body: { email: localPart(EMAIL_MAX_LENGTH + 1) + domain, name: '超過', role: Role.viewer },
+    });
+    expect(tooLong.status).toBe(422);
+    expect((tooLong.json as { issues: { path: string }[] }).issues[0].path).toBe('email');
   });
 
   it('未知の役割は 422', async () => {
@@ -271,6 +290,20 @@ describe('DELETE /users/{userId} (無効化)', () => {
       body: { name: 'x' },
     });
     expect(result.status).toBe(409);
+  });
+
+  it('他テナントのユーザーは無効化できない (404。相手は有効なまま)', async () => {
+    // テナント A の admin が、テナント B の viewer を無効化しようとする
+    const result = await call(disableUser, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { userId: seed.b.users.viewer.id },
+    });
+    // 存在を漏らさないため 403 ではなく 404 (ADR-0002)
+    expect(result.status).toBe(404);
+    // 相手側は有効なまま (状態が変わっていないことまで見ないと、404 を返しつつ書き換える実装を見逃す)
+    expect(seed.store.users.get(seed.b.users.viewer.id)!.disabledAt).toBeNull();
+    expect((await call(getMe, { token: seed.b.tokens.viewer })).status).toBe(200);
   });
 
   it('無効化は冪等 (2 回目も 200 で日時は変わらない)', async () => {

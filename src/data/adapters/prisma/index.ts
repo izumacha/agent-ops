@@ -175,9 +175,8 @@ class PrismaUsers implements UsersPort {
   private async mutateGuardingLastAdmin(
     tenantId: string,
     id: string,
-    // 対象を admin から外す操作か (true なら「最後の admin」判定を行う)
-    removesAdmin: (target: UserRecord) => boolean,
-    // 実際の更新 (トランザクション内で呼ぶ)
+    // 実際の更新 (トランザクション内で呼ぶ)。呼び出し側はいずれも「対象を admin から外す」操作
+    // (admin への昇格は判定が要らないので updateRole がこの関数を通さない)
     apply: (tx: Db, target: UserRecord) => Promise<UserRecord>,
   ): Promise<UserMutationResult> {
     // 1 トランザクションで判定と更新を行う
@@ -192,8 +191,8 @@ class PrismaUsers implements UsersPort {
       // 対象 (テナント境界内)
       const target = await tx.user.findUnique({ where: { tenantId_id: { tenantId, id } } });
       if (!target) return { status: 'not_found' };
-      // 対象が有効な admin で、操作で admin から外れるなら、他に有効な admin が居ることを要求する
-      if (target.role === Role.admin && target.disabledAt === null && removesAdmin(target)) {
+      // 対象が有効な admin なら (この操作で admin から外れるので)、他に有効な admin が居ることを要求する
+      if (target.role === Role.admin && target.disabledAt === null) {
         // 対象以外の有効な admin の人数
         const others = await tx.user.count({
           where: { tenantId, role: Role.admin, disabledAt: null, id: { not: id } },
@@ -228,7 +227,7 @@ class PrismaUsers implements UsersPort {
       return user ? { status: 'ok', user } : { status: 'not_found' };
     }
     // admin 以外へ変えるときは「最後の admin」判定と同じトランザクションで更新する
-    return this.mutateGuardingLastAdmin(tenantId, id, () => true, apply);
+    return this.mutateGuardingLastAdmin(tenantId, id, apply);
   }
 
   // 無効化 (最後の有効な admin は 'last_admin'。既に無効なら日時はそのまま)
@@ -237,7 +236,6 @@ class PrismaUsers implements UsersPort {
     return this.mutateGuardingLastAdmin(
       tenantId,
       id,
-      () => true,
       // 既に無効なら更新せずそのまま返す (最初の日時を保つ)
       (tx, target) =>
         target.disabledAt !== null

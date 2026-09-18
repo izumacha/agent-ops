@@ -2,8 +2,9 @@
 // 各ルートは route(async ({ principal, repos, params, request }) => Response) の形で書く
 import { DuplicateError, getRepos, type Repositories } from '@/data';
 import { isResourceId } from '@/domain/resource-id';
-import { API_MESSAGES, NO_STORE_CACHE_CONTROL } from '@/lib/constants';
+import { API_MESSAGES } from '@/lib/constants';
 import { authenticate, type Principal } from './auth';
+import { withPrivateCacheHeaders } from './cache-headers';
 import { ApiError, errorResponse, notFoundError, validationError } from './errors';
 import { HTTP_STATUS } from './http-status';
 
@@ -89,27 +90,6 @@ function assertResourceIdParams(params: unknown): void {
   for (const value of Object.values(params)) {
     if (!isResourceId(value)) throw notFoundError();
   }
-}
-
-/**
- * 応答に「保存するな・Authorization で分けろ」を付ける。全ルートがテナント固有の内容を返すので、
- * URL だけを鍵にするキャッシュ (CDN・リバースプロキシ) が別テナントへ配ってしまうのを防ぐ。
- * RFC 9111 は Authorization 付きの要求を既定で共有キャッシュに保存させないが、`/api/*` を一律にキャッシュする
- * 設定はよくあるので、アプリ側でも明示する (テナント境界をアプリの where 条件だけに頼らない)
- */
-function withPrivateCacheHeaders(response: Response): Response {
-  // 既存のヘッダを引き継ぐ
-  const headers = new Headers(response.headers);
-  // 保存させない
-  headers.set('Cache-Control', NO_STORE_CACHE_CONTROL);
-  // 万一保存されても資格情報ごとに分ける
-  headers.append('Vary', 'Authorization');
-  // 本文・状態はそのままで作り直す (204 の null 本文もそのまま通る)
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
 }
 
 // 例外を HTTP 応答へ写す

@@ -18,6 +18,7 @@
 // このアプリの本文上限 `JSON_BODY_MAX_BYTES` (64 KiB) はその 1/160 なので、正規の要求も
 // 413 を返す経路も影響を受けない。**上限を既定より大きくするときはここを見直すこと。**
 import { NextResponse, type NextRequest } from 'next/server';
+import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { errorResponse } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES } from '@/lib/constants';
@@ -40,7 +41,9 @@ export function proxy(request: NextRequest): Response {
   // 読めないパスは「そんな資源は無い」として 404 で返す (500 にしない・本体まで通さない)。
   // 応答の形は API のエラー契約に揃える (この配備が持つ経路はほぼ API で、形が割れる方が扱いにくい)
   if (!isDecodablePath(request.url)) {
-    return errorResponse(HTTP_STATUS.NOT_FOUND, API_MESSAGES.notFound);
+    // キャッシュ制御も route() の応答と同じ規律に揃える (この 1 経路だけ外れていると、
+    // 将来 proxy が分岐を増やしたときに気付けない)
+    return withPrivateCacheHeaders(errorResponse(HTTP_STATUS.NOT_FOUND, API_MESSAGES.notFound));
   }
   // それ以外はそのまま先へ渡す
   return NextResponse.next();

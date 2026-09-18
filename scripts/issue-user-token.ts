@@ -12,7 +12,7 @@ import { parseDecimalInteger } from '../src/domain/decimal-integer';
 // メールの正規化 (API と同じ規則で検索する)
 import { normalizeEmail } from '../src/domain/email';
 import { createPrismaClient } from '../src/lib/prisma-client';
-// 既定の用途名と有効期間 (API と同じ値を使う)
+// CLI の既定の用途名と、API と同じ既定の有効期間
 import { USER_TOKEN_CLI_NAME, USER_TOKEN_DEFAULT_TTL_DAYS } from '../src/lib/constants';
 // 既定テナントの id (seed と共有する唯一の定義)
 import { DEFAULT_TENANT_ID } from '../src/domain/tenant';

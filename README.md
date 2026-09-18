@@ -48,7 +48,7 @@ npm run typecheck    # tsc --noEmit
 npm run test         # Vitest (tests/**/*.test.ts。API テストは memory アダプタで DB 不要)
 npm run test:contract # prisma アダプタの契約テスト (RUN_PRISMA_CONTRACT=1 + 専用 DB の DATABASE_URL が必要。全テーブルを TRUNCATE する)
 npm run build        # 本番ビルド (standalone 出力)
-npm run gate:step0   # Step0 の受け入れ基準を一括検査 (gen / db:generate / lint / typecheck / test / OpenAPI / ADR)
+npm run gate:step0   # Step0 の受け入れ基準を一括検査 (gen / db:generate / lint / format:check / typecheck / test / OpenAPI / ADR)
 npm run gate:step1   # Step1 の受け入れ基準を一括検査 (上記 + テスト 60 件以上 / RBAC 3×3 の 403 / npm audit high 0)
 ```
 

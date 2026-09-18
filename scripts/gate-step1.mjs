@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Step1 の受け入れ基準を機械的に検査するゲート (docs/roadmap.md)。赤なら次 Step のブランチを切らない。
-//   1. Step0 の項目 (gen / db:generate / lint / typecheck) が通る
+//   1. Step0 の項目 (gen / db:generate / lint / format:check / typecheck) が通る
 //   2. ユニット + API テストが 60 件以上 pass (失敗 0)
 //   3. 権限違反テストが役割 3 × 操作 3 の全パターン存在し、すべて pass (tests/api/rbac-matrix.test.ts)
 //   4. `npm audit --audit-level=high` が high 0

@@ -48,6 +48,9 @@ export const pageQuerySchema = z.object({
 });
 
 // URL のクエリから指定したキーを取り出す (無いキーは undefined のまま渡して default / optional に任せる)
+// クエリはスキーマにあるキーだけを読む (未知のクエリは無視する。本文と違って中間装置やブラウザが
+// 追跡用の値を足すことがあり、そこで 422 にすると正規の要求が通らなくなるため。本文の未知キーは
+// z.strictObject で 422 にしている — 無視と拒否の使い分けはこの違いによる)
 function pickQuery(url: URL, keys: readonly string[]): Record<string, string | undefined> {
   // キーごとに値を取り出す
   return Object.fromEntries(keys.map((key) => [key, url.searchParams.get(key) ?? undefined]));

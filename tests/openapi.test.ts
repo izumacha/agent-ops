@@ -17,6 +17,12 @@ import {
   USER_TOKEN_MAX_TTL_DAYS,
 } from '@/lib/constants';
 import { MICRO_USD_MAX } from '@/domain/money';
+import type { ZodObject, ZodTypeAny } from 'zod';
+import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
+import { apiKeyCreateSchema } from '@/lib/validations/api-key';
+import { tenantCreateSchema } from '@/lib/validations/tenant';
+import { userTokenCreateSchema } from '@/lib/validations/user-token';
+import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -29,7 +35,12 @@ type Operation = {
   tags?: string[];
   responses?: Record<string, unknown>;
   security?: unknown[];
-  requestBody?: unknown;
+  requestBody?: {
+    content?: Record<
+      string,
+      { schema?: { $ref?: string; properties?: Record<string, Record<string, unknown>> } }
+    >;
+  };
 };
 type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
 type Spec = {
@@ -45,6 +56,40 @@ type Spec = {
   };
 };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
+
+// 契約の本文スキーマ → 実装の Zod スキーマ。表に載っていない本文が契約に増えれば下のテストが落ちるので、
+// 「対応を書き忘れたまま契約と実装が食い違う」ことが起きない (キーは $ref の名前、インラインは "METHOD /path")
+const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
+  TenantCreate: tenantCreateSchema,
+  UserCreate: userCreateSchema,
+  UserTokenCreate: userTokenCreateSchema,
+  AgentCreate: agentCreateSchema,
+  AgentUpdate: agentUpdateSchema,
+  ApiKeyCreate: apiKeyCreateSchema,
+  'PUT /users/{userId}/role': userRoleSchema,
+};
+
+// 契約に現れる本文スキーマを (キー, 定義) の並びで集める ($ref は components から解決する)
+function collectRequestBodies(): {
+  key: string;
+  schema: { properties?: Record<string, Record<string, unknown>>; additionalProperties?: unknown };
+}[] {
+  // パス × メソッドを走査する
+  return Object.entries(spec.paths).flatMap(([path, item]) =>
+    HTTP_METHODS.flatMap((method) => {
+      // JSON の本文スキーマ
+      const declared = item[method]?.requestBody?.content?.['application/json']?.schema;
+      if (!declared) return [];
+      // $ref なら components から引き、名前をキーにする
+      if (declared.$ref) {
+        const name = declared.$ref.split('/').pop() as string;
+        return [{ key: name, schema: spec.components.schemas[name] }];
+      }
+      // インライン定義はメソッドとパスをキーにする
+      return [{ key: `${method.toUpperCase()} ${path}`, schema: declared }];
+    }),
+  );
+}
 
 // 全オペレーションを (パス, メソッド, 定義) の並びに平坦化する
 const operations = Object.entries(spec.paths).flatMap(([path, item]) =>
@@ -189,24 +234,41 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       expect(description, `${schemaName}.budgetMicroUsd の上限`).toContain(
         MICRO_USD_MAX.toString(),
       );
+      // 「19 桁まで」の桁数も定数から導く (散文の片方だけが古くなるのを防ぐ)
+      expect(description, `${schemaName}.budgetMicroUsd の桁数`).toContain(
+        `${MICRO_USD_MAX.toString().length} 桁`,
+      );
     }
   });
 
-  // 本文のスキーマは未知キーを拒否する (Zod 側は z.strictObject。契約だけ緩いと「契約上は妥当な本文が 422」になる)
-  it('本文スキーマは additionalProperties を閉じている', () => {
-    // 本文として使うスキーマ
-    for (const schemaName of [
-      'TenantCreate',
-      'UserCreate',
-      'UserTokenCreate',
-      'AgentCreate',
-      'AgentUpdate',
-      'ApiKeyCreate',
-    ]) {
-      expect(
-        spec.components.schemas[schemaName]?.additionalProperties,
-        `${schemaName} が未知キーを許している`,
-      ).toBe(false);
+  // 本文は契約と Zod の両方で未知キーを閉じ、受け付ける項目も一致させる (どちらか片方だけが厳しいと
+  // 「契約上は妥当な本文が 422」/「契約が禁じた本文が 200」になる。走査は契約側から導くので、
+  // インラインの本文や将来足したパスも自動で対象に入る)
+  it('本文スキーマは契約と Zod で項目が一致し、両方が未知キーを閉じている', () => {
+    // 契約に現れる本文を全部集める
+    const bodies = collectRequestBodies();
+    // 1 つも集められなければ走査が壊れている (fail-closed)
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const { key, schema } of bodies) {
+      // 契約側が未知キーを閉じていること
+      expect(schema?.additionalProperties, `${key} が未知キーを許している`).toBe(false);
+      // 対応する Zod スキーマが表にあること (契約に本文が増えたら必ずここで落ちる)
+      const zodSchema = BODY_SCHEMAS[key];
+      expect(zodSchema, `${key} に対応する Zod スキーマが表に無い`).toBeDefined();
+      if (!zodSchema) continue;
+      // 受け付ける項目が一致すること
+      expect(Object.keys(zodSchema.shape).sort(), `${key} の項目`).toEqual(
+        Object.keys(schema.properties ?? {}).sort(),
+      );
+      // Zod 側も未知キーを拒否すること (z.object へ戻すとここで落ちる)
+      const parsed = zodSchema.safeParse({ __unknown__: 1 });
+      expect(parsed.success, `${key} は未知キーを受け入れてしまう`).toBe(false);
+      if (!parsed.success) {
+        expect(
+          parsed.error.issues.some((issue) => issue.code === 'unrecognized_keys'),
+          `${key} が未知キーを剥がしている`,
+        ).toBe(true);
+      }
     }
   });
 

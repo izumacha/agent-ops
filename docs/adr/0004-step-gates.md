@@ -21,5 +21,5 @@
 
 ## 結果
 
-- Step0 のゲートは `gen` / `db:generate` / `lint` / `typecheck` / `test` / OpenAPI 定義の存在 / ADR 3 件以上を検査する。
+- Step0 のゲートは `gen` / `db:generate` / `lint` / `format:check` / `typecheck` / `test` / OpenAPI 定義の存在 / ADR 3 件以上を検査する（`format:check` は定数の削除などで崩れた書式を lint / typecheck / test のどれも拾えなかったため後から追加した）。
 - 性能系のゲート（Step2 以降）は CI ランナーの性能差でぶれるため、しきい値と計測方法を各 Step の ADR で決めてから実装する。

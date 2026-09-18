@@ -72,6 +72,15 @@ describe('POST /agents', () => {
     }
   });
 
+  it('未知のキーを含む本文は 422 (status は stop / resume でしか変えられない)', async () => {
+    // 登録の本文に API が受け付けないキーを混ぜる
+    const created = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      body: { ...VALID, status: AgentStatus.stopped },
+    });
+    expect(created.status).toBe(422);
+  });
+
   it('空白だけの名前は 422 で、前後の空白は除いて保存する', async () => {
     // 空白だけ
     expect(
@@ -398,12 +407,6 @@ describe('PATCH /agents/{agentId}', () => {
   });
 
   it('未知のキーを含む本文は 422 (黙って剥がして無視しない)', async () => {
-    // 登録: status は API では指定できない (stop / resume で変える)
-    const created = await call(createAgent, {
-      token: seed.a.tokens.operator,
-      body: { ...VALID, status: AgentStatus.stopped },
-    });
-    expect(created.status).toBe(422);
     // 更新: provider は変えられない
     const updated = await call(updateAgent, {
       token: seed.a.tokens.operator,

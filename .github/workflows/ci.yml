@@ -1,4 +1,4 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step1`: gen / db:generate / lint / typecheck / テスト 60 件以上 /
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step1`: gen / db:generate / lint / format:check / typecheck / テスト 60 件以上 /
 # RBAC 3×3 / npm audit high 0) を検査し、あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・
 # prisma アダプタの契約テスト・本番ビルド・Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
 name: CI

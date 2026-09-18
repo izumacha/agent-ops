@@ -22,6 +22,20 @@ import { call, seedEachTest } from './helpers';
 // seed (各テストで作り直し、後始末も helpers が行う)
 const seed = seedEachTest();
 
+// ログに渡された引数を「中身が見える形」で 1 本の文字列にする。
+// JSON.stringify だけだと Error は {} になり、例外そのものを引数へ足す変更 (message ごと出る) が
+// 素通りする — PII をログへ出さないための選別が丸ごと無意味になるのに、全件緑のまま通ってしまう
+function renderLoggedArgs(args: unknown[]): string {
+  // 引数を 1 つずつ文字列にする
+  return args
+    .map((arg) =>
+      arg instanceof Error
+        ? `${arg.name}: ${arg.message}\n${arg.stack ?? ''}`
+        : JSON.stringify(arg),
+    )
+    .join(' ');
+}
+
 // 有効な登録本文
 const VALID = { name: '要約ボット', provider: Provider.anthropic, model: 'claude-sonnet-4-6' };
 
@@ -257,7 +271,7 @@ describe('リクエスト本文の防御', () => {
       expect(other.json).toEqual({ status: 500, message: API_MESSAGES.internal });
       expect(errorSpy).toHaveBeenCalledTimes(1);
       // ログには種類と発生箇所だけが残り、message (利用者の入力) は 1 文字も残らない
-      const logged = JSON.stringify(errorSpy.mock.calls[0]);
+      const logged = renderLoggedArgs(errorSpy.mock.calls[0]);
       expect(logged).toContain('"name":"Error"');
       // 本物のフレーム (このテストの pull 関数) は残る
       expect(logged).toMatch(/at (?:Object\.)?pull /);
@@ -287,7 +301,7 @@ describe('リクエスト本文の防御', () => {
       const result = await call(listAgents, { token: seed.a.tokens.viewer });
       expect(result.status).toBe(500);
       // ログの中身
-      const logged = JSON.stringify(errorSpy.mock.calls[0]);
+      const logged = renderLoggedArgs(errorSpy.mock.calls[0]);
       // 本物のフレームは残る (選別を厳しくしすぎる変更もここで落ちる)
       expect(logged).toContain('PrismaAgents.list');
       // 偽のフレーム (利用者の入力由来) は 1 文字も残らない

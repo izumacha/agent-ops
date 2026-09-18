@@ -40,6 +40,8 @@ export const USER_TOKEN_MAX_TTL_DAYS = 365;
 export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
 // テナント作成時に最初の admin へ発行するログイントークンの用途名 (UserToken.name に保存され一覧に出る)
 export const USER_TOKEN_BOOTSTRAP_NAME = '初期管理者トークン';
+// 開発用 CLI (scripts/issue-user-token.ts) が発行するトークンの既定の用途名 (--name 省略時)
+export const USER_TOKEN_CLI_NAME = 'CLI';
 // JSON 本文の上限 (バイト)。Step1 の入力は短い文字列だけなので小さく保つ (§9 リクエストサイズ上限)
 export const JSON_BODY_MAX_BYTES = 64 * 1024;
 

@@ -13,7 +13,11 @@ import { parseDecimalInteger } from '../src/domain/decimal-integer';
 import { normalizeEmail } from '../src/domain/email';
 import { createPrismaClient } from '../src/lib/prisma-client';
 // 既定の有効期間
-import { DEFAULT_TENANT_ID, USER_TOKEN_DEFAULT_TTL_DAYS } from '../src/lib/constants';
+import {
+  DEFAULT_TENANT_ID,
+  USER_TOKEN_CLI_NAME,
+  USER_TOKEN_DEFAULT_TTL_DAYS,
+} from '../src/lib/constants';
 // 用途名と有効期間の規則 (API の POST /users/{id}/tokens と同じスキーマで検証し、規則を書き写さない)
 import { userTokenCreateSchema } from '../src/lib/validations/user-token';
 // トークン生成
@@ -26,7 +30,7 @@ async function main(): Promise<void> {
     options: {
       email: { type: 'string' },
       tenant: { type: 'string', default: DEFAULT_TENANT_ID },
-      name: { type: 'string', default: 'CLI' },
+      name: { type: 'string', default: USER_TOKEN_CLI_NAME },
       days: { type: 'string', default: String(USER_TOKEN_DEFAULT_TTL_DAYS) },
     },
   });

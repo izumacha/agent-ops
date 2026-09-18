@@ -47,6 +47,31 @@ function isPrismaError(error: unknown, code: string): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === code;
 }
 
+// ApiKey → Agent の複合 FK の制約名 (schema.prisma の既定命名。prisma/migrations の init が作る)
+const API_KEY_AGENT_FK = 'ApiKey_tenantId_agentId_fkey';
+
+// 外部キー違反のうち、指定した制約の違反か (どの FK でも同じ原因に翻訳すると、テナント行が消えたときの
+// Tenant 側 FK の違反まで「エージェントが見つからない」として返ってしまう)
+function isForeignKeyViolationOn(error: unknown, constraint: string): boolean {
+  // まず外部キー違反であること
+  if (!isPrismaError(error, FOREIGN_KEY_VIOLATION)) return false;
+  // PostgreSQL では meta.constraint に制約名が入る (末尾に " (index)" が付く版もあるので含有で見る)
+  const named = (error as Prisma.PrismaClientKnownRequestError).meta?.constraint;
+  return typeof named === 'string' && named.includes(constraint);
+}
+
+// 失効の共通形 (UserToken / ApiKey): まだ有効な行だけに失効日時を入れ (条件付き更新なので存在確認との間の窓が無い)、
+// 現在の行を返す (境界外なら null。既に失効済みなら日時はそのまま)
+async function revokeThenReload<T>(
+  revoke: (revokedAt: Date) => Promise<unknown>,
+  reload: () => Promise<T | null>,
+): Promise<T | null> {
+  // 条件付きで失効日時を入れる
+  await revoke(new Date());
+  // 現在の行を読み直す
+  return reload();
+}
+
 // 一意制約違反なら DuplicateError へ翻訳して投げ、それ以外はそのまま投げ直す
 function rethrowDuplicate(error: unknown, field: string): never {
   // 一意制約違反はデータ層の型へ翻訳する
@@ -295,13 +320,15 @@ class PrismaUserTokens implements UserTokensPort {
 
   // 失効 (見つからなければ null。既に失効済みなら日時はそのまま)
   async revoke(tenantId: string, userId: string, id: string): Promise<UserTokenRecord | null> {
-    // まだ有効な行だけに失効日時を入れる (条件付き更新なので、存在確認との間の窓が無い)
-    await this.db.userToken.updateMany({
-      where: { id, tenantId, userId, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    // 現在の行を返す (境界外なら null)
-    return this.db.userToken.findFirst({ where: { id, tenantId, userId } });
+    // 共通の失効の形 (条件付き更新 → 読み直し)
+    return revokeThenReload(
+      (revokedAt) =>
+        this.db.userToken.updateMany({
+          where: { id, tenantId, userId, revokedAt: null },
+          data: { revokedAt },
+        }),
+      () => this.db.userToken.findFirst({ where: { id, tenantId, userId } }),
+    );
   }
 }
 
@@ -393,21 +420,23 @@ class PrismaApiKeys implements ApiKeysPort {
     try {
       return await this.db.apiKey.create({ data: input });
     } catch (error) {
-      // 外部キー違反 = エージェントが同テナントに居ない
-      if (isPrismaError(error, FOREIGN_KEY_VIOLATION)) return null;
+      // その FK の違反だけ = エージェントが同テナントに居ない (Tenant 側 FK の違反は内部エラーのまま上へ)
+      if (isForeignKeyViolationOn(error, API_KEY_AGENT_FK)) return null;
       throw error;
     }
   }
 
   // 失効 (見つからなければ null。既に失効済みなら日時はそのまま)
   async revoke(tenantId: string, id: string): Promise<ApiKeyRecord | null> {
-    // まだ有効な行だけに失効日時を入れる (条件付き更新なので、存在確認との間の窓が無い)
-    await this.db.apiKey.updateMany({
-      where: { id, tenantId, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    // 現在の行を返す (境界外なら null)
-    return this.findById(tenantId, id);
+    // 共通の失効の形 (条件付き更新 → 読み直し)
+    return revokeThenReload(
+      (revokedAt) =>
+        this.db.apiKey.updateMany({
+          where: { id, tenantId, revokedAt: null },
+          data: { revokedAt },
+        }),
+      () => this.findById(tenantId, id),
+    );
   }
 }
 

@@ -26,6 +26,9 @@ export interface HandlerInput<P> {
 // ハンドラ本体の型
 export type Handler<P> = (input: HandlerInput<P>) => Promise<Response>;
 
+// route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
+export const ROUTE_HANDLER_BRAND = Symbol.for('agent-ops.routeHandler');
+
 // V8 のスタックフレームの形 (末尾が「:行:列)」「:行:列」「<anonymous>)」「native)」のいずれか)
 const STACK_FRAME_PATTERN = /^at .*(?::\d+:\d+\)?|<anonymous>\)?|native\)?)$/;
 
@@ -110,8 +113,8 @@ function toErrorResponse(error: unknown): Response {
  * 認証 (401) はどのルートでも本体より前に行い、認可 (403) は本体の先頭で guard.ts を呼ぶ
  */
 export function route<P = Record<string, never>>(handler: Handler<P>) {
-  // Next.js が呼ぶ形の関数を返す
-  return async (request: Request, context: RouteContext<P>): Promise<Response> => {
+  // Next.js が呼ぶ形の関数
+  const wrapped = async (request: Request, context: RouteContext<P>): Promise<Response> => {
     // 例外はすべて HTTP 応答へ写す
     try {
       // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
@@ -127,6 +130,10 @@ export function route<P = Record<string, never>>(handler: Handler<P>) {
       return withPrivateCacheHeaders(toErrorResponse(error));
     }
   };
+  // 「route() が包んだ」という印を付ける (列挙されない定義なので DTO や JSON には現れない)
+  Object.defineProperty(wrapped, ROUTE_HANDLER_BRAND, { value: true });
+  // 包んだ関数を返す
+  return wrapped;
 }
 
 // 204 No Content

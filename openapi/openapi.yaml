@@ -914,7 +914,8 @@ components:
           type: string
     Agent:
       type: object
-      required: [id, tenantId, name, provider, model, status, createdAt]
+      required:
+        [id, tenantId, name, description, provider, model, status, budgetMicroUsd, createdAt]
       properties:
         id:
           type: string
@@ -995,7 +996,7 @@ components:
           type: string
     ApiKey:
       type: object
-      required: [id, tenantId, prefix, name, createdAt]
+      required: [id, tenantId, agentId, prefix, name, createdAt, revokedAt]
       properties:
         id:
           type: string

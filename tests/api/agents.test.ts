@@ -8,6 +8,7 @@ import {
 } from '@/app/api/v1/agents/[agentId]/route';
 import { POST as resumeAgent } from '@/app/api/v1/agents/[agentId]/resume/route';
 import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
+import { decodeCursor, encodeCursor } from '@/data/page';
 import { AgentStatus, Provider } from '@/domain/types';
 import { API_MESSAGES, JSON_BODY_MAX_BYTES, PAGE_CURSOR_MAX_LENGTH } from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
@@ -371,11 +372,15 @@ describe('GET /agents と /agents/{agentId}', () => {
   });
 
   it('復号できる形でも上限より長い cursor は 422 (復号前に長さで弾く)', async () => {
-    // 形は正しい (ミリ秒:id) が、id を伸ばして上限を超えるカーソルを作る
-    const longId = 'a'.repeat(PAGE_CURSOR_MAX_LENGTH);
-    const cursor = Buffer.from(`${Date.now()}:${longId}`).toString('base64url');
+    // 正しい位置を符号化したカーソル (これ単体なら復号できる)
+    const valid = encodeCursor({ createdAt: new Date(), id: seed.a.agent.id });
+    // base64 の復号は英数字・- ・ _ 以外を読み飛ばすので、前に '!' を並べても復号結果は変わらない。
+    // 「長さの検査を外すと通ってしまう」形 = 形の検査では落ちないカーソルを作る
+    const cursor = '!'.repeat(PAGE_CURSOR_MAX_LENGTH) + valid;
     // 上限より長いこと (テストの前提)
     expect(cursor.length).toBeGreaterThan(PAGE_CURSOR_MAX_LENGTH);
+    // 形の検査では落ちないこと (この前提が崩れると、長さの検査を消しても 422 のままになり検査が空回りする)
+    expect(decodeCursor(cursor)).not.toBeNull();
     const result = await call(listAgents, {
       token: seed.a.tokens.viewer,
       query: `cursor=${cursor}`,

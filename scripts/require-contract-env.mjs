@@ -3,22 +3,11 @@
 // CI のステップから環境変数が落ちても気付けない fail-open なので、ここで先に落とす (§9 fail-closed)。
 // 全体テスト (`npm run test`) では skip のままでよい — 生成物や DB が無い環境でも動くことが狙いだから
 
+// 接続先が専用 DB かの判定 (契約テスト本体と同じ規則を 1 か所から読む)
+import { contractDatabaseProblem } from './lib/contract-database.mjs';
+
 // 契約テストを走らせるための環境変数 (CLAUDE.md §2 と CI の contract ステップが同じ値を使う)
 const FLAG = 'RUN_PRISMA_CONTRACT';
-// 契約テスト専用 DB の名前に要求する接尾辞 (CI と CLAUDE.md §2 が使う agent_ops_contract に合わせる)
-const REQUIRED_DATABASE_SUFFIX = '_contract';
-
-// 接続文字列からデータベース名を取り出す (取り出せなければ null)
-function databaseNameOf(url) {
-  // URL として解釈できなければ判定できない
-  try {
-    // パス先頭の / を除いた部分がデータベース名
-    return new URL(url).pathname.replace(/^\//, '') || null;
-  } catch {
-    // 解釈できない形は判定できない
-    return null;
-  }
-}
 
 // 不足している設定を集める
 const missing = [];
@@ -36,15 +25,11 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// 接続先のデータベース名
-const database = databaseNameOf(process.env.DATABASE_URL);
 // 専用 DB の名前でなければ落とす (開発 DB を指したまま走ると seed 済みのデータを TRUNCATE で消す。
 // 「指さないこと」と書くだけでは、開発用の DATABASE_URL を export している人が必ず踏む)
-if (database === null || !database.endsWith(REQUIRED_DATABASE_SUFFIX)) {
-  console.error(
-    `[test:contract] DATABASE_URL のデータベース名は "${REQUIRED_DATABASE_SUFFIX}" で終わる専用 DB にしてください` +
-      ` (今の指定: ${database ?? '解釈できない形'})`,
-  );
+const problem = contractDatabaseProblem(process.env.DATABASE_URL);
+if (problem !== null) {
+  console.error(`[test:contract] ${problem}`);
   console.error(
     '[test:contract] 全テーブルを TRUNCATE するため、開発 DB を指すと seed 済みデータが消えます',
   );

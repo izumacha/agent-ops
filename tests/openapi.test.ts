@@ -51,7 +51,11 @@ type Spec = {
     parameters: Record<string, { schema: Record<string, unknown> }>;
     schemas: Record<
       string,
-      { properties?: Record<string, Record<string, unknown>>; additionalProperties?: unknown }
+      {
+        properties?: Record<string, Record<string, unknown>>;
+        additionalProperties?: unknown;
+        required?: string[];
+      }
     >;
   };
 };
@@ -270,6 +274,35 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
         ).toBe(true);
       }
     }
+  });
+
+  // 応答スキーマの「null を取りうるプロパティ」は、値が無いときも null として必ず応答に載る
+  // (serializers.ts が全プロパティを組み立てる)。required から漏れると生成される型で省略可能になり、
+  // 「未設定 (null)」と「そもそも欠落」を区別しない書き方が型検査を通ってしまう
+  it('応答スキーマの null を取りうるプロパティは required に入っている', () => {
+    // 本文 (リクエスト) のスキーマ名。PATCH の「省略＝変更しない」は required にできないので対象外にする
+    const bodyNames = new Set(collectRequestBodies().map(({ key }) => key));
+    // 実際に見たプロパティの数 (走査が壊れて 0 件になったら落とす = fail-closed)
+    let checked = 0;
+    // components.schemas を走査する
+    for (const [name, schema] of Object.entries(spec.components.schemas)) {
+      // 本文スキーマは対象外
+      if (bodyNames.has(name)) continue;
+      // 必須と宣言されたプロパティ名
+      const required = new Set(schema.required ?? []);
+      for (const [property, definition] of Object.entries(schema.properties ?? {})) {
+        // 型の宣言 (null を許すときだけ配列で書いている)
+        const type = (definition as { type?: unknown }).type;
+        // null を取らないプロパティは対象外
+        if (!Array.isArray(type) || !type.includes('null')) continue;
+        // 見た数を数える
+        checked += 1;
+        // required に入っていること
+        expect(required.has(property), `${name}.${property} が required に無い`).toBe(true);
+      }
+    }
+    // 1 件も見ていなければ走査が壊れている
+    expect(checked).toBeGreaterThan(0);
   });
 
   // 上の表に載せ忘れた maxLength が野放しにならないようにする (包含リストだけだと、表に無いプロパティは

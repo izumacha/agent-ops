@@ -115,8 +115,9 @@ type LockedUser = { status: 'ok' } | { status: 'not_found' } | { status: 'disabl
  * 生 SQL なので写しを持たない — ロック句を片方だけ落とす変更は型検査もテストも素通りするため
  */
 async function lockActiveUser(
-  // トランザクション内のクライアントだけを受ける (通常のクライアントで呼ぶと文の終わりでロックが解けて
-  // 無効化との競合を防げないため、型で書けなくする)
+  // トランザクション内で呼ぶこと。$transaction の外で呼ぶと文の終わりでロックが解け、無効化との競合を防げない。
+  // 型はその前提を書き残すためのもので、強制はできない (TransactionClient は PrismaClient から一部を
+  // 取り除いた上位の型なので、通常のクライアントもそのまま渡せてしまう)
   tx: Prisma.TransactionClient,
   tenantId: string,
   id: string,
@@ -230,11 +231,19 @@ class PrismaUsers implements UsersPort {
         { id: string }[]
       >`SELECT id FROM "Tenant" WHERE id = ${tenantId} FOR NO KEY UPDATE`;
       if (locked.length === 0) return { status: 'not_found' };
-      // 対象 (テナント境界内)
-      const target = await tx.user.findUnique({ where: { tenantId_id: { tenantId, id } } });
-      if (!target) return { status: 'not_found' };
+      // 対象の行もロックしてから読む。テナント行のロックだけでは足りない — admin への昇格 (updateRole) は
+      // テナント行を取らず対象の行だけを掴むので、ここでロック無しに読むと「昇格の直前の姿」で
+      // 役割と無効化を判定したまま更新してしまう (判定と更新の間に役割が変わる)。
+      // 先に掴んでおけば、昇格中なら commit を待ってから読み直すので、判定に使った姿はコミットまで変わらない
+      const lockedTarget = await lockActiveUser(tx, tenantId, id);
+      // 同テナントに居ない
+      if (lockedTarget.status === 'not_found') return { status: 'not_found' };
       // 無効化済みユーザーの役割変更は拒否する (無効化そのものは冪等にしたいので、判定は呼び出し側が渡す)
-      if (rejectDisabled && target.disabledAt !== null) return { status: 'disabled' };
+      if (rejectDisabled && lockedTarget.status === 'disabled') return { status: 'disabled' };
+      // 対象の中身 (ロック済みなので、この読み取りはコミットまで変わらない)
+      const target = await tx.user.findUnique({ where: { tenantId_id: { tenantId, id } } });
+      // ロックできた行なので必ず見つかる (null を除いて型を絞るためだけの分岐)
+      if (!target) return { status: 'not_found' };
       // 対象が有効な admin なら (この操作で admin から外れるので)、他に有効な admin が居ることを要求する
       if (target.role === Role.admin && target.disabledAt === null) {
         // 対象以外の有効な admin の人数

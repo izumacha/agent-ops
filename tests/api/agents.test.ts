@@ -220,6 +220,9 @@ describe('リクエスト本文の防御', () => {
         headers: { 'content-type': 'application/json' },
       });
       expect(other.status).toBe(500);
+      // 応答の本文は定型の日本語メッセージだけ (内部詳細・利用者の入力を外へ返さない。§9)。
+      // ログの検査だけだと、応答へ String(error) を載せる変更が全件緑のまま通る
+      expect(other.json).toEqual({ status: 500, message: API_MESSAGES.internal });
       expect(errorSpy).toHaveBeenCalledTimes(1);
       // ログには種類と発生箇所だけが残り、message (利用者の入力) は 1 文字も残らない
       const logged = JSON.stringify(errorSpy.mock.calls[0]);

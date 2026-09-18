@@ -16,6 +16,12 @@ import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mj
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
 
+// ロックの検査で「待たされている」と判定するまでの待ち時間 (ミリ秒)。ロックが無ければ降格は
+// 数ミリ秒で終わるので、これだけ待って終わらなければロック待ちだと判断できる
+const LOCK_TEST_WAIT_MS = 500;
+// ロックを保持する側のトランザクション上限 (ミリ秒)。待ち時間より十分長くする
+const LOCK_TEST_TRANSACTION_TIMEOUT_MS = 10_000;
+
 // テストで発行するトークンの有効期間 (日)
 const TOKEN_TTL_DAYS = 1;
 
@@ -154,6 +160,10 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       keyHash: 'hash-list-a',
       name: 'A のキー',
     });
+    // id での取得もテナント境界の内側だけ (他テナントの id を渡しても null)。
+    // ここが漏れると GET /users/{userId}/tokens の存在確認が通り、他テナントのユーザー id の実在が漏れる
+    expect(await repos.users.findById(b.tenant.id, a.admin.id)).toBeNull();
+    expect((await repos.users.findById(a.tenant.id, a.admin.id))?.id).toBe(a.admin.id);
     // ユーザー一覧: B から見ると B の admin だけ (A の 2 人は見えない)
     const usersOfB = await repos.users.list(b.tenant.id, { limit: 10 });
     expect(usersOfB.items.map((row) => row.id)).toEqual([b.admin.id]);
@@ -475,6 +485,47 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.users.disable('other', second.id)).toEqual({ status: 'not_found' });
     expect(await repos.users.findByEmail(a.tenant.id, 'second@example.com')).not.toBeNull();
     expect(await repos.users.findByEmail('other', 'second@example.com')).toBeNull();
+  });
+
+  // 上のテストは 2 本の要求が実際には直列に流れるため、ロック句を落としても緑のまま通ってしまう
+  // (実測)。そこで「同じテナント行を別のトランザクションが掴んでいる間、降格が待たされる」ことを
+  // 決定的に確かめる — ロックが無ければ待たずに終わるので、ロック句の削除がここで赤くなる
+  it('同じテナント行を掴んでいる間、降格は待たされる (テナント行ロックの存在)', async () => {
+    // admin 2 人 (降格そのものが last_admin で弾かれないようにする)
+    const a = await makeTenant(repos, 'HeldLock');
+    const second = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'second@example.com',
+      name: '2 人目の管理者',
+      role: Role.admin,
+    });
+    // ロックを離す合図
+    let release = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // 別のトランザクションでテナント行を掴んだまま待つ
+    const holding = client.$transaction(
+      async (tx) => {
+        // 降格が取るのと同じ行・同じ強さのロック
+        await tx.$queryRaw`SELECT id FROM "Tenant" WHERE id = ${a.tenant.id} FOR NO KEY UPDATE`;
+        // 合図が来るまで保持する
+        await released;
+      },
+      { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
+    );
+    // 降格を始める (ロックが効いていれば、掴んでいる間は終わらない)
+    const demote = repos.users.updateRole(a.tenant.id, second.id, Role.viewer);
+    // 待たされていること (先に時間切れの方が返る)
+    const finishedFirst = await Promise.race([
+      demote.then(() => 'demoted' as const),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS)),
+    ]);
+    expect(finishedFirst).toBe('blocked');
+    // ロックを離すと降格が通る
+    release();
+    await holding;
+    expect((await demote).status).toBe('ok');
   });
 
   it('並行する降格要求でも有効な admin が 0 人にならない (行ロックで直列化)', async () => {

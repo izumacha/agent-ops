@@ -81,19 +81,24 @@ jobs:
         run: npm run db:seed && npm run db:seed
 
       # prisma アダプタの契約テストは全テーブルを TRUNCATE するため、seed 済みの DB とは別の専用 DB で流す
+      # 既定の public ではなく専用スキーマを使う。接続文字列の ?schema= は「アダプタの schema オプション」と
+      # 「接続時の search_path」の両方へ反映する必要があり (片方だけだと生 SQL が別スキーマを向く)、
+      # public のままだと両者の食い違いが CI で一度も試されない
       - name: Create contract-test database
-        run: PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE agent_ops_contract'
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE agent_ops_contract'
+          PGPASSWORD=postgres psql -h localhost -U postgres -d agent_ops_contract -c 'CREATE SCHEMA IF NOT EXISTS app'
 
       - name: Apply migrations (contract DB)
         run: npm run db:deploy
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_ops_contract
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_ops_contract?schema=app
 
       # 本番実装 (prisma アダプタ) が memory アダプタと同じ契約を満たすことを実 DB で確かめる
       - name: Prisma adapter contract tests
         run: npm run test:contract
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_ops_contract
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_ops_contract?schema=app
           RUN_PRISMA_CONTRACT: '1'
 
       - name: Build

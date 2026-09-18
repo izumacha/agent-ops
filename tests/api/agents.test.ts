@@ -195,7 +195,9 @@ describe('リクエスト本文の防御', () => {
       expect(errorSpy).not.toHaveBeenCalled();
       // 切断以外の読み取り失敗はこれまでどおり内部エラー (500) として記録する。message は複数行で利用者の入力
       // (メールアドレス) を含む形にし、ログに残らないことを確かめる (ORM の検証エラーがこの形。§9)
-      const leakyMessage = 'disk failure\nInvalid invocation:\n{ email: "alice@example.com" }';
+      // 「at 」で始まる行 (利用者の入力が改行を含めば作れる) もフレームとして残らないこと
+      const leakyMessage =
+        'disk failure\nInvalid invocation:\n{ email: "alice@example.com" }\nat alice@example.com\nat evil (/etc/passwd:1:1)';
       const broken = new ReadableStream<Uint8Array>({
         pull(controller) {
           controller.error(new Error(leakyMessage));
@@ -212,9 +214,12 @@ describe('リクエスト本文の防御', () => {
       // ログには種類と発生箇所だけが残り、message (利用者の入力) は 1 文字も残らない
       const logged = JSON.stringify(errorSpy.mock.calls[0]);
       expect(logged).toContain('"name":"Error"');
-      expect(logged).toContain('at ');
+      // 本物のフレーム (このテストの pull 関数) は残る
+      expect(logged).toMatch(/at (?:Object\.)?pull /);
       expect(logged).not.toContain('alice@example.com');
       expect(logged).not.toContain('disk failure');
+      // message に仕込んだ「フレームの形をした行」も残らない (偽の発生箇所を障害ログへ書けない)
+      expect(logged).not.toContain('/etc/passwd');
     } finally {
       errorSpy.mockRestore();
     }

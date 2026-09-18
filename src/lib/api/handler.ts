@@ -26,18 +26,26 @@ export interface HandlerInput<P> {
 // ハンドラ本体の型
 export type Handler<P> = (input: HandlerInput<P>) => Promise<Response>;
 
+// V8 のスタックフレームの形 (末尾が「:行:列)」「:行:列」「<anonymous>)」「native)」のいずれか)
+const STACK_FRAME_PATTERN = /^at .*(?::\d+:\d+\)?|<anonymous>\)?|native\)?)$/;
+
 // 内部エラーのログに残す形: 種類 (name / code) と発生箇所 (スタックフレーム) だけで、message は含めない。
 // ORM の検証エラーなどは message にクエリ引数 (= メールアドレス・名前といった利用者の入力) をそのまま埋め込むため、
 // message ごと出すと PII がログに流れる (§9 ログに残す前に個人情報をマスクする)
 function describeError(error: unknown): Record<string, unknown> {
   // Error でなければ型だけ
   if (!(error instanceof Error)) return { type: typeof error };
-  // 「    at ...」の行 (呼び出し位置) だけを残す。1 行目を落とすだけでは複数行の message (ORM のエラーは典型) の
-  // 2 行目以降がフレームとして残るため、形で選ぶ
-  const frames = (error.stack ?? '')
+  // V8 の stack は「name: message」の見出しの後にフレームが続く。見出しは構築時の name / message で固定されるので、
+  // まず見出しを長さで切り落とし (message が何行あっても構造で外せる)、残りから V8 のフレームの形
+  // (「at 関数 (ファイル:行:列)」か「at <anonymous>」) に一致する行だけを残す。「at 」で始まるかだけで選ぶと、
+  // 利用者の入力 (改行を含む description 等) 由来の「at 田中 …」という行が message から紛れ込み、偽のフレームも書ける
+  const stack = error.stack ?? '';
+  const header = error.message ? `${error.name}: ${error.message}` : error.name;
+  const body = stack.startsWith(header) ? stack.slice(header.length) : stack;
+  const frames = body
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.startsWith('at '));
+    .filter((line) => STACK_FRAME_PATTERN.test(line));
   // code は Node のシステムエラー (ECONNREFUSED 等) や ORM のエラー番号が入る
   const code = 'code' in error ? (error as { code?: unknown }).code : undefined;
   return { name: error.name, code, frames };

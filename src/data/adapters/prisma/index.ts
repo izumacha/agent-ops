@@ -231,10 +231,15 @@ class PrismaUsers implements UsersPort {
         { id: string }[]
       >`SELECT id FROM "Tenant" WHERE id = ${tenantId} FOR NO KEY UPDATE`;
       if (locked.length === 0) return { status: 'not_found' };
-      // 対象の行もロックしてから読む。テナント行のロックだけでは足りない — admin への昇格 (updateRole) は
-      // テナント行を取らず対象の行だけを掴むので、ここでロック無しに読むと「昇格の直前の姿」で
-      // 役割と無効化を判定したまま更新してしまう (判定と更新の間に役割が変わる)。
-      // 先に掴んでおけば、昇格中なら commit を待ってから読み直すので、判定に使った姿はコミットまで変わらない
+      // 対象の行もロックしてから読む。admin への昇格 (updateRole) だけはテナント行を取らず対象の行しか
+      // 掴まないので、ロック無しに読むと「昇格の直前の姿」のまま判定して更新・応答してしまう。
+      // 今の Port の範囲で実際に観測できるずれは 2 つで、いずれも「有効な admin が 0 人になる」には至らない
+      // (admin を減らす操作はすべてこの関数を通ってテナント行で直列化され、昇格は増やす方向にしか効かないため):
+      //   - 昇格直後の対象を降格するとき、「最後の admin」判定が正しく適用される
+      //   - 既に無効なユーザーへの disable が、昇格前の古い role を 200 応答に載せない
+      // 将来ユーザー削除・テナント削除を足すとここが不変条件そのものを支えるので、ロックは外さない。
+      // なおテナント行のロックを FOR UPDATE へ強めてはいけない (上の注記のとおり、子テーブル INSERT の
+      // FK 検査が取る FOR KEY SHARE と衝突して本物のデッドロックになる)
       const lockedTarget = await lockActiveUser(tx, tenantId, id);
       // 同テナントに居ない
       if (lockedTarget.status === 'not_found') return { status: 'not_found' };

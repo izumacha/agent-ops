@@ -43,20 +43,21 @@ type Operation = {
   };
 };
 type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
+type SchemaObject = {
+  properties?: Record<string, Record<string, unknown>>;
+  additionalProperties?: unknown;
+  required?: string[];
+  allOf?: SchemaObject[];
+  oneOf?: SchemaObject[];
+  anyOf?: SchemaObject[];
+};
 type Spec = {
   openapi: string;
   paths: Record<string, PathItem>;
   tags?: { name: string }[];
   components: {
     parameters: Record<string, { schema: Record<string, unknown> }>;
-    schemas: Record<
-      string,
-      {
-        properties?: Record<string, Record<string, unknown>>;
-        additionalProperties?: unknown;
-        required?: string[];
-      }
-    >;
+    schemas: Record<string, SchemaObject>;
   };
 };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
@@ -93,6 +94,18 @@ function collectRequestBodies(): {
       return [{ key: `${method.toUpperCase()} ${path}`, schema: declared }];
     }),
   );
+}
+
+// スキーマ本体と allOf / oneOf / anyOf の枝を平坦に並べる (枝は入れ子にできるので再帰する)。
+// $ref だけの枝は properties を持たないので何も足さない (参照先はそれ自身が走査対象になる)
+function objectBranches(schema: SchemaObject): SchemaObject[] {
+  // 自分自身と、合成の枝をそれぞれ展開したもの
+  return [
+    schema,
+    ...[...(schema.allOf ?? []), ...(schema.oneOf ?? []), ...(schema.anyOf ?? [])].flatMap(
+      objectBranches,
+    ),
+  ];
 }
 
 // 全オペレーションを (パス, メソッド, 定義) の並びに平坦化する
@@ -280,25 +293,36 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   // (serializers.ts が全プロパティを組み立てる)。required から漏れると生成される型で省略可能になり、
   // 「未設定 (null)」と「そもそも欠落」を区別しない書き方が型検査を通ってしまう
   it('応答スキーマの null を取りうるプロパティは required に入っている', () => {
-    // 本文 (リクエスト) のスキーマ名。PATCH の「省略＝変更しない」は required にできないので対象外にする
-    const bodyNames = new Set(collectRequestBodies().map(({ key }) => key));
+    // 除外は PATCH の本文だけにする (「省略＝変更しない」が null 許容と同居する唯一の形)。
+    // 本文すべてを除外すると、同じスキーマを応答にも使い始めた瞬間に検査対象から静かに外れる
+    const patchBodyNames = new Set(
+      Object.values(spec.paths).flatMap((item) => {
+        // PATCH の JSON 本文スキーマ
+        const declared = item.patch?.requestBody?.content?.['application/json']?.schema;
+        // $ref で書かれていればその名前を除外対象にする
+        return declared?.$ref ? [declared.$ref.split('/').pop() as string] : [];
+      }),
+    );
     // 実際に見たプロパティの数 (走査が壊れて 0 件になったら落とす = fail-closed)
     let checked = 0;
     // components.schemas を走査する
     for (const [name, schema] of Object.entries(spec.components.schemas)) {
-      // 本文スキーマは対象外
-      if (bodyNames.has(name)) continue;
-      // 必須と宣言されたプロパティ名
-      const required = new Set(schema.required ?? []);
-      for (const [property, definition] of Object.entries(schema.properties ?? {})) {
-        // 型の宣言 (null を許すときだけ配列で書いている)
-        const type = (definition as { type?: unknown }).type;
-        // null を取らないプロパティは対象外
-        if (!Array.isArray(type) || !type.includes('null')) continue;
-        // 見た数を数える
-        checked += 1;
-        // required に入っていること
-        expect(required.has(property), `${name}.${property} が required に無い`).toBe(true);
+      // PATCH の本文は対象外
+      if (patchBodyNames.has(name)) continue;
+      // allOf / oneOf / anyOf の枝も見る (発行応答は allOf で secret を足す形なので、枝を見ないと取りこぼす)
+      for (const branch of objectBranches(schema)) {
+        // その枝が必須と宣言したプロパティ名
+        const required = new Set(branch.required ?? []);
+        for (const [property, definition] of Object.entries(branch.properties ?? {})) {
+          // 型の宣言 (null を許すときだけ配列で書いている)
+          const type = definition.type;
+          // null を取らないプロパティは対象外
+          if (!Array.isArray(type) || !type.includes('null')) continue;
+          // 見た数を数える
+          checked += 1;
+          // required に入っていること
+          expect(required.has(property), `${name}.${property} が required に無い`).toBe(true);
+        }
       }
     }
     // 1 件も見ていなければ走査が壊れている

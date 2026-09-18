@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
-import { ALLOWED_ROUTE_FILE_NAME, findRouteFiles } from './lib/route-files';
+import { ALLOWED_ROUTE_FILE_NAME, findRouteFiles, PAGE_EXTENSIONS } from './lib/route-files';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { ROUTE_HANDLER_BRAND } from '@/lib/api/handler';
@@ -64,18 +64,21 @@ describe('Route Handler の結線', () => {
   // それらが「無いこと」を固定する (存在すると、認証も認可も通らない経路がこの検査の外に生える。
   // 実測: src/pages/api/leak.ts も src/proxy.ts も全件緑のまま 200 を返した)
   it('App Router の route.* 以外に Next の入口が無い', () => {
-    // 存在してはいけない入口 (Pages Router・middleware・proxy。リポジトリ直下と src/ の両方を見る)
+    // 入口になるファイル名 (拡張子は pageExtensions の表から導く。列挙を手で書くと
+    // proxy.tsx のような綴りが漏れる — 実測で未認証の 200 を返した)
+    const entryBasenames = ['proxy', 'middleware'];
+    // 存在してはいけない入口 (Pages Router・リポジトリ直下の app・middleware・proxy)。
+    // リポジトリ直下に app があると Next は src/app を**丸ごと無視する**ので、走査の根ごとすり替わる
     const forbidden = [
       'pages',
-      'src/pages',
-      'middleware.ts',
-      'middleware.js',
-      'src/middleware.ts',
-      'src/middleware.js',
-      'proxy.ts',
-      'proxy.js',
-      'src/proxy.ts',
-      'src/proxy.js',
+      join('src', 'pages'),
+      'app',
+      ...entryBasenames.flatMap((name) =>
+        PAGE_EXTENSIONS.flatMap((extension) => [
+          `${name}.${extension}`,
+          join('src', `${name}.${extension}`),
+        ]),
+      ),
     ];
     for (const entry of forbidden) {
       // 無いこと (足すなら、この検査と認可の網羅をどう広げるかを先に決める)
@@ -173,6 +176,12 @@ function findSourceFiles(dir: string): string[] {
   });
 }
 
+// 行コメントとブロックコメントを落とす (説明文に書いた名前を「実装が触っている」と数えないため)
+function stripComments(source: string): string {
+  // ブロックコメント → 行コメントの順に落とす
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+}
+
 // 関数本体に現れる return 文を、空白を詰めた形で並べる (抜け道が増えたかを見る)
 function returnsIn(body: string | undefined): string[] {
   // 本体が読めなければ空 (呼び出し側が toBeDefined で落とす)
@@ -211,16 +220,26 @@ describe('秘密の生成と比較', () => {
   });
 
   // 秘密を読む場所が 1 か所だけであること (別の場所で読めば、そこで安い比較を書けてしまう)
-  it('PLATFORM_ADMIN_TOKEN を読むのは照合の中だけ', () => {
-    // src 全体で環境変数を読んでいる箇所
-    const reads = findSourceFiles(join(process.cwd(), 'src')).flatMap((file) =>
-      [...readFileSync(file, 'utf8').matchAll(/process\.env\.PLATFORM_ADMIN_TOKEN/g)].map(
-        () => file,
-      ),
+  it('PLATFORM_ADMIN_TOKEN に触れるのは照合の中だけ', () => {
+    // 秘密の名前 (末尾に _ が続く別の定数 PLATFORM_ADMIN_TOKEN_MIN_LENGTH は対象外)。
+    // process.env.X だけを探す形にすると、process.env['X'] や分割代入が素通りする (実測)
+    const identifier = /\bPLATFORM_ADMIN_TOKEN\b(?!_)/g;
+    // 認証のファイル以外では 1 度も現れないこと (別の場所で読めば、そこで安い比較を書ける)
+    for (const file of findSourceFiles(join(process.cwd(), 'src'))) {
+      // 認証のファイルは下で中身を見る
+      if (file.endsWith(join('lib', 'api', 'auth.ts'))) continue;
+      // コメントを落としてから探す (説明で名前を出すのは構わない)
+      expect(stripComments(readFileSync(file, 'utf8')).match(identifier), file).toBeNull();
+    }
+    // 認証のファイルの中でも、現れるのは照合の関数の中だけであること
+    const code = stripComments(auth);
+    const bodyCode = stripComments(
+      /function matchesPlatformAdminToken\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(auth)?.[1] ?? '',
     );
-    // 1 か所だけで、それが認証のファイルであること
-    expect(reads).toHaveLength(1);
-    expect(reads[0]?.endsWith(join('lib', 'api', 'auth.ts'))).toBe(true);
+    // 関数の外に出ていないこと (件数が一致する = 全部が中にある)
+    expect((code.match(identifier) ?? []).length).toBe((bodyCode.match(identifier) ?? []).length);
+    // 中に 1 つ以上あること (走査が壊れて 0 件になったら落とす)
+    expect((bodyCode.match(identifier) ?? []).length).toBeGreaterThan(0);
   });
 
   // 実装が定数時間でも、呼び出し側が === に戻れば同じこと (実測で全件緑のまま通った)

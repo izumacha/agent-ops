@@ -256,6 +256,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
 
   // 複合 FK は「アダプタのチェックを通らない書き込み」に対する第 2 の砦。アダプタ経由でしか
   // 確かめていないと、参照を単一列 FK へ弱めても全件緑のまま通る (実測)。DB へ直接書いて確かめる
+  // Step2 以降で子テーブル (UsageEvent 等) の Port を足すときは、その複合 FK も同じ形でここに足す
   it('複合 FK は DB へ直接書いても別テナントの親を拒否する (アダプタを通らない経路)', async () => {
     // 2 テナント
     const a = await makeTenant(repos, 'FkA');
@@ -752,6 +753,73 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     );
     // 読み直していれば無効化が見えて拒否される (無効化済みユーザーの役割変更は disabled)
     expect(demoted.status).toBe('disabled');
+  });
+
+  // ロックは「弱すぎないか」だけでなく「強すぎないか」も不変条件。FOR UPDATE へ強めると、
+  // 子テーブルの INSERT が親行に取る FK 検査のロック (FOR KEY SHARE) と衝突して本物のデッドロックになる。
+  // 外す変異は既存のテストが落とすが、強める変異は全件緑のまま通っていた (実測)
+  it('ロックは子テーブルの FK 検査と衝突しない (FOR UPDATE へ強めていない)', async () => {
+    // 降格させる相手 (2 人目の admin)
+    const a = await makeTenant(repos, 'KeyShare');
+    const second = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'keyshare@example.com',
+      name: '2 人目の管理者',
+      role: Role.admin,
+    });
+    // ロックを離す合図
+    let release = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // ロックを掴んだ合図
+    let signalHeld = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    // 子テーブルの INSERT が親行に取るのと同じ弱いロックを掴んだまま待つ
+    const holding = client.$transaction(
+      async (tx) => {
+        // テナント行とユーザー行の両方 (役割変更はテナント行を、トークン発行はユーザー行を取る)
+        await tx.$queryRaw`SELECT id FROM "Tenant" WHERE id = ${a.tenant.id} FOR KEY SHARE`;
+        await tx.$queryRaw`SELECT id FROM "User" WHERE "tenantId" = ${a.tenant.id} AND id = ${a.admin.id} FOR KEY SHARE`;
+        // 掴めたことを知らせる
+        signalHeld();
+        // 合図が来るまで保持する
+        await released;
+      },
+      { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
+    );
+    // 掴むまで始めない
+    await held;
+    // 掴まれたままでも両方とも進めること (強いロックなら待たされる)
+    const running = Promise.all([
+      repos.users.updateRole(a.tenant.id, second.id, Role.viewer),
+      repos.userTokens.create({
+        tenantId: a.tenant.id,
+        userId: a.admin.id,
+        prefix: 'aop_u_ks',
+        tokenHash: `hash-keyshare-${Date.now()}`,
+        name: '弱いロックの検査',
+        expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+      }),
+    ]);
+    try {
+      // 待たされずに終わること
+      const finishedFirst = await Promise.race([
+        running.then(() => 'finished' as const),
+        new Promise<'blocked'>((resolve) =>
+          setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS),
+        ),
+      ]);
+      expect(finishedFirst).toBe('finished');
+    } finally {
+      // 失敗しても必ず離す
+      release();
+      await holding;
+    }
+    // どちらも成功していること
+    expect((await running).map((result) => result.status)).toEqual(['ok', 'ok']);
   });
 
   it('並行する降格要求でも有効な admin が 0 人にならない (行ロックで直列化)', async () => {

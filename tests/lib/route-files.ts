@@ -5,9 +5,15 @@
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Next.js の既定 pageExtensions は ['tsx','ts','jsx','js']。将来足されても取りこぼさないよう
-// mjs / cjs も含めて広めに拾う（拾いすぎても「検査の対象が増える」方向にしか効かない）
-export const ROUTE_FILE_PATTERN = /^route\.(ts|tsx|js|jsx|mjs|cjs)$/;
+// Next.js の既定 pageExtensions（node_modules/next/dist/server/config-shared.js）。
+// route.* だけでなく proxy.* / middleware.* の検出にも同じ表が使われるので、ここを唯一の源にする。
+// 設定で変えていないことは tests/route-wrapping.test.ts が固定する
+export const PAGE_EXTENSIONS = ['tsx', 'ts', 'jsx', 'js'] as const;
+
+// Route Handler として扱われるファイル名 (上の拡張子 + 念のため mjs / cjs)
+export const ROUTE_FILE_PATTERN = new RegExp(
+  `^route\\.(?:${[...PAGE_EXTENSIONS, 'mjs', 'cjs'].join('|')})$`,
+);
 
 // このリポジトリで書いてよい唯一の綴り（他の拡張子は禁止する。詳細は tests/route-wrapping.test.ts）
 export const ALLOWED_ROUTE_FILE_NAME = 'route.ts';

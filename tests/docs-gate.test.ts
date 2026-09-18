@@ -9,6 +9,8 @@ import { join } from 'node:path';
 const DOCS = join(process.cwd(), 'docs');
 // 定数の正本 (文書に書かれた数値と突き合わせる)
 import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
+// RBAC の許可表 (役割と操作の唯一の真実の源)
+import { PERMISSIONS } from '@/domain/rbac';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -62,6 +64,37 @@ describe('Step0 の設計成果物', () => {
       // その数値が本文に現れること
       expect(readFileSync(path, 'utf8'), `${path} の最小長が実装とずれている`).toContain(expected);
     }
+  });
+
+  // ゲートの受け入れ基準が、正本 (ロードマップの散文と RBAC の許可表) と一致していることを固定する。
+  // 「基準を緩める変更はテスト側だけを書き換えない」(ADR-0004) を支えているのはこのスクリプトだけなのに、
+  // その値を照合する検査が無かった。実測では件数の下限を 0 にしても、役割の一覧を 1 要素にしても全件緑で、
+  // 役割が 4 種に増えてもゲートは 3 × 3 しか要求しないままだった
+  it('gate:step1 のしきい値がロードマップと RBAC の許可表と一致する', () => {
+    // ゲートの本文
+    const gate = readFileSync(join(process.cwd(), 'scripts', 'gate-step1.mjs'), 'utf8');
+    // テスト件数の下限 (読めなければ検出網が死んでいるので落とす)
+    const required = gate.match(/^const REQUIRED_PASSED_TESTS = (\d+);$/m);
+    expect(required, 'REQUIRED_PASSED_TESTS を読めない').not.toBeNull();
+    // ロードマップの受け入れ基準に同じ件数が書かれていること。
+    // **数字の途中に一致させない** — 単なる部分一致にすると、下限を 0 にした変異が
+    // 「60 件以上」の末尾に一致して素通りする (実測で全件緑のまま通った)
+    const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
+    expect(roadmap, 'ロードマップの件数とゲートの下限がずれている').toMatch(
+      new RegExp(`(?<![0-9])${required?.[1]} 件以上`),
+    );
+    // 役割と操作の一覧が許可表と一致すること (許可表が唯一の真実の源。ゲートはその写しを持っている)
+    const roles = gate.match(/^const ROLES = \[(.*)\];$/m);
+    const actions = gate.match(/^const ACTIONS = \[(.*)\];$/m);
+    expect(roles, 'ROLES を読めない').not.toBeNull();
+    expect(actions, 'ACTIONS を読めない').not.toBeNull();
+    // 文字列リテラルの一覧を取り出す小さなヘルパー
+    const literals = (source: string): string[] =>
+      [...source.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect(literals(roles?.[1] ?? '').sort()).toEqual(Object.keys(PERMISSIONS).sort());
+    // 操作は許可表の値 (全役割の許可集合の和) から導く
+    const allActions = new Set(Object.values(PERMISSIONS).flatMap((set) => [...set]));
+    expect(literals(actions?.[1] ?? '').sort()).toEqual([...allActions].sort());
   });
 
   // 生成元と計画書が消えていないことを固定する

@@ -518,6 +518,19 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(cleared?.budgetMicroUsd).toBeNull();
     // 指定しなかった項目は保たれること
     expect(cleared?.model).toBe('claude-opus-4-1');
+    // **省略した nullable の項目**も保たれること。`patch.x ?? null` と書いて undefined を潰す形
+    // (型をそろえる整理として通りやすい) を入れると、名前を変えただけで説明と予算が消える。
+    // 非 null の model しか見ていないとその変異が素通りする (実測)。予算は Step2 以降の
+    // コスト上限そのものなので、改名で黙って外れると効かないガードレールになる
+    const refilled = await repos.agents.update(a.tenant.id, agent.id, {
+      description: '残るはずの説明',
+      budgetMicroUsd: 7n,
+    });
+    expect(refilled?.budgetMicroUsd).toBe(7n);
+    const renamed = await repos.agents.update(a.tenant.id, agent.id, { name: 'patch-bot-3' });
+    expect(renamed?.name).toBe('patch-bot-3');
+    expect(renamed?.description).toBe('残るはずの説明');
+    expect(renamed?.budgetMicroUsd).toBe(7n);
   });
 
   it('同テナント内の改名で名前が重複すると DuplicateError (更新経路の一意制約)', async () => {
@@ -575,8 +588,14 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.userTokens.revoke(a.tenant.id, other.id, issued.token.id)).toBeNull();
     expect(await stillActive()).toBeNull();
     // 正しい組み合わせなら失効する
+    const before = Date.now();
     const revoked = await repos.userTokens.revoke(a.tenant.id, a.admin.id, issued.token.id);
     expect(revoked?.revokedAt).not.toBeNull();
+    // 日時が「実際に失効した時刻」であること。not.toBeNull() だけだと固定値 (new Date(0) 等) でも
+    // 緑になり、一覧の revokedAt が 1970-01-01 になって「いつキルスイッチを引いたか」が追えなくなる
+    // (memory アダプタは store.now() を使うので、この差は本番だけに出る)
+    expect(revoked?.revokedAt?.getTime()).toBeGreaterThanOrEqual(before);
+    expect(revoked?.revokedAt?.getTime()).toBeLessThanOrEqual(Date.now());
     // 二度目は日時を保つ (冪等)
     const again = await repos.userTokens.revoke(a.tenant.id, a.admin.id, issued.token.id);
     expect(again?.revokedAt?.getTime()).toBe(revoked?.revokedAt?.getTime());
@@ -598,8 +617,12 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.apiKeys.revoke(b.tenant.id, key.id)).toBeNull();
     expect((await repos.apiKeys.findById(a.tenant.id, key.id))?.revokedAt).toBeNull();
     // 正しいテナントなら失効し、二度目も日時を保つ
+    const beforeKey = Date.now();
     const revokedKey = await repos.apiKeys.revoke(a.tenant.id, key.id);
     expect(revokedKey?.revokedAt).not.toBeNull();
+    // トークンと同じく、日時が実際の失効時刻であること
+    expect(revokedKey?.revokedAt?.getTime()).toBeGreaterThanOrEqual(beforeKey);
+    expect(revokedKey?.revokedAt?.getTime()).toBeLessThanOrEqual(Date.now());
     const againKey = await repos.apiKeys.revoke(a.tenant.id, key.id);
     expect(againKey?.revokedAt?.getTime()).toBe(revokedKey?.revokedAt?.getTime());
   });
@@ -692,6 +715,51 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect([...seen].sort()).toEqual([...ids].sort());
   });
 
+  // 並びと次ページの条件は「位置 (createdAt, id) の比較」で、同値条件を落として
+  // `createdAt > k OR id > k.id` にすると**カーソルより前の行が毎ページ混ざり**、カーソルが
+  // そこへ戻ってページ送りが無限ループする (実測。3 行目に永久に到達しない)。
+  // 「冗長な同値条件を整理する」形で書かれうるのに、同一時刻 2 行のテストでは差が出ない。
+  // createdAt の順と id の順がねじれた 3 行で確かめる — id はアプリ側の採番 (cuid)、createdAt は
+  // DB の時刻なので、複数インスタンスで動かすと実際にねじれる
+  it('createdAt と id の順がねじれていてもページ送りが進む (位置の比較になっている)', async () => {
+    // テナントとエージェント 3 件
+    const a = await makeTenant(repos, 'Twisted');
+    const common = {
+      tenantId: a.tenant.id,
+      description: null,
+      provider: Provider.anthropic,
+      model: 'm',
+      budgetMicroUsd: null,
+    };
+    const rows = [];
+    for (const name of ['t1', 't2', 't3']) {
+      rows.push(await repos.agents.create({ ...common, name }));
+    }
+    // 位置をねじる: いちばん古い行の id をいちばん大きく、以降は時刻順に小さい id を与える
+    const twisted = [
+      { id: 'agent-zzz-oldest', createdAt: new Date('2026-09-01T00:00:00.000Z') },
+      { id: 'agent-mmm-middle', createdAt: new Date('2026-09-02T00:00:00.000Z') },
+      { id: 'agent-nnn-newest', createdAt: new Date('2026-09-03T00:00:00.000Z') },
+    ];
+    for (const [index, row] of rows.entries()) {
+      await client.agent.update({ where: { id: row.id }, data: twisted[index] });
+    }
+    // 1 件ずつページ送りして、最後まで辿る (打ち切りを入れて無限ループでも止まるようにする)
+    const seen: string[] = [];
+    let cursor: CursorKey | undefined;
+    for (let page = 0; page < 8; page += 1) {
+      // 1 件だけ取る
+      const result = await repos.agents.list(a.tenant.id, { limit: 1, cursor });
+      seen.push(...result.items.map((item) => item.id));
+      // 次が無ければ終わり
+      const next = result.nextCursor;
+      if (next === undefined) break;
+      cursor = decodeCursor(next) ?? undefined;
+    }
+    // 3 件が時刻の昇順で 1 度ずつ出ること (条件を崩すと同じ行が何度も出て、最後の行に届かない)
+    expect(seen).toEqual(twisted.map((row) => row.id));
+  });
+
   it('一覧は createdAt → id 順で、nextCursor は最終行の位置を符号化した値、末尾より後ろの位置は空', async () => {
     // 3 件
     const a = await makeTenant(repos, 'A');
@@ -749,6 +817,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       name: '2',
       role: Role.admin,
     });
+    const before = Date.now();
     const once = await repos.users.disable(a.tenant.id, second.id);
     const twice = await repos.users.disable(a.tenant.id, second.id);
     expect(once.status).toBe('ok');
@@ -756,6 +825,10 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     if (once.status === 'ok' && twice.status === 'ok') {
       // 冪等 (最初の日時を保つ)
       expect(once.user.disabledAt).not.toBeNull();
+      // 日時が「実際に無効化した時刻」であること (固定値でも not.toBeNull() は緑になる。
+      // 応答の disabledAt が 1970-01-01 になると、いつ締め出したかが追えなくなる)
+      expect(once.user.disabledAt?.getTime()).toBeGreaterThanOrEqual(before);
+      expect(once.user.disabledAt?.getTime()).toBeLessThanOrEqual(Date.now());
       expect(twice.user.disabledAt?.getTime()).toBe(once.user.disabledAt?.getTime());
       // 2 回目は何も書き換えない (updatedAt も進まない。memory アダプタと同じ契約)
       expect(twice.user.updatedAt.getTime()).toBe(once.user.updatedAt.getTime());

@@ -124,8 +124,8 @@ model UserToken {
   // 発行先ユーザー。複合 FK で「同じテナントのユーザー」であることを DB が保証する。ユーザー削除でトークンも消える
   user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
 
-  @@index([tenantId, createdAt]) // 認証時のテナント絞り込み + createdAt 順
-  @@index([tenantId, userId, createdAt]) // ユーザー別一覧 (絞り込み + createdAt 順のカーソル送り)・複合 FK の Cascade 解決用
+  // 認証は tokenHash の一意索引で引く。テナント全体の一覧は無いので (tenantId, createdAt) の索引は持たない
+  @@index([tenantId, userId, createdAt]) // ユーザー別一覧 (絞り込み + createdAt 順のカーソル送り)・複合 FK / テナント Cascade の解決用
 }
 
 // エージェント (管理対象の AI エージェント台帳)

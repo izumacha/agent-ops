@@ -13,11 +13,9 @@ import { parseDecimalInteger } from '../src/domain/decimal-integer';
 import { normalizeEmail } from '../src/domain/email';
 import { createPrismaClient } from '../src/lib/prisma-client';
 // 既定の有効期間
-import {
-  DEFAULT_TENANT_ID,
-  USER_TOKEN_DEFAULT_TTL_DAYS,
-  USER_TOKEN_MAX_TTL_DAYS,
-} from '../src/lib/constants';
+import { DEFAULT_TENANT_ID, USER_TOKEN_DEFAULT_TTL_DAYS } from '../src/lib/constants';
+// 用途名と有効期間の規則 (API の POST /users/{id}/tokens と同じスキーマで検証し、規則を書き写さない)
+import { userTokenCreateSchema } from '../src/lib/validations/user-token';
 // トークン生成
 import { issueSecret, userTokenExpiresAt } from '../src/lib/tokens';
 
@@ -34,11 +32,19 @@ async function main(): Promise<void> {
   });
   // メールは必須
   if (!values.email) throw new Error('--email <メールアドレス> を指定してください。');
-  // 日数は 1〜上限の 10 進整数 (API と同じ判定関数で読む)
-  const days = parseDecimalInteger(values.days);
-  if (days === null || days < 1 || days > USER_TOKEN_MAX_TTL_DAYS) {
-    throw new Error(`--days は 1〜${USER_TOKEN_MAX_TTL_DAYS} の整数で指定してください。`);
+  // 用途名と日数は API と同じスキーマで検証する (10 進整数でない --days は NaN にして数値の検証で落とす)
+  const parsed = userTokenCreateSchema.safeParse({
+    name: values.name,
+    expiresInDays: parseDecimalInteger(values.days!) ?? Number.NaN,
+  });
+  if (!parsed.success) {
+    // どの引数がどう誤りかを 1 行ずつ示す (name → --name、expiresInDays → --days)
+    const lines = parsed.error.issues.map(
+      (issue) => `--${issue.path[0] === 'name' ? 'name' : 'days'}: ${issue.message}`,
+    );
+    throw new Error(`引数が不正です。\n${lines.join('\n')}`);
   }
+  const { name, expiresInDays: days } = parsed.data;
   // DB へ接続する
   const client = createPrismaClient();
   const repos = createPrismaRepos(client);
@@ -56,7 +62,7 @@ async function main(): Promise<void> {
       userId: user.id,
       prefix: issued.prefix,
       tokenHash: issued.hash,
-      name: values.name!,
+      name,
       expiresAt: userTokenExpiresAt(days),
     });
     if (!token) throw new Error('トークンを発行できませんでした。');

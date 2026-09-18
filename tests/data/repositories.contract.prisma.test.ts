@@ -353,9 +353,6 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     });
   });
 
-  // 更新は「更新してよい項目」だけを DB へ渡す。検証済みの本文を丸ごと渡す実装だと、
-  // 契約と Zod に項目が増えた瞬間に status や tenantId まで届く (実測で権限の迂回とテナント移動に到達した)。
-  // memory アダプタは項目ごとに代入するのでこの差は API テストからは見えない
   // 生 SQL のガードが「本番のクライアントに実際に配線されているか」を確かめる。
   // 単体テスト (tests/raw-sql-guard.test.ts) はガードの挙動を固定するが、結線が外れていることは見えない。
   // 実測では、綴りを走査する静的検査は `const { raw } = Prisma` の 1 段の間接化で崩れ、URL の
@@ -366,6 +363,10 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // SQL 断片を埋め込む形も拒否する (Prisma.raw を変数で受けても値は同じ)
     const fragment = { strings: [`1 = 1`], values: [], sql: `1 = 1` };
     expect(() => client.$queryRaw`SELECT ${fragment}`).toThrow(/安全でない生 SQL/);
+    // 書き込み側も同じ (読み取りだけ見ていると、こちらを対象から外す変異が素通りする)
+    expect(() => client.$executeRaw`DELETE FROM "Tenant" WHERE ${fragment}`).toThrow(
+      /安全でない生 SQL/,
+    );
     // トランザクション内のクライアントも同じ (行ロックを書いているのはこちら)
     await expect(
       client.$transaction(async (tx) => {
@@ -373,6 +374,26 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
         await tx.$queryRawUnsafe('SELECT 1');
       }),
     ).rejects.toThrow(/安全でない生 SQL/);
+    // クライアントを返す経路 (拡張・親) から 1 ホップで外へ出られないこと。実測では
+    // `$extends({})` と `tx.$parent` の両方から、ガードを通らない生 SQL に到達できた。
+    // とくに拡張は「Composition Root で createPrismaRepos(prisma.$extends(...)) に差し替える」
+    // という自然な運用改善の形で入りうるので、データ層全体が黙って無防備になる
+    const extended = (
+      client as unknown as { $extends: (options: object) => typeof client }
+    ).$extends({});
+    expect(() => extended.$queryRawUnsafe('SELECT 1')).toThrow(/安全でない生 SQL/);
+    await expect(
+      client.$transaction(async (tx) => {
+        // tx から親クライアントを辿る
+        await (tx as unknown as { $parent: typeof client }).$parent.$queryRawUnsafe('SELECT 1');
+      }),
+    ).rejects.toThrow(/安全でない生 SQL/);
+    // 内部用の入口 (危険な名前を列挙する形では漏れる綴り) も塞がっていること
+    expect(() =>
+      (
+        client as unknown as { $queryRawInternal: (...args: unknown[]) => unknown }
+      ).$queryRawInternal(undefined, '$queryRawUnsafe', ['SELECT 1']),
+    ).toThrow(/安全でない生 SQL/);
     // 正しい形 (値を埋め込んだタグ付きテンプレート) は通る
     expect(await client.$queryRaw`SELECT ${1}::int AS value`).toEqual([{ value: 1 }]);
   });
@@ -438,6 +459,9 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(issued.token.revokedAt).toBeNull();
   });
 
+  // 更新は「更新してよい項目」だけを DB へ渡す。検証済みの本文を丸ごと渡す実装だと、
+  // 契約と Zod に項目が増えた瞬間に status や tenantId まで届く (実測で権限の迂回とテナント移動に到達した)。
+  // memory アダプタは項目ごとに代入するのでこの差は API テストからは見えない
   it('更新は許した項目だけを書き、余分な項目は DB へ届かない', async () => {
     // 2 テナントと A のエージェント
     const a = await makeTenant(repos, 'PatchA');

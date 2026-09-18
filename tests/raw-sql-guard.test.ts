@@ -48,28 +48,80 @@ describe('guardRawSql', () => {
     expect(client.$executeRaw).toHaveBeenCalledTimes(1);
   });
 
-  it('SQL 断片を埋め込む形は落ちる (Prisma.raw の結果を変数で受けても同じ)', async () => {
-    // 包んだクライアント
-    const client = fakeClient();
+  // 読み取り側と書き込み側の両方に同じ検査を掛ける。片方にしか拒否のケースが無いと、
+  // 検査の対象からそちらを外す変異が全件緑で通る (実測: $executeRaw を外すと Prisma.raw を埋めた
+  // DELETE がそのまま走った。書き込み側のほうが被害は重い)
+  it.each(['$queryRaw', '$executeRaw'] as const)(
+    '%s: SQL 断片を埋め込む形は落ちる (Prisma.raw の結果を変数で受けても同じ)',
+    (method) => {
+      // 包んだクライアント
+      const client = fakeClient();
+      const guarded = guardRawSql(client);
+      // Prisma.raw が返すのは「SQL 断片」のオブジェクト。変数に入れて埋め込んでも値は同じなので落ちる
+      const fragment = { strings: [`id = 'x'`], values: [], sql: `id = 'x'` };
+      expect(() => guarded[method](template('SELECT ', ''), fragment)).toThrow(UnsafeRawSqlError);
+      // 入れ子 (配列の中の断片) も落ちる
+      expect(() => guarded[method](template('SELECT ', ''), [fragment])).toThrow(UnsafeRawSqlError);
+      // 本物には届いていない
+      expect(client[method]).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['$queryRaw', '$executeRaw'] as const)(
+    '%s: タグ付きでない呼び方 (文字列を組み立てて渡す) は落ちる',
+    (method) => {
+      // 包んだクライアント
+      const client = fakeClient();
+      const guarded = guardRawSql(client);
+      // 文字列を渡す形は、正しい綴りでも中身は素通し
+      expect(() => guarded[method](`DELETE FROM "User" WHERE id = 'x'`)).toThrow(UnsafeRawSqlError);
+      expect(client[method]).not.toHaveBeenCalled();
+    },
+  );
+
+  it('列挙にない生 SQL の入口も落ちる (名前の形で捉える)', () => {
+    // Prisma が内部用に持つ入口。実測ではここから実際に SQL が走った
+    const client = {
+      ...fakeClient(),
+      $queryRawInternal: vi.fn().mockResolvedValue([]),
+      $executeRawInternal: vi.fn().mockResolvedValue(0),
+      $runCommandRaw: vi.fn().mockResolvedValue({}),
+    };
     const guarded = guardRawSql(client);
-    // Prisma.raw が返すのは「SQL 断片」のオブジェクト。変数に入れて埋め込んでも値は同じなので落ちる
-    const fragment = { strings: [`id = 'x'`], values: [], sql: `id = 'x'` };
-    expect(() => guarded.$queryRaw(template('SELECT ', ''), fragment)).toThrow(UnsafeRawSqlError);
-    // 入れ子 (配列の中の断片) も落ちる
-    expect(() => guarded.$queryRaw(template('SELECT ', ''), [fragment])).toThrow(UnsafeRawSqlError);
-    // 本物には届いていない
-    expect(client.$queryRaw).not.toHaveBeenCalled();
+    // どれも呼べない (危険な名前を列挙する形だと、ここが丸ごと外に残る)
+    expect(() => guarded.$queryRawInternal()).toThrow(UnsafeRawSqlError);
+    expect(() => guarded.$executeRawInternal()).toThrow(UnsafeRawSqlError);
+    expect(() => guarded.$runCommandRaw({})).toThrow(UnsafeRawSqlError);
+    // 本物には 1 度も届いていない
+    expect(client.$queryRawInternal).not.toHaveBeenCalled();
   });
 
-  it('タグ付きでない呼び方 (文字列を組み立てて渡す) は落ちる', async () => {
-    // 包んだクライアント
-    const client = fakeClient();
+  it('クライアントを返す経路 ($extends / $parent) も包み直す', () => {
+    // 拡張クライアントと親クライアントを返す実体
+    const inner = fakeClient();
+    const client = {
+      ...fakeClient(),
+      // 拡張は「オプションを受け取って新しいクライアントを返す」形 (引数は使わないので受けない)
+      $extends: vi.fn(() => inner),
+      $parent: inner,
+    };
     const guarded = guardRawSql(client);
-    // 文字列を渡す形は、$queryRaw という綴りでも中身は素通し
-    expect(() => guarded.$queryRaw(`SELECT * FROM "User" WHERE id = 'x'`)).toThrow(
-      UnsafeRawSqlError,
-    );
-    expect(client.$queryRaw).not.toHaveBeenCalled();
+    // 拡張の戻り値から危険な呼び方はできない (1 ホップで包みの外へ出られない)
+    const extend = guarded.$extends as unknown as (options: object) => typeof inner;
+    expect(() => extend({}).$queryRawUnsafe('SELECT 1')).toThrow(UnsafeRawSqlError);
+    // 親クライアントも同じ (トランザクション内の tx からここを辿れる)
+    expect(() => guarded.$parent.$queryRawUnsafe('SELECT 1')).toThrow(UnsafeRawSqlError);
+    // 本物には届いていない
+    expect(inner.$queryRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it('同じプロパティを 2 回読んでも同じ参照を返す', () => {
+    // 包んだクライアント
+    const guarded = guardRawSql(fakeClient());
+    // 包むたびに新しい関数を作ると、「登録したハンドラを同じ参照で解除する」が効かなくなる
+    expect(guarded.$queryRaw).toBe(guarded.$queryRaw);
+    expect(guarded.$transaction).toBe(guarded.$transaction);
+    expect(guarded.$queryRawUnsafe).toBe(guarded.$queryRawUnsafe);
   });
 
   it('トランザクション内のクライアントも同じガードを通る', async () => {

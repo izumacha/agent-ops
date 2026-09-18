@@ -15,8 +15,6 @@ export interface UserPrincipal {
   user: UserRecord;
   // そのユーザーのテナント (全クエリの where に入れる)
   tenantId: string;
-  // 使われたトークンの id
-  tokenId: string;
 }
 
 // プラットフォーム管理者として認証された主体
@@ -106,7 +104,7 @@ async function authenticateUserToken(
     throw invalidTokenError();
   }
   // テナント内のユーザーとして認証成功
-  return { kind: 'user', user, tenantId: user.tenantId, tokenId: record.id };
+  return { kind: 'user', user, tenantId: user.tenantId };
 }
 
 /**

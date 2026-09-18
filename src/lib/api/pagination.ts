@@ -52,8 +52,15 @@ export function pickQuery(url: URL, keys: readonly string[]): Record<string, str
   return Object.fromEntries(keys.map((key) => [key, url.searchParams.get(key) ?? undefined]));
 }
 
+// スキーマが読むクエリのキーをその shape から導く (手で並べると、スキーマに項目を足したとき pickQuery が
+// その値を URL から取り出さず、既定値が黙って使われる = 指定が無視される)
+export function queryKeysOf(schema: { shape: Record<string, unknown> }): readonly string[] {
+  // shape のキーがそのままクエリ名
+  return Object.keys(schema.shape);
+}
+
 // pageQuerySchema が読むクエリのキー
-export const PAGE_QUERY_KEYS = ['limit', 'cursor'] as const;
+export const PAGE_QUERY_KEYS = queryKeysOf(pageQuerySchema);
 
 // URL のクエリから PageQuery を作る (不正値は 422)
 export function parsePageQuery(url: URL): PageQuery {

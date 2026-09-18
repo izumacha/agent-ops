@@ -190,6 +190,28 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     });
   });
 
+  it('同テナント内の改名で名前が重複すると DuplicateError (更新経路の一意制約)', async () => {
+    // 1 テナントに 2 体のエージェント
+    const a = await makeTenant(repos, 'A');
+    const base = {
+      tenantId: a.tenant.id,
+      description: null,
+      provider: Provider.anthropic,
+      model: 'm',
+      budgetMicroUsd: null,
+    };
+    const first = await repos.agents.create({ ...base, name: '一号機' });
+    const second = await repos.agents.create({ ...base, name: '二号機' });
+    // 既存の名前へ改名すると一意制約違反 (作成経路と同じ型へ翻訳される)
+    await expect(
+      repos.agents.update(a.tenant.id, second.id, { name: first.name }),
+    ).rejects.toBeInstanceOf(DuplicateError);
+    // 自分自身の名前への改名は通る (冪等)
+    expect((await repos.agents.update(a.tenant.id, second.id, { name: second.name }))?.name).toBe(
+      second.name,
+    );
+  });
+
   it('失効はテナント・ユーザー境界の内側だけで効き、二度目は日時を保つ (漏れた資格情報のキルスイッチ)', async () => {
     // 2 テナント (A のトークン・キーを B から失効できないこと確かめる)
     const a = await makeTenant(repos, 'A');

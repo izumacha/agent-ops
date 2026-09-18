@@ -95,13 +95,10 @@ async function readBodyWithinByteLimit(request: Request, maxBytes: number): Prom
  * JSON 本文を読み、Zod スキーマで検証して返す。
  * 415 (Content-Type 違い) → 413 (サイズ超過) → 400 (JSON 構文) → 422 (スキーマ) の順に落とす
  */
-export async function readJsonBody<T>(
-  request: Request,
-  schema: ZodType<T>,
-  // 本文の上限。既定は全経路共通の値で、ルート別の枠が要るときはここへ渡す (申告サイズの事前拒否と実測の両方が
-  // 同じ値を使う。片方だけ定数を直に読むと「正直に申告した本文だけ 413」という向きの逆転が起きる)
-  maxBytes: number = JSON_BODY_MAX_BYTES,
-): Promise<T> {
+export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Promise<T> {
+  // 本文の上限は 1 か所で読み、申告サイズの事前拒否と実測の両方が同じ値を使う
+  // (片方だけ定数を直に読むと、ルート別の枠を入れたとき「正直に申告した本文だけ 413」という向きの逆転が起きる)
+  const maxBytes = JSON_BODY_MAX_BYTES;
   // Content-Type が application/json であること (パラメータ付き "application/json; charset=utf-8" も許す)
   const contentType = request.headers.get('content-type') ?? '';
   if (contentType.split(';')[0].trim().toLowerCase() !== JSON_MEDIA_TYPE) {

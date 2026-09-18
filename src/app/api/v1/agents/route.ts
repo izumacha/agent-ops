@@ -3,7 +3,7 @@ import { readJsonBody, validateWith } from '@/lib/api/body';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { PAGE_QUERY_KEYS, pageQuerySchema, pickQuery } from '@/lib/api/pagination';
+import { pageQuerySchema, pickQuery, queryKeysOf } from '@/lib/api/pagination';
 import { toListDto, toAgentDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
 import { agentCreateSchema } from '@/lib/validations/agent';
@@ -11,8 +11,8 @@ import { agentStatus } from '@/lib/validations/common';
 
 // 一覧のクエリ (limit / cursor に status を足す)。1 つのスキーマで検証し、複数の誤りを 1 応答の issues で返す
 const agentListQuerySchema = pageQuerySchema.extend({ status: agentStatus.optional() });
-// 読むクエリのキー
-const AGENT_LIST_QUERY_KEYS = [...PAGE_QUERY_KEYS, 'status'] as const;
+// 読むクエリのキー (スキーマの shape から導くので、項目を足しても取り出し漏れが起きない)
+const AGENT_LIST_QUERY_KEYS = queryKeysOf(agentListQuerySchema);
 
 // GET /agents (listAgents)
 export const GET = route(async ({ request, principal, repos }) => {

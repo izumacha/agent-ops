@@ -24,6 +24,7 @@ import type {
   UserMutationResult,
   UserRecord,
   UserTokenLookup,
+  UserTokenCreateResult,
   UserTokenRecord,
   UserTokensPort,
   UsersPort,
@@ -199,11 +200,13 @@ class MemoryUserTokens implements UserTokensPort {
   // 共有の表を受け取る
   constructor(private readonly store: MemoryStore) {}
 
-  // 発行 (発行先が同テナントに無ければ null)
-  async create(input: CreateUserTokenInput): Promise<UserTokenRecord | null> {
+  // 発行 (判定と挿入の間に await が無いので、メモリ実装では自明に原子的)
+  async create(input: CreateUserTokenInput): Promise<UserTokenCreateResult> {
     // 発行先ユーザーがテナント内に存在すること
     const user = this.store.users.get(input.userId);
-    if (!user || user.tenantId !== input.tenantId) return null;
+    if (!user || user.tenantId !== input.tenantId) return { status: 'not_found' };
+    // 無効化済みのユーザーには発行しない
+    if (user.disabledAt !== null) return { status: 'disabled' };
     // 新しい行
     const row: UserTokenRecord = {
       id: this.store.nextId('utok'),
@@ -218,7 +221,7 @@ class MemoryUserTokens implements UserTokensPort {
     };
     // 表へ入れて複製を返す
     this.store.userTokens.set(row.id, row);
-    return clone(row);
+    return { status: 'ok', token: clone(row) };
   }
 
   // ハッシュで引く (認証経路)

@@ -25,6 +25,7 @@ import type {
   UserMutationResult,
   UserRecord,
   UserTokenLookup,
+  UserTokenCreateResult,
   UserTokenRecord,
   UserTokensPort,
   UsersPort,
@@ -249,16 +250,23 @@ class PrismaUserTokens implements UserTokensPort {
   // クライアントを受け取る
   constructor(private readonly db: PrismaClient) {}
 
-  // 発行 (発行先が同テナントに無ければ null)
-  async create(input: CreateUserTokenInput): Promise<UserTokenRecord | null> {
-    // 挿入する。複合 FK (tenantId, userId) が「別テナントのユーザー」を拒否するので null に翻訳する
-    try {
-      return await this.db.userToken.create({ data: input });
-    } catch (error) {
-      // 外部キー違反 = 発行先が同テナントに居ない
-      if (isPrismaError(error, FOREIGN_KEY_VIOLATION)) return null;
-      throw error;
-    }
+  // 発行 (判定と挿入を 1 トランザクションで行う)
+  async create(input: CreateUserTokenInput): Promise<UserTokenCreateResult> {
+    // 無効化との競合を防ぐため、発行先ユーザーの行をロックしてから判定する
+    return this.db.$transaction(async (tx: Db): Promise<UserTokenCreateResult> => {
+      // 発行先の行 (テナント境界内) を FOR NO KEY UPDATE でロックする。disable の UPDATE は同じロックを取るので、
+      // ここで見た disabledAt がコミットまで変わらない (逆順なら、無効化のコミット後に最新の行を読み直す)。
+      // 子テーブル INSERT の FK 検査 (FOR KEY SHARE) とは衝突しない
+      const locked = await tx.$queryRaw<
+        { disabledAt: Date | null }[]
+      >`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${input.tenantId} AND id = ${input.userId} FOR NO KEY UPDATE`;
+      // 同テナントに居なければ発行しない
+      if (locked.length === 0) return { status: 'not_found' };
+      // 無効化済みなら発行しない
+      if (locked[0].disabledAt !== null) return { status: 'disabled' };
+      // 挿入する (複合 FK (tenantId, userId) は上の検索で満たしている)
+      return { status: 'ok', token: await tx.userToken.create({ data: input }) };
+    });
   }
 
   // ハッシュで引く (認証経路。発行先ユーザーも同時に取る)

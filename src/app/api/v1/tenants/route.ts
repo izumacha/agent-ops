@@ -7,7 +7,7 @@ import { toListDto, toTenantDto, toUserDto, toUserTokenDto } from '@/lib/api/ser
 import type { ApiSchemas } from '@/lib/api-types';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { USER_TOKEN_BOOTSTRAP_NAME, USER_TOKEN_DEFAULT_TTL_DAYS } from '@/lib/constants';
-import { issueSecret, userTokenExpiresAt } from '@/lib/tokens';
+import { issueUserToken } from '@/lib/tokens';
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 
 // 認証に依存するので静的化しない
@@ -31,17 +31,12 @@ export const POST = route(async ({ request, principal, repos }) => {
   // 本文を検証する
   const input = await readJsonBody(request, tenantCreateSchema);
   // admin のログイントークンを発行する (平文はこの応答でのみ返す)
-  const issued = issueSecret('user');
+  const issued = issueUserToken(USER_TOKEN_BOOTSTRAP_NAME, USER_TOKEN_DEFAULT_TTL_DAYS);
   // 3 行を原子的に作る
   const created = await repos.tenants.createWithAdmin({
     name: input.name,
     admin: { email: input.adminEmail, name: input.adminName },
-    token: {
-      prefix: issued.prefix,
-      tokenHash: issued.hash,
-      name: USER_TOKEN_BOOTSTRAP_NAME,
-      expiresAt: userTokenExpiresAt(USER_TOKEN_DEFAULT_TTL_DAYS),
-    },
+    token: issued.input,
   });
   // DTO へ写し、平文を添えて 201 で返す
   const body: ApiSchemas['TenantCreated'] = {

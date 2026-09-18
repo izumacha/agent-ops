@@ -17,7 +17,7 @@ import { DEFAULT_TENANT_ID, USER_TOKEN_DEFAULT_TTL_DAYS } from '../src/lib/const
 // 用途名と有効期間の規則 (API の POST /users/{id}/tokens と同じスキーマで検証し、規則を書き写さない)
 import { userTokenCreateSchema } from '../src/lib/validations/user-token';
 // トークン生成
-import { issueSecret, userTokenExpiresAt } from '../src/lib/tokens';
+import { issueUserToken } from '../src/lib/tokens';
 
 // CLI 本体
 async function main(): Promise<void> {
@@ -54,21 +54,18 @@ async function main(): Promise<void> {
     const user = await repos.users.findByEmail(values.tenant!, normalizeEmail(values.email));
     if (!user)
       throw new Error(`ユーザーが見つかりません: ${values.email} (tenant=${values.tenant})`);
-    if (user.disabledAt !== null) throw new Error('このユーザーは無効化されています。');
-    // 平文を発行し、ハッシュだけ保存する
-    const issued = issueSecret('user');
-    const token = await repos.userTokens.create({
+    // 平文を発行し、ハッシュだけ保存する (有効/無効の判定はデータ層が原子的に行う)
+    const issued = issueUserToken(name, days);
+    const result = await repos.userTokens.create({
       tenantId: user.tenantId,
       userId: user.id,
-      prefix: issued.prefix,
-      tokenHash: issued.hash,
-      name,
-      expiresAt: userTokenExpiresAt(days),
+      ...issued.input,
     });
-    if (!token) throw new Error('トークンを発行できませんでした。');
+    if (result.status === 'disabled') throw new Error('このユーザーは無効化されています。');
+    if (result.status === 'not_found') throw new Error('トークンを発行できませんでした。');
     // 平文はここで 1 度だけ表示する
     console.log(
-      `発行しました (${user.email} / ${user.role} / 期限 ${token.expiresAt.toISOString()})`,
+      `発行しました (${user.email} / ${user.role} / 期限 ${result.token.expiresAt.toISOString()})`,
     );
     console.log(`Authorization: Bearer ${issued.secret}`);
   } finally {

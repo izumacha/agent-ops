@@ -53,6 +53,35 @@ export function issueSecret(kind: SecretKind): IssuedSecret {
   return { secret, prefix: displayPrefix(secret), hash: hashSecret(secret) };
 }
 
+// ユーザートークン発行の一式 (平文と、Port へ渡す保存用の入力)。発行箇所 (テナント作成・トークン発行 API・CLI) は
+// これを使い、prefix / hash / expiresAt を個別に組み立てない (取り違えや有効期限の計算の写しを作らない。§6 DRY)
+export interface IssuedUserToken {
+  // 平文 (応答か CLI の標準出力でしか見せない)
+  secret: string;
+  // Port へ渡す保存用の入力 (tenantId / userId は呼び出し側が足す)
+  input: { prefix: string; tokenHash: string; name: string; expiresAt: Date };
+}
+
+// ユーザートークンを 1 つ発行する (用途名と有効日数から。now はテストで固定するため)
+export function issueUserToken(
+  name: string,
+  days: number,
+  now: Date = new Date(),
+): IssuedUserToken {
+  // 平文・先頭・ハッシュ
+  const issued = issueSecret('user');
+  // 保存用の形に写す
+  return {
+    secret: issued.secret,
+    input: {
+      prefix: issued.prefix,
+      tokenHash: issued.hash,
+      name,
+      expiresAt: userTokenExpiresAt(days, now),
+    },
+  };
+}
+
 // 平文トークンの SHA-256 ハッシュ (16 進)。DB にはこれだけを保存する
 export function hashSecret(secret: string): string {
   // SHA-256 で不可逆にする (トークンは高エントロピーなのでソルト無しでよい)

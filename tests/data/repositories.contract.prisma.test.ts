@@ -156,7 +156,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       name: 'x',
     });
     expect(key?.agentId).toBe(agent.id);
-    // 別テナントのユーザーへのトークン発行 → null
+    // 別テナントのユーザーへのトークン発行 → not_found
     expect(
       await repos.userTokens.create({
         tenantId: b.tenant.id,
@@ -166,7 +166,27 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
         name: 'x',
         expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
       }),
-    ).toBeNull();
+    ).toEqual({ status: 'not_found' });
+    // 無効化済みユーザーへの発行 → disabled (2 人目の admin を作って無効化する)
+    const second = await repos.users.create({
+      tenantId: a.tenant.id,
+      email: 'second-token@example.com',
+      name: '2',
+      role: Role.admin,
+    });
+    const tokenInput = {
+      tenantId: a.tenant.id,
+      userId: second.id,
+      prefix: 'aop_u_y',
+      name: 'y',
+      expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
+    };
+    const active = await repos.userTokens.create({ ...tokenInput, tokenHash: 't2' });
+    expect(active.status).toBe('ok');
+    expect(await repos.users.disable(a.tenant.id, second.id)).toMatchObject({ status: 'ok' });
+    expect(await repos.userTokens.create({ ...tokenInput, tokenHash: 't3' })).toEqual({
+      status: 'disabled',
+    });
   });
 
   it('履歴 (UsageEvent) を持つエージェントは削除できず、履歴が無ければ専用キーごと消える', async () => {

@@ -5,7 +5,7 @@ import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, UserRecord, UserTokenRecord } from '@/data';
 import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
 import type { RouteContext } from '@/lib/api/handler';
-import { issueSecret, userTokenExpiresAt } from '@/lib/tokens';
+import { issueUserToken } from '@/lib/tokens';
 
 // テストで使うプラットフォーム管理者トークン (32 文字以上)
 export const PLATFORM_TOKEN = 'test-platform-admin-token-0123456789abcdef';
@@ -64,16 +64,13 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
     };
     store.users.set(user.id, user);
     // 平文トークンとそのハッシュ行
-    const issued = issueSecret('user');
+    const issued = issueUserToken('テスト用', SEED_TOKEN_TTL_DAYS, now);
     const token: UserTokenRecord = {
       id: store.nextId('utok'),
       tenantId: id,
       userId: user.id,
-      prefix: issued.prefix,
-      tokenHash: issued.hash,
-      name: 'テスト用',
+      ...issued.input,
       createdAt: now,
-      expiresAt: userTokenExpiresAt(SEED_TOKEN_TTL_DAYS, now),
       revokedAt: null,
     };
     store.userTokens.set(token.id, token);

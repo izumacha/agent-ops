@@ -504,27 +504,43 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     const released = new Promise<void>((resolve) => {
       release = resolve;
     });
+    // ロックを掴んだ合図 (掴む前に降格を始めると、どちらが先に行を取るかは数ミリ秒の運になり
+    // 「待たされなかった」という誤った赤が出る。実測で 400 回中 17 回まで落ちた)
+    let signalHeld = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
     // 別のトランザクションでテナント行を掴んだまま待つ
     const holding = client.$transaction(
       async (tx) => {
         // 降格が取るのと同じ行・同じ強さのロック
         await tx.$queryRaw`SELECT id FROM "Tenant" WHERE id = ${a.tenant.id} FOR NO KEY UPDATE`;
+        // 掴めたことを知らせる
+        signalHeld();
         // 合図が来るまで保持する
         await released;
       },
       { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
     );
+    // 掴むまで降格を始めない
+    await held;
     // 降格を始める (ロックが効いていれば、掴んでいる間は終わらない)
     const demote = repos.users.updateRole(a.tenant.id, second.id, Role.viewer);
-    // 待たされていること (先に時間切れの方が返る)
-    const finishedFirst = await Promise.race([
-      demote.then(() => 'demoted' as const),
-      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS)),
-    ]);
-    expect(finishedFirst).toBe('blocked');
-    // ロックを離すと降格が通る
-    release();
-    await holding;
+    try {
+      // 待たされていること (先に時間切れの方が返る)
+      const finishedFirst = await Promise.race([
+        demote.then(() => 'demoted' as const),
+        new Promise<'blocked'>((resolve) =>
+          setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS),
+        ),
+      ]);
+      expect(finishedFirst).toBe('blocked');
+    } finally {
+      // 失敗しても必ず離す (掴んだまま抜けると、次のテストの TRUNCATE が待たされて道連れで落ちる)
+      release();
+      await holding;
+    }
+    // ロックを離した後は降格が通る
     expect((await demote).status).toBe('ok');
   });
 

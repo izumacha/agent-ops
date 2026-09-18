@@ -47,19 +47,6 @@ function isPrismaError(error: unknown, code: string): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === code;
 }
 
-// ApiKey → Agent の複合 FK の制約名 (schema.prisma の既定命名。prisma/migrations の init が作る)
-const API_KEY_AGENT_FK = 'ApiKey_tenantId_agentId_fkey';
-
-// 外部キー違反のうち、指定した制約の違反か (どの FK でも同じ原因に翻訳すると、テナント行が消えたときの
-// Tenant 側 FK の違反まで「エージェントが見つからない」として返ってしまう)
-function isForeignKeyViolationOn(error: unknown, constraint: string): boolean {
-  // まず外部キー違反であること
-  if (!isPrismaError(error, FOREIGN_KEY_VIOLATION)) return false;
-  // PostgreSQL では meta.constraint に制約名が入る (末尾に " (index)" が付く版もあるので含有で見る)
-  const named = (error as Prisma.PrismaClientKnownRequestError).meta?.constraint;
-  return typeof named === 'string' && named.includes(constraint);
-}
-
 // 失効の共通形 (UserToken / ApiKey): まだ有効な行だけに失効日時を入れ (条件付き更新なので存在確認との間の窓が無い)、
 // 現在の行を返す (境界外なら null。既に失効済みなら日時はそのまま)
 async function revokeThenReload<T>(
@@ -416,14 +403,22 @@ class PrismaApiKeys implements ApiKeysPort {
 
   // 発行 (agentId が同テナントに無ければ null)
   async create(input: CreateApiKeyInput): Promise<ApiKeyRecord | null> {
-    // 挿入する。複合 FK (tenantId, agentId) が「別テナントのエージェント」を拒否するので null に翻訳する
-    try {
-      return await this.db.apiKey.create({ data: input });
-    } catch (error) {
-      // その FK の違反だけ = エージェントが同テナントに居ない (Tenant 側 FK の違反は内部エラーのまま上へ)
-      if (isForeignKeyViolationOn(error, API_KEY_AGENT_FK)) return null;
-      throw error;
-    }
+    // テナント共通キーなら紐づけ先の確認は要らない
+    if (input.agentId === null) return this.db.apiKey.create({ data: input });
+    // 紐づけ先の確認と挿入を 1 トランザクションで行う (ユーザートークンの発行と同じ形)。
+    // FK 違反 (P2003) の翻訳に頼らない — Prisma 7 のドライバアダプタ経由のエラーは「どの制約か」を安定した形で
+    // 持たず、どの FK でも同じ原因に翻訳すると Tenant 側 FK の違反まで「エージェントが見つからない」になる
+    return this.db.$transaction(async (tx: Db): Promise<ApiKeyRecord | null> => {
+      // 紐づけ先のエージェント行 (テナント境界内) を FOR KEY SHARE で押さえる (削除だけを待たせ、状態変更や
+      // 他のキー発行は妨げない)。存在すれば挿入は複合 FK (tenantId, agentId) を必ず満たす
+      const locked = await tx.$queryRaw<
+        { id: string }[]
+      >`SELECT id FROM "Agent" WHERE "tenantId" = ${input.tenantId} AND id = ${input.agentId} FOR KEY SHARE`;
+      // 同テナントに居なければ発行しない
+      if (locked.length === 0) return null;
+      // 挿入する
+      return tx.apiKey.create({ data: input });
+    });
   }
 
   // 失効 (見つからなければ null。既に失効済みなら日時はそのまま)

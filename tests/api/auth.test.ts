@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants } from '@/app/api/v1/tenants/route';
 import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
+import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { generateSecret } from '@/lib/tokens';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
 
@@ -143,9 +144,22 @@ describe('プラットフォーム管理者トークン', () => {
   });
 
   it('環境変数が短すぎる値なら無視して 401 (弱いトークンを使わせない)', async () => {
-    // 32 文字未満
-    process.env.PLATFORM_ADMIN_TOKEN = 'short';
-    expect((await call(listTenants, { token: 'short' })).status).toBe(401);
+    // 境界のちょうど 1 文字下 (リテラルではなく定数から作る。'short' のような固定値だと、上限を 6 まで
+    // 下げる変更でも緑のまま通ってしまう)
+    const tooShort = 'a'.repeat(PLATFORM_ADMIN_TOKEN_MIN_LENGTH - 1);
+    process.env.PLATFORM_ADMIN_TOKEN = tooShort;
+    expect((await call(listTenants, { token: tooShort })).status).toBe(401);
+    // 境界ちょうどは受け付ける (上限を厳しくしすぎる変更もここで落ちる)
+    const atLimit = 'a'.repeat(PLATFORM_ADMIN_TOKEN_MIN_LENGTH);
+    process.env.PLATFORM_ADMIN_TOKEN = atLimit;
+    expect((await call(listTenants, { token: atLimit })).status).toBe(200);
+  });
+
+  it('最小長そのものが 32 文字以上である (弱いトークンを許す方向へ動かさない)', () => {
+    // この 32 はテストが手で持つ唯一の値で、定数を下げると落ちる。
+    // 失効も期限切れも無く全テナントの作成・列挙を握る資格情報なので、下げるときは人の判断を必ず一度通す
+    // (認証経路のレート制限は Step6 の宿題＝いまは総当たりを阻む層がここしか無い)
+    expect(PLATFORM_ADMIN_TOKEN_MIN_LENGTH).toBeGreaterThanOrEqual(32);
   });
 });
 

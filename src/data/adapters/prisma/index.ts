@@ -134,6 +134,81 @@ async function lockActiveUser(
   return { status: 'ok' };
 }
 
+// ── DB へ渡してよい項目だけを書き出す writer 群 ─────────────────────────────
+// Port の入力を `data:` へ丸ごと渡さず、ここで 1 項目ずつ写してから渡す。理由は 2 つある。
+// (1) 丸ごと渡すと、入力の型に項目が増えたとき (契約と Zod を一緒に直すのが自然な直し方) それがそのまま
+//     DB へ届く。実測では更新経路で「execute 権限しか要らない更新で停止できる (stop 権限の迂回)」
+//     「行が別テナントへ移る」まで到達した。型では止まらない — 変数を渡すと TypeScript の
+//     「余分なプロパティ」の検査が働かないため。
+// (2) 逆に手で並べると今度は**足し忘れ**が起きる (落ちた項目は成功応答のまま黙って無視される)。
+//     そこで戻り値の型を Required<入力型> のマップ型にし、項目が増減したら型検査が落ちるようにする。
+// 作成・更新のどちらも同じ規約にそろえる (片方だけ例外にすると、どちらが正しい書き方かがレビューで揺れる)。
+
+// ユーザー作成
+function userCreateData(input: CreateUserInput): {
+  [K in keyof Required<CreateUserInput>]: CreateUserInput[K];
+} {
+  // 許した項目だけを写す
+  return { tenantId: input.tenantId, email: input.email, name: input.name, role: input.role };
+}
+
+// ログイントークン発行
+function userTokenCreateData(input: CreateUserTokenInput): {
+  [K in keyof Required<CreateUserTokenInput>]: CreateUserTokenInput[K];
+} {
+  // 許した項目だけを写す
+  return {
+    tenantId: input.tenantId,
+    userId: input.userId,
+    prefix: input.prefix,
+    tokenHash: input.tokenHash,
+    name: input.name,
+    expiresAt: input.expiresAt,
+  };
+}
+
+// エージェント作成
+function agentCreateData(input: CreateAgentInput): {
+  [K in keyof Required<CreateAgentInput>]: CreateAgentInput[K];
+} {
+  // 許した項目だけを写す (状態 status は既定値から始めるので受け取らない)
+  return {
+    tenantId: input.tenantId,
+    name: input.name,
+    description: input.description,
+    provider: input.provider,
+    model: input.model,
+    budgetMicroUsd: input.budgetMicroUsd,
+  };
+}
+
+// エージェント更新
+function agentUpdateData(patch: UpdateAgentInput): {
+  [K in keyof Required<UpdateAgentInput>]: UpdateAgentInput[K];
+} {
+  // 許した項目だけを写す (undefined の項目は Prisma が「変更しない」として扱う)
+  return {
+    name: patch.name,
+    description: patch.description,
+    model: patch.model,
+    budgetMicroUsd: patch.budgetMicroUsd,
+  };
+}
+
+// API キー発行
+function apiKeyCreateData(input: CreateApiKeyInput): {
+  [K in keyof Required<CreateApiKeyInput>]: CreateApiKeyInput[K];
+} {
+  // 許した項目だけを写す (失効日時 revokedAt は発行時には入れない)
+  return {
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    prefix: input.prefix,
+    keyHash: input.keyHash,
+    name: input.name,
+  };
+}
+
 // テナント Port の prisma 実装
 class PrismaTenants implements TenantsPort {
   // クライアントを受け取る
@@ -158,7 +233,8 @@ class PrismaTenants implements TenantsPort {
     return this.db.$transaction(async (tx: Db) => {
       // テナント行
       const tenant = await tx.tenant.create({
-        data: { name: input.name, plan: input.plan ?? Plan.free },
+        // プランは free から始める (切り替えは課金を入れる後の Step で足す。いまは入力で決めさせない)
+        data: { name: input.name, plan: Plan.free },
       });
       // admin ユーザー行 (役割は必ず admin)
       const admin = await tx.user.create({
@@ -184,23 +260,6 @@ class PrismaTenants implements TenantsPort {
       return { tenant, admin, token };
     });
   }
-}
-
-// 作成で DB へ渡してよい項目だけを書き出す (更新側の agentUpdateData と同じ考え方)。
-// 受け取った入力を丸ごと渡すと、Zod の strictObject が緩んだ瞬間に本文の id や disabledAt がそのまま DB へ届く
-// (呼び出し側が行 id を決められる・最初から無効化済みのユーザーを作れる)。型では止まらない
-// (変数を渡すと余分なプロパティの検査が働かない)。
-// 戻り値の型を Required<CreateUserInput> のマップ型にして、項目が増えたら型検査が落ちるようにする
-function userCreateData(input: CreateUserInput): {
-  [K in keyof Required<CreateUserInput>]: CreateUserInput[K];
-} {
-  // 許した項目だけを写す
-  return {
-    tenantId: input.tenantId,
-    email: input.email,
-    name: input.name,
-    role: input.role,
-  };
 }
 
 // ユーザー Port の prisma 実装
@@ -345,7 +404,10 @@ class PrismaUserTokens implements UserTokensPort {
       const locked = await lockActiveUser(tx, input.tenantId, input.userId);
       if (locked.status !== 'ok') return locked;
       // 挿入する (複合 FK (tenantId, userId) は上の検索で満たしている)
-      return { status: 'ok', token: await tx.userToken.create({ data: input }) };
+      return {
+        status: 'ok',
+        token: await tx.userToken.create({ data: userTokenCreateData(input) }),
+      };
     });
   }
 
@@ -384,24 +446,6 @@ class PrismaUserTokens implements UserTokensPort {
   }
 }
 
-// 更新で DB へ渡してよい項目だけを書き出す。
-// 本文を丸ごと渡すと、将来 AgentUpdate に項目が増えたとき (契約と Zod を一緒に直すのが自然な直し方)
-// status や tenantId まで DB へ届く — 実測で「execute 権限で停止できる」「行が別テナントへ移る」まで到達した。
-// 型では止まらない (変数を渡すと余分なプロパティの検査が働かない)。
-// 一方で手で並べると今度は**足し忘れ**が起きる (落ちた項目は 200 のまま黙って無視される) ので、
-// 戻り値の型を Required<UpdateAgentInput> のマップ型にして、項目が増えたら型検査が落ちるようにする
-function agentUpdateData(patch: UpdateAgentInput): {
-  [K in keyof Required<UpdateAgentInput>]: UpdateAgentInput[K];
-} {
-  // 許した項目だけを写す (undefined の項目は Prisma が「変更しない」として扱う)
-  return {
-    name: patch.name,
-    description: patch.description,
-    model: patch.model,
-    budgetMicroUsd: patch.budgetMicroUsd,
-  };
-}
-
 // エージェント Port の prisma 実装
 class PrismaAgents implements AgentsPort {
   // クライアントを受け取る
@@ -426,7 +470,7 @@ class PrismaAgents implements AgentsPort {
   async create(input: CreateAgentInput): Promise<AgentRecord> {
     // 挿入し、一意制約違反なら翻訳する
     try {
-      return await this.db.agent.create({ data: input });
+      return await this.db.agent.create({ data: agentCreateData(input) });
     } catch (error) {
       rethrowDuplicate(error, 'name');
     }
@@ -491,7 +535,7 @@ class PrismaApiKeys implements ApiKeysPort {
   // 発行 (agentId が同テナントに無ければ null)
   async create(input: CreateApiKeyInput): Promise<ApiKeyRecord | null> {
     // テナント共通キーなら紐づけ先の確認は要らない
-    if (input.agentId === null) return this.db.apiKey.create({ data: input });
+    if (input.agentId === null) return this.db.apiKey.create({ data: apiKeyCreateData(input) });
     // 紐づけ先の確認と挿入を 1 トランザクションで行う (ユーザートークンの発行と同じ形)。
     // FK 違反 (P2003) の翻訳に頼らない — Prisma 7 のドライバアダプタ経由のエラーは「どの制約か」を安定した形で
     // 持たず、どの FK でも同じ原因に翻訳すると Tenant 側 FK の違反まで「エージェントが見つからない」になる
@@ -504,7 +548,7 @@ class PrismaApiKeys implements ApiKeysPort {
       // 同テナントに居なければ発行しない
       if (locked.length === 0) return null;
       // 挿入する
-      return tx.apiKey.create({ data: input });
+      return tx.apiKey.create({ data: apiKeyCreateData(input) });
     });
   }
 

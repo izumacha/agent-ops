@@ -195,6 +195,11 @@ describe('DELETE /users/{userId} (無効化)', () => {
     });
     expect(result.status).toBe(409);
     expect((result.json as { message: string }).message).toBe(API_MESSAGES.selfDisable);
+    // 拒否したのだから行は書き換わっていない。ここは「他に有効な admin が居る」場面なので、データ層の
+    // last_admin 判定は拒否しない = ガードが書き込みの前にあるかどうかがそのまま結果に出る
+    // (status だけを見ていると、ガードを disable の後ろへ移す変更が「409 を返しつつ実際には無効化する」
+    //  形で素通りする。無効化されたユーザーは以後 401 で、再有効化の API は無い)
+    expect(seed.store.users.get(seed.a.users.admin.id)!.disabledAt).toBeNull();
   });
 
   it('URL のユーザーと発行先が違うトークンは失効できない (404)', async () => {
@@ -284,12 +289,18 @@ describe('DELETE /users/{userId} (無効化)', () => {
       method: 'DELETE',
       params: { userId: seed.a.users.viewer.id },
     });
+    // 発行前の本数 (seed が配ったトークンがあるので、差を見る)
+    const before = seed.store.userTokens.size;
     const result = await call(createToken, {
       token: seed.a.tokens.admin,
       params: { userId: seed.a.users.viewer.id },
       body: { name: 'x' },
     });
     expect(result.status).toBe(409);
+    // 拒否したのだから行は 1 本も増えていない
+    // (増えると「有効に見えるのに絶対に認証できないトークン」が一覧に並ぶ。status だけを見ていると、
+    //  挿入してから拒否を返す変更が素通りする)
+    expect(seed.store.userTokens.size).toBe(before);
   });
 
   it('他テナントのユーザーは無効化できない (404。相手は有効なまま)', async () => {

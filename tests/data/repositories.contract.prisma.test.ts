@@ -252,6 +252,10 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.userTokens.create({ ...tokenInput, tokenHash: 't3' })).toEqual({
       status: 'disabled',
     });
+    // 拒否したのだから行は 1 本も増えていない (発行済みの 1 本だけ)。
+    // $transaction のコールバックは正常 return でコミットするので、「挿入してから拒否を返す」書き方でも
+    // 応答だけを見ていると気付けない — その場合「有効に見えるのに絶対に認証できないトークン」が DB に残る
+    expect(await client.userToken.count({ where: { userId: second.id } })).toBe(1);
   });
 
   // 複合 FK は「アダプタのチェックを通らない書き込み」に対する第 2 の砦。アダプタ経由でしか

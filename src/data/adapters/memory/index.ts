@@ -65,7 +65,8 @@ class MemoryTenants implements TenantsPort {
     const tenant: TenantRecord = {
       id: this.store.nextId('tenant'),
       name: input.name,
-      plan: input.plan ?? Plan.free,
+      // プランは free から始める (prisma 実装と同じ。切り替えは後の Step)
+      plan: Plan.free,
       createdAt: now,
       updatedAt: now,
     };

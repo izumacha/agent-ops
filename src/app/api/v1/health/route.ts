@@ -4,6 +4,8 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 // OpenAPI から生成した応答の型
 import type { HealthDto } from '@/lib/api-types';
+// HTTP ステータスの唯一の参照元 (§6)
+import { HTTP_STATUS } from '@/lib/api/http-status';
 
 // DB を毎回叩くので、Next.js の静的化を無効にして常に動的に応答する
 export const dynamic = 'force-dynamic';
@@ -23,6 +25,9 @@ export async function GET(): Promise<NextResponse<HealthDto>> {
       error instanceof Error ? error.message : error,
     );
     // 503 で「DB が落ちている」ことだけを伝える
-    return NextResponse.json({ ok: false, db: 'down' }, { status: 503 });
+    return NextResponse.json(
+      { ok: false, db: 'down' },
+      { status: HTTP_STATUS.SERVICE_UNAVAILABLE },
+    );
   }
 }

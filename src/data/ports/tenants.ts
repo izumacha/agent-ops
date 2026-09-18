@@ -1,5 +1,4 @@
 // テナント操作の Port (契約)。実装は adapters/memory と adapters/prisma
-import type { Plan } from '@/domain/types';
 import type { Page, PageQuery, TenantRecord, UserRecord, UserTokenRecord } from './types';
 
 // テナント作成の入力。最初の admin ユーザーとそのログイントークンを同時に作る (UC-01)。
@@ -7,8 +6,6 @@ import type { Page, PageQuery, TenantRecord, UserRecord, UserTokenRecord } from 
 export interface CreateTenantInput {
   // テナントの表示名
   name: string;
-  // 契約プラン (省略時は free)
-  plan?: Plan;
   // 最初の admin ユーザー
   admin: {
     email: string;

@@ -7,6 +7,9 @@ import { join } from 'node:path';
 
 // docs/ の場所
 const DOCS = join(process.cwd(), 'docs');
+// 定数の正本 (文書に書かれた数値と突き合わせる)
+import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
+
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
 const REQUIRED_ADRS = 3;
@@ -41,6 +44,23 @@ describe('Step0 の設計成果物', () => {
       expect(body, `${name} にステータスが無い`).toMatch(
         /^- \*\*ステータス\*\*: (採択|廃止|置換)/m,
       );
+    }
+  });
+
+  // 運用者が読む 3 つの文書と、実装が使う定数が同じ数値を言っていることを固定する
+  // (写しが 3 か所あるので、定数を下げても文書が古い値のまま残り「32 文字以上と書いてあるのに 6 文字が通る」
+  //  状態を作れてしまう。文書側だけを直しても同じ)
+  it(`プラットフォーム管理者トークンの最小長 ${PLATFORM_ADMIN_TOKEN_MIN_LENGTH} が文書と一致する`, () => {
+    // 実装の値を文書の書き方 (「32 文字以上」) に合わせた文字列
+    const expected = `${PLATFORM_ADMIN_TOKEN_MIN_LENGTH} 文字以上`;
+    // 運用者がこの値を読む 3 か所
+    for (const path of [
+      join(DOCS, 'adr', '0005-bearer-token-auth.md'),
+      join(process.cwd(), '.env.example'),
+      join(process.cwd(), 'README.md'),
+    ]) {
+      // その数値が本文に現れること
+      expect(readFileSync(path, 'utf8'), `${path} の最小長が実装とずれている`).toContain(expected);
     }
   });
 

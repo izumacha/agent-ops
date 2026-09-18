@@ -35,6 +35,24 @@ const config = [
   {
     // 適用対象: src 配下の TypeScript / TSX ファイル全体
     files: ['src/**/*.{ts,tsx}'],
+    rules: {
+      // 値をそのまま SQL へ混ぜる Prisma の API を禁止する (タグ付きテンプレートの $queryRaw を使う)。
+      // 構文での検査は tests/raw-sql.test.ts が担い、ここは編集中にすぐ気付けるようにするための二重化
+      'no-restricted-syntax': [
+        'error',
+        {
+          // メンバ参照の名前で禁止する (a.$queryRawUnsafe / Prisma.raw など)
+          selector:
+            'MemberExpression[property.name=/^(\\$queryRawUnsafe|\\$executeRawUnsafe|raw|sql)$/]',
+          message:
+            '値を素通しする生 SQL は禁止。タグ付きテンプレートの $queryRaw / $executeRaw を使うこと (パラメータ化される)。',
+        },
+      ],
+    },
+  },
+  {
+    // 適用対象: src 配下の TypeScript / TSX ファイル全体
+    files: ['src/**/*.{ts,tsx}'],
     // 例外: Prisma クライアントの結線箇所と prisma アダプタ (Ports & Adapters の Adapter 側) だけは生成物の直接 import を許可する
     ignores: ['src/lib/prisma.ts', 'src/lib/prisma-client.ts', 'src/data/adapters/prisma/**'],
     rules: {

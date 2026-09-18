@@ -6,6 +6,11 @@ import { prisma } from '@/lib/prisma';
 import type { HealthDto } from '@/lib/api-types';
 // HTTP ステータスの唯一の参照元 (§6)
 import { HTTP_STATUS } from '@/lib/api/http-status';
+// 保存を禁じる Cache-Control の値 (route() が全ルートへ付けているのと同じ値)
+import { NO_STORE_CACHE_CONTROL } from '@/lib/api/handler';
+
+// 応答に付けるキャッシュ制御 (成功・失敗のどちらにも同じものを付ける)
+const CACHE_HEADERS = { 'Cache-Control': NO_STORE_CACHE_CONTROL };
 
 // DB を毎回叩くので、Next.js の静的化を無効にして常に動的に応答する
 export const dynamic = 'force-dynamic';
@@ -17,7 +22,9 @@ export async function GET(): Promise<NextResponse<HealthDto>> {
     // SELECT 1 が返れば DB は生きている
     await prisma.$queryRaw`SELECT 1`;
     // 正常応答 (OpenAPI の Health スキーマに一致させる)
-    return NextResponse.json({ ok: true, db: 'up' });
+    // このルートだけは route() を通らないので、キャッシュ制御は自分で付ける。
+    // 付けないと前段のキャッシュ層が DB 障害中も古い ok:true を配り、生存確認が「健康」と答え続ける
+    return NextResponse.json({ ok: true, db: 'up' }, { headers: CACHE_HEADERS });
   } catch (error) {
     // 内部詳細 (接続文字列など) は返さず、サーバログにだけ残す (§9)
     console.error(
@@ -27,7 +34,7 @@ export async function GET(): Promise<NextResponse<HealthDto>> {
     // 503 で「DB が落ちている」ことだけを伝える
     return NextResponse.json(
       { ok: false, db: 'down' },
-      { status: HTTP_STATUS.SERVICE_UNAVAILABLE },
+      { status: HTTP_STATUS.SERVICE_UNAVAILABLE, headers: CACHE_HEADERS },
     );
   }
 }

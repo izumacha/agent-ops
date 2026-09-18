@@ -23,6 +23,9 @@ describe('GET /health', () => {
     const response = await GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true, db: 'up' });
+    // route() を通らない唯一の経路なので、キャッシュ制御を自分で付けているか見る
+    // (付いていないと前段のキャッシュ層が DB 障害中も古い ok:true を配り、監視が沈黙する)
+    expect(response.headers.get('cache-control')).toBe('no-store');
   });
 
   it('DB 障害時は 503 で、応答に内部詳細を 1 文字も含まない (サーバログにだけ残す)', async () => {
@@ -34,6 +37,8 @@ describe('GET /health', () => {
     // ハンドラを直接呼ぶ
     const response = await GET();
     expect(response.status).toBe(503);
+    // 失敗側にも同じく付いていること
+    expect(response.headers.get('cache-control')).toBe('no-store');
     // 本文は「DB が落ちている」ことだけ (項目を足す変更もここで落ちる)
     const body = await response.json();
     expect(body).toEqual({ ok: false, db: 'down' });

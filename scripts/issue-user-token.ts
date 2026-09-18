@@ -23,7 +23,7 @@ import { DEFAULT_TENANT_ID } from '../src/domain/tenant';
 // 用途名と有効期間の規則 (API の POST /users/{id}/tokens と同じスキーマで検証し、規則を書き写さない)
 import { userTokenCreateSchema } from '../src/lib/validations/user-token';
 // トークン生成
-import { issueUserToken } from '../src/lib/tokens';
+import { issueUserToken, userTokenCreateInput } from '../src/lib/tokens';
 
 // CLI 本体
 async function main(): Promise<void> {
@@ -68,16 +68,9 @@ async function main(): Promise<void> {
       throw new Error(`ユーザーが見つかりません: ${values.email} (tenant=${values.tenant})`);
     // 平文を発行し、ハッシュだけ保存する (有効/無効の判定はデータ層が原子的に行う)
     const issued = issueUserToken(name, days);
-    const result = await repos.userTokens.create({
-      tenantId: user.tenantId,
-      userId: user.id,
-      // 発行の一式は展開せず 1 項目ずつ書き写す (展開を後ろに置くと、将来 input に tenantId や
-      // userId が増えたとき呼び出し側の指定を黙って上書きする)
-      prefix: issued.input.prefix,
-      tokenHash: issued.input.tokenHash,
-      name: issued.input.name,
-      expiresAt: issued.input.expiresAt,
-    });
+    const result = await repos.userTokens.create(
+      userTokenCreateInput(issued, { tenantId: user.tenantId, userId: user.id }),
+    );
     if (result.status === 'disabled') throw new Error('このユーザーは無効化されています。');
     if (result.status === 'not_found') throw new Error('トークンを発行できませんでした。');
     // 平文はここで 1 度だけ表示する

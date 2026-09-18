@@ -3,8 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants, POST as createTenant } from '@/app/api/v1/tenants/route';
 import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
+import { USER_TOKEN_DEFAULT_TTL_DAYS, USER_TOKEN_MAX_TTL_DAYS } from '@/lib/constants';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
+
+// 1 日のミリ秒 (有効期限の日数を求めるため)
+const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // seed (各テストで作り直し、後始末も helpers が行う)
 const seed = seedEachTest();
@@ -12,8 +16,8 @@ const seed = seedEachTest();
 // 作成応答の形
 interface Created {
   tenant: { id: string; name: string; plan: string };
-  admin: { id: string; role: string; email: string };
-  adminToken: { secret: string; prefix: string; expiresAt: string };
+  admin: { id: string; role: string; email: string; name: string };
+  adminToken: { secret: string; prefix: string; name: string; expiresAt: string };
 }
 
 describe('POST /tenants', () => {
@@ -29,6 +33,17 @@ describe('POST /tenants', () => {
     expect(body.tenant.name).toBe('新テナント');
     expect(body.tenant.plan).toBe('free');
     expect(body.admin.role).toBe('admin');
+    // 送った本文の各項目が、そのまま作られていること (固定値へ差し替える変更をここで落とす)
+    expect(body.admin.email).toBe('owner@example.com');
+    expect(body.admin.name).toBe('オーナー');
+    // ブートストラップトークンの有効期限。新テナントで唯一発行される全権資格情報なので、
+    // 既定の日数で切れること・上限を超えないことを見る (ADR-0005「無期限は作れない」)。
+    // 発行 API 側 (POST /users/{id}/tokens) には同じ表明があるのに、より強いこちらだけ無検証だった
+    const expiresAt = new Date(body.adminToken.expiresAt).getTime();
+    const days = (expiresAt - Date.now()) / MILLIS_PER_DAY;
+    expect(days).toBeGreaterThan(USER_TOKEN_DEFAULT_TTL_DAYS - 1);
+    expect(days).toBeLessThan(USER_TOKEN_DEFAULT_TTL_DAYS + 1);
+    expect(days).toBeLessThanOrEqual(USER_TOKEN_MAX_TTL_DAYS);
     expect(body.adminToken.secret.startsWith(USER_TOKEN_PREFIX)).toBe(true);
     expect(body.adminToken.secret.startsWith(body.adminToken.prefix)).toBe(true);
     // 返ったトークンでその admin として認証できること

@@ -1,5 +1,7 @@
 // Bearer トークン (ユーザートークン・API キー) の生成・ハッシュ・比較。
 // 平文は発行応答でのみ返し、DB には SHA-256 ハッシュだけを保存する (docs/spec.md §5)
+// ログイントークン作成の入力 (Port の契約。型だけを使う)
+import type { CreateUserTokenInput } from '@/data/ports/user-tokens';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 // ユーザートークンの接頭辞 (種類を一目で判別し、誤ってログへ貼られたときに検索できるようにする)
@@ -79,6 +81,28 @@ export function issueUserToken(
       name,
       expiresAt: userTokenExpiresAt(days, now),
     },
+  };
+}
+
+/**
+ * 発行の一式を「ログイントークン作成の入力」へ組み立てる。発行箇所 (トークン発行 API・CLI・テストの seed) が
+ * 同じ形を書き写さないために置く (§6 DRY)。
+ * 展開 (spread) で渡す形にしない — 並べる順で tenantId / userId を上書きでき、将来 IssuedUserToken.input に
+ * それらが増えたときに黙って壊れる。戻り値の型を CreateUserTokenInput にすることで、項目が増えたら
+ * ここ 1 か所の型検査が落ちる
+ */
+export function userTokenCreateInput(
+  issued: IssuedUserToken,
+  owner: { tenantId: string; userId: string },
+): CreateUserTokenInput {
+  // 発行先と、発行の一式を 1 項目ずつ写す
+  return {
+    tenantId: owner.tenantId,
+    userId: owner.userId,
+    prefix: issued.input.prefix,
+    tokenHash: issued.input.tokenHash,
+    name: issued.input.name,
+    expiresAt: issued.input.expiresAt,
   };
 }
 

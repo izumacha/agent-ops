@@ -36,6 +36,23 @@ describe('POST /agents', () => {
     expect(body.budgetMicroUsd).toBeNull();
   });
 
+  it('登録の応答は送った項目をそのまま返す (本文から Port への配線)', async () => {
+    // 送る本文 (予算は JSON では文字列で運ぶ)
+    const body = {
+      name: '配線ボット',
+      description: '配線の説明',
+      provider: Provider.openai,
+      model: 'gpt-配線',
+      budgetMicroUsd: '1000',
+    };
+    // 登録する
+    const result = await call(createAgent, { token: seed.a.tokens.operator, body });
+    expect(result.status).toBe(201);
+    // 送った 5 項目がそのまま載っていること。どれかを固定値へ差し替えると、台帳と実物が食い違う
+    // (provider を固定すると Step2 のプロキシが別ベンダへ中継し、費用の按分も誤る)
+    expect(result.json).toMatchObject(body);
+  });
+
   it('同一テナント内で名前が重複すると 422 (UC-03 の例外)', async () => {
     // 既存エージェントと同じ名前
     const result = await call(createAgent, {
@@ -250,6 +267,35 @@ describe('リクエスト本文の防御', () => {
       expect(logged).not.toContain('/etc/passwd');
     } finally {
       errorSpy.mockRestore();
+    }
+  });
+
+  it('スタックに紛れた「フレームの形でない行」はログに残らない (見出しが読めた場合)', async () => {
+    // ドライバや ORM は自前で stack を組み立てることがあり、見出しの後ろに利用者の入力由来の行が続きうる。
+    // 見出しが読めた経路では message の切り落としでは消えないので、残す行を「V8 のフレームの形」に
+    // 限っていることが効く。実測では、選別を「at で始まるか」だけに緩めるとこの行がログへ出た
+    const leaked = 'at 田中太郎 (tanaka@example.com) の予定';
+    // 見出しは正しく、その後ろに偽のフレームと本物のフレームが並ぶ例外
+    const error = new Error('boom');
+    error.stack = `Error: boom\n${leaked}\n    at PrismaAgents.list (/app/src/data/adapters/prisma/index.ts:10:5)`;
+    // 一覧の Port を差し替えてこの例外を投げさせる
+    const list = vi.spyOn(seed.repos.agents, 'list').mockRejectedValue(error);
+    // ログは記録だけして端末へ出さない
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      // 一覧を呼ぶ (500 になる)
+      const result = await call(listAgents, { token: seed.a.tokens.viewer });
+      expect(result.status).toBe(500);
+      // ログの中身
+      const logged = JSON.stringify(errorSpy.mock.calls[0]);
+      // 本物のフレームは残る (選別を厳しくしすぎる変更もここで落ちる)
+      expect(logged).toContain('PrismaAgents.list');
+      // 偽のフレーム (利用者の入力由来) は 1 文字も残らない
+      expect(logged).not.toContain('tanaka@example.com');
+      expect(logged).not.toContain('田中太郎');
+    } finally {
+      errorSpy.mockRestore();
+      list.mockRestore();
     }
   });
 

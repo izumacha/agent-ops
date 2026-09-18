@@ -76,11 +76,14 @@ function describeError(error: unknown): Record<string, unknown> {
  * RFC 9111 は Authorization 付きの要求を既定で共有キャッシュに保存させないが、`/api/*` を一律にキャッシュする
  * 設定はよくあるので、アプリ側でも明示する (テナント境界をアプリの where 条件だけに頼らない)
  */
+// 保存を禁じる Cache-Control の値 (route() を通らない /health も同じ値を使うので唯一の参照元にする)
+export const NO_STORE_CACHE_CONTROL = 'no-store';
+
 function withPrivateCacheHeaders(response: Response): Response {
   // 既存のヘッダを引き継ぐ
   const headers = new Headers(response.headers);
   // 保存させない
-  headers.set('Cache-Control', 'no-store');
+  headers.set('Cache-Control', NO_STORE_CACHE_CONTROL);
   // 万一保存されても資格情報ごとに分ける
   headers.append('Vary', 'Authorization');
   // 本文・状態はそのままで作り直す (204 の null 本文もそのまま通る)

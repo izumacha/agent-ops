@@ -2,12 +2,13 @@
 import { describe, expect, it } from 'vitest';
 import { getRepos } from '@/data';
 import { GET as getMe } from '@/app/api/v1/me/route';
+import { POST as createAgent } from '@/app/api/v1/agents/route';
 import { GET as listUsers, POST as createUser } from '@/app/api/v1/users/route';
 import { DELETE as disableUser } from '@/app/api/v1/users/[userId]/route';
 import { PUT as updateRole } from '@/app/api/v1/users/[userId]/role/route';
 import { GET as listTokens, POST as createToken } from '@/app/api/v1/users/[userId]/tokens/route';
 import { DELETE as revokeToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
-import { Role } from '@/domain/types';
+import { Provider, Role } from '@/domain/types';
 import { API_MESSAGES, EMAIL_MAX_LENGTH } from '@/lib/constants';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
 import { call, seedEachTest } from './helpers';
@@ -39,6 +40,16 @@ describe('POST /users', () => {
     expect(body.tenantId).toBe(seed.a.id);
     expect(body.role).toBe('operator');
     expect(body.disabledAt).toBeNull();
+  });
+
+  it('招待の応答は送った項目をそのまま返す (本文から Port への配線)', async () => {
+    // 送る本文 (メールは正規化後と同じ形にして、比較が変換の有無に左右されないようにする)
+    const body = { email: 'wiring@example.com', name: '配線 太郎', role: Role.operator };
+    // 招待する
+    const result = await call(createUser, { token: seed.a.tokens.admin, body });
+    expect(result.status).toBe(201);
+    // 送った 3 項目がそのまま載っていること (どれかを固定値へ差し替える変更をここで落とす)
+    expect(result.json).toMatchObject(body);
   });
 
   it('同一テナント内でメールが重複すると 422 (issues.path = email)', async () => {
@@ -346,8 +357,22 @@ describe('ログイントークン (/users/{userId}/tokens)', () => {
       body: { name: 'CLI' },
     });
     expect(issued.status).toBe(201);
-    const body = issued.json as { id: string; secret: string; prefix: string; expiresAt: string };
+    const body = issued.json as {
+      id: string;
+      userId: string;
+      name: string;
+      secret: string;
+      prefix: string;
+      expiresAt: string;
+      revokedAt: string | null;
+    };
     expect(body.secret.startsWith(USER_TOKEN_PREFIX)).toBe(true);
+    // 送った用途名と発行先が、そのまま応答に載ること (固定値へ差し替える変更をここで落とす)。
+    // 一覧は admin が「どの資格情報が生きているか」を見る唯一の窓口なので、誰のどのトークンかが要る
+    expect(body.name).toBe('CLI');
+    expect(body.userId).toBe(seed.a.users.viewer.id);
+    // 発行直後は失効していない
+    expect(body.revokedAt).toBeNull();
     // 発行したトークンで viewer として認証できる
     const me = await call(getMe, { token: body.secret });
     expect((me.json as { user: { id: string } }).user.id).toBe(seed.a.users.viewer.id);
@@ -360,7 +385,13 @@ describe('ログイントークン (/users/{userId}/tokens)', () => {
     const text = JSON.stringify(list.json);
     expect(text).not.toContain(body.secret);
     expect(text).not.toContain('tokenHash');
-    expect((list.json as { items: { id: string }[] }).items.map((t) => t.id)).toContain(body.id);
+    const items = (list.json as { items: { id: string; userId: string; name: string }[] }).items;
+    expect(items.map((t) => t.id)).toContain(body.id);
+    // 一覧側でも用途名と発行先が載っていること
+    expect(items.find((t) => t.id === body.id)).toMatchObject({
+      userId: seed.a.users.viewer.id,
+      name: 'CLI',
+    });
   });
 
   it('有効期間は既定 90 日で、365 日を超える指定は 422', async () => {
@@ -399,6 +430,21 @@ describe('ログイントークン (/users/{userId}/tokens)', () => {
     });
     expect(revoked.status).toBe(204);
     expect((await call(getMe, { token: body.secret })).status).toBe(401);
+    // 一覧でも失効済みに見えること。DTO の revokedAt を固定値にする変異は認証側に影響しないので、
+    // 401 だけを見ていると「実際は失効したのに一覧では生きて見える」「その逆」を両方見逃す
+    const listed = await call(listTokens, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+    });
+    const revokedItem = (
+      listed.json as { items: { id: string; revokedAt: string | null }[] }
+    ).items.find((t) => t.id === body.id);
+    expect(revokedItem?.revokedAt).not.toBeNull();
+    // 失効させていない seed のトークンは生きたまま (revokedAt を一律で埋める変異を落とす)
+    const seedItem = (
+      listed.json as { items: { id: string; revokedAt: string | null }[] }
+    ).items.find((t) => t.id === seed.a.tokenRows.viewer.id);
+    expect(seedItem?.revokedAt).toBeNull();
     // 2 回目も 204
     const again = await call(revokeToken, {
       token: seed.a.tokens.admin,
@@ -406,6 +452,76 @@ describe('ログイントークン (/users/{userId}/tokens)', () => {
       params: { userId: seed.a.users.viewer.id, tokenId: body.id },
     });
     expect(again.status).toBe(204);
+  });
+
+  // 認証は「毎リクエスト DB を引く」ことが前提で、失効・無効化・降格はそれで初めて即時に効く。
+  // 既存のテストはどれも「一度も認証に成功していないトークン」を失効させているので、認証結果を
+  // 覚える実装 (性能改善としてごく自然な形) を入れても全件緑になる。実測ではその変異で
+  // 失効後の GET /me が 200、降格後の POST /agents が 201 になった (キルスイッチが死ぬ)。
+  // そこで「成功 → 状態を変える → 同じトークンで再度」の順序を明示して固定する
+  it('一度認証に成功したトークンでも、失効・無効化・降格はその後すぐ効く', async () => {
+    // viewer 向けに発行し、まず 1 度認証を通す
+    const issued = await call(createToken, {
+      token: seed.a.tokens.admin,
+      params: { userId: seed.a.users.viewer.id },
+      body: { name: '順序テスト' },
+    });
+    const secret = (issued.json as { id: string; secret: string }).secret;
+    const tokenId = (issued.json as { id: string; secret: string }).id;
+    expect((await call(getMe, { token: secret })).status).toBe(200);
+    // 失効させると、同じトークンは以後 401
+    expect(
+      (
+        await call(revokeToken, {
+          token: seed.a.tokens.admin,
+          method: 'DELETE',
+          params: { userId: seed.a.users.viewer.id, tokenId },
+        })
+      ).status,
+    ).toBe(204);
+    expect((await call(getMe, { token: secret })).status).toBe(401);
+
+    // 無効化も同じ (seed のトークンで 1 度成功してから無効化する)
+    expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(200);
+    expect(
+      (
+        await call(disableUser, {
+          token: seed.a.tokens.admin,
+          method: 'DELETE',
+          params: { userId: seed.a.users.viewer.id },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(401);
+
+    // 降格も同じ (operator のトークンで 1 度 execute 権限の操作を通してから viewer へ落とす)
+    expect(
+      (
+        await call(createAgent, {
+          token: seed.a.tokens.operator,
+          body: { name: '順序ボット', provider: Provider.anthropic, model: 'claude-sonnet-4-6' },
+        })
+      ).status,
+    ).toBe(201);
+    expect(
+      (
+        await call(updateRole, {
+          token: seed.a.tokens.admin,
+          method: 'PUT',
+          params: { userId: seed.a.users.operator.id },
+          body: { role: Role.viewer },
+        })
+      ).status,
+    ).toBe(200);
+    // 同じトークンでも、降格後は execute 権限が無いので 403
+    expect(
+      (
+        await call(createAgent, {
+          token: seed.a.tokens.operator,
+          body: { name: '順序ボット 2', provider: Provider.anthropic, model: 'claude-sonnet-4-6' },
+        })
+      ).status,
+    ).toBe(403);
   });
 
   it('他テナントのユーザーへの発行・一覧・失効は 404', async () => {

@@ -31,6 +31,17 @@ describe('POST /api-keys', () => {
     expect(JSON.stringify(list.json)).not.toContain('keyHash');
   });
 
+  it('発行の応答は送った用途名をそのまま返す (本文から Port への配線)', async () => {
+    // 用途名を送る
+    const result = await call(createKey, {
+      token: seed.a.tokens.operator,
+      body: { name: '配線キー' },
+    });
+    expect(result.status).toBe(201);
+    // 用途名は「どのキーを失効させるか」を特定する唯一の手掛かりなので、固定値へ差し替える変更を落とす
+    expect(result.json).toMatchObject({ name: '配線キー' });
+  });
+
   it('自テナントのエージェントに紐づけて発行できる', async () => {
     // 既存エージェントを指定する
     const result = await call(createKey, {

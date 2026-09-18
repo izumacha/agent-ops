@@ -14,9 +14,14 @@
 // 落とす前提で、`docs/adr/0005-bearer-token-auth.md` の宿題に記載している。
 //
 // **本文サイズへの副作用**: proxy を置くと Next.js は非 GET の本文を入口で複製・バッファし、
-// `experimental.proxyClientMaxBodySize` (既定 10 MiB) を超えた分をエラーにせず切り詰める。
-// このアプリの本文上限 `JSON_BODY_MAX_BYTES` (64 KiB) はその 1/160 なので、正規の要求も
-// 413 を返す経路も影響を受けない。**上限を既定より大きくするときはここを見直すこと。**
+// `experimental.proxyClientMaxBodySize` を超えた分をエラーにせず切り詰める。このバッファは
+// **認証より前**に走るので、既定 (10 MiB) のままだと未認証の相手が 1 接続あたりその分の
+// ヒープを握れる。そこで `next.config.ts` はこの値をアプリの本文上限から導いて絞っている
+// (`src/lib/body-limits.ts` の `ENTRY_MAX_BODY_BYTES` = `JSON_BODY_MAX_BYTES` ＋ 余白)。
+// 守るべき不変条件は「余白は 0 より大きく、本文上限の 2 倍以内」で、定数側のコメントと
+// `tests/proxy.test.ts` が固定する。**保持時間はこの設定では直らない** —
+// 本文を送り終えるまで応答は出ないので、本文のタイムアウトは前段のリバースプロキシで落とす
+// (ADR-0005 の宿題)。
 import { NextResponse, type NextRequest } from 'next/server';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { errorResponse } from '@/lib/api/errors';

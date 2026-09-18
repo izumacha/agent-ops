@@ -12,7 +12,11 @@ import type { NextRequest } from 'next/server';
 import { config, proxy } from '@/proxy';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
-import { ENTRY_MAX_BODY_BYTES, JSON_BODY_MAX_BYTES } from '@/lib/body-limits';
+import {
+  ENTRY_MAX_BODY_BYTES,
+  JSON_BODY_MAX_BYTES,
+  MAX_SOCKET_READ_BYTES,
+} from '@/lib/body-limits';
 import nextConfig from '../next.config';
 import { findRouteFiles } from './lib/route-files';
 
@@ -159,5 +163,22 @@ describe('入口でバッファする本文の上限', () => {
   it('入口の上限はアプリの上限より大きい (413 の経路を壊さない)', () => {
     // 入口がちょうど同じ値だと、上限超過の本文が「ちょうど上限」へ切り詰められて 413 を返せなくなる
     expect(ENTRY_MAX_BODY_BYTES).toBeGreaterThan(JSON_BODY_MAX_BYTES);
+  });
+
+  it('入口の余裕は 1 回のソケット読み取り以上ある (切り詰めが「別の妥当な JSON」に化けない)', () => {
+    // Next.js は上限を跨いだかたまりを丸ごと捨てるので、余裕が 1 回の読み取りに満たないと
+    // 切り詰め後の長さがアプリの上限ちょうどに着地でき、413 を通り抜ける。
+    // 実測では余裕を 1 KiB にした版が、完結した別の JSON を 201 で受理した (全件緑のまま)
+    expect(ENTRY_MAX_BODY_BYTES - JSON_BODY_MAX_BYTES).toBeGreaterThanOrEqual(
+      MAX_SOCKET_READ_BYTES,
+    );
+  });
+
+  it('入口の上限はアプリの上限の 2 倍以内 (未認証に握らせるヒープを小さく保つ)', () => {
+    // **下限だけでは足りない。** 余白をいくら膨らませても下限の検査は通るので、余白の 1 行を
+    // 既定 (10 MiB) 相当へ戻す変異が全件緑のまま通った (実測: テスト件数も 366 のまま不変で、
+    // 未認証 40 接続に対する RSS 増は +22.8 MB → +201.0 MB へ戻った)。
+    // 上限は定数から導く (Next の既定値をここへ書き写さない。本文上限を上げれば自動で追随する)
+    expect(ENTRY_MAX_BODY_BYTES).toBeLessThanOrEqual(JSON_BODY_MAX_BYTES * 2);
   });
 });

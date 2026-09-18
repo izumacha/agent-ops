@@ -117,7 +117,10 @@ export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Pro
   if (contentType.split(';')[0].trim().toLowerCase() !== JSON_MEDIA_TYPE) {
     throw new ApiError(HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE, API_MESSAGES.unsupportedMediaType);
   }
-  // 申告サイズが上限を超えていれば読む前に落とす (正直な申告への早期拒否。実測は下で必ず行う)
+  // 申告サイズが上限を超えていれば読む前に落とす (正直な申告への早期拒否。実測は下で必ず行う)。
+  // **本番で「早く」落ちるわけではない** — 入口に proxy を置いているので Next.js は本文を読み切って
+  // からハンドラを呼ぶ。ここで短絡するのはハンドラを直接呼ぶテスト経路だけで、送信中に打ち切るのは
+  // 前段のリバースプロキシの責務 (ADR-0005 の宿題)
   const declared = Number(request.headers.get('content-length') ?? '0');
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);

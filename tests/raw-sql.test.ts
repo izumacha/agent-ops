@@ -1,8 +1,12 @@
-// 生 SQL の書き方を構文で固定する。Prisma はタグ付きテンプレート (`$queryRaw`) なら値をパラメータ化するが、
-// `$queryRawUnsafe` / `Prisma.raw` は文字列をそのまま SQL に混ぜる。実測では lockActiveUser を
-// `$queryRawUnsafe` + 文字列連結へ書き換えても全 244 件と契約 30 件が緑のまま通り、URL の
-// パスパラメータから任意 SQL を実行できた (pg_sleep(2) が実際に 2 秒効いた)。
-// 契約テストは正しい形の id しか渡さないので、値を見る検査では原理的に捕まえられない
+// 生 SQL の書き方を構文で固定する **二次的な網**。Prisma はタグ付きテンプレート (`$queryRaw`) なら値を
+// パラメータ化するが、`$queryRawUnsafe` / `Prisma.raw` は文字列をそのまま SQL に混ぜる。
+//
+// **値の妥当性を担保するのはここではなく実行時のガード** (`src/lib/raw-sql-guard.ts`)。綴りを走査する
+// 検出網は 1 段の間接化で崩れるためで、実測では `const { raw } = Prisma` と分割代入して変数に入れた
+// 断片を埋め込むだけで、この検査も ESLint も素通りし、URL のパスパラメータから任意 SQL を実行できた
+// (pg_sleep が実際に効いた)。同じ理由で、計算添字 `(tx as never)[name](sql)` のような形も捕まえられない。
+// この検査の役目は「危険な書き方が直接の綴りで増えたことに、テストを流す前の段階で気付く」ことに限る。
+// 捕まえられる範囲を正直に書いておくのは、これを「証明」と誤解して実行時ガードを外させないため
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 import { forEachNode, parseSourceFiles } from './lib/source-files';

@@ -63,6 +63,7 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 # 列挙は seed の import グラフと tests/docker-seed-files.test.ts が突き合わせる (足し忘れ・余分はどちらも落ちる)
 COPY --from=builder /app/src/lib/prisma-client.ts ./src/lib/prisma-client.ts
 COPY --from=builder /app/src/lib/pg-search-path.ts ./src/lib/pg-search-path.ts
+COPY --from=builder /app/src/lib/raw-sql-guard.ts ./src/lib/raw-sql-guard.ts
 COPY --from=builder /app/src/domain/tenant.ts ./src/domain/tenant.ts
 COPY --from=builder /app/src/domain/types.ts ./src/domain/types.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json

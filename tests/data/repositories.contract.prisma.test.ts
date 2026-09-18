@@ -80,7 +80,8 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
 
   // 全テーブルを空にする (Tenant を起点に CASCADE で子も消える)
   beforeEach(async () => {
-    await client.$executeRawUnsafe('TRUNCATE TABLE "Tenant" CASCADE');
+    // 値を埋め込まないタグ付きテンプレートで流す ($executeRawUnsafe は実行時ガードが禁止している)
+    await client.$executeRaw`TRUNCATE TABLE "Tenant" CASCADE`;
   });
 
   // 切断する
@@ -355,6 +356,27 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   // 更新は「更新してよい項目」だけを DB へ渡す。検証済みの本文を丸ごと渡す実装だと、
   // 契約と Zod に項目が増えた瞬間に status や tenantId まで届く (実測で権限の迂回とテナント移動に到達した)。
   // memory アダプタは項目ごとに代入するのでこの差は API テストからは見えない
+  // 生 SQL のガードが「本番のクライアントに実際に配線されているか」を確かめる。
+  // 単体テスト (tests/raw-sql-guard.test.ts) はガードの挙動を固定するが、結線が外れていることは見えない。
+  // 実測では、綴りを走査する静的検査は `const { raw } = Prisma` の 1 段の間接化で崩れ、URL の
+  // パスパラメータから任意 SQL を実行できた。値を見るこのガードが本体なので、経路ごと固定する
+  it('本番のクライアントは危険な生 SQL を実行時に拒否する (トランザクション内も同じ)', async () => {
+    // 値を素通しするメソッドは呼べない (クエリを組み立てる前に同期的に落ちる)
+    expect(() => client.$queryRawUnsafe('SELECT 1')).toThrow(/安全でない生 SQL/);
+    // SQL 断片を埋め込む形も拒否する (Prisma.raw を変数で受けても値は同じ)
+    const fragment = { strings: [`1 = 1`], values: [], sql: `1 = 1` };
+    expect(() => client.$queryRaw`SELECT ${fragment}`).toThrow(/安全でない生 SQL/);
+    // トランザクション内のクライアントも同じ (行ロックを書いているのはこちら)
+    await expect(
+      client.$transaction(async (tx) => {
+        // トランザクション内のクライアントも包まれている
+        await tx.$queryRawUnsafe('SELECT 1');
+      }),
+    ).rejects.toThrow(/安全でない生 SQL/);
+    // 正しい形 (値を埋め込んだタグ付きテンプレート) は通る
+    expect(await client.$queryRaw`SELECT ${1}::int AS value`).toEqual([{ value: 1 }]);
+  });
+
   // 更新側と対になる作成側の表明。writer を外して入力を丸ごと渡す形へ戻すと、呼び出し側が行 id や
   // 初期状態・無効化日時・失効日時まで決められる (実測でそこまで到達した)。値の往復だけを見ていると
   // この巻き戻しは全件緑のまま通るので、「余分な項目が届かないこと」を別に固定する

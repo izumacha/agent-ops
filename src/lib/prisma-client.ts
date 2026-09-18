@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Prisma, PrismaClient } from '@/generated/prisma';
 // 接続時に search_path を固定する libpq オプションの組み立て (純粋関数)
 import { buildSearchPathOption } from './pg-search-path';
+// 生 SQL をパラメータ化された形だけに閉じる実行時ガード
+import { guardRawSql } from './raw-sql-guard';
 
 // `?schema=` が書かれていないときに使うスキーマ。Prisma 5 のクエリエンジンは接続時に search_path を
 // ここへ固定していたが、Prisma 7 のドライバアダプタは何もしない。既定値を明示して
@@ -105,6 +107,9 @@ export function createPrismaClient(options?: {
     },
   );
 
-  // アダプタを渡して PrismaClient を生成し、呼び出し側へ返す
-  return new PrismaClient({ adapter, ...(options?.log ? { log: options.log } : {}) });
+  // アダプタを渡して PrismaClient を生成する
+  const client = new PrismaClient({ adapter, ...(options?.log ? { log: options.log } : {}) });
+  // 生 SQL の危険な使い方を実行時に閉じてから返す (綴りを追う静的検査は 1 段の間接化で崩れるため、
+  // 値そのものを見るここが本体。アプリ・seed・契約テスト・CLI はすべてこのファクトリを通る)
+  return guardRawSql(client);
 }

@@ -7,7 +7,10 @@ import { join } from 'node:path';
 // YAML パーサ (OpenAPI 定義は YAML)
 import { parse } from 'yaml';
 import {
+  EMAIL_MAX_LENGTH,
+  LONG_TEXT_MAX_LENGTH,
   PAGE_CURSOR_MAX_LENGTH,
+  SHORT_TEXT_MAX_LENGTH,
   PAGE_LIMIT_DEFAULT,
   PAGE_LIMIT_MAX,
   USER_TOKEN_DEFAULT_TTL_DAYS,
@@ -109,5 +112,38 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     const expiresInDays = spec.components.schemas.UserTokenCreate.properties?.expiresInDays;
     expect(expiresInDays?.default).toBe(USER_TOKEN_DEFAULT_TTL_DAYS);
     expect(expiresInDays?.maximum).toBe(USER_TOKEN_MAX_TTL_DAYS);
+  });
+
+  // 文字列長の上限も同じ理由で固定する (Zod 側は constants.ts を読むので、OpenAPI だけ動かすと
+  // 「契約上は通る値が 422 になる」ずれが lint / typecheck / テスト緑のまま出荷される)
+  it('本文スキーマの文字列長の上限は constants.ts と一致する', () => {
+    // 期待する上限 (スキーマ名 → プロパティ名 → 定数)
+    const expected: Record<string, Record<string, number>> = {
+      TenantCreate: {
+        name: SHORT_TEXT_MAX_LENGTH,
+        adminEmail: EMAIL_MAX_LENGTH,
+        adminName: SHORT_TEXT_MAX_LENGTH,
+      },
+      UserCreate: { email: EMAIL_MAX_LENGTH, name: SHORT_TEXT_MAX_LENGTH },
+      UserTokenCreate: { name: SHORT_TEXT_MAX_LENGTH },
+      AgentCreate: {
+        name: SHORT_TEXT_MAX_LENGTH,
+        description: LONG_TEXT_MAX_LENGTH,
+        model: SHORT_TEXT_MAX_LENGTH,
+      },
+      AgentUpdate: {
+        name: SHORT_TEXT_MAX_LENGTH,
+        description: LONG_TEXT_MAX_LENGTH,
+        model: SHORT_TEXT_MAX_LENGTH,
+      },
+      ApiKeyCreate: { name: SHORT_TEXT_MAX_LENGTH },
+    };
+    // スキーマごとに宣言された maxLength を突き合わせる
+    for (const [schemaName, properties] of Object.entries(expected)) {
+      for (const [property, max] of Object.entries(properties)) {
+        const declared = spec.components.schemas[schemaName]?.properties?.[property]?.maxLength;
+        expect(declared, `${schemaName}.${property} の maxLength`).toBe(max);
+      }
+    }
   });
 });

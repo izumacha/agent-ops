@@ -36,16 +36,16 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   let client: typeof import('@/lib/prisma').prisma;
   let repos: Repositories;
 
-  // 接続する (生成物へ依存するモジュールはここで初めて読む)。素の createPrismaClient() ではなく本番の Composition Root と
-  // 同じ src/lib/prisma の Proxy を通す — $transaction / $queryRaw が Proxy 越しに正しく転送されることまで、
-  // 本番で実際に走る配線で確かめる (素のクライアントだと Proxy の退行を全テスト緑のまま見逃す)
+  // 接続する (生成物へ依存するモジュールはここで初めて読む)。リポジトリは本番と同じ Composition Root
+  // (getRepos の動的 import 経由) から取る — アダプタの結線が壊れても他のジョブは緑のままなので、ここで通す。
+  // TRUNCATE と切断には同じ singleton (遅延生成 Proxy) を使う
   beforeAll(async () => {
-    const [{ prisma }, { createPrismaRepos }] = await Promise.all([
+    const [{ prisma }, { getRepos }] = await Promise.all([
       import('@/lib/prisma'),
-      import('@/data/adapters/prisma'),
+      import('@/data'),
     ]);
     client = prisma;
-    repos = createPrismaRepos(client);
+    repos = await getRepos();
   });
 
   // 全テーブルを空にする (Tenant を起点に CASCADE で子も消える)

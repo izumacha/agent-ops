@@ -8,6 +8,7 @@ import { PUT as updateRole } from '@/app/api/v1/users/[userId]/role/route';
 import { GET as listTokens, POST as createToken } from '@/app/api/v1/users/[userId]/tokens/route';
 import { DELETE as revokeToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
 import { Role } from '@/domain/types';
+import { API_MESSAGES } from '@/lib/constants';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
 import { call, seedEachTest } from './helpers';
 
@@ -153,6 +154,31 @@ describe('DELETE /users/{userId} (無効化)', () => {
     expect((result.json as { disabledAt: string | null }).disabledAt).not.toBeNull();
     // 以後は認証できない
     expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(401);
+  });
+
+  it('無効化したユーザーの役割は変えられない (409。認証できない admin を作らない)', async () => {
+    // viewer を無効化する
+    const target = seed.a.users.viewer;
+    expect(
+      (
+        await call(disableUser, {
+          token: seed.a.tokens.admin,
+          method: 'DELETE',
+          params: { userId: target.id },
+        })
+      ).status,
+    ).toBe(200);
+    // 昇格も降格も 409 (トークン発行と同じ文言)
+    for (const role of [Role.admin, Role.operator]) {
+      const result = await call(updateRole, {
+        token: seed.a.tokens.admin,
+        method: 'PUT',
+        params: { userId: target.id },
+        body: { role },
+      });
+      expect(result.status, role).toBe(409);
+      expect((result.json as { message: string }).message).toBe(API_MESSAGES.userDisabled);
+    }
   });
 
   it('自分自身は無効化できない (409)', async () => {

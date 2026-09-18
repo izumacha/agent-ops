@@ -15,6 +15,8 @@ export const DELETE = route<{ userId: string }>(async ({ params, principal, repo
   const result = await repos.users.disable(tenantId, params.userId);
   if (result.status === 'not_found') throw notFoundError();
   if (result.status === 'last_admin') throw conflictError(API_MESSAGES.lastAdmin);
+  // 無効化は冪等なのでここへは来ない (型の網羅性のため残す)
+  if (result.status === 'disabled') throw conflictError(API_MESSAGES.userDisabled);
   // 無効化後のユーザーを返す
   return Response.json(toUserDto(result.user));
 });

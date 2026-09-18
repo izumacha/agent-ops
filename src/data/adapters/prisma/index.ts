@@ -188,8 +188,10 @@ class PrismaUsers implements UsersPort {
     tenantId: string,
     id: string,
     // 実際の更新 (トランザクション内で呼ぶ)。呼び出し側はいずれも「対象を admin から外す」操作
-    // (admin への昇格は判定が要らないので updateRole がこの関数を通さない)
+    // (admin への昇格は「最後の admin」判定が要らないので updateRole がこの関数を通さない)
     apply: (tx: Db, target: UserRecord) => Promise<UserRecord>,
+    // 無効化済みユーザーを 'disabled' で拒否するか (役割変更は拒否、無効化は冪等にしたいので拒否しない)
+    rejectDisabled = false,
   ): Promise<UserMutationResult> {
     // 1 トランザクションで判定と更新を行う
     return this.db.$transaction(async (tx: Db): Promise<UserMutationResult> => {
@@ -203,6 +205,8 @@ class PrismaUsers implements UsersPort {
       // 対象 (テナント境界内)
       const target = await tx.user.findUnique({ where: { tenantId_id: { tenantId, id } } });
       if (!target) return { status: 'not_found' };
+      // 無効化済みユーザーの役割変更は拒否する (無効化そのものは冪等にしたいので、判定は呼び出し側が渡す)
+      if (rejectDisabled && target.disabledAt !== null) return { status: 'disabled' };
       // 対象が有効な admin なら (この操作で admin から外れるので)、他に有効な admin が居ることを要求する
       if (target.role === Role.admin && target.disabledAt === null) {
         // 対象以外の有効な admin の人数
@@ -231,15 +235,25 @@ class PrismaUsers implements UsersPort {
     // 更新そのもの (複合一意 (tenantId, id) で 1 回)
     const apply = (db: Db) =>
       db.user.update({ where: { tenantId_id: { tenantId, id } }, data: { role } });
-    // admin への昇格は admin を減らさないので、テナント行のロックもトランザクションも要らない
-    // (同じテナントの役割変更・無効化を不要に待たせない)
+    // admin への昇格は admin を減らさないので「最後の admin」判定は要らない。ただし無効化済みかどうかは見る
+    // (認証できない admin を作らない)。無効化との競合を防ぐため、対象行をロックしてから判定する
     if (role === Role.admin) {
-      // 対象が無ければ not_found
-      const user = await updateOrNull(() => apply(this.db));
-      return user ? { status: 'ok', user } : { status: 'not_found' };
+      return this.db.$transaction(async (tx: Db): Promise<UserMutationResult> => {
+        // 対象行 (テナント境界内) をロックする。disable の UPDATE と同じロックなので、ここで見た disabledAt は
+        // コミットまで変わらない
+        const locked = await tx.$queryRaw<
+          { disabledAt: Date | null }[]
+        >`SELECT "disabledAt" FROM "User" WHERE "tenantId" = ${tenantId} AND id = ${id} FOR NO KEY UPDATE`;
+        // 同テナントに居なければ not_found
+        if (locked.length === 0) return { status: 'not_found' };
+        // 無効化済みなら役割を変えない
+        if (locked[0].disabledAt !== null) return { status: 'disabled' };
+        // 更新する
+        return { status: 'ok', user: await apply(tx) };
+      });
     }
     // admin 以外へ変えるときは「最後の admin」判定と同じトランザクションで更新する
-    return this.mutateGuardingLastAdmin(tenantId, id, apply);
+    return this.mutateGuardingLastAdmin(tenantId, id, apply, true);
   }
 
   // 無効化 (最後の有効な admin は 'last_admin'。既に無効なら日時はそのまま)

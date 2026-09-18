@@ -208,7 +208,7 @@ paths:
     put:
       tags: [users]
       operationId: updateUserRole
-      summary: 役割変更 (admin ロール限定)。最後の有効な admin を降格する変更は 409
+      summary: 役割変更 (admin ロール限定)。最後の有効な admin を降格する変更と、無効化済みユーザーへの変更は 409
       requestBody:
         required: true
         content:

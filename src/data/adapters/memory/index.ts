@@ -171,6 +171,8 @@ class MemoryUsers implements UsersPort {
     // 対象行 (テナント境界内)
     const row = this.store.users.get(id);
     if (!row || row.tenantId !== tenantId) return { status: 'not_found' };
+    // 無効化済みのユーザーの役割は変えない (認証できない admin を作らない)
+    if (row.disabledAt !== null) return { status: 'disabled' };
     // 最後の有効な admin を admin 以外へ変える要求は拒否する
     if (role !== Role.admin && this.wouldLeaveNoAdmin(row)) return { status: 'last_admin' };
     // 役割と更新日時を書き換える

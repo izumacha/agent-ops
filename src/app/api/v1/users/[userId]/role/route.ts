@@ -17,6 +17,8 @@ export const PUT = route<{ userId: string }>(async ({ request, params, principal
   const result = await repos.users.updateRole(tenantId, params.userId, input.role);
   if (result.status === 'not_found') throw notFoundError();
   if (result.status === 'last_admin') throw conflictError(API_MESSAGES.lastAdmin);
+  // 無効化済みユーザーの役割は変えない (認証できない admin を作らない。トークン発行と同じ 409)
+  if (result.status === 'disabled') throw conflictError(API_MESSAGES.userDisabled);
   // 更新後のユーザーを返す
   return Response.json(toUserDto(result.user));
 });

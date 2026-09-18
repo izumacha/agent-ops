@@ -11,9 +11,14 @@ export interface CreateUserInput {
 }
 
 // 役割変更・無効化の結果。'last_admin' は「最後の有効な admin を降格・無効化しようとした」拒否で、
-// 判定と更新はアダプタが 1 つの原子的な操作として行う (API 層で count → update と分けると並行要求で admin が 0 人になる)
+// 判定と更新はアダプタが 1 つの原子的な操作として行う (API 層で count → update と分けると並行要求で admin が 0 人になる)。
+// 'disabled' は「無効化済みのユーザーの役割を変えようとした」拒否 (無効化済みは認証できないので、admin へ昇格させると
+// 「ログインできない admin」が一覧に並ぶ。トークン発行を 409 にしているのと同じ理由。無効化自体は冪等なので返さない)
 export type UserMutationResult =
-  { status: 'ok'; user: UserRecord } | { status: 'not_found' } | { status: 'last_admin' };
+  | { status: 'ok'; user: UserRecord }
+  | { status: 'not_found' }
+  | { status: 'last_admin' }
+  | { status: 'disabled' };
 
 // ユーザー Port
 export interface UsersPort {

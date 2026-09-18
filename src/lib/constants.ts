@@ -31,6 +31,12 @@ export const PAGE_LIMIT_DEFAULT = 50;
 // 一覧の最大件数 (OpenAPI の Limit パラメータの maximum と一致させる。§8 一覧は必ず上限を持つ)
 export const PAGE_LIMIT_MAX = 200;
 // カーソル文字列の最大長 (ミリ秒と id を符号化した値なので十分。異常に長い値を弾く)
+// 表示名など短い文字列の上限 (OpenAPI の name / model 等の maxLength と一致させる)
+export const SHORT_TEXT_MAX_LENGTH = 100;
+// 説明文など長い文字列の上限 (OpenAPI の description の maxLength)
+export const LONG_TEXT_MAX_LENGTH = 1000;
+// メールアドレスの上限 (RFC 5321)
+export const EMAIL_MAX_LENGTH = 254;
 export const PAGE_CURSOR_MAX_LENGTH = 200;
 // ユーザートークンの既定の有効期間 (日)
 export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;

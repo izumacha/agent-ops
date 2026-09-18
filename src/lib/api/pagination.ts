@@ -59,8 +59,8 @@ export function queryKeysOf(schema: { shape: Record<string, unknown> }): readonl
   return Object.keys(schema.shape);
 }
 
-// pageQuerySchema が読むクエリのキー
-export const PAGE_QUERY_KEYS = queryKeysOf(pageQuerySchema);
+// pageQuerySchema が読むクエリのキー (このモジュール内だけで使う。外から使うときは queryKeysOf を呼ぶ)
+const PAGE_QUERY_KEYS = queryKeysOf(pageQuerySchema);
 
 // URL のクエリから PageQuery を作る (不正値は 422)
 export function parsePageQuery(url: URL): PageQuery {

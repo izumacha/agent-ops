@@ -17,6 +17,14 @@ updates:
       # 解除条件 (プラグインが揃って 10 を許した時点) は tests/dependabot-eslint-guard.test.ts が検出する
       - dependency-name: eslint
         update-types: ['version-update:semver-major']
+      # typescript の major (5 → 7) も上流の非互換で止める: lint の経路に載る typescript-eslint /
+      # @typescript-eslint/* が peer で `typescript >=4.8.4 <6.1.0` を、型生成の openapi-typescript が
+      # `^5.x` を宣言しているため、7 を入れると `npm ci` が ERESOLVE で落ちて CI はインストールの
+      # 時点で赤になる (実測: Dependabot の PR #2 は 3 ジョブすべてがこれで失敗した)。
+      # 解除条件 (必須 peer を宣言する依存が揃って 7 を許した時点) は
+      # tests/dependabot-typescript-guard.test.ts が lockfile から導いて検出する
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
   - package-ecosystem: docker
     directory: /
     schedule:

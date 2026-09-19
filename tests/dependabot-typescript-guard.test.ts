@@ -17,30 +17,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 // semver の範囲判定
 import semver from 'semver';
-// YAML パーサ (dependabot.yml)
-import { parse } from 'yaml';
+// dependabot.yml の読み方 (eslint 側のガードと共有する。§6 DRY)
+import { majorOnlyIgnore } from './lib/dependabot-config';
 
 // リポジトリのルート
 const ROOT = process.cwd();
 // 保留している TypeScript の次の major (5 の次に出た major。6 は欠番)
 const NEXT_TYPESCRIPT_MAJOR = 7;
-
-// dependabot.yml の ignore エントリ 1 件分
-type IgnoreEntry = { 'dependency-name': string; 'update-types'?: string[]; versions?: string[] };
-
-// dependabot.yml の npm ブロック (ルートディレクトリ) の ignore 一覧を返す
-function npmIgnores(): IgnoreEntry[] {
-  // 設定を読む
-  const config = parse(readFileSync(join(ROOT, '.github', 'dependabot.yml'), 'utf8'));
-  // npm エコシステムでルートディレクトリのブロックを探す
-  const npm = (
-    config.updates as { 'package-ecosystem': string; directory: string; ignore?: IgnoreEntry[] }[]
-  ).filter((u) => u['package-ecosystem'] === 'npm' && u.directory === '/');
-  // ちょうど 1 つあること (別ディレクトリへの置き間違いを弾く)
-  expect(npm).toHaveLength(1);
-  // ignore 一覧を返す (無ければ空)
-  return npm[0].ignore ?? [];
-}
 
 /**
  * ロックファイルから「TypeScript の版を**必須** peer で縛っている依存」を導く。
@@ -76,14 +59,12 @@ function requiredTypeScriptPeers(): { name: string; range: string }[] {
 
 describe('TypeScript の major 更新の保留 (dependabot.yml)', () => {
   it('typescript の major だけを止めるエントリがちょうど 1 つある (消失・重複・効きすぎを弾く)', () => {
-    // typescript を対象にするエントリ
-    const entries = npmIgnores().filter((e) => e['dependency-name'] === 'typescript');
-    // 1 つだけ (Dependabot は同じ依存の複数エントリを**すべて**適用するので、重複は効きすぎになる)
-    expect(entries).toHaveLength(1);
+    // 消失・重複は majorOnlyIgnore が例外で落とす (共有ヘルパー側に集約)
+    const entry = majorOnlyIgnore('typescript');
     // update-types が major だけであること (無いと「全バージョン無視」= minor / patch の更新まで止まる)
-    expect(entries[0]['update-types']).toEqual(['version-update:semver-major']);
+    expect(entry['update-types']).toEqual(['version-update:semver-major']);
     // versions を足すと同じく効きすぎになる
-    expect(entries[0].versions).toBeUndefined();
+    expect(entry.versions).toBeUndefined();
   });
 
   it('必須 peer の導出が 1 件も拾えない状態では落とす (「違反ゼロ = 緑」で無力化されないように)', () => {

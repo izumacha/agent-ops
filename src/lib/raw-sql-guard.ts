@@ -7,12 +7,28 @@
 // 綴りを追いかける限りこの追跡は終わらないので、値そのものを見る実行時チェックへ寄せる。
 // 静的検査 (tests/raw-sql.test.ts) は「危険な書き方が増えたことに気付く」ための網として併用する。
 //
-// **このガードが閉じるのは「包んだクライアントから値を読む経路」だけで、新しいクライアントを作る経路は
-// 守備範囲外**。実測では `new (prisma.constructor)({ adapter: prisma._engineConfig.adapter })` で
-// 2 つ目の素のクライアントを作れる (prisma アダプタのディレクトリは生成物の import が許されているので、
-// そこでは素直に `new PrismaClient({ adapter })` とも書ける)。ここを追いかけると「綴りを追う」形に
-// 戻るので追わない — 代わりに `createPrismaClient()` を唯一の生成箇所にする規約 (CLAUDE.md §3) と
-// レビューで守る。「生 SQL は必ずパラメータ化される」と読み切らないこと。
+// **このガードが閉じるのは「包んだクライアントから**通常のプロパティ読み取りで**値を取る経路」だけ**。
+// Proxy に仕掛けているトラップは `get` 1 つなので、**プロパティの読み取り以外の内省は包まれない**。
+// 守備範囲の外は 2 つあり、どちらも実測で確認済み:
+//
+//   1. **プロトタイプ経由** — `Object.getPrototypeOf(guarded).$queryRawUnsafe.call(client, sql)` は
+//      包みを 1 度も通らずに実体のメソッドへ届く (生成物の PrismaClient は生 SQL のメソッドを
+//      **プロトタイプ上**に持つ。`src/lib/prisma.ts` の遅延生成 Proxy も `getPrototypeOf` を実体へ
+//      転送している)。`getPrototypeOf` トラップで包み直すことはできるが、**返すのが別オブジェクトに
+//      なるため `instanceof` が成立しなくなる** (プロトタイプは同一性で比較される)。Prisma の内部も
+//      利用側もそれに依存しうるので、ここは**意図的に閉じていない**。
+//      同じ理由で `Object.getOwnPropertyDescriptor(guarded, name).value` も包まれない。
+//   2. **新しいクライアントを作る経路** — `new (prisma.constructor)({ adapter: prisma._engineConfig.adapter })`
+//      で 2 つ目の素のクライアントを作れる (prisma アダプタのディレクトリは生成物の import が
+//      許されているので、そこでは素直に `new PrismaClient({ adapter })` とも書ける)。
+//
+// **どちらもここを追いかけると「綴りを追う」形に戻るので追わない** — 代わりに
+// `createPrismaClient()` を唯一の生成箇所にする規約 (CLAUDE.md §3) と、
+// 二次的な静的の網 (`tests/raw-sql.test.ts` / ESLint の `no-restricted-syntax` は
+// **レシーバを問わず** `$queryRawUnsafe` / `$executeRawUnsafe` の綴りを落とすので、
+// 1 の素直な書き方はそこで赤くなる)、そしてレビューで守る。
+// **「このガードがあるから生 SQL は必ずパラメータ化される」と読み切らないこと。**
+// 境界は `tests/raw-sql-guard.test.ts` が固定しているので、閉じ方を変えるときはそちらも直す。
 
 // タグ付きテンプレートで使うメソッド (埋め込む値を検査してから通す)。**ここに挙げたものだけが通る**
 const TAGGED_RAW_METHODS = new Set<string>(['$queryRaw', '$executeRaw']);

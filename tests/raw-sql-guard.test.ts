@@ -171,19 +171,26 @@ describe('guardRawSql', () => {
   //     「このガードがあるから生 SQL は必ずパラメータ化される」と読み切ってしまう)
   //   - 将来ここを**閉じた**ときにこのテストが落ちるので、説明の更新が必ず一度は目に入る
   it('プロトタイプ経由・own descriptor 経由は包まれない (意図した境界。静的な網と規約で守る)', () => {
-    // 生 SQL のメソッドを**プロトタイプ上**に持つクライアント (生成物の PrismaClient と同じ形)
+    // 生 SQL のメソッドを**プロトタイプ上**に持つクライアント (生成物の PrismaClient と同じ形)。
+    // `this` を読むのは、本物の $queryRawUnsafe がエンジンの状態をレシーバから取るため —
+    // レシーバを取り違えたテストは「素通りしたこと」しか見ておらず、
+    // モジュールのコメントが書いている形とずれても緑のままになる
     class PrototypeShapedClient {
-      $queryRawUnsafe(sql: string): string {
-        return `RAN:${sql}`;
+      readonly marker = 'raw';
+      $queryRawUnsafe(this: PrototypeShapedClient, sql: string): string {
+        return `RAN(${this.marker}):${sql}`;
       }
     }
+    // 包む前の実体 (コメントが書いている呼び方はこちらをレシーバにする)
+    const client = new PrototypeShapedClient();
     // 包んだクライアント
-    const onPrototype = guardRawSql(new PrototypeShapedClient());
+    const onPrototype = guardRawSql(client);
     // 通常の読み取りはガードに当たる (ここが本来の守備範囲)
     expect(() => onPrototype.$queryRawUnsafe('SELECT 1')).toThrow(UnsafeRawSqlError);
-    // プロトタイプから直接取ると包みを通らない (= 守備範囲外)
+    // プロトタイプから取り、**包む前の実体**をレシーバにすると包みを 1 度も通らない (= 守備範囲外)。
+    // これがモジュール冒頭のコメントが書いている形そのもの
     const fromPrototype = Object.getPrototypeOf(onPrototype) as PrototypeShapedClient;
-    expect(fromPrototype.$queryRawUnsafe.call(onPrototype, 'SELECT 1')).toBe('RAN:SELECT 1');
+    expect(fromPrototype.$queryRawUnsafe.call(client, 'SELECT 1')).toBe('RAN(raw):SELECT 1');
     // 自分自身のプロパティとして持つ形では、descriptor から取ると包みを通らない
     const onSelf = guardRawSql({ $queryRawUnsafe: (sql: string) => `RAN:${sql}` });
     expect(() => onSelf.$queryRawUnsafe('SELECT 1')).toThrow(UnsafeRawSqlError);

@@ -6,9 +6,11 @@
 // (1) は**実際にモジュールを読み込んで印を見る** — ソースの綴りを見る形だと、`export { PUT }` のような
 // 別の書き方・OPTIONS のような別のメソッド・v1 の外のディレクトリがすべて死角になる (実測で素通りした)
 import { describe, expect, it } from 'vitest';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { ALLOWED_ROUTE_FILE_NAME, findRouteFiles, PAGE_EXTENSIONS } from './lib/route-files';
+import { forEachNode, parseSourceFiles } from './lib/source-files';
+import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { ROUTE_HANDLER_BRAND } from '@/lib/api/handler';
@@ -185,23 +187,59 @@ describe('Route Handler の結線', () => {
   });
 });
 
-// src 配下の TypeScript ファイルを集める (秘密の読み取り箇所を数えるのに使う)
-function findSourceFiles(dir: string): string[] {
-  // 直下の要素
-  return readdirSync(dir).flatMap((entry) => {
-    // 絶対パス
-    const full = join(dir, entry);
-    // ディレクトリなら潜る (生成物は対象外)
-    if (statSync(full).isDirectory()) return entry === 'generated' ? [] : findSourceFiles(full);
-    // .ts / .tsx だけを拾う
-    return /\.tsx?$/.test(entry) ? [full] : [];
+// 環境変数として読む秘密の名前 (パーサで識別子・文字列リテラルとして見るので、
+// 末尾に続く別の定数 PLATFORM_ADMIN_TOKEN_MIN_LENGTH は最初から別のトークンになる)
+const PLATFORM_ADMIN_TOKEN_NAME = 'PLATFORM_ADMIN_TOKEN';
+
+// 認証のソース (秘密を実際に比べる唯一の場所)
+const AUTH_SOURCE_PATH = join(process.cwd(), 'src', 'lib', 'api', 'auth.ts');
+
+/**
+ * 構文木の中で、秘密の名前に「コードとして」触れている位置を集める。
+ *
+ * 拾うのは識別子 (`process.env.PLATFORM_ADMIN_TOKEN` や分割代入) と
+ * 文字列リテラル (`process.env['PLATFORM_ADMIN_TOKEN']`) の両方。
+ *
+ * **正規表現でコメントを落とす形に戻さない。** 以前は `//` から行末までを削っていたため、
+ * コメントではなく**文字列リテラルの中の `//`** でも行末までが消えていた (実測:
+ * `const docs = 'https://example.com'; const t = process.env.PLATFORM_ADMIN_TOKEN;` は
+ * `const docs = 'https:` に切り詰められる)。つまり 1 行にそう書くだけで 2 つ目の
+ * 読み取り箇所を全件緑のまま置け、そこで安い比較を書けてしまった。
+ * パーサならコメントはトークンにならないので、説明文で名前を出すのは自由なまま
+ * この取りこぼしだけが消える (tests/lib/source-files.ts の冒頭コメントと同じ理由)。
+ */
+function secretNameOffsets(source: ts.SourceFile): number[] {
+  // 見つけた位置を溜める入れ物
+  const offsets: number[] = [];
+  // 構文木のすべてのノードを辿る
+  forEachNode(source, (node) => {
+    // 識別子か文字列リテラルで、綴りが秘密の名前そのものか
+    const touches =
+      (ts.isIdentifier(node) || ts.isStringLiteralLike(node)) &&
+      node.text === PLATFORM_ADMIN_TOKEN_NAME;
+    // 当てはまればソース上の位置を控える (関数の中かどうかを後で判定するため)
+    if (touches) offsets.push(node.getStart(source));
   });
+  // 見つけた位置をそのまま返す (件数と範囲は呼び出し側が判定する)
+  return offsets;
 }
 
-// 行コメントとブロックコメントを落とす (説明文に書いた名前を「実装が触っている」と数えないため)
-function stripComments(source: string): string {
-  // ブロックコメント → 行コメントの順に落とす
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+/** 名前で関数宣言を探し、そのソース上の範囲を返す (見つからなければ null)。 */
+function functionRange(source: ts.SourceFile, name: string): { start: number; end: number } | null {
+  // 見つけた範囲 (最初の 1 つだけを採る)
+  let found: { start: number; end: number } | null = null;
+  // 構文木を辿って関数宣言を探す
+  forEachNode(source, (node) => {
+    // 既に見つかっていれば何もしない
+    if (found !== null) return;
+    // 関数宣言で、名前が一致するもの
+    if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
+      // その関数がソース上で占める範囲を控える
+      found = { start: node.getStart(source), end: node.getEnd() };
+    }
+  });
+  // 見つからなければ null (呼び出し側が fail-closed で落とす)
+  return found;
 }
 
 // 関数本体に現れる return 文を、空白を詰めた形で並べる (抜け道が増えたかを見る)
@@ -243,25 +281,30 @@ describe('秘密の生成と比較', () => {
 
   // 秘密を読む場所が 1 か所だけであること (別の場所で読めば、そこで安い比較を書けてしまう)
   it('PLATFORM_ADMIN_TOKEN に触れるのは照合の中だけ', () => {
-    // 秘密の名前 (末尾に _ が続く別の定数 PLATFORM_ADMIN_TOKEN_MIN_LENGTH は対象外)。
-    // process.env.X だけを探す形にすると、process.env['X'] や分割代入が素通りする (実測)
-    const identifier = /\bPLATFORM_ADMIN_TOKEN\b(?!_)/g;
     // 認証のファイル以外では 1 度も現れないこと (別の場所で読めば、そこで安い比較を書ける)
-    for (const file of findSourceFiles(join(process.cwd(), 'src'))) {
+    for (const { path, source } of parseSourceFiles()) {
       // 認証のファイルは下で中身を見る
-      if (file.endsWith(join('lib', 'api', 'auth.ts'))) continue;
-      // コメントを落としてから探す (説明で名前を出すのは構わない)
-      expect(stripComments(readFileSync(file, 'utf8')).match(identifier), file).toBeNull();
+      if (path === AUTH_SOURCE_PATH) continue;
+      // コードとして触れている位置が 1 つも無いこと (コメントでの言及は数えない)
+      expect(secretNameOffsets(source), path).toEqual([]);
     }
-    // 認証のファイルの中でも、現れるのは照合の関数の中だけであること
-    const code = stripComments(auth);
-    const bodyCode = stripComments(
-      /function matchesPlatformAdminToken\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(auth)?.[1] ?? '',
-    );
-    // 関数の外に出ていないこと (件数が一致する = 全部が中にある)
-    expect((code.match(identifier) ?? []).length).toBe((bodyCode.match(identifier) ?? []).length);
-    // 中に 1 つ以上あること (走査が壊れて 0 件になったら落とす)
-    expect((bodyCode.match(identifier) ?? []).length).toBeGreaterThan(0);
+    // 認証のファイルを構文木にする
+    const authSource = ts.createSourceFile(AUTH_SOURCE_PATH, auth, ts.ScriptTarget.Latest, true);
+    // 照合の関数がソース上で占める範囲
+    const range = functionRange(authSource, 'matchesPlatformAdminToken');
+    // 読めなければ走査が壊れているので落とす (fail-closed)
+    expect(range, 'matchesPlatformAdminToken の定義が読めない').not.toBeNull();
+    // 認証のファイルで秘密に触れている位置
+    const offsets = secretNameOffsets(authSource);
+    // 走査が壊れて 0 件になったら落とす (「違反ゼロ = 緑」で無力化されないように)
+    expect(offsets.length, '認証のファイルで秘密を読んでいる箇所が見つからない').toBeGreaterThan(0);
+    // すべてが照合の関数の中にあること (関数の外へ出したら落ちる)
+    for (const offset of offsets) {
+      expect(
+        range !== null && offset >= range.start && offset < range.end,
+        `PLATFORM_ADMIN_TOKEN を照合の関数の外で読んでいる (位置 ${offset})`,
+      ).toBe(true);
+    }
   });
 
   // 実装が定数時間でも、呼び出し側が === に戻れば同じこと (実測で全件緑のまま通った)

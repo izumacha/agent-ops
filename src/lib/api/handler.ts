@@ -35,9 +35,11 @@ export const ROUTE_HANDLER_BRAND = Symbol.for('agent-ops.routeHandler');
 const STACK_FRAME_PATTERN = /^at .*(?::\d+:\d+\)?|<anonymous>\)?|native\)?)$/;
 
 // 内部エラーのログに残す形: 種類 (name / code) と発生箇所 (スタックフレーム) だけで、message は含めない。
+// **エラーをログへ落とす経路はすべてここを通す** (route() を通らない /health も含む)。
+// 経路ごとに書き方が分かれると、片方だけが message を素で出して PII / 接続文字列を漏らす。
 // ORM の検証エラーなどは message にクエリ引数 (= メールアドレス・名前といった利用者の入力) をそのまま埋め込むため、
 // message ごと出すと PII がログに流れる (§9 ログに残す前に個人情報をマスクする)
-function describeError(error: unknown): Record<string, unknown> {
+export function describeError(error: unknown): Record<string, unknown> {
   // Error でなければ型だけ
   if (!(error instanceof Error)) return { type: typeof error };
   // V8 の stack は「name: message」の見出しの後にフレームが続く。見出しは構築時の name / message で固定されるので、

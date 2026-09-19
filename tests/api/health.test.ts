@@ -47,6 +47,16 @@ describe('GET /health', () => {
     expect(JSON.stringify(body)).not.toContain('s3cret');
     // 詳細はサーバログには残っていること (黙って握り潰していないこと。§6)
     expect(errorLog).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(errorLog.mock.calls[0])).toContain('ECONNREFUSED');
+    // **ログにも message は出さない。** ドライバの接続失敗は message に DSN
+    // (利用者名・パスワード込み) をそのまま埋めるので、素で出すと接続情報が
+    // コンテナログへ流れる。しかも compose の healthcheck が 10 秒ごとに叩くため
+    // 障害中は同じ 1 行が積まれ続ける。route() が通る経路と同じ describeError に
+    // 通し、種類 (name / code) と発生箇所だけを残す
+    const logged = JSON.stringify(errorLog.mock.calls[0]);
+    expect(logged).not.toContain('s3cret');
+    expect(logged).not.toContain('postgresql://');
+    expect(logged).not.toContain('db-host');
+    // 何が起きたかは分かること (握り潰しではない)
+    expect(errorLog.mock.calls[0]?.[1]).toMatchObject({ name: 'Error' });
   });
 });

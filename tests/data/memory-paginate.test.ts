@@ -67,5 +67,14 @@ describe('paginate', () => {
     // 符号化 → 復号が往復する
     const key = { createdAt: new Date(1_726_000_000_000), id: 'cuid_x' };
     expect(decodeCursor(encodeCursor(key))).toEqual(key);
+    // **encodeCursor が作れる値は decodeCursor が必ず読めること。** 1970 年より前の
+    // createdAt では `-1000:...` を返すので、符号を拒む復号だと「自分が発行した
+    // nextCursor を送り返しただけで 422」になり、その先のページが取れなくなる
+    const beforeEpoch = { createdAt: new Date(-1_000), id: 'cuid_x' };
+    expect(decodeCursor(encodeCursor(beforeEpoch))).toEqual(beforeEpoch);
+    // 符号だけ・符号の後ろが空の形は従来どおり読めない (fail-closed のまま)
+    for (const broken of ['-:cuid_x', '--1:cuid_x', '1-2:cuid_x']) {
+      expect(decodeCursor(Buffer.from(broken).toString('base64url')), broken).toBeNull();
+    }
   });
 });

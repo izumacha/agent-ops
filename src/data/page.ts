@@ -27,11 +27,17 @@ export function decodeCursor(cursor: string): CursorKey | null {
   // 区切りで 2 つに分ける
   const separator = decoded.indexOf(CURSOR_SEPARATOR);
   if (separator <= 0 || separator === decoded.length - 1) return null;
-  // ミリ秒は 10 進整数 (15 桁以内 = Date の範囲内)、id は資源 id の形 (規則は @/domain/resource-id が唯一の定義。
-  // base64url は任意のバイト列を復号できるため、NUL などが DB へ渡って 500 になるのを形の検査で防ぐ)
+  // ミリ秒は 10 進整数 (符号あり・15 桁以内 = Date の範囲内)、id は資源 id の形
+  // (規則は @/domain/resource-id が唯一の定義。base64url は任意のバイト列を復号できるため、
+  // NUL などが DB へ渡って 500 になるのを形の検査で防ぐ)。
+  // **符号を許すのは encodeCursor との往復を閉じるため。** encodeCursor は
+  // `createdAt.getTime()` をそのまま埋めるので、1970 年より前の行では `-1000:...` を返す。
+  // 符号を拒むと「自分が発行した nextCursor を送り返しただけで 422」になり、その先の
+  // ページが永久に取れない (Step2 で履歴をバックフィルする・seed が過去日時を入れると届く)。
+  // 片側だけを直すと符号化と復号が非対称なまま残るので、読める範囲を書ける範囲へそろえる
   const millis = decoded.slice(0, separator);
   const id = decoded.slice(separator + 1);
-  if (!/^[0-9]{1,15}$/.test(millis) || !isResourceId(id)) return null;
+  if (!/^-?[0-9]{1,15}$/.test(millis) || !isResourceId(id)) return null;
   // 位置として返す
   return { createdAt: new Date(Number(millis)), id };
 }

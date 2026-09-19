@@ -1,4 +1,4 @@
-// TypeScript の major 更新 (5 → 7) を保留していることと、その保留の期限切れを見張る。
+// TypeScript の major 更新を保留していることと、その保留の期限切れを見張る。
 //
 // **なぜ止めるか**: lint の経路に載る `typescript-eslint` / `@typescript-eslint/*` は peer で
 // `typescript >=4.8.4 <6.1.0` を宣言しており、型生成に使う `openapi-typescript` は `^5.x`。
@@ -22,8 +22,52 @@ import { majorOnlyIgnore } from './lib/dependabot-config';
 
 // リポジトリのルート
 const ROOT = process.cwd();
-// 保留している TypeScript の次の major (5 の次に出た major。6 は欠番)
-const NEXT_TYPESCRIPT_MAJOR = 7;
+
+// ロックファイルの中身 (読むのに要る項目だけ)
+interface Lockfile {
+  packages: Record<
+    string,
+    {
+      version?: string;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+    }
+  >;
+}
+
+// ロックファイルを 1 度だけ読む (解決済み版と peer の両方をここから導く)
+function readLockfile(): Lockfile {
+  return JSON.parse(readFileSync(join(ROOT, 'package-lock.json'), 'utf8')) as Lockfile;
+}
+
+/**
+ * 「保留が外れたら入ってくる版」= いま解決している TypeScript の**次の major**。
+ *
+ * **直書きしない。** `ignore` は `version-update:semver-major` なので **すべての major** を
+ * 止める一方、判定の候補を `7.0.0` に固定すると**保留の範囲より判定が狭くなる**。
+ * 実測（この差分を書いた時点のロックファイル）:
+ *
+ * | 候補 | 許さない必須 peer |
+ * |---|---|
+ * | `7.0.0` | 9 件 |
+ * | `6.0.0` | **1 件だけ**（`openapi-typescript` の `^5.x`） |
+ *
+ * `@typescript-eslint/*` の `>=4.8.4 <6.1.0` は 6.0.0 を**許している**ので、
+ * `openapi-typescript` が 6.x を許す版へ上がった時点で 6.x の保留理由は消える。
+ * それでも 7.0.0 を見ている判定は 9 件のまま緑で、6.x の更新が永久に抑止される
+ * ——このファイルの冒頭が警告している「解除条件が永久に発火しない」形が、
+ * 候補を直書きしたことで別の姿で再発する。peer の一覧を導出しているのと
+ * 同じ「書かずに導く」原則をここにも当てる。
+ */
+function nextTypeScriptMajor(lock: Lockfile): string {
+  // 解決済みの版 (これが読めないと候補を決められないので fail-closed)
+  const resolved = lock.packages['node_modules/typescript']?.version;
+  if (resolved === undefined) throw new Error('package-lock.json から typescript の版を読めない');
+  // 次の major の代表値 (5.9.3 なら 6.0.0)
+  const candidate = semver.inc(resolved, 'major');
+  if (candidate === null) throw new Error(`typescript の版を semver として読めない: ${resolved}`);
+  return candidate;
+}
 
 /**
  * ロックファイルから「TypeScript の版を**必須** peer で縛っている依存」を導く。
@@ -31,17 +75,7 @@ const NEXT_TYPESCRIPT_MAJOR = 7;
  * **optional な peer は数えない** — `@prisma/client` のように「あれば使う」宣言は
  * インストールを止めないので、保留の理由にならない。
  */
-function requiredTypeScriptPeers(): { name: string; range: string }[] {
-  // ロックファイルを読む
-  const lock = JSON.parse(readFileSync(join(ROOT, 'package-lock.json'), 'utf8')) as {
-    packages: Record<
-      string,
-      {
-        peerDependencies?: Record<string, string>;
-        peerDependenciesMeta?: Record<string, { optional?: boolean }>;
-      }
-    >;
-  };
+function requiredTypeScriptPeers(lock: Lockfile): { name: string; range: string }[] {
   // 必須 peer を宣言しているものだけを集める
   return Object.entries(lock.packages)
     .flatMap(([path, entry]) => {
@@ -51,8 +85,10 @@ function requiredTypeScriptPeers(): { name: string; range: string }[] {
       if (range === undefined) return [];
       // optional なら保留の理由にならないので外す
       if (entry.peerDependenciesMeta?.typescript?.optional === true) return [];
-      // node_modules/ を外した名前と範囲を返す
-      return [{ name: path.replace(/^node_modules\//, ''), range }];
+      // **最後の `node_modules/` 以降**を名前として使う。先頭だけを外すと、
+      // 巻き上げが衝突した入れ子 (`node_modules/a/node_modules/b`) が
+      // `a/node_modules/b` になり、失敗文言 (= 解除の判断材料) が読みにくくなる
+      return [{ name: path.split('node_modules/').pop() ?? path, range }];
     })
     .sort((a, b) => (a.name < b.name ? -1 : 1));
 }
@@ -69,16 +105,18 @@ describe('TypeScript の major 更新の保留 (dependabot.yml)', () => {
 
   it('必須 peer の導出が 1 件も拾えない状態では落とす (「違反ゼロ = 緑」で無力化されないように)', () => {
     // 導出できた依存
-    const peers = requiredTypeScriptPeers();
+    const peers = requiredTypeScriptPeers(readLockfile());
     // 0 件なら読み方が壊れている (fail-closed)
     expect(peers.length, 'typescript の必須 peer を 1 件も読めない').toBeGreaterThan(0);
   });
 
-  it('保留の期限切れ: TypeScript の版を縛る依存が揃って 7 を許したら落ちる (落ちたら ignore とこのテストを消して major を取り込む)', () => {
-    // 次の major の代表値
-    const candidate = `${NEXT_TYPESCRIPT_MAJOR}.0.0`;
+  it('保留の期限切れ: 次の major を縛る依存が無くなったら落ちる (落ちたら ignore とこのテストを消して major を取り込む)', () => {
+    // ロックファイルは 1 度だけ読む
+    const lock = readLockfile();
+    // 保留が外れたら入ってくる版 (解決済み版の次の major)
+    const candidate = nextTypeScriptMajor(lock);
     // まだ許していない依存 (この一覧が空になった時点で保留の理由が消える)
-    const blocking = requiredTypeScriptPeers().filter(
+    const blocking = requiredTypeScriptPeers(lock).filter(
       ({ range }) => !semver.satisfies(candidate, range),
     );
     // 1 つでも残っていれば保留は妥当 (失敗文言に残っている依存を出し、解除の判断材料にする)

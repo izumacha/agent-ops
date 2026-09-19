@@ -59,12 +59,13 @@ DATABASE_URL='postgresql://postgres:postgres@localhost:5432/agent_ops_contract?s
 
 CI（`.github/workflows/ci.yml`）は `gate` ジョブ（ジョブ名＝ステータスチェック名は Step が進んでも変えず、実装済みの最新 Step のゲートを回す。どの Step かはステップ名で示す）、PostgreSQL サービスコンテナで `db:deploy` → `db:seed`（2 回流して冪等性確認）→ 専用 DB での契約テスト → `build` を行う `migrate-and-build` ジョブ、`docker compose up` で `/api/v1/health` が healthy になることを確かめる `docker-smoke` ジョブの 3 本。§14 の「PR 前に通すローカル検証」は `npm run gate:step1` と `npm run build`（ゲートは常に実装済みの最新 Step のものを回す。`docs/roadmap.md` ゲート運用ルール 2）。
 
-**major 更新を意図的に保留している依存が 2 つある（`.github/dependabot.yml` の npm ブロック）。**
+**major 更新を意図的に保留している依存が 3 つある（`.github/dependabot.yml`）。**
 
+- **`@types/node`（npm）と `node` ベースイメージ（docker）**: 型と出荷先のランタイムがずれても lint も typecheck もテストも通る（**CI の緑が判断材料にならない fail-open**）ので、「ランタイムを上げる判断」の側で一緒に上げる。解除条件は上流ではなく人の判断なので期限切れの検査は持たず、**保留そのものの消失・重複・効きすぎ**を `tests/dependabot-eslint-guard.test.ts` が見る。
 - **`eslint` の 9 → 10**: `eslint-config-next` が引き込む `eslint-plugin-react` / `eslint-plugin-import` / `eslint-plugin-jsx-a11y` が peer で `^9` までに制限しており、10 では削除済み API を呼ぶため `npm run lint` が必ず落ちる。
 - **`typescript` の 5 → 7**: lint の経路に載る `typescript-eslint` / `@typescript-eslint/*` が peer で `typescript >=4.8.4 <6.1.0` を、型生成の `openapi-typescript` が `^5.x` を宣言しているため、**`npm ci` が ERESOLVE で落ちる**（実測: Dependabot の PR #2 は gate / migrate-and-build / docker-smoke の 3 ジョブすべてがインストールの時点で失敗した）。
 
-**どちらの `ignore` も消さず、`package.json` の版を手で上げない。** 解除条件（上流が揃って次の major を許すこと）は `tests/dependabot-eslint-guard.test.ts` / `tests/dependabot-typescript-guard.test.ts` が **`package-lock.json` の解決済み `peerDependencies` から導いて**判定する（`package.json` の major を見る形では、保留が効いている限り値が動かないので解除条件が永久に発火しない）。**見張る依存を手書きの一覧にしない** — typescript 側は「必須 peer で typescript を縛っている依存」をロックファイルから導くので、依存が増減しても一覧が古くならない（0 件しか読めなければ fail-closed で落とす）。落ちたら `ignore` とそのテストごと削除して major を取り込む。
+**どの `ignore` も消さず、`package.json` の版を手で上げない。** `eslint` / `typescript` の解除条件（上流が揃って次の major を許すこと）は `tests/dependabot-eslint-guard.test.ts` / `tests/dependabot-typescript-guard.test.ts` が **`package-lock.json` の解決済み `peerDependencies` から導いて**判定する（`package.json` の major を見る形では、保留が効いている限り値が動かないので解除条件が永久に発火しない）。**見張る依存も、判定に使う版も手書きしない** — typescript 側は「必須 peer で typescript を縛っている依存」と「解決済み版の次の major」をどちらもロックファイルから導く（0 件しか読めなければ fail-closed で落とす）。**候補の版を直書きすると保留の範囲より判定が狭くなる**: `ignore` はすべての major を止めるのに、判定だけが `7.0.0` を見ていると、6.x の保留理由（`openapi-typescript` の `^5.x` 1 件だけ）が消えても緑のままで 6.x が永久に抑止される。落ちたら `ignore` とそのテストごと削除して major を取り込む。
 
 `npm audit` の high 0 はゲートの一部。Prisma 7.10 の CLI が固定する推移依存（`deepmerge-ts` / `mysql2`）の high は `package.json` の `overrides` で解決版へ差し替えている（この API は PostgreSQL しか使わず、`mysql2` は実行時に到達しない）。**上流 (`@prisma/config` / `prisma`) はこれらを完全一致でピンしているので、`overrides` はそのピンを跨いで major を上げている**（現状 `prisma generate` / `migrate deploy` は動作を確認済み）。Prisma を上げて上流が解決版を取り込んだら `overrides` を外す。外す前に Prisma を大きく上げるときは、`overrides` を外した状態で `npm audit` と `prisma migrate deploy` の両方を確かめる。
 

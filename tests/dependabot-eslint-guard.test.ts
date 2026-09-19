@@ -6,8 +6,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 // semver の範囲判定
 import semver from 'semver';
-// YAML パーサ (dependabot.yml)
-import { parse } from 'yaml';
+// dependabot.yml の読み方 (typescript 側のガードと共有する。§6 DRY)
+import { majorOnlyIgnore } from './lib/dependabot-config';
 
 // リポジトリのルート
 const ROOT = process.cwd();
@@ -16,30 +16,13 @@ const UPSTREAM_PLUGINS = ['eslint-plugin-react', 'eslint-plugin-import', 'eslint
 // 保留している eslint の次の major
 const NEXT_ESLINT_MAJOR = 10;
 
-// dependabot.yml の npm ブロックの ignore エントリ一覧を返す
-type IgnoreEntry = { 'dependency-name': string; 'update-types'?: string[]; versions?: string[] };
-function npmIgnores(): IgnoreEntry[] {
-  // 設定を読む
-  const config = parse(readFileSync(join(ROOT, '.github', 'dependabot.yml'), 'utf8'));
-  // npm エコシステムでルートディレクトリのブロックを探す
-  const npm = (
-    config.updates as { 'package-ecosystem': string; directory: string; ignore?: IgnoreEntry[] }[]
-  ).filter((u) => u['package-ecosystem'] === 'npm' && u.directory === '/');
-  // ちょうど 1 つあること (別ディレクトリへの置き間違いを弾く)
-  expect(npm).toHaveLength(1);
-  // ignore 一覧を返す (無ければ空)
-  return npm[0].ignore ?? [];
-}
-
 describe('eslint の major 更新の保留 (dependabot.yml)', () => {
   it('eslint の major だけを止めるエントリがちょうど 1 つある (消失・重複・効きすぎを弾く)', () => {
-    // eslint を対象にするエントリ
-    const entries = npmIgnores().filter((e) => e['dependency-name'] === 'eslint');
-    // 1 つだけ
-    expect(entries).toHaveLength(1);
+    // 消失・重複は majorOnlyIgnore が例外で落とす (共有ヘルパー側に集約)
+    const entry = majorOnlyIgnore('eslint');
     // update-types が major だけで、versions は無い (どちらも「全バージョン無視」になる形を防ぐ)
-    expect(entries[0]['update-types']).toEqual(['version-update:semver-major']);
-    expect(entries[0].versions).toBeUndefined();
+    expect(entry['update-types']).toEqual(['version-update:semver-major']);
+    expect(entry.versions).toBeUndefined();
   });
 
   it('保留の期限切れ: 上流プラグインが揃って eslint 10 を許したら落ちる (落ちたら ignore とこのテストを消して major を取り込む)', () => {

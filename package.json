@@ -13,13 +13,16 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:contract": "node scripts/require-contract-env.mjs && vitest run tests/data --no-file-parallelism",
     "gen": "openapi-typescript openapi/openapi.yaml -o src/generated/openapi.d.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
-    "gate:step0": "node scripts/gate-step0.mjs"
+    "gate:step0": "node scripts/gate-step0.mjs",
+    "gate:step1": "node scripts/gate-step1.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",
@@ -29,7 +32,8 @@
     "prisma": "^7.10.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "tsx": "^4.23.13"
+    "tsx": "^4.23.13",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
@@ -44,5 +48,9 @@
     "typescript": "^5.9.3",
     "vitest": "^5.0.0",
     "yaml": "^2.9.0"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.2",
+    "mysql2": "^3.24.4"
   }
 }

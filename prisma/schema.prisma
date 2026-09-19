@@ -75,6 +75,7 @@ model Tenant {
   updatedAt DateTime @updatedAt // 更新日時 (自動更新)
 
   users          User[] // 所属ユーザー
+  userTokens     UserToken[] // 発行済みログイントークン
   agents         Agent[] // 登録エージェント
   apiKeys        ApiKey[] // 発行 API キー
   usageEvents    UsageEvent[] // 利用イベント
@@ -83,37 +84,62 @@ model Tenant {
   guardrailRules GuardrailRule[] // ガードレール
   incidents      Incident[] // インシデント
   auditLogs      AuditLog[] // 監査ログ
+
+  @@index([createdAt]) // 一覧 (GET /tenants の createdAt 順のカーソル送り)
 }
 
 // ユーザー (テナント内の操作主体)
 model User {
-  id        String   @id @default(cuid()) // 主キー
-  tenantId  String // 所属テナント
-  email     String // ログイン用メール (テナント内で一意)
-  name      String // 表示名
-  role      Role    @default(viewer) // 役割 (既定は最小権限の viewer)
-  createdAt DateTime @default(now()) // 作成日時
-  updatedAt DateTime @updatedAt // 更新日時
+  id         String    @id @default(cuid()) // 主キー
+  tenantId   String // 所属テナント
+  email      String // ログイン用メール (テナント内で一意)
+  name       String // 表示名
+  role       Role      @default(viewer) // 役割 (既定は最小権限の viewer)
+  disabledAt DateTime? // 無効化日時 (null なら有効)。監査ログの操作者は削除できない (Restrict) ため、削除の代わりに無効化する
+  createdAt  DateTime  @default(now()) // 作成日時
+  updatedAt  DateTime  @updatedAt // 更新日時
 
-  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント (テナント削除で連鎖削除)
-  auditLogs AuditLog[] // このユーザーが行った操作
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント (テナント削除で連鎖削除)
+  auditLogs  AuditLog[] // このユーザーが行った操作
+  userTokens UserToken[] // このユーザーに発行したログイントークン
 
   @@unique([tenantId, email]) // 同一テナント内でメールを重複させない
-  @@index([tenantId]) // テナント絞り込み用
+  @@unique([tenantId, id]) // UserToken の複合 FK (tenantId, userId) の参照先。「別テナントのユーザーを指すトークン」を DB で弾く
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)。先頭列がテナント絞り込みも担う
+}
+
+// ユーザーのログイントークン (Bearer 認証の資格情報。平文は発行時のみ返し、ハッシュだけを保存する。ADR-0005)
+model UserToken {
+  id        String    @id @default(cuid()) // 主キー
+  tenantId  String // 所属テナント
+  userId    String // 発行先ユーザー
+  prefix    String // 先頭数文字 (一覧表示・特定用。秘密ではない)
+  tokenHash String    @unique // トークンの SHA-256 ハッシュ (照合用)
+  name      String // 用途メモ (例: CLI、CI)
+  createdAt DateTime  @default(now()) // 発行日時
+  expiresAt DateTime // 有効期限 (既定 90 日。無期限は作れない)
+  revokedAt DateTime? // 失効日時 (null なら有効)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  // 発行先ユーザー。複合 FK で「同じテナントのユーザー」であることを DB が保証する。ユーザー削除でトークンも消える
+  user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
+
+  // 認証は tokenHash の一意索引で引く。テナント全体の一覧は無いので (tenantId, createdAt) の索引は持たない
+  @@index([tenantId, userId, createdAt]) // ユーザー別一覧 (絞り込み + createdAt 順のカーソル送り)・複合 FK / テナント Cascade の解決用
 }
 
 // エージェント (管理対象の AI エージェント台帳)
 model Agent {
-  id               String      @id @default(cuid()) // 主キー
-  tenantId         String // 所属テナント
-  name             String // 表示名 (テナント内で一意)
-  description      String? // 用途の説明 (任意)
-  provider         Provider // 利用する LLM プロバイダ
-  model            String // モデル名 (例: claude-sonnet-4-6)
-  status           AgentStatus @default(active) // 稼働状態
-  budgetMicroUsd   BigInt? // 月次予算 (マイクロ USD。1 USD = 1,000,000。任意)
-  createdAt        DateTime    @default(now()) // 作成日時
-  updatedAt        DateTime    @updatedAt // 更新日時
+  id             String      @id @default(cuid()) // 主キー
+  tenantId       String // 所属テナント
+  name           String // 表示名 (テナント内で一意)
+  description    String? // 用途の説明 (任意)
+  provider       Provider // 利用する LLM プロバイダ
+  model          String // モデル名 (例: claude-sonnet-4-6)
+  status         AgentStatus @default(active) // 稼働状態
+  budgetMicroUsd BigInt? // 月次予算 (マイクロ USD。1 USD = 1,000,000。任意)
+  createdAt      DateTime    @default(now()) // 作成日時
+  updatedAt      DateTime    @updatedAt // 更新日時
 
   tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
   apiKeys        ApiKey[] // このエージェント専用の API キー
@@ -124,7 +150,8 @@ model Agent {
 
   @@unique([tenantId, name]) // 同一テナント内で名前を重複させない
   @@unique([tenantId, id]) // 子テーブルの複合 FK (tenantId, agentId) の参照先。「別テナントのエージェントを指す行」を DB で弾く
-  @@index([tenantId, status]) // 一覧の絞り込み (テナント + 状態)
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
+  @@index([tenantId, status, createdAt]) // 状態で絞った一覧 (テナント + 状態 + createdAt 順)
 }
 
 // API キー (エージェントがプロキシへ接続するときの認証情報。平文は保存せずハッシュのみ)
@@ -141,9 +168,9 @@ model ApiKey {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
   // 紐づくエージェント。複合 FK で「同じテナントのエージェント」であることを DB が保証する。
   // Cascade なのは、SetNull だと削除でキーが「テナント共通キー (agentId=null)」へ黙って昇格し権限が広がるため
-  agent Agent? @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Cascade)
+  agent  Agent? @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Cascade)
 
-  @@index([tenantId]) // テナント絞り込み用
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
   @@index([agentId]) // エージェント削除時の Cascade 解決・エージェント別一覧用 (PostgreSQL は FK に索引を張らない)
 }
 
@@ -164,7 +191,7 @@ model UsageEvent {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
   // 呼び出し元エージェント (同テナントであることを複合 FK で保証)。Restrict なのは、コスト履歴は請求の根拠なので
   // エージェント削除で消してはいけないため (履歴があるエージェントは削除せず stopped にする。docs/spec.md §3)
-  agent Agent @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
+  agent  Agent  @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
 
   @@index([tenantId, createdAt]) // 日次集計 (テナント + 期間)
   @@index([agentId, createdAt]) // エージェント別集計
@@ -199,14 +226,14 @@ model EvaluationCase {
 
 // 評価実行 (評価セット × エージェントの採点結果。Step3)
 model EvaluationRun {
-  id            String   @id @default(cuid()) // 主キー
-  tenantId      String // 所属テナント
-  agentId       String // 評価対象エージェント
-  setId         String // 使った評価セット
-  accuracy      Float // 正確性スコア (0.0〜1.0)
-  safety        Float // 安全性スコア (0.0〜1.0)
-  deviation     Float // 逸脱スコア (0.0〜1.0。低いほど良い)
-  createdAt     DateTime @default(now()) // 実行日時
+  id        String   @id @default(cuid()) // 主キー
+  tenantId  String // 所属テナント
+  agentId   String // 評価対象エージェント
+  setId     String // 使った評価セット
+  accuracy  Float // 正確性スコア (0.0〜1.0)
+  safety    Float // 安全性スコア (0.0〜1.0)
+  deviation Float // 逸脱スコア (0.0〜1.0。低いほど良い)
+  createdAt DateTime @default(now()) // 実行日時
 
   tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
   // 対象エージェント (同テナントを複合 FK で保証)。評価履歴は回帰比較の根拠なので削除で消さない (Restrict)

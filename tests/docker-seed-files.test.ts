@@ -15,8 +15,15 @@ const IMPORT_PATTERN = /^(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)[
 // パスエイリアス `@/` の解決先 (tsconfig.json の paths と同じ)
 const ALIAS_PREFIX = '@/';
 
-// あるファイルから相対 import で辿れる src/ 配下のファイルを再帰的に集める
-function collectSrcImports(file: string, seen = new Set<string>()): Set<string> {
+// あるファイルから相対 import で辿れる src/ 配下のファイルを再帰的に集める。
+// **辿る対象と集める対象を分ける** — prisma/seed-data.ts のように src/ の外にある手書きファイルも
+// seed の import グラフの一部なので、そこを辿らないとその先の src/ 配下の依存が丸ごと視界から外れる
+// (集合には入れない。prisma/ ごと COPY されるため Dockerfile の列挙対象ではない)
+function collectSrcImports(
+  file: string,
+  seen = new Set<string>(),
+  visited = new Set<string>(),
+): Set<string> {
   // ファイルを読む
   const source = readFileSync(file, 'utf8');
   // import 文を順に見る
@@ -33,12 +40,15 @@ function collectSrcImports(file: string, seen = new Set<string>()): Set<string> 
         : resolve(dirname(file), specifier)) + '.ts';
     // リポジトリ相対のパスに正規化する
     const rel = relative(ROOT, target).split('\\').join('/');
-    // src/ 配下の手書きファイルだけを集める (生成物 src/generated/ は Dockerfile がディレクトリごと
-    // コピーし、prisma/ 等は別途まとめてコピーする)
-    if (!rel.startsWith('src/') || rel.startsWith('src/generated/') || seen.has(rel)) continue;
-    // 集合に加え、そのファイルの import も辿る
-    seen.add(rel);
-    collectSrcImports(target, seen);
+    // 生成物 (src/generated/) は Dockerfile がディレクトリごとコピーするので、集めも辿りもしない
+    if (rel.startsWith('src/generated/')) continue;
+    // 同じファイルを 2 度辿らない (循環 import で止まらなくなるのを防ぐ)
+    if (visited.has(rel)) continue;
+    visited.add(rel);
+    // Dockerfile が 1 ファイルずつ列挙するのは src/ 配下の手書きファイルだけ
+    if (rel.startsWith('src/')) seen.add(rel);
+    // どちらであっても、その先の import は辿る
+    collectSrcImports(target, seen, visited);
   }
   // 集めた結果を返す
   return seen;

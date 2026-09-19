@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Prisma, PrismaClient } from '@/generated/prisma';
 // 接続時に search_path を固定する libpq オプションの組み立て (純粋関数)
 import { buildSearchPathOption } from './pg-search-path';
+// 生 SQL をパラメータ化された形だけに閉じる実行時ガード
+import { guardRawSql } from './raw-sql-guard';
 
 // `?schema=` が書かれていないときに使うスキーマ。Prisma 5 のクエリエンジンは接続時に search_path を
 // ここへ固定していたが、Prisma 7 のドライバアダプタは何もしない。既定値を明示して
@@ -35,8 +37,10 @@ function parseConnectionString(connectionString: string): URL {
  * あると search_path の固定が黙って上書きされる (Neon の `?options=endpoint%3D...` 等)。
  * 両方を結合し、search_path を後ろに置いて必ず効かせ、DSN 側からは options を取り除く。
  */
-// schema 指定つき DSN 用の接続設定を組み立てる (DSN 側の options と併存させる)
-function buildScopedConnectionConfig(
+// schema 指定つき DSN 用の接続設定を組み立てる (DSN 側の options と併存させる)。
+// export しているのはテストから直接確かめるため — この合流 (DSN 側 options と search_path) は
+// CI の接続先が options を持たないので、実際の接続経路では一度も通らない
+export function buildScopedConnectionConfig(
   connectionString: string,
   url: URL,
   schema: string,
@@ -92,7 +96,10 @@ export function createPrismaClient(options?: {
     {
       // 接続先 (search_path の固定オプション込み)
       ...buildScopedConnectionConfig(connectionString, url, schema),
-      // 接続確立の上限 (ミリ秒)。無期限待ちを避ける
+      // 接続確立の上限 (ミリ秒)。無期限待ちを避ける。
+      // **この行に検出網は無い** — 外しても全テストが緑のまま通る (実測)。外すと DB 到達不能時に
+      // /health が 503 を返さずハングし、compose や k8s の生存確認が「応答なし」になる。
+      // アダプタの設定は組み立てて即座に new へ渡すので値を取り出して検査できない。レビューで守る
       connectionTimeoutMillis: DEFAULT_CONNECT_TIMEOUT_SECONDS * 1000,
     },
     {
@@ -105,6 +112,9 @@ export function createPrismaClient(options?: {
     },
   );
 
-  // アダプタを渡して PrismaClient を生成し、呼び出し側へ返す
-  return new PrismaClient({ adapter, ...(options?.log ? { log: options.log } : {}) });
+  // アダプタを渡して PrismaClient を生成する
+  const client = new PrismaClient({ adapter, ...(options?.log ? { log: options.log } : {}) });
+  // 生 SQL の危険な使い方を実行時に閉じてから返す (綴りを追う静的検査は 1 段の間接化で崩れるため、
+  // 値そのものを見るここが本体。アプリ・seed・契約テスト・CLI はすべてこのファクトリを通る)
+  return guardRawSql(client);
 }

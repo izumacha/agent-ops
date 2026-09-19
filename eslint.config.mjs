@@ -30,13 +30,32 @@ const config = [
           destructuredArrayIgnorePattern: '^_', // 分割代入の _ プレフィックスを無視
         },
       ],
+      // 値をそのまま SQL へ混ぜる Prisma の API を禁止する (タグ付きテンプレートの $queryRaw を使う)。
+      // これは編集中にすぐ気付くための二次的な網で、値の妥当性は実行時のガード
+      // (src/lib/raw-sql-guard.ts) が担う。1 段の間接化 (分割代入・別名・計算添字) は捕まえられない
+      'no-restricted-syntax': [
+        'error',
+        {
+          // 値を素通しするメソッドの読み取り (レシーバは問わない)
+          selector: 'MemberExpression[property.name=/^\\$(query|execute)RawUnsafe$/]',
+          message:
+            '値を素通しする生 SQL は禁止。タグ付きテンプレートの $queryRaw / $executeRaw を使うこと (パラメータ化される)。',
+        },
+        {
+          // SQL 断片を作る Prisma.raw / Prisma.sql (レシーバが Prisma のときだけ。名前だけで禁じると
+          // 無関係なオブジェクトの .raw / .sql まで落ち、誤検知がいずれ検査を緩める圧力になる)
+          selector: "MemberExpression[object.name='Prisma'][property.name=/^(raw|sql)$/]",
+          message:
+            'SQL 断片 (Prisma.raw / Prisma.sql) の埋め込みは禁止。値はタグ付きテンプレートの ${} で渡すこと。',
+        },
+      ],
     },
   },
   {
     // 適用対象: src 配下の TypeScript / TSX ファイル全体
     files: ['src/**/*.{ts,tsx}'],
-    // 例外: Prisma クライアントの結線箇所 (composition root) だけは生成物の直接 import を許可する
-    ignores: ['src/lib/prisma.ts', 'src/lib/prisma-client.ts'],
+    // 例外: Prisma クライアントの結線箇所と prisma アダプタ (Ports & Adapters の Adapter 側) だけは生成物の直接 import を許可する
+    ignores: ['src/lib/prisma.ts', 'src/lib/prisma-client.ts', 'src/data/adapters/prisma/**'],
     rules: {
       // 指定したモジュールへの import をエラー化するルール
       'no-restricted-imports': [

@@ -11,6 +11,8 @@ export default defineConfig({
     environment: 'node',
     // 拾うテストファイルのパターン (tests/ 配下の *.test.ts のみ)
     include: ['tests/**/*.test.ts'],
+    // 各テストファイルの前に走らせる前処理 (契約テストの接続先が専用 DB であることを確かめる)
+    setupFiles: ['tests/setup/contract-database-guard.ts'],
   },
   // モジュール解決設定
   resolve: {

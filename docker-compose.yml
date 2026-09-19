@@ -14,9 +14,13 @@ services:
     # データ永続化用ボリューム
     volumes:
       - pgdata:/var/lib/postgresql/data
-    # ホストの 5432 をコンテナの 5432 に公開 (ローカルから DB クライアントで繋げる)
+    # ホストの 5432 をコンテナの 5432 に公開 (ローカルから DB クライアントで繋げる)。
+    # **必ずループバックに限定する** — 既定値のままだと 0.0.0.0 に公開され、既定資格情報のまま
+    # 同一 LAN の誰でも接続できる。この DB は Bearer 認証の資格情報ストアそのものなので
+    # (UserToken.tokenHash が一致すればその principal になる)、1 行 INSERT するだけで
+    # RBAC・テナント境界・失効・期限のすべてが迂回される
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     # ヘルスチェック: pg_isready で接続可能か 5 秒おきに確認
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U postgres']
@@ -40,6 +44,8 @@ services:
       TZ: Asia/Tokyo
       # DB 接続文字列 (db サービスの 5432 を指す)
       DATABASE_URL: postgresql://postgres:postgres@db:5432/agent_ops
+      # プラットフォーム管理者トークン (.env から渡す。空なら未設定 = テナント作成は誰もできない)
+      PLATFORM_ADMIN_TOKEN: ${PLATFORM_ADMIN_TOKEN:-}
     # db のヘルスチェックが green になってから起動する
     depends_on:
       db:

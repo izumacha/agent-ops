@@ -24,6 +24,9 @@ const OPENAI_MODEL = 'gpt-5';
 // スタブ上流の接続先 (ループバックなので非本番では http を許す。fetch は差し替えるので実際には繋がない)
 const STUB_BASE_URL = 'http://127.0.0.1:4010';
 
+// 本文を持てない HTTP ステータス (RFC 9110)。Response に本文を渡すと TypeError になる
+const BODYLESS_STATUSES = new Set([204, 205, 304]);
+
 // 差し替えた fetch が受け取った呼び出し (URL とオプション)
 let fetchCalls: { url: string; init: RequestInit }[] = [];
 
@@ -55,8 +58,13 @@ function stubUpstream(response: StubResponse | Error): void {
     if (response.delayMs !== undefined) {
       await new Promise((resolve) => setTimeout(resolve, response.delayMs));
     }
-    // 返す本文 (rawBody 優先。無ければ body を JSON 化する)
-    const body = response.rawBody ?? JSON.stringify(response.body);
+    // 返す本文 (rawBody 優先。無ければ body を JSON 化する)。
+    // **本文を持てないステータスには null を渡す** — undici は 204 / 205 / 304 に空文字を渡しても
+    // TypeError で拒否するので、うっかり '' を渡すとスタブの fetch が投げ、
+    // 「本文が JSON として読めないから 502」ではなく「接続に失敗したから 502」を測ってしまう (実測)
+    const body = BODYLESS_STATUSES.has(response.status)
+      ? null
+      : (response.rawBody ?? JSON.stringify(response.body));
     // 応答を返す
     return new Response(body, {
       status: response.status,
@@ -599,7 +607,7 @@ describe('上流の失敗', () => {
   it('本文を持てないステータス (204) でも 500 にならず 502 になる', async () => {
     // 204 の本文は空文字なので JSON として読めない。**本文ごと Response へ渡すと TypeError** になり、
     // 上流の異常が「自分の内部エラー」= 500 とスタック付きのログに化けていた (実測)
-    stubUpstream({ status: 204, rawBody: '' });
+    stubUpstream({ status: 204 });
     // 中継する
     const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
     const result = await call(proxyAnthropic, {
@@ -679,6 +687,30 @@ describe('上流の失敗', () => {
     // **記録もしない** — 上流へ 1 バイトも出ていない呼び出しを利用イベントにすると、
     // 上流が未設定のあいだ有効なキー 1 本で DB の行だけを無制限に増やせる (実測)
     expect(recordedEvents()).toHaveLength(0);
+  });
+});
+
+describe('サーバログ', () => {
+  it('トークン数を読めなかったログは 2xx のときだけ出す', async () => {
+    // console.error を覗く (出し過ぎも出さなすぎも見る)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // 2xx なのに usage が無い応答 = 本物の異常なので残す
+    stubUpstream({ status: 200, body: { id: 'x' } });
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
+    // 1 回だけ出る
+    expect(logged.mock.calls.filter((args) => String(args[0]).includes('トークン数'))).toHaveLength(
+      1,
+    );
+    // 4xx では出さない (上流のエラー本文に usage は載らないので必ず読めず、
+    // 安く量産できる 400 でログが埋まって本物の異常が隠れる)
+    logged.mockClear();
+    stubUpstream({ status: 400, body: { error: { type: 'invalid_request_error' } } });
+    await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
+    // 1 回も出ない
+    expect(logged.mock.calls.filter((args) => String(args[0]).includes('トークン数'))).toHaveLength(
+      0,
+    );
   });
 });
 

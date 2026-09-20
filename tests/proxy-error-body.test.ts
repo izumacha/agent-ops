@@ -35,6 +35,7 @@ describe('上流のエラー本文の絞り込み', () => {
         type: 'invalid_request_error',
         billing: { balance_usd: 0.12, organization: 'acme-corp' },
         detail: 'credit balance is too low',
+        // detail は許可リストに無いので、綴りによらず落ちる
       },
     });
     // 最上位の type と error.type だけが残る
@@ -47,11 +48,43 @@ describe('上流のエラー本文の絞り込み', () => {
     expect(JSON.stringify(safe)).not.toContain('req_011CQabcdef');
   });
 
-  it('識別子として長すぎる値は通さない (自由記述が別名で入ってくる経路を塞ぐ)', () => {
-    // code に長文を入れても落ちる
-    const safe = sanitizeUpstreamErrorBody({ error: { code: 'x'.repeat(101) } });
+  it.each([
+    ['空白入りの散文 (code)', { code: 'quota for org-ACME exhausted; plan=Enterprise' }],
+    [
+      '空白入りの散文 (param)',
+      { param: 'organization ACME Corp (tier: enterprise) has no access' },
+    ],
+    ['長すぎる識別子', { code: 'x'.repeat(65) }],
+    ['制御文字を含む値', { code: 'a\r\nX-Injected: 1\u0000b' }],
+    ['孤立サロゲート', { code: '\ud800' }],
+    ['空文字', { type: '' }],
+  ])('識別子の綴りに収まらない値は通さない: %s', (_label, error) => {
+    // 長さだけを見ていたときは 100 文字以内の散文が素通しした (実測)
+    const safe = sanitizeUpstreamErrorBody({ error });
     // 定型文だけが残る
     expect(safe).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
+  });
+
+  it('最上位の type に入れた散文も通さない', () => {
+    // 最上位の type は Anthropic が 'error' を入れる項目。ここにも散文は入れられる
+    const safe = sanitizeUpstreamErrorBody({
+      type: 'org ACME Corp balance is $0.00 — upgrade at Plans & Billing',
+      error: {},
+    });
+    // 最上位の type ごと落ちる
+    expect(safe).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
+  });
+
+  it.each([
+    ['ベンダーの種別', { type: 'invalid_request_error' }],
+    ['ベンダーのコード', { code: 'context_length_exceeded' }],
+    ['JSON パス形式の param', { param: 'messages[0].content' }],
+    ['ハイフンとドット', { code: 'rate-limit.exceeded' }],
+  ])('実在するベンダーの識別子は通す: %s', (_label, error) => {
+    // 絞りすぎて診断が消えていないことを確かめる (綴りの条件が厳しすぎると全部 undefined になる)
+    const safe = sanitizeUpstreamErrorBody({ error }) as { error: Record<string, unknown> };
+    // 入れた項目がそのまま残る
+    for (const [key, value] of Object.entries(error)) expect(safe.error[key]).toBe(value);
   });
 
   it.each([

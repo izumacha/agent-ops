@@ -20,15 +20,19 @@ export type StreamReadResult =
  * ストリームを上限バイトまで読む。超えた時点で残りを読まずに打ち切る。
  * **読み取りそのものの失敗 (切断など) は投げたまま**にする — 切断を「ふつうの結果」に混ぜると、
  * 呼び出し側がクライアントの切断と上流の障害を区別できなくなる。
- * @param stream 読むストリーム (null なら空文字を返す)
+ * @param stream 読むストリーム (無ければ空文字を返す)
  * @param maxBytes 許す最大バイト数 (これを 1 バイトでも超えたら打ち切る)
+ * @param options cancelOnOverflow: 上限超過で打ち切るときに下層のストリームも解放するか
  */
 export async function readStreamWithinByteLimit(
-  stream: ReadableStream<Uint8Array> | null,
+  stream: ReadableStream<Uint8Array> | null | undefined,
   maxBytes: number,
+  options: { cancelOnOverflow?: boolean } = {},
 ): Promise<StreamReadResult> {
-  // 本文が無ければ空文字 (呼び出し側が「空」として扱う)
-  if (stream === null) return { ok: true, text: '' };
+  // 本文が無ければ空文字 (呼び出し側が「空」として扱う)。
+  // **undefined も同じ扱いにする** — 標準の Request/Response は null を返すが、
+  // 本文を持たないテスト用の値などは undefined になり、getReader() で TypeError になっていた
+  if (stream === null || stream === undefined) return { ok: true, text: '' };
   // ストリームを少しずつ読む
   const reader = stream.getReader();
   // 読んだかたまりと合計バイト数
@@ -44,10 +48,19 @@ export async function readStreamWithinByteLimit(
       if (done) break;
       // 合計を更新する
       total += value.byteLength;
-      // 上限を超えたら、残りを読まずにその場で終える (これ以上メモリを積まない)。
-      // reader.cancel() は呼ばない — 呼び出し側 (リクエスト本文) では下層のストリームごと
-      // 破棄されて応答が届く前に接続が切れるため。読むのをやめれば残りはランタイムが捨てる
-      if (total > maxBytes) return { ok: false, reason: 'too_large' };
+      // 上限を超えたら、残りを読まずにその場で終える (これ以上メモリを積まない)
+      if (total > maxBytes) {
+        // **下層を解放するかは呼び出し側が決める** — 2 つの経路で事情が正反対なので、
+        // 共有ヘルパーの既定に寄せると片方が必ず壊れる:
+        //   - リクエスト本文: cancel すると Next.js が下層の IncomingMessage ごと破棄し、
+        //     送信済みの 413 が届く前に接続が切れる (クライアントには ECONNRESET に見える)。
+        //     読むのをやめれば残りはランタイムが捨てるので、ここでは cancel しない
+        //   - 上流の応答: cancel しないと応答ボディが未消費のまま残り、ソケットと fd が
+        //     解放されない (実測で 502 を返した 20 秒後もソケットが閉じなかった)
+        if (options.cancelOnOverflow === true) await reader.cancel().catch(() => undefined);
+        // 打ち切った理由
+        return { ok: false, reason: 'too_large' };
+      }
       // 上限内なら取っておく
       chunks.push(value);
     }

@@ -98,7 +98,7 @@ export const API_MESSAGES = {
   // 上流が要求を拒否したときの定型文。**上流の文章はそのまま返さない** — 自由記述の message には
   // 残高不足・組織名・契約ティアといったプラットフォーム側のアカウント状態が載るため (ADR-0007 決定 7)
   upstreamRejected:
-    '上流の LLM プロバイダが要求を受け付けませんでした。エラーの種別 (upstream) を参照してください。',
+    '上流の LLM プロバイダが要求を受け付けませんでした。error.type / error.code を参照してください。',
   invalidUsageDay: '日付は YYYY-MM-DD で指定してください。',
   reversedUsageRange: 'from は to 以前の日付を指定してください。',
   usageRangeTooLong: `期間は最大 ${USAGE_RANGE_MAX_DAYS} 日までです。`,

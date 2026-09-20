@@ -638,9 +638,11 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          $ref: '#/components/responses/ProxyRelayedError'
+        '404':
+          $ref: '#/components/responses/ProxyRelayedError'
         '413':
-          $ref: '#/components/responses/PayloadTooLarge'
+          $ref: '#/components/responses/ProxyRelayedError'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '429':
@@ -681,9 +683,11 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          $ref: '#/components/responses/ProxyRelayedError'
+        '404':
+          $ref: '#/components/responses/ProxyRelayedError'
         '413':
-          $ref: '#/components/responses/PayloadTooLarge'
+          $ref: '#/components/responses/ProxyRelayedError'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '429':
@@ -839,6 +843,18 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    ProxyRelayedError:
+      description: |
+        プロキシ自身が要求を拒否した (本文が JSON でない・上限超過など) か、上流が拒否したかの
+        どちらか。前者は API 共通のエラー形 ({status, message})、後者は上流の形を保った
+        RelayedUpstreamError で、**本文は機械可読な項目だけに絞ってある**
+        (自由記述には上流アカウントの残高・組織名・契約ティアが載るため)
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/Error'
+              - $ref: '#/components/schemas/RelayedUpstreamError'
     TooManyRequests:
       description: |
         上流の LLM プロバイダが混雑を返した。本文は定型文に差し替える (上流の本文には組織名や
@@ -1252,6 +1268,34 @@ components:
       type: object
       description: 上流の応答をそのまま返す (項目はベンダーの仕様に従う)
       additionalProperties: true
+    RelayedUpstreamError:
+      type: object
+      description: |
+        プロキシが中継する上流のエラー本文。ベンダーの形は保つが、通すのは機械可読な識別子だけで、
+        自由記述の message はプロキシの定型文に置き換わる (docs/adr/0007-cost-proxy.md 決定 7)。
+      properties:
+        type:
+          type: string
+          description: 上流が最上位に置いた種別 (Anthropic は 'error')
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+              description: プロキシの定型文 (上流の文章ではない)
+            type:
+              type: string
+              description: エラーの種別 (invalid_request_error など)
+            code:
+              type: string
+              description: 細かい理由コード (context_length_exceeded など)
+            param:
+              type: string
+              description: 問題のあった入力項目 (messages[0].content など)
+          required: [message]
+          additionalProperties: false
+      required: [error]
+      additionalProperties: false
     DailyUsage:
       type: object
       required: [day, requests, inputTokens, outputTokens, costMicroUsd]

@@ -187,7 +187,12 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> 
     });
     // 応答本文を**上限バイトまで**読む。response.text() は全量をメモリへ載せてからしか大きさが
     // 分からないので、壊れた前段ゲートウェイが巨大な本文を返すとそのぶんヒープを握ってしまう
-    const read = await readStreamWithinByteLimit(response.body, maxResponseBytes);
+    // **上限を超えたら下層も解放する** (cancelOnOverflow) — 読むのをやめるだけだと応答ボディが
+    // 未消費のまま残り、ソケットと fd がタイムアウトまで解放されない (実測)。
+    // リクエスト本文側と事情が逆なので、共有ヘルパーではこちらが明示的に選ぶ
+    const read = await readStreamWithinByteLimit(response.body, maxResponseBytes, {
+      cancelOnOverflow: true,
+    });
     // 上限超過・UTF-8 として壊れた本文は「上流の応答が使えなかった」として 502 にする
     // (中途半端に切り詰めた本文を JSON として解釈させない)
     if (!read.ok) throw new ApiError(HTTP_STATUS.BAD_GATEWAY, API_MESSAGES.upstreamFailure);

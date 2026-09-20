@@ -11,6 +11,12 @@
 // **ステータス番号では選り分けられない** — 上の 400 は送り主の本文が悪いときの 400 と同じ番号。
 // 区別できるのは**本文の中のどの項目か**だけなので、機械可読な項目だけを許可リストで通し、
 // 自由記述 (message) は自前の定型文へ差し替える (§9 fail-closed: 迷うものは出さない)。
+//
+// **残る境界**: 通す値は綴りで絞るが、`code` / `type` は**ベンダーの分類語彙**なので、
+// `billing_hard_limit_reached` や `model_not_found` のように「共有している上流アカウントの
+// 状態」をカテゴリとして示す値は残る。これを完全に塞ぐには「既知の安全なコードだけの閉じた
+// 語彙」にするしかなく、ベンダーが値を増やすたびに診断が黙って消える (別の壊れ方) ので採らない。
+// 形では弾けないと理解したうえで受け入れている (ADR-0007 決定 7)。
 import { API_MESSAGES } from '@/lib/constants';
 
 // 通してよい項目の名前。いずれも機械可読な識別子で、アカウントの状態を語らない:
@@ -19,9 +25,16 @@ import { API_MESSAGES } from '@/lib/constants';
 //   param … 問題のあった入力項目の名前 (messages / max_tokens など)
 const SAFE_ERROR_FIELDS = ['type', 'code', 'param'] as const;
 
-// 値が「そのまま返してよい識別子」か。文字列で、常識的な長さに収まるものだけを通す
-// (長い文字列は自由記述が別名で入ってくる経路になる)
-const SAFE_FIELD_MAX_LENGTH = 100;
+// 値が「そのまま返してよい識別子」か。**長さではなく綴りで絞る** —
+// 長さだけを見ていたときは 100 文字以内の散文が素通しし、実測で
+// `code: 'quota for org-ACME exhausted; plan=Enterprise; …'` や
+// `param: 'organization ACME Corp (tier: enterprise) has no access …'` がそのまま中継された。
+// 英数字・アンダースコア・ドット・ハイフンと、JSON パス用の角括弧だけを許す
+// (実在のベンダー値 invalid_request_error / context_length_exceeded / messages[0].content は通る)。
+// 空白を許さないので散文は入らず、制御文字・孤立サロゲートも同時に落ちる
+// (このリポジトリが他のすべての文字列に対して課している不変条件と揃う)。
+// 固定長の繰り返しなので ReDoS の余地は無い (§9)
+const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_.\-[\]]{1,64}$/;
 
 // オブジェクト (連想配列) として読めるかどうか
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -33,12 +46,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 // 識別子として通してよい文字列だけを取り出す (それ以外は undefined)
 function safeIdentifier(value: unknown): string | undefined {
-  // 文字列で、空でなく、長すぎないもの
-  if (typeof value !== 'string' || value === '' || value.length > SAFE_FIELD_MAX_LENGTH) {
-    return undefined;
-  }
-  // そのまま返してよい
-  return value;
+  // 文字列でなければ通さない
+  if (typeof value !== 'string') return undefined;
+  // 識別子の綴りに収まるものだけを通す (fail-closed)
+  return SAFE_IDENTIFIER_PATTERN.test(value) ? value : undefined;
 }
 
 /**

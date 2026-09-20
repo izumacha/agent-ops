@@ -272,6 +272,8 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
     try {
       shifted = createPrismaClient();
     } finally {
+      // この 1 件だけを戻す vi.unstubEnv はこの vitest には無いので全件を戻す
+      // (このファイルは他に環境変数を差し替えていないので巻き添えは起きない)
       vi.unstubAllEnvs();
     }
     // 後始末を確実にしたうえで集計する

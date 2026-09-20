@@ -6,6 +6,7 @@ import { callUpstream, resolveUpstreamBaseUrl, upstreamEndpoint } from '@/lib/pr
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { UPSTREAM_MAX_RESPONSE_BYTES } from '@/lib/constants';
 import { Provider } from '@/domain/types';
 
 // 環境変数の入れ物を作る (process.env を汚さずに判定だけを試す)
@@ -190,6 +191,96 @@ describe('上流の呼び出し (時間切れ・本文の上限)', () => {
       maxResponseBytes: 2 * 1024,
     }).catch((error: unknown) => error);
     // 上流の応答が使えなかったので 502
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(HTTP_STATUS.BAD_GATEWAY);
+  });
+
+  it('上限を渡さなければ既定値 (UPSTREAM_MAX_RESPONSE_BYTES) が効く', async () => {
+    // **既定値の結線を見る検査**。上の 2 件は上限を明示で渡すので、
+    // `?? UPSTREAM_MAX_RESPONSE_BYTES` を `?? Infinity` に変えても全件緑のままだった (実測)
+    const chunk = new Uint8Array(64 * 1024).fill(0x78);
+    // 既定の上限をちょうど超える回数だけ流す
+    const times = Math.ceil(UPSTREAM_MAX_RESPONSE_BYTES / chunk.byteLength) + 1;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                // 上限を超えるまで流す
+                for (let i = 0; i < times; i += 1) controller.enqueue(chunk);
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+    // 上限を渡さずに呼ぶ (本番と同じ結線)
+    const failure = await callUpstream({
+      provider: Provider.anthropic,
+      target: { endpoint: new URL('https://api.anthropic.com/v1/messages'), apiKey: 'k' },
+      body: '{}',
+    }).catch((error: unknown) => error);
+    // 既定の上限で打ち切られて 502
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(HTTP_STATUS.BAD_GATEWAY);
+  });
+
+  it('上限を超えたら下層のストリームも解放する (ソケットを抱え続けない)', async () => {
+    // 読むのをやめるだけだと応答ボディが未消費のまま残り、fd がタイムアウトまで解放されない
+    // (実測で 502 を返した 20 秒後もソケットが閉じなかった)。cancel が呼ばれることを見る
+    let cancelled = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              pull(controller) {
+                // 止めるまで流し続ける
+                controller.enqueue(new Uint8Array(1024).fill(0x78));
+              },
+              cancel() {
+                // 解放されたことを記録する
+                cancelled = true;
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+    // 小さな上限で呼ぶ
+    await callUpstream({
+      provider: Provider.anthropic,
+      target: { endpoint: new URL('https://api.anthropic.com/v1/messages'), apiKey: 'k' },
+      body: '{}',
+      maxResponseBytes: 2 * 1024,
+    }).catch(() => undefined);
+    // 下層のストリームが解放されている
+    expect(cancelled).toBe(true);
+  });
+
+  it('本文が UTF-8 として壊れていても 502 (置換して中継しない)', async () => {
+    // 上限超過と壊れたバイト列は別の理由。片方しか見ていないと、もう一方の写像先が無検証になる
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(new Uint8Array([0xff, 0xfe, 0xfd]), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+    // 呼ぶ
+    const failure = await callUpstream({
+      provider: Provider.anthropic,
+      target: { endpoint: new URL('https://api.anthropic.com/v1/messages'), apiKey: 'k' },
+      body: '{}',
+    }).catch((error: unknown) => error);
+    // 502 (U+FFFD へ置換した本文を中継しない)
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(HTTP_STATUS.BAD_GATEWAY);
   });

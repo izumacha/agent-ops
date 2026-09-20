@@ -14,6 +14,19 @@ const CHILD_TIMEOUT_MS = 180_000;
 // warning を 1 つだけ起こす一時ファイルの名前 (pid を入れて並行実行でも衝突させない)
 const PROBE_PREFIX = 'lint-warning-probe.';
 
+// 子プロセスが実際に起動して正常に終わったことを確かめる。
+// **`status` の null を素通りさせない** — `spawnSync` はコマンドが見つからないときも
+// 時間切れのときも `status: null` を返すので、`expect(status).not.toBe(0)` のような
+// 「非 0 なら合格」の書き方は**何も測れていない状態で緑**になる (§9 fail-closed)
+function expectRan(result: ReturnType<typeof spawnSync>, label: string): void {
+  // 起動そのものに失敗していないこと (ENOENT など)
+  expect(result.error, `${label} を起動できなかった`).toBeUndefined();
+  // シグナルで殺されていないこと (時間切れはここに出る)
+  expect(result.signal, `${label} が途中で打ち切られた`).toBeNull();
+  // 終了コードが数値であること (null のまま判定へ進ませない)
+  expect(typeof result.status, `${label} の終了コードが取れていない`).toBe('number');
+}
+
 describe('lint の指定そのもの', () => {
   // `package.json` の lint スクリプト
   const lintScript = (
@@ -51,6 +64,10 @@ describe('lint の指定そのもの', () => {
           encoding: 'utf8',
           timeout: CHILD_TIMEOUT_MS,
         });
+        // **子プロセスが動いたことを先に確かめる。** `spawnSync` は起動できなかったとき
+        // (コマンドが無い・時間切れ) も `status` に null を返すので、null のまま先へ進むと
+        // 「何も測っていないのに緑」になる (§9 fail-closed)
+        expectRan(lenient, 'npx eslint');
         expect(lenient.status, '既定の eslint が warning で落ちている').toBe(0);
         // **プローブが本当に検査されていること。** lint の対象外 (ignores に入る等) だと
         // eslint は「File ignored」の warning を 1 件出すので、「既定は 0 / 指定付きは非 0」という
@@ -66,12 +83,21 @@ describe('lint の指定そのもの', () => {
           encoding: 'utf8',
           timeout: CHILD_TIMEOUT_MS,
         });
+        // **ここが最も fail-open になりやすい。** `not.toBe(0)` は null も通すので、
+        // npm を起動できなくても時間切れでも「落ちた」と読めてしまう (実測でそのまま緑だった)
+        expectRan(viaNpm, 'npm run lint');
+        // **プローブを実際に見たうえで落ちていること。** 対象パスを狭める変異だと
+        // 「別の理由で落ちた」のか「プローブで落ちた」のかが区別できない
+        expect(
+          `${viaNpm.stdout}${viaNpm.stderr}`,
+          'npm run lint がプローブを検査していない',
+        ).toContain(PROBE_PREFIX);
         expect(viaNpm.status, 'npm run lint が warning を失敗にしていない').not.toBe(0);
       } finally {
         // 一時ファイルを消す
         rmSync(probePath, { force: true });
       }
-      // eslint を 3 回起こすので既定の 5 秒では足りない (子プロセス側の上限は CHILD_TIMEOUT_MS)
+      // 子プロセスを 2 本起こすので既定の 5 秒では足りない (子プロセス側の上限は CHILD_TIMEOUT_MS)
     },
     CHILD_TIMEOUT_MS,
   );

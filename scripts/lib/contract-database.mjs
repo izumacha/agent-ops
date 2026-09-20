@@ -43,21 +43,27 @@ export function contractDatabaseProblem(url) {
 }
 
 /**
- * ベンチの接続先ガード。専用 DB でなければその場で throw する。
- * **判定と throw を 1 つの関数にまとめるのが要点** — 呼び出し側で
+ * ベンチの接続先ガード。専用 DB でなければ理由を表示して非 0 終了する。
+ *
+ * **判定と終了を 1 つの関数にまとめるのが要点** — 呼び出し側で
  * `const problem = contractDatabaseProblem(...); if (problem !== null && 何か) throw ...` と
- * 書けると、条件を 1 つ足すだけでガードが実質外れる (実測で 705 件すべて緑だった)。
- * まとめてあれば、外すには呼び出しごと消すしかなく、結線の検査がそれを落とす
+ * 書けると、条件を 1 つ足すだけでガードが実質外れる (実測で全件緑だった)。
+ *
+ * **環境変数を引数で受け取らない。** 受け取れるようにしていたときは、呼び出し側が
+ * `requireContractDatabase('bench:usage', { DATABASE_URL: '…_contract' })` と偽の env を
+ * 渡すだけでガードが完全に死んだ (実測で 713 件すべて緑のまま、開発 DB への `TRUNCATE` に到達)。
+ * テストから判定を確かめたいときは `contractDatabaseProblem` を直接呼ぶ
  * @param {string} label ゲート/ベンチの名前 (失敗の文言に入れる)
- * @param {Record<string, string | undefined>} [env] 読み取る環境変数 (既定は実際の環境)
  */
-export function requireContractDatabase(label, env = process.env) {
+export function requireContractDatabase(label) {
   // 駄目な理由 (専用 DB なら null)
-  const problem = contractDatabaseProblem(env.DATABASE_URL);
-  // 専用 DB でなければ 1 件も書かずに落とす (fail-closed)
-  if (problem !== null) {
-    throw new Error(`${label} は専用 DB でだけ実行してください: ${problem}`);
-  }
+  const problem = contractDatabaseProblem(process.env.DATABASE_URL);
+  // 専用 DB なら何もしない
+  if (problem === null) return;
+  // 理由を表示して落とす (`exitIfFailures` と同じ形。トップレベルで throw するとスタックが出る)
+  console.error(`[${label}] 専用 DB でだけ実行してください: ${problem}`);
+  // 非 0 終了 (1 件も書かずに止める)
+  process.exit(1);
 }
 
 /**

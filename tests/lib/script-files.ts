@@ -128,39 +128,6 @@ interface CallSite {
 }
 
 /**
- * `const x = f(...)` の形の束縛を集める (変数名 → 束縛した呼び出し先の名前)。
- * 呼び出し以外で束縛された場合 (配列リテラル・メンバ式の呼び出し `a.filter(...)` など) は null を入れる。
- * **なぜ要るか**: 「渡しているのが素の識別子か」だけを見ると、**1 文はさむだけ**で迂回できる。
- * 実測で `const failures = rawFailures.filter(() => false);` を足す変異は 705 件すべて緑・
- * `npm run lint` も exit 0 のまま通り、ゲートは失敗を数えたうえで exit 0 になった。
- * @param source 構文木
- * @returns 変数名 → その変数を束縛した呼び出し先の名前 (呼び出しでなければ null)
- */
-function collectBindings(source: ts.SourceFile): Map<string, (string | null)[]> {
-  // 変数名ごとの束縛 (同じ名前が複数回束縛されることもあるので配列で持つ)
-  const bindings = new Map<string, (string | null)[]>();
-  // すべての節点を辿る
-  const visit = (node: ts.Node): void => {
-    // 名前が素の識別子で初期化子を持つ変数宣言だけを見る
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-      // 初期化子が素の識別子への呼び出しなら、その名前を覚える
-      const producer =
-        ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression)
-          ? node.initializer.expression.text
-          : null;
-      // 同じ名前の束縛をまとめる
-      bindings.set(node.name.text, [...(bindings.get(node.name.text) ?? []), producer]);
-    }
-    // 子を辿る
-    ts.forEachChild(node, visit);
-  };
-  // 根から辿る
-  ts.forEachChild(source, visit);
-  // 集めた結果
-  return bindings;
-}
-
-/**
  * ファイルを「トップレベル」と「名前付き関数ごと」のスコープに分け、各スコープの呼び出しを集める。
  * 名前の無い関数 (コールバック等) の中の呼び出しは、外側の名前付きスコープに数える。
  * @param source 構文木
@@ -177,9 +144,20 @@ function collectCallsByScope(source: ts.SourceFile): Map<string, CallSite[]> {
     if (declared !== null && !byScope.has(declared)) byScope.set(declared, []);
     // 子を辿るときのスコープ
     const inner = declared ?? scope;
-    // 素の識別子への呼び出しだけを数える (メンバ式・別名経由は捉えられない。下の注記を参照)
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression))
-      byScope.get(scope)?.push({ name: node.expression.text, args: node.arguments });
+    // 呼び出しを数える。**メンバ式 (`fs.readFileSync(...)`) も `fs.readFileSync` という名前で数える** —
+    // 素の識別子だけを見ていたときは、標準モジュールをメンバ経由で呼ぶだけで
+    // 「実行ヘルパーしか呼んでいない」と判定され、判定をまるごと書き写したゲートが除外できた (実測)
+    if (ts.isCallExpression(node)) {
+      // 呼び出し先の名前 (素の識別子か、受け手が識別子のメンバ式だけを読む)
+      const called = ts.isIdentifier(node.expression)
+        ? node.expression.text
+        : ts.isPropertyAccessExpression(node.expression) &&
+            ts.isIdentifier(node.expression.expression)
+          ? `${node.expression.expression.text}.${node.expression.name.text}`
+          : null;
+      // 読めた呼び出しだけを覚える
+      if (called !== null) byScope.get(scope)?.push({ name: called, args: node.arguments });
+    }
     // 子を辿る
     ts.forEachChild(node, (child) => visit(child, inner));
   };
@@ -217,6 +195,30 @@ function reachableScopes(byScope: Map<string, CallSite[]>): Set<string> {
   }
   // 到達可能なスコープ
   return reachable;
+}
+
+/**
+ * その名前が指定した共有モジュールから取り込まれ、かつ同名のローカル宣言に覆われていないか。
+ * **名前の一致だけでは足りない** — 取り込みをやめて同名のローカル関数を宣言すると綴りは満たせる
+ * (実測で 713 件すべて緑のまま、判定が常に空配列を返すゲートが通った)。
+ * @param path 対象ファイルの絶対パス
+ * @param source その構文木
+ * @param moduleName 共有モジュールのファイル名
+ * @param localName このファイルの中での名前
+ * @returns 取り込み由来なら true
+ */
+function comesFromSharedModule(
+  path: string,
+  source: ts.SourceFile,
+  moduleName: string,
+  localName: string,
+): boolean {
+  // その共有モジュールから取り込んだ名前
+  const imported = importedSharedNames(path).get(moduleName) ?? [];
+  // 手元の名前として使われていなければ、指しているのは別物
+  if (!imported.some((entry) => entry.local === localName)) return false;
+  // 同名のローカル宣言で覆われていれば、指しているのはそちら
+  return !locallyDeclaredNames(source).has(localName);
 }
 
 /**
@@ -270,24 +272,57 @@ function locallyDeclaredNames(source: ts.SourceFile): Set<string> {
 }
 
 /**
- * そのファイルが取り込んでいるモジュール指定子をすべて返す (生の文字列のまま)。
- * 「共有モジュールしか取り込んでいない」ことを確かめるために使う。
+ * そのファイルが取り込んでいるモジュールのうち、**`scripts/lib` 配下でないもの**を返す。
+ * 静的 `import` だけでなく**動的 `import()` と `require()`** も見る — 静的 import しか
+ * 見ていなかったときは、`const fs = await import('node:fs')` で標準モジュールを読み込み、
+ * 判定をメンバ式呼び出しでインライン化したゲートが「共有モジュールしか取り込んでいない」と
+ * 判定された (実測)。指定子は**絶対パスへ解決**して判定する (文字列一致だと `./vendor/lib/x.mjs`
+ * のような囮パスが通る)
  * @param path 対象ファイルの絶対パス
- * @returns import 宣言のモジュール指定子
+ * @returns 共有モジュール以外の指定子 (重複なし)
  */
-export function importedModuleSpecifiers(path: string): string[] {
+export function foreignModuleSpecifiers(path: string): string[] {
   // 構文木にする
   const source = parseScript(path);
-  // トップレベルの import 宣言の指定子を集める
-  return source.statements
-    .filter((statement): statement is ts.ImportDeclaration => ts.isImportDeclaration(statement))
-    .map((statement) => statement.moduleSpecifier)
-    .filter((specifier): specifier is ts.StringLiteral => ts.isStringLiteral(specifier))
-    .map((specifier) => specifier.text);
+  // 見つかった指定子
+  const specifiers: string[] = [];
+  // 取り込みの形ごとに指定子を拾う
+  const visit = (node: ts.Node): void => {
+    // 静的 import
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier))
+      specifiers.push(node.moduleSpecifier.text);
+    // 動的 import() と require()
+    if (ts.isCallExpression(node)) {
+      // 動的 import か require か
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
+      // 第 1 引数が文字列リテラルのときだけ読める
+      const first = node.arguments[0];
+      if ((isDynamicImport || isRequire) && first !== undefined && ts.isStringLiteral(first))
+        specifiers.push(first.text);
+    }
+    // 子を辿る
+    ts.forEachChild(node, visit);
+  };
+  // 根から辿る
+  ts.forEachChild(source, visit);
+  // scripts/lib 配下へ解決できないものだけを返す
+  return [
+    ...new Set(
+      specifiers.filter((specifier) => {
+        // 相対パスでなければ共有モジュールではない (node: や npm パッケージ)
+        if (!specifier.startsWith('.')) return true;
+        // 絶対パスへ解決して置き場を見る
+        const resolved = resolve(dirname(path), specifier);
+        return dirname(resolved) !== join(SCRIPTS_DIR, 'lib') || !resolved.endsWith('.mjs');
+      }),
+    ),
+  ];
 }
 
 /**
- * トップレベルから到達できる位置で呼ばれている、素の識別子の名前をすべて返す。
+ * トップレベルから到達できる位置で呼ばれている関数の名前をすべて返す
+ * (素の識別子は `f`、受け手が識別子のメンバ式は `a.b` の形)。
  * 「このファイルは runSteps と banner しかしていない」のような**構造の主張**を確かめるために使う。
  * @param path 対象ファイルの絶対パス
  * @returns 呼び出し先の名前 (重複なし)
@@ -327,7 +362,7 @@ export function reachableCallNames(path: string): string[] {
  *   呼び出しだけを数える (条件で囲む形を落とす)。`importedFrom` はその名前が
  *   `scripts/lib/<その名前>` から取り込まれ、かつ同名のローカル宣言で覆われていないことを求める
  *   (同名の no-op をその場で宣言して差し替える形を落とす)。`argument` はその位置の実引数が
- *   **素の識別子**で、かつ `boundToCallOf` に挙げた関数の戻り値で束縛されていることを求める
+ *   `callOf` に挙げた関数の**呼び出しそのもの**で、その関数もまた `importedFrom` 由来であることを求める
  * @returns 条件を満たす呼び出しがあれば true
  */
 export function callsFunction(
@@ -336,25 +371,20 @@ export function callsFunction(
   options: {
     atTopLevel?: boolean;
     importedFrom?: string;
-    argument?: { index: number; boundToCallOf: readonly string[] };
+    argument?: { index: number; callOf: readonly string[]; importedFrom: string };
   } = {},
 ): boolean {
   // 構文木にする
   const source = parseScript(path);
   // スコープごとの呼び出しを集める
   const byScope = collectCallsByScope(source);
-  // 変数がどの呼び出しで束縛されたか
-  const bindings = collectBindings(source);
   // **取り込み元まで確かめる。** 名前の一致だけを見ていたときは、import をやめて同名の
   // no-op をその場で宣言するだけで結線が消えた (実測で 705 件すべて緑・件数も不変)
-  if (options.importedFrom !== undefined) {
-    // その共有モジュールから取り込んだ名前
-    const imported = importedSharedNames(path).get(options.importedFrom) ?? [];
-    // 手元の名前として使われていなければ、呼んでいるのは別物
-    if (!imported.some((entry) => entry.local === functionName)) return false;
-    // 同名のローカル宣言で覆われていれば、呼んでいるのはそちら
-    if (locallyDeclaredNames(source).has(functionName)) return false;
-  }
+  if (
+    options.importedFrom !== undefined &&
+    !comesFromSharedModule(path, source, options.importedFrom, functionName)
+  )
+    return false;
   // 見る呼び出しの集合 (トップレベルの式文に限るか、到達可能なスコープ全部か)
   const candidates =
     options.atTopLevel === true
@@ -368,20 +398,21 @@ export function callsFunction(
     if (options.argument === undefined) return true;
     // 指定した位置の実引数
     const argument = call.args[options.argument.index];
-    // 素の識別子でなければ、渡す値そのものを無害化した形 (`failures.filter(() => false)`)
-    if (argument === undefined || !ts.isIdentifier(argument)) continue;
-    // その識別子を束縛した呼び出し (同じ名前が複数回束縛されることもある)
-    const producers = bindings.get(argument.text);
-    // 束縛が読めないもの (import した値・引数など) は判定結果だと確かめられないので数えない
-    if (producers === undefined || producers.length === 0) continue;
-    // **すべての束縛が判定の戻り値であること**まで見る。1 つでも別物なら、途中で
-    // 無害化された値が渡りうる (fail-closed)
+    // **判定の呼び出しそのものであること**を求める。中間変数を許していたときは、宣言と
+    // 呼び出しの間で再代入 (`failures = []`) や破壊的変更 (`failures.length = 0`) ができ、
+    // どちらも検出網に 1 ビットも映らなかった (実測で 713 件すべて緑)
+    if (argument === undefined || !ts.isCallExpression(argument)) continue;
+    // 呼び出し先が素の識別子でなければ、判定だと確かめられない
+    if (!ts.isIdentifier(argument.expression)) continue;
+    // 判定の名前でなければ別物
+    if (!options.argument.callOf.includes(argument.expression.text)) continue;
+    // **判定そのものも共有モジュール由来であること**まで見る (同名のローカル no-op を落とす)
     if (
-      producers.every(
-        (producer) => producer !== null && options.argument?.boundToCallOf.includes(producer),
-      )
+      !comesFromSharedModule(path, source, options.argument.importedFrom, argument.expression.text)
     )
-      return true;
+      continue;
+    // すべて満たした
+    return true;
   }
   // 条件を満たす呼び出しは無い
   return false;

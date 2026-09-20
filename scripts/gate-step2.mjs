@@ -100,18 +100,22 @@ console.log(
 banner('受け入れ基準の判定 (テスト件数 / RBAC 行列 / 料金計算)');
 // 料金表のモデル一覧 (正本から導く)
 const models = readPricedModels();
-const failures = evaluateStep2Report({
-  testStatus,
-  report,
-  requiredPassedTests: REQUIRED_PASSED_TESTS,
-  roles: ROLES,
-  actions: ACTIONS,
-  matrixPrefix: MATRIX_TEST_PREFIX,
-  models,
-  pricePrefix: PRICE_TEST_PREFIX,
-});
-// 満たしていない基準があればすべて表示して赤 (終了コードの扱いは run-npm-steps.mjs に集約)
-exitIfFailures('gate:step2', failures);
+// 満たしていない基準があればすべて表示して赤 (終了コードの扱いは run-npm-steps.mjs に集約)。
+// **判定の呼び出しをそのまま渡す** — 中間変数を挟むと、宣言と呼び出しの間で再代入 (`failures = []`)
+// や破壊的変更 (`failures.length = 0`) ができてしまい、どちらも検出網に映らなかった (実測で全件緑)
+exitIfFailures(
+  'gate:step2',
+  evaluateStep2Report({
+    testStatus,
+    report,
+    requiredPassedTests: REQUIRED_PASSED_TESTS,
+    roles: ROLES,
+    actions: ACTIONS,
+    matrixPrefix: MATRIX_TEST_PREFIX,
+    models,
+    pricePrefix: PRICE_TEST_PREFIX,
+  }),
+);
 console.log(
   `[gate:step2] RBAC 行列 ${ROLES.length * ACTIONS.length} パターンと料金表 ${models.length} モデルすべて pass`,
 );

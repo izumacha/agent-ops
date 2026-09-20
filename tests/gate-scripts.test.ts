@@ -12,7 +12,7 @@
 // (実測で `eslint . --max-warnings=0` が 1 を返す)。`package.json` の lint からその指定を外さないこと
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -33,7 +33,7 @@ import {
   callsFunction,
   gateScriptNames,
   importSharedModule,
-  importedModuleSpecifiers,
+  foreignModuleSpecifiers,
   importedSharedNames,
   reachableCallNames,
 } from './lib/script-files';
@@ -391,6 +391,36 @@ describe('判定の結線', () => {
     expect(gateScriptNames().length, 'ゲートスクリプトが 1 本も無い').toBeGreaterThan(0);
   });
 
+  it('走査で見つかるゲート/ベンチは package.json が実際に起動するものと一致する', () => {
+    // **名前の規約だけで導くと、改名しただけで全検査から静かに消える。** 実測で
+    // `bench-usage-aggregate.ts` を `usage-aggregate-bench.ts` へ改名し package.json を
+    // 追随させると、専用 DB のガードごと消しても 713 件すべて緑・件数も不変で通った。
+    // **導出とは独立な手がかり**として、npm スクリプトが実際に起動するファイル名と突き合わせる
+    const scripts = (
+      JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+        scripts: Record<string, string>;
+      }
+    ).scripts;
+    // `<実行コマンド> scripts/<ファイル名>` の形からファイル名を取り出す
+    const launchedBy = (prefix: string): string[] =>
+      Object.entries(scripts)
+        .filter(([name]) => name.startsWith(prefix))
+        .map(([, command]) => /(?:^|\s)scripts\/([\w.-]+)(?:\s|$)/.exec(command)?.[1])
+        .filter((name): name is string => name !== undefined)
+        .sort();
+    // 起動されるゲートが 0 本なら読み取りが壊れている (fail-closed)
+    expect(launchedBy('gate:').length, 'package.json が起動するゲートが 0 本').toBeGreaterThan(0);
+    // 起動されるベンチが 0 本でも同じ
+    expect(launchedBy('bench:').length, 'package.json が起動するベンチが 0 本').toBeGreaterThan(0);
+    // 走査で見つかる一覧と一致すること (片方にしか無いものがあれば落ちる)
+    expect(gateScriptNames().sort(), 'ゲートの一覧が package.json と食い違う').toEqual(
+      launchedBy('gate:'),
+    );
+    expect(benchScriptNames().sort(), 'ベンチの一覧が package.json と食い違う').toEqual(
+      launchedBy('bench:'),
+    );
+  });
+
   it('除外は実在するゲートにだけ付いている', () => {
     for (const [name, reason] of Object.entries(GATE_EXIT_EXCLUSIONS)) {
       // 消えたゲートの除外が残り続けないように
@@ -430,13 +460,14 @@ describe('判定の結線', () => {
       // **判定を書き写せば除外の理由は成り立ってしまう。** 実測で、gate-report.mjs の
       // 取り込みをやめて判定を数行インライン化し、除外表へ 1 行足すと**赤ゼロ**で通った
       // (痕跡は件数が 1 減るだけ)。除外できるのは「検証コマンドを順に流すだけ」のゲートなので、
-      // **構造そのもの**を要求する: 取り込みは共有モジュールだけ、呼び出しは実行ヘルパーだけ
-      for (const specifier of importedModuleSpecifiers(join(SCRIPTS_DIR, name))) {
-        expect(
-          importedSharedNames(join(SCRIPTS_DIR, name)).size > 0 && specifier.includes('/lib/'),
-          `${name} は共有モジュール以外 (${specifier}) を取り込んでいるので除外できない`,
-        ).toBe(true);
-      }
+      // **構造そのもの**を要求する: 取り込みは共有モジュールだけ、呼び出しは実行ヘルパーだけ。
+      // 取り込みは動的 `import()` / `require()` まで見て、**絶対パスで解決**して判定する
+      // (静的 import と文字列一致だけを見ていたときは、`await import('node:fs')` と
+      // メンバ式呼び出しでインライン化したゲートが素通りした。実測)
+      expect(
+        foreignModuleSpecifiers(join(SCRIPTS_DIR, name)),
+        `${name} は共有モジュール以外を取り込んでいるので除外できない`,
+      ).toEqual([]);
       for (const called of reachableCallNames(join(SCRIPTS_DIR, name))) {
         expect(
           EXCLUDED_GATE_ALLOWED_CALLS.includes(called),
@@ -476,7 +507,7 @@ describe('判定の結線', () => {
         callsFunction(join(SCRIPTS_DIR, name), 'exitIfFailures', {
           atTopLevel: true,
           importedFrom: 'run-npm-steps.mjs',
-          argument: { index: 1, boundToCallOf: judgements },
+          argument: { index: 1, callOf: judgements, importedFrom: 'gate-report.mjs' },
         }),
         `${name} が exitIfFailures を判定結果そのもので呼んでいない`,
       ).toBe(true);
@@ -550,6 +581,8 @@ describe('判定の結線', () => {
     // process.env.BENCH_STRICT_DB === '1') throw …` と条件を 1 つ足すだけで、呼び出しは
     // 残したままガードが実質外れた (705 件すべて緑)。判定と throw をまとめた関数を、
     // **トップレベルの式文として**、共有モジュールから取り込んだ名前で呼ぶことまで求める
+    // 0 本なら空振りで緑になる (fail-closed)
+    expect(benchScriptNames().length, 'ベンチが 1 本も無い').toBeGreaterThan(0);
     for (const bench of benchScriptNames()) {
       expect(
         callsFunction(join(SCRIPTS_DIR, bench), 'requireContractDatabase', {

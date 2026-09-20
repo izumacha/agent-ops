@@ -71,16 +71,20 @@ console.log(
 // 2'. + 3. テストの成否・件数・RBAC 行列 (役割 3 × 操作 3) をまとめて判定する。
 // 判定そのものは純粋関数に置き、ユニットテストで挙動を固定している (scripts/lib/gate-report.mjs)
 banner('受け入れ基準の判定 (テスト件数 / RBAC 行列)');
-const failures = evaluateStep1Report({
-  testStatus,
-  report,
-  requiredPassedTests: REQUIRED_PASSED_TESTS,
-  roles: ROLES,
-  actions: ACTIONS,
-  matrixPrefix: MATRIX_TEST_PREFIX,
-});
-// 満たしていない基準があればすべて表示して赤 (終了コードの扱いは run-npm-steps.mjs に集約)
-exitIfFailures('gate:step1', failures);
+// 満たしていない基準があればすべて表示して赤 (終了コードの扱いは run-npm-steps.mjs に集約)。
+// **判定の呼び出しをそのまま渡す** — 中間変数を挟むと、宣言と呼び出しの間で再代入 (`failures = []`)
+// や破壊的変更 (`failures.length = 0`) ができてしまい、どちらも検出網に映らなかった (実測で全件緑)
+exitIfFailures(
+  'gate:step1',
+  evaluateStep1Report({
+    testStatus,
+    report,
+    requiredPassedTests: REQUIRED_PASSED_TESTS,
+    roles: ROLES,
+    actions: ACTIONS,
+    matrixPrefix: MATRIX_TEST_PREFIX,
+  }),
+);
 console.log(`[gate:step1] RBAC 行列 ${ROLES.length * ACTIONS.length} パターンすべて pass`);
 
 // 4. npm audit で high 以上が 0 件であること

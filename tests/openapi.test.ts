@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { ALLOWED_ROUTE_FILE_NAME, ROUTE_FILE_PATTERN } from './lib/route-files';
 import {
+  API_MESSAGES,
   EMAIL_MAX_LENGTH,
   LONG_TEXT_MAX_LENGTH,
   PAGE_CURSOR_MAX_LENGTH,
@@ -584,6 +585,8 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       { properties?: Record<string, { properties?: Record<string, unknown> }> } | undefined;
     // 契約が読めなければ照合できない (fail-closed)
     expect(relayed?.properties, 'RelayedUpstreamError が契約に無い').toBeDefined();
+    // 列挙でまとめて読んだことを表す印 (契約の項目名と衝突しない綴りにする)
+    const ENUMERATION_MARKER = '<列挙>';
     // 実装が上流の本文から読んだ項目名を集める
     const readKeysOf = (build: (probe: Record<string, unknown>) => unknown): string[] => {
       // 読まれた項目名
@@ -594,6 +597,16 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
           // 文字列のキーだけ数える (Symbol は言語側の問い合わせ)
           if (typeof property === 'string') seen.add(property);
           return Reflect.get(target, property);
+        },
+        // **列挙も「読んだ」に数える。** `get` だけを見ていると、`Object.entries` /
+        // `Object.keys` / スプレッドのように**項目名を選ばずまとめて読む**実装が死角になる
+        // (入れ物が空なので get が 1 度も発火しない)。実測で、許可リストの直後に
+        // `Object.entries(upstreamError)` で 2 項目を中継する変異を入れると、
+        // **691 件すべて緑・件数も不変**のまま組織名・ティアが中継された。
+        // 列挙は契約に無い印として記録するので、そういう実装はここで落ちる
+        ownKeys(target) {
+          seen.add(ENUMERATION_MARKER);
+          return Reflect.ownKeys(target);
         },
       });
       // 実装に通す (戻り値は使わない。見たいのは「何を読んだか」)
@@ -606,6 +619,25 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       readKeysOf((probe) => probe),
       '最上位から読む項目名',
     ).toEqual(Object.keys(relayed?.properties ?? {}).sort());
+    // 最上位 type の値は閉じた語彙。**契約の enum を期待値にする** — 値を実装・契約・テストの
+    // 3 か所へ手書きしていたときは、契約の enum を別の値へ書き換えても全件緑だった (実測)
+    const topLevelEnum = (relayed?.properties?.type as { enum?: unknown } | undefined)?.enum;
+    // enum が無ければ閉じた語彙という決定が契約から消えている (fail-closed)
+    expect(
+      Array.isArray(topLevelEnum) && topLevelEnum.length > 0,
+      '最上位 type の enum が契約に無い',
+    ).toBe(true);
+    for (const allowed of (topLevelEnum as string[]) ?? []) {
+      // 契約が許す値はそのまま中継される
+      expect(sanitizeUpstreamErrorBody({ type: allowed, error: {} }), `${allowed} は通す`).toEqual({
+        type: allowed,
+        error: { message: API_MESSAGES.upstreamRejected },
+      });
+    }
+    // 綴りとしては妥当でも、契約の語彙に無い値は落ちる
+    expect(sanitizeUpstreamErrorBody({ type: 'invalid_request_error', error: {} })).toEqual({
+      error: { message: API_MESSAGES.upstreamRejected },
+    });
     // error の中: 契約の properties から message を除いたもの。
     // **message だけは上流から読まずこちらが書く項目**なので、読んだ項目名には現れない
     // (逆に現れたら、上流の自由記述が定型文を上書きする経路ができている)

@@ -1,6 +1,10 @@
 // 上流のエラー本文の絞り込み (src/lib/proxy/error-body.ts)。
 // ここが緩むと、上流アカウントの残高・組織名・契約ティアが有効な API キーを持つ全テナントへ漏れる
 import { describe, expect, it } from 'vitest';
+// 契約 (OpenAPI) から総当たりの対象を導くため
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parse } from 'yaml';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { API_MESSAGES } from '@/lib/constants';
 
@@ -134,56 +138,61 @@ describe('上流のエラー本文の絞り込み', () => {
     expect(safe).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
   });
 
-  // **同じ綴りを使う出力位置をすべて総当たりする。**
-  // `SAFE_CODE_PATTERN` を参照する箇所は 3 つある (`error.type` / `error.code` / 最上位 `type`)。
-  // 項目を 1 つ選んで検査すると、**別の箇所だけを差し替える変異が素通りする** —— 実測で、
-  // 語数の上限を最上位 `type` だけ緩める変異は 618 件すべて緑のまま通り、テスト件数も変わらなかった。
-  // 「同じ定数を指しているから 1 つ見れば足りる」は実装の都合であって契約ではない
   // **同じ綴り (SAFE_CODE_PATTERN) を使う出力位置をすべて総当たりする。**
   // 項目を 1 つ選んで検査すると、別の箇所だけを差し替える変異が素通りする (実測で全件緑だった)。
-  // **表はデータだけを持つ** — `build` / `read` を関数として手書きすると、
-  // 2 つの位置が同じ場所を指す変異 (整合した重複) が作れてしまい、そのぶんの検査が黙って消える
-  // (実測: `error.code` の build と read を両方 `error.type` にすると 93 件すべて緑だった)。
-  // 位置を足してエントリを書き忘れた場合は tsc が落ちる
-  const CODE_POSITIONS = {
-    'error.type': { container: 'error', key: 'type' },
-    'error.code': { container: 'error', key: 'code' },
-  } as const;
-  // 位置の名前 (表のキーが唯一の定義)
-  type CodePosition = keyof typeof CODE_POSITIONS;
-  // その位置へ値を載せた「上流の本文」を組み立てる
-  function buildAt(position: CodePosition, value: string): unknown {
-    // 入れ物と項目名を表から引く
-    const { container, key } = CODE_POSITIONS[position];
-    // error の中か最上位かで置き場所を変える
-    return container === 'error' ? { error: { [key]: value } } : { [key]: value, error: {} };
+  //
+  // **一覧は手で書かず契約から導く。** 手書きの表にしていたときは、エントリを 1 行消すだけで
+  // その位置の検査 14 件が黙って消え、痕跡は件数の減少だけだった。実測では、消したうえで
+  // `code` の総長を 40→64 に緩めると **677 件すべて緑**のまま
+  // `OrgAcmeCorpTierEnterpriseCreditBalanceZeroGoToPlansAndBilling` (61 文字) が中継された
+  const relayedErrorSchema = (
+    parse(readFileSync(join(process.cwd(), 'openapi', 'openapi.yaml'), 'utf8') as string) as {
+      components?: {
+        schemas?: Record<string, { properties?: { error?: { properties?: object } } }>;
+      };
+    }
+  ).components?.schemas?.RelayedUpstreamError?.properties?.error?.properties;
+  // 契約の項目のうち、この総当たりの対象にしないもの (理由付き。増える差分はレビューで見る)
+  const CODE_SWEEP_EXCLUSIONS: Readonly<Record<string, string>> = {
+    message: 'プロキシの定型文。上流から読まないので綴りの検査は要らない',
+    param: 'JSON パス用の別の綴り (SAFE_PARAM_PATTERN)。専用の表で上下を固定している',
+  };
+  // 契約が読めなければ導出が空振りする (fail-closed)
+  expect(relayedErrorSchema, '契約から error の項目を読めない').toBeDefined();
+  // 総当たりの対象 = 契約の項目 − 除外
+  const CODE_FIELDS = Object.keys(relayedErrorSchema ?? {}).filter(
+    (field) => CODE_SWEEP_EXCLUSIONS[field] === undefined,
+  );
+
+  it('綴りの総当たりは契約の項目を覆っている', () => {
+    // 1 つも残らなければ導出が壊れている
+    expect(CODE_FIELDS.length, '総当たりの対象が 0 件').toBeGreaterThan(0);
+    // 除外は実在する項目にだけ付けられる (契約から消えた項目の除外が残り続けないように)
+    for (const [field, reason] of Object.entries(CODE_SWEEP_EXCLUSIONS)) {
+      expect(relayedErrorSchema, `${field} は契約に無い`).toHaveProperty(field);
+      expect(reason.trim().length, `${field} の除外理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  // その項目へ値を載せた「上流の本文」を組み立てる
+  function buildAt(field: string, value: string): unknown {
+    // 総当たりの対象はすべて error の中の項目
+    return { error: { [field]: value } };
   }
   // 通ったとき、その値が応答のどこへ出るかを読む
-  function readAt(position: CodePosition, safe: Record<string, unknown>): unknown {
-    // 入れ物と項目名を表から引く
-    const { container, key } = CODE_POSITIONS[position];
-    // 読む場所も同じ表から導くので、載せ先と読み先が食い違わない
-    const scope =
-      container === 'error' ? (safe.error as Record<string, unknown> | undefined) : safe;
-    return scope?.[key];
+  function readAt(field: string, safe: Record<string, unknown>): unknown {
+    // 載せ先と同じ場所から読む
+    return (safe.error as Record<string, unknown> | undefined)?.[field];
   }
-  // 位置ごとの検査ケースへ展開する (ラベルに位置を入れて、どこで落ちたか分かるようにする)
+  // 項目ごとの検査ケースへ展開する (ラベルに項目名を入れて、どこで落ちたか分かるようにする)
   function forEachPosition(
     cases: readonly (readonly [string, string])[],
-  ): readonly (readonly [string, CodePosition, string])[] {
-    // 値 × 位置の総当たり
+  ): readonly (readonly [string, string, string])[] {
+    // 値 × 項目の総当たり
     return cases.flatMap(([label, value]) =>
-      (Object.keys(CODE_POSITIONS) as CodePosition[]).map(
-        (position) => [`${label} @ ${position}`, position, value] as const,
-      ),
+      CODE_FIELDS.map((field) => [`${label} @ error.${field}`, field, value] as const),
     );
   }
-
-  it('検査している位置は互いに重なっていない', () => {
-    // 同じ場所を 2 つの名前で指していると、そのぶんの検査が消えるだけで件数は変わらない
-    const places = Object.values(CODE_POSITIONS).map((place) => `${place.container}.${place.key}`);
-    expect(new Set(places).size, '位置が重複している').toBe(places.length);
-  });
 
   it.each(
     forEachPosition([
@@ -211,9 +220,9 @@ describe('上流のエラー本文の絞り込み', () => {
       ['ハイフン 4 語', 'org-ACME-tier-enterprise'],
       ['先頭のアンダースコア', '_billing_hard_limit_reached'],
     ]),
-  )('分類語彙の上限を超えたら通さない: %s', (_label, position, value) => {
+  )('分類語彙の上限を超えたら通さない: %s', (_label, field, value) => {
     // 上限を緩める変異を落とす。固定する前は語数をいくら広げても全件緑だった (実測)
-    expect(sanitizeUpstreamErrorBody(buildAt(position, value))).toEqual({
+    expect(sanitizeUpstreamErrorBody(buildAt(field, value))).toEqual({
       error: { message: API_MESSAGES.upstreamRejected },
     });
   });
@@ -225,14 +234,11 @@ describe('上流のエラー本文の絞り込み', () => {
       ['語の長さちょうど', `a_${'b'.repeat(16)}`],
       ['総長ちょうどの 1 語', 'a'.repeat(40)],
     ]),
-  )(
-    '分類語彙の上限ちょうどは通す (絞りすぎて診断が消えていない): %s',
-    (_label, position, value) => {
-      // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない
-      const safe = sanitizeUpstreamErrorBody(buildAt(position, value)) as Record<string, unknown>;
-      expect(readAt(position, safe)).toBe(value);
-    },
-  );
+  )('分類語彙の上限ちょうどは通す (絞りすぎて診断が消えていない): %s', (_label, field, value) => {
+    // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない
+    const safe = sanitizeUpstreamErrorBody(buildAt(field, value)) as Record<string, unknown>;
+    expect(readAt(field, safe)).toBe(value);
+  });
 
   it.each([
     ['ベンダーの値', 'error', 'error'],

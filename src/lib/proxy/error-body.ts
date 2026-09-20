@@ -135,7 +135,10 @@ export function sanitizeUpstreamErrorBody(parsed: unknown): Record<string, unkno
   // ここだけ分類語彙の綴り (40 文字) を許すと、診断を 1 ビットも増やさないまま搬送容量が 40 文字
   // 増える (実測: `OrgAcmeCorpTierEnterpriseBalance0` 33 文字が最上位に乗った)。
   // 綴りで絞ると診断が消えるという他の項目の事情は、値が 1 つしかないこの項目には当てはまらない
-  // (OpenAI / Azure / Bedrock は最上位 type をそもそも置かない)
+  // (OpenAI / Azure / Bedrock は最上位 type をそもそも置かない)。
+  // **この断定は公式の 4 経路について。** `*_BASE_URL` は社内ゲートウェイや OpenAI 互換の
+  // 自ホスト実装を指せるので、そこが最上位へ別の値を置く形だと、その診断は落ちる
+  // (残る境界。ADR-0007 決定 7)
   const topLevelType = root?.type === UPSTREAM_ERROR_TYPE ? UPSTREAM_ERROR_TYPE : undefined;
   // 組み直した本文 (上流の他の項目・request_id・自由記述はすべて落ちる)
   return topLevelType === undefined ? { error } : { type: topLevelType, error };

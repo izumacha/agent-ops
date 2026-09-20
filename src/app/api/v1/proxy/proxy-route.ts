@@ -281,7 +281,8 @@ export function proxyRoute(provider: Provider) {
             outputTokens: NO_TOKENS,
             costMicroUsd: NO_COST,
             latencyMs: Math.round(performance.now() - startedAt),
-            // 想定外の例外は route() が 500 に写すので、記録も同じ値にする
+            // 想定外の例外は route() が 500 へ写す (データ層の例外など一部は別の番号になるが、
+            // ここへ来る例外は callUpstream の外で起きた想定外のものなので 500 で記録する)
             statusCode:
               error instanceof ApiError ? error.status : HTTP_STATUS.INTERNAL_SERVER_ERROR,
           });

@@ -211,69 +211,121 @@ describe('上流のエラー本文の絞り込み', () => {
   // 綴りの検査を通る値 (分類語彙・JSON パスのどちらの綴りにも収まる)
   const PASSING_VALUE = 'org_ACME_tier_enterprise';
 
-  it('候補を全部同時に載せても契約の項目しか出ない (条件付きの読み取りも捕まえる)', () => {
-    // **1 項目ずつの総当たりでは「条件付きの読み取り」が一度も実行されない。**
-    // 上の総当たりは項目を 1 つだけ載せ、tests/openapi.test.ts の観測は空の入れ物を渡すので、
-    // 「ある項目が通ったときに限り別の項目も中継する」実装はどちらの経路でも走らない
-    // (実測: `code` が通ったときだけ `hint` を載せる変異は **699 件すべて緑**のまま、
-    // 残高・組織名・契約ティアを含む散文をそのまま中継した)。ここでは全項目に同時に値を載せ、
-    // 分岐が実際に実行される状態で**出口だけ**を見る
-    //
-    // **入れ物は Proxy にする。** 候補の名前を手で書き並べると、そこに無い名前を読む実装が
-    // 黙って外れる。どんな名前を読まれても目印つきの値を返せば、出口に出た時点で捕まる
-    const relayable = new Set([...CODE_FIELDS, ...PARAM_SWEEP_FIELDS]);
-    // 契約が読めていなければ照合にならない (fail-closed)
-    expect(relayable.size, '中継する項目が 0 件').toBeGreaterThan(0);
-    // 列挙でまとめて読む実装のために、目に見える名前も持たせる (重複は Proxy の規約違反なので潰す)
-    const enumerableKeys = [...new Set([...CANDIDATE_FIELDS, ...relayable])];
-    // 名前を問わず値を返す入れ物を作る
-    const fieldProxy = (values: Record<string, unknown>): Record<string, unknown> =>
+  // 契約の項目へ入れる値の周回。**1 通りでは「値で条件づけた読み取り」に入れない** —
+  // 実測で `upstreamError.type === 'billing_error'` のときだけ別項目を載せる変異は、
+  // 汎用の識別子だけを流していたとき 705 件すべて緑のまま中継した。
+  // 実在しそうなベンダーの語彙でもう 1 周する (**それでも「どの値で条件づけたか」までは
+  // 尽くせないので、値で条件づけた形は残る境界**)
+  const VALUE_ROUNDS: readonly (readonly [string, Readonly<Record<string, string>>])[] = [
+    ['汎用の識別子', {}],
+    [
+      'ベンダーらしい値 (課金系)',
+      { type: 'billing_error', code: 'billing_hard_limit_reached', param: 'messages[0].content' },
+    ],
+    [
+      'ベンダーらしい値 (要求不正)',
+      { type: 'invalid_request_error', code: 'model_not_found', param: 'model' },
+    ],
+  ];
+
+  it.each(VALUE_ROUNDS)(
+    '候補を全部同時に載せても契約の項目しか出ない (存在で条件づけた読み取りも捕まえる): %s',
+    (_label, vendorValues) => {
+      // **1 項目ずつの総当たりでは「条件付きの読み取り」が一度も実行されない。**
+      // 上の総当たりは項目を 1 つだけ載せ、tests/openapi.test.ts の観測は空の入れ物を渡すので、
+      // 「ある項目が通ったときに限り別の項目も中継する」実装はどちらの経路でも走らない
+      // (実測: `code` が通ったときだけ `hint` を載せる変異は **699 件すべて緑**のまま、
+      // 残高・組織名・契約ティアを含む散文をそのまま中継した)。ここでは全項目に同時に値を載せ、
+      // 分岐が実際に実行される状態で**出口だけ**を見る
+      //
+      // **入れ物は Proxy にする。** 候補の名前を手で書き並べると、そこに無い名前を読む実装が
+      // 黙って外れる。名前を問わず目印つきの値を返すので、**文字列として読まれた値**が出口に
+      // 出れば捕まる。入れ子へ降りる形は別の検査 (下の「入れ子の … 下からも値を運ばない」) が見る
+      const relayable = new Set([...CODE_FIELDS, ...PARAM_SWEEP_FIELDS]);
+      // 契約が読めていなければ照合にならない (fail-closed)
+      expect(relayable.size, '中継する項目が 0 件').toBeGreaterThan(0);
+      // 列挙でまとめて読む実装のために、目に見える名前も持たせる (重複は Proxy の規約違反なので潰す)
+      const enumerableKeys = [...new Set([...CANDIDATE_FIELDS, ...relayable])];
+      // 名前を問わず値を返す入れ物を作る
+      const fieldProxy = (values: Record<string, unknown>): Record<string, unknown> =>
+        new Proxy({} as Record<string, unknown>, {
+          // どの名前で読まれても値を返す
+          get(target, property) {
+            // Symbol は言語側の問い合わせなので素通しする
+            if (typeof property !== 'string') return Reflect.get(target, property);
+            // 明示した項目はその値、それ以外は「出てはいけない値」
+            return property in values ? values[property] : `${LEAK_MARKER}_${property}`;
+          },
+          // 列挙 (Object.entries / スプレッド) でも同じ値が見えるようにする
+          ownKeys: () => [...new Set([...enumerableKeys, ...Object.keys(values)])],
+          // 列挙した名前が実際に読めるよう、記述子も返す (enumerable でないと entries に出ない)
+          getOwnPropertyDescriptor(target, property) {
+            // Symbol は素通し
+            if (typeof property !== 'string')
+              return Reflect.getOwnPropertyDescriptor(target, property);
+            // 値つきの記述子を返す (target に無い項目なので configurable は必須)
+            return {
+              value: property in values ? values[property] : `${LEAK_MARKER}_${property}`,
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            };
+          },
+          // 存在確認はすべて真 (当たりを付けてから読む形にも値を渡す)
+          has: () => true,
+        });
+      // error の中身: 中継する項目だけ綴りを通る値にして、分岐が実行される状態にする
+      const upstreamError = fieldProxy(
+        Object.fromEntries(
+          [...relayable].map((field) => [field, vendorValues[field] ?? PASSING_VALUE]),
+        ),
+      );
+      // 最上位: type は閉じた語彙の値、error は上の入れ物、それ以外は目印つきの値
+      const safe = sanitizeUpstreamErrorBody(
+        fieldProxy({ type: 'error', error: upstreamError }),
+      ) as Record<string, unknown>;
+      // 出口の最上位に、契約に無い項目が出ていないこと
+      const topLevelFields = new Set(Object.keys(relayedTopLevelSchema ?? {}));
+      // 契約が読めていなければ照合にならない (fail-closed)
+      expect(topLevelFields.size, '契約の最上位の項目が 0 件').toBeGreaterThan(0);
+      for (const key of Object.keys(safe))
+        expect(topLevelFields.has(key), `契約に無い項目が最上位に出た: ${key}`).toBe(true);
+      // 出口の error の中にも、契約に無い項目が出ていないこと
+      const errorFields = new Set(Object.keys(relayedErrorSchema ?? {}));
+      for (const key of Object.keys((safe.error ?? {}) as Record<string, unknown>))
+        expect(errorFields.has(key), `契約に無い項目が error に出た: ${key}`).toBe(true);
+      // 目印つきの値が 1 つも出ていないこと (契約の項目名の下へ移し替える形もここで落ちる)
+      expect(JSON.stringify(safe), '通してはいけない値が出口に現れた').not.toContain(LEAK_MARKER);
+    },
+  );
+
+  it.each([
+    ['1 段', 2],
+    ['2 段', 3],
+    ['3 段', 4],
+  ])('入れ子の %s 下からも値を運ばない', (_label, depth) => {
+    // **上の検査も tests/openapi.test.ts の観測も、入れ子へ降りる実装を 1 度も実行しない** —
+    // 前者は未知の名前に文字列を返すだけ、後者は空の入れ物を渡すだけなので、
+    // `error.param.detail` のような 3 段目を読む実装が死角になる (実測: 許可リストの直後で
+    // `error.param` をオブジェクトとして読み `detail` を中継する変異は 705 件すべて緑のまま、
+    // 112 文字の散文をそのまま中継した)。ベンダーの形に合わせる改修 (`error.innererror.code` /
+    // `error.details[0].reason` 等) は現実に起こるので、**降りた先も目印つきにする**
+    const nested = (remaining: number): Record<string, unknown> =>
       new Proxy({} as Record<string, unknown>, {
-        // どの名前で読まれても値を返す
+        // どの名前で読まれても、まだ深さが残っていれば入れ物、尽きたら目印つきの値を返す
         get(target, property) {
           // Symbol は言語側の問い合わせなので素通しする
           if (typeof property !== 'string') return Reflect.get(target, property);
-          // 明示した項目はその値、それ以外は「出てはいけない値」
-          return property in values ? values[property] : `${LEAK_MARKER}_${property}`;
+          // 深さが残っていれば入れ子、尽きたら葉
+          return remaining > 1 ? nested(remaining - 1) : `${LEAK_MARKER}_${property}`;
         },
-        // 列挙 (Object.entries / スプレッド) でも同じ値が見えるようにする
-        ownKeys: () => [...new Set([...enumerableKeys, ...Object.keys(values)])],
-        // 列挙した名前が実際に読めるよう、記述子も返す (enumerable でないと entries に出ない)
-        getOwnPropertyDescriptor(target, property) {
-          // Symbol は素通し
-          if (typeof property !== 'string')
-            return Reflect.getOwnPropertyDescriptor(target, property);
-          // 値つきの記述子を返す (target に無い項目なので configurable は必須)
-          return {
-            value: property in values ? values[property] : `${LEAK_MARKER}_${property}`,
-            writable: true,
-            enumerable: true,
-            configurable: true,
-          };
-        },
-        // 存在確認はすべて真 (当たりを付けてから読む形にも値を渡す)
+        // 存在確認はすべて真 (当たりを付けてから降りる形にも値を渡す)
         has: () => true,
       });
-    // error の中身: 中継する項目だけ綴りを通る値にして、分岐が実行される状態にする
-    const upstreamError = fieldProxy(
-      Object.fromEntries([...relayable].map((field) => [field, PASSING_VALUE])),
-    );
-    // 最上位: type は閉じた語彙の値、error は上の入れ物、それ以外は目印つきの値
-    const safe = sanitizeUpstreamErrorBody(
-      fieldProxy({ type: 'error', error: upstreamError }),
-    ) as Record<string, unknown>;
-    // 出口の最上位に、契約に無い項目が出ていないこと
-    const topLevelFields = new Set(Object.keys(relayedTopLevelSchema ?? {}));
-    // 契約が読めていなければ照合にならない (fail-closed)
-    expect(topLevelFields.size, '契約の最上位の項目が 0 件').toBeGreaterThan(0);
-    for (const key of Object.keys(safe))
-      expect(topLevelFields.has(key), `契約に無い項目が最上位に出た: ${key}`).toBe(true);
-    // 出口の error の中にも、契約に無い項目が出ていないこと
-    const errorFields = new Set(Object.keys(relayedErrorSchema ?? {}));
-    for (const key of Object.keys((safe.error ?? {}) as Record<string, unknown>))
-      expect(errorFields.has(key), `契約に無い項目が error に出た: ${key}`).toBe(true);
-    // 目印つきの値が 1 つも出ていないこと (契約の項目名の下へ移し替える形もここで落ちる)
-    expect(JSON.stringify(safe), '通してはいけない値が出口に現れた').not.toContain(LEAK_MARKER);
+    // error の中身を入れ子にして通す (最上位 type は閉じた語彙なので通る値を置く)
+    const safe = sanitizeUpstreamErrorBody({ type: 'error', error: nested(depth) });
+    // 目印つきの値が 1 つも出ていないこと
+    expect(JSON.stringify(safe), '入れ子の値が出口に現れた').not.toContain(LEAK_MARKER);
   });
 
   // その項目へ値を載せた「上流の本文」を組み立てる

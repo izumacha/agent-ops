@@ -28,8 +28,25 @@ import { createPrismaClient } from '../src/lib/prisma-client';
 import { displayPrefix, hashSecret, issueSecret } from '../src/lib/tokens';
 import { Plan, Provider } from '../src/domain/types';
 
+// 環境変数から 0 以上の整数を読む。**読めない値は既定へ落とさず落とす (fail-closed)。**
+// `Number('2s')` は `NaN` で、`NaN > 0` も `NaN >= 1` も false になるため、素の `Number()` だと
+// 打ち間違いが「捨て玉なし」「既定の 10 秒」へ黙って化ける (ゲートでは気付けない)
+function intFromEnv(name: string, fallback: number, minimum: number): number {
+  // 未設定なら既定値
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  // 10 進の整数として読む
+  const parsed = Number(raw);
+  // 整数でない・下限未満は設定ミスとみなして止める
+  if (!Number.isInteger(parsed) || parsed < minimum) {
+    throw new Error(`${name} は ${minimum} 以上の整数で指定してください (今の指定: ${raw})`);
+  }
+  // 読めた値
+  return parsed;
+}
+
 // 負荷を掛ける秒数 (1 本あたり)
-const DURATION_SECONDS = Number(process.env.BENCH_DURATION ?? '10');
+const DURATION_SECONDS = intFromEnv('BENCH_DURATION', 10, 1);
 // **同時接続は 1 本にして逐次で測る。** 受け入れ基準が見たいのは「中継したぶん 1 件あたり
 // 何ミリ秒増えるか」で、待ち行列の長さではない。実測で 3 通り試した結果がこの選択の理由:
 //   - 10 接続・無制限: 追加 72ms。autocannon は常に 10 件を飛ばし続けるので必ず飽和し、
@@ -38,11 +55,18 @@ const DURATION_SECONDS = Number(process.env.BENCH_DURATION ?? '10');
 //     autocannon 自身のペース配分 (1 秒ごとにまとめて発射する) の待ち時間が混ざる
 //   - 1 接続・無制限 (これ): 追加 11ms。待ち行列もペース配分も無いので、増えた時間だけが出る
 // 同時実行時の振る舞いは Step7 の負荷試験 (同時 100 リクエストでエラー率 < 1%) が見る
-const CONNECTIONS = Number(process.env.BENCH_CONNECTIONS ?? '1');
+const CONNECTIONS = intFromEnv('BENCH_CONNECTIONS', 1, 1);
 // 計測の前に捨てて回す**件数** (**判定には使わない**。理由は下の measureLatency のコメント)。
 // 秒ではなく件数で決めるのは、吸収したい初回コストが「最初の数十件」という**件数の現象**だから。
 // 秒で決めると遅い機械ほど捨てられる件数が減り、いちばん必要な場所で効かなくなる
-const WARMUP_REQUESTS = Number(process.env.BENCH_WARMUP ?? '200');
+const WARMUP_REQUESTS = intFromEnv('BENCH_WARMUP', 200, 0);
+// 捨て玉側に置く**緩い**上限の倍率。判定の上限 (50ms) の何倍までなら初回コストとして許すか。
+// **判定を 50ms へ近づけるためではない** — 捨て玉の目的は初回コストを判定から外すことなので、
+// ここを厳しくすると目的と衝突する。狙いは「初回コストが桁で悪化したのに、JSON に数字が出るだけで
+// 誰も気付かない」を避けること (実測: 起動直後だけ +150ms 遅くする変異は、捨て玉があると
+// warmup.maxMs が 127→266 になるだけで何も落ちなかった)。
+// 実測の初回コストは開発機 123ms・CI ランナー 106ms なので、10 倍 = 500ms は 4 倍の余裕がある
+const WARMUP_MAX_MS_MULTIPLIER = 10;
 // 計測として成立する最小の件数 (これを下回る = ほとんど流せていないので判定しない)
 const MIN_REQUESTS = 100;
 // 中継するモデル (料金表にある値)
@@ -217,13 +241,14 @@ async function startApp(port: number, upstreamPort: number, caPath: string): Pro
 }
 
 // 1 回ぶんの負荷を掛けて、遅延の分布をそのまま返す (判定に使う値は呼び出し側が選ぶ)
-async function runLoad(options: {
-  url: string;
-  headers: Record<string, string>;
-  // 秒で回す (本計測) か、件数で回す (捨て玉) かのどちらか
-  durationSeconds?: number;
-  amount?: number;
-}): Promise<{
+async function runLoad(
+  options: { url: string; headers: Record<string, string> } & (
+    | // 秒で回す (本計測)
+      { durationSeconds: number; amount?: never }
+      // 件数で回す (捨て玉)
+    | { amount: number; durationSeconds?: never }
+  ),
+): Promise<{
   p97_5Ms: number;
   p50Ms: number;
   p99Ms: number;
@@ -286,7 +311,24 @@ async function measureLatency(options: { url: string; headers: Record<string, st
     WARMUP_REQUESTS > 0 ? await runLoad({ ...options, amount: WARMUP_REQUESTS }) : null;
   // 本計測 (窓の長さは捨て玉に関わらず一定)
   const measured = await runLoad({ ...options, durationSeconds: DURATION_SECONDS });
-  // 捨て玉で失敗していたら本計測の数字も信用できない (認証の取り違え等) ので、件数を合算して返す
+  // 捨て玉が指定どおりの件数で止まったかを確かめる。autocannon が `amount` より `duration` を
+  // 優先する版に変われば、捨て玉が秒で回って初回コストを吸収しきれなくなるが、**判定結果には
+  // 現れない** (本計測はそのまま緑になる) ので、ここで落とす (fail-closed)
+  if (warmup !== null && warmup.requests !== WARMUP_REQUESTS) {
+    throw new Error(
+      `捨て玉が指定の件数で止まりませんでした (指定 ${WARMUP_REQUESTS} 件 / 実際 ${warmup.requests} 件)`,
+    );
+  }
+  // 初回コストそのものが桁で悪化していないかを、判定より十分ゆるい上限で見る (上の定数のコメント)
+  const warmupLimitMs = PROXY_ADDED_LATENCY_P95_MAX_MS * WARMUP_MAX_MS_MULTIPLIER;
+  if (warmup !== null && warmup.maxMs > warmupLimitMs) {
+    throw new Error(
+      `初回コストが大きすぎます: 捨て玉の最大 ${warmup.maxMs}ms (上限 ${warmupLimitMs}ms)`,
+    );
+  }
+  // 捨て玉で失敗していたら本計測の数字も信用できない (認証の取り違え等) ので、件数を合算して返す。
+  // **この合算は load-bearing** — 外すと「捨て玉の窓だけ 401 になる」設定ミスが丸ごと消える
+  // (実測: 外した版は全件 2xx 扱いで `passed: true` を返した)
   return {
     latencyMs: measured.p97_5Ms,
     p50Ms: measured.p50Ms,
@@ -296,6 +338,18 @@ async function measureLatency(options: { url: string; headers: Record<string, st
     requests: measured.requests,
     warmup: warmup === null ? null : { maxMs: warmup.maxMs, requests: warmup.requests },
   };
+}
+
+// 計測 1 本ぶんの分布を、結果の JSON へ載せる形へ整える (direct / proxied で同じ形にするため
+// 1 か所にまとめる。手書きで 2 つ並べると、片方にだけ項目を足す差分が書ける)
+function distributionOf(measured: {
+  p50Ms: number;
+  p99Ms: number;
+  maxMs: number;
+  warmup: { maxMs: number; requests: number } | null;
+}): Record<string, unknown> {
+  // 判定には使わないが、初回コストや裾の伸びを読めるようにする値
+  return { p50: measured.p50Ms, p99: measured.p99Ms, max: measured.maxMs, warmup: measured.warmup };
 }
 
 // ベンチ本体
@@ -364,20 +418,7 @@ async function main(): Promise<void> {
         limitMs: PROXY_ADDED_LATENCY_P95_MAX_MS,
         requests: { direct: direct.requests, proxied: proxied.requests },
         // 判定には使わないが、初回コストや裾の伸びを読めるように残す (上の measureLatency のコメント)
-        distribution: {
-          direct: {
-            p50: direct.p50Ms,
-            p99: direct.p99Ms,
-            max: direct.maxMs,
-            warmup: direct.warmup,
-          },
-          proxied: {
-            p50: proxied.p50Ms,
-            p99: proxied.p99Ms,
-            max: proxied.maxMs,
-            warmup: proxied.warmup,
-          },
-        },
+        distribution: { direct: distributionOf(direct), proxied: distributionOf(proxied) },
         passed: addedMs <= PROXY_ADDED_LATENCY_P95_MAX_MS,
       }),
     );

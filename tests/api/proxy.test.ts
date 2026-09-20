@@ -15,7 +15,7 @@ import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/ro
 import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
 import { AgentStatus, Provider } from '@/domain/types';
 import * as pricing from '@/domain/pricing';
-import { JSON_BODY_MAX_BYTES } from '@/lib/constants';
+import { JSON_BODY_MAX_BYTES, UPSTREAM_MAX_RESPONSE_BYTES } from '@/lib/constants';
 import { call, seedApiKey, seedEachTest } from './helpers';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
@@ -468,6 +468,27 @@ describe('上流の失敗', () => {
     // 記録は残り、ステータスは上流の 500
     expect(recordedEvents()).toHaveLength(1);
     expect(recordedEvents()[0].statusCode).toBe(500);
+    expect(recordedEvents()[0].costMicroUsd).toBe(0n);
+  });
+
+  it('上流の応答本文が上限を超えたら 502 で、記録も 502 (読み切れていないので上流の値は使えない)', async () => {
+    // 上限を 1 バイト超える本文 (JSON としては妥当な形)
+    const oversized = `{"pad":"${'a'.repeat(UPSTREAM_MAX_RESPONSE_BYTES)}"}`;
+    // 上流は 200 を返すが、本文は読み切れない
+    stubUpstream({ status: 200, rawBody: oversized });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // 利用者へは 502 (中途半端に切り詰めた本文を JSON として解釈させない)
+    expect(result.status).toBe(502);
+    // **記録も 502。** 「上流は 200 だが本文が使えず 502」でも、本文を読み切れた場合 (JSON として
+    // 解釈できなかった) は上流の 200 が残るのに対し、読み切れなかったこの経路は上流が何を返したかを
+    // 確かめられないので 502 になる。ADR-0007 決定 7 の解説はこの 2 通りを書き分けている
+    expect(recordedEvents()).toHaveLength(1);
+    expect(recordedEvents()[0].statusCode).toBe(502);
     expect(recordedEvents()[0].costMicroUsd).toBe(0n);
   });
 

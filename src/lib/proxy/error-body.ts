@@ -60,7 +60,7 @@ const SAFE_PARAM_PATTERN = new RegExp(
 // 項目名 → その項目に許す綴り (許可リストはこの表が唯一の定義)
 const SAFE_ERROR_FIELDS: Readonly<Record<'type' | 'code' | 'param', RegExp>> = {
   // エラーの種別 (invalid_request_error / not_found_error など)
-  type: /^(?=.{1,40}$)[A-Za-z][A-Za-z0-9_]*$/,
+  type: SAFE_CODE_PATTERN,
   // 細かい理由コード (context_length_exceeded など)
   code: SAFE_CODE_PATTERN,
   // 問題のあった入力項目の名前 (messages[0].content など)

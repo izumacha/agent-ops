@@ -12,29 +12,34 @@
 // 区別できるのは**本文の中のどの項目か**だけなので、機械可読な項目だけを許可リストで通し、
 // 自由記述 (message) は自前の定型文へ差し替える (§9 fail-closed: 迷うものは出さない)。
 //
-// **残る境界**: 通す値は綴りで絞るが、`code` / `type` は**ベンダーの分類語彙**なので、
-// `billing_hard_limit_reached` や `model_not_found` のように「共有している上流アカウントの
-// 状態」をカテゴリとして示す値は残る。これを完全に塞ぐには「既知の安全なコードだけの閉じた
-// 語彙」にするしかなく、ベンダーが値を増やすたびに診断が黙って消える (別の壊れ方) ので採らない。
-// 形では弾けないと理解したうえで受け入れている (ADR-0007 決定 7)。
+// **残る境界（形では塞げない。ADR-0007 決定 7 に同じことを書いてある）**:
+//   - `type` / `code` / `param` はいずれもベンダーの語彙なので、`billing_hard_limit_reached` の
+//     ように「共有している上流アカウントの状態」をカテゴリとして示す値は残る。
+//   - 短い snake_case を繋いだ語（`org_ACME_Corp.tier_enterprise.balance_zero` 等）も通る。
+//     綴りを締めるほど実在のベンダー値まで落ちるので、ここが実用的な下限。
+//     **「空白が無いから散文は入らない」とは言えない** — 空白は `_` や `.` で置き換えられる（実測）。
+// 完全に塞ぐには「既知の安全なコードだけの閉じた語彙」にするしかないが、ベンダーが値を増やす
+// たびに診断が黙って消える（別の壊れ方）ので採らない。
 import { API_MESSAGES } from '@/lib/constants';
 
-// 通してよい項目の名前。いずれも機械可読な識別子で、アカウントの状態を語らない:
-//   type  … エラーの種別 (invalid_request_error / not_found_error など)
-//   code  … 細かい理由コード (context_length_exceeded など)
-//   param … 問題のあった入力項目の名前 (messages / max_tokens など)
-const SAFE_ERROR_FIELDS = ['type', 'code', 'param'] as const;
+// 通してよい項目と、その項目に許す綴り。**項目ごとに形が違う**ので 1 本の正規表現にまとめない —
+// まとめると、param のために必要なドットと角括弧が type / code にも効いてしまい、
+// 区切り文字で単語を繋いだ文（`billing.org-ACME_Corp.tier-enterprise` 等）が素通りする（実測）。
+//   type / code … ベンダーの分類語彙。snake_case か PascalCase の短い語で、区切りは `_` だけ
+//   param       … 問題のあった入力項目。`messages[0].content` のような JSON パスを取る
+const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,23}(?:_[A-Za-z0-9]{1,23}){0,3}$/;
+const SAFE_PARAM_PATTERN =
+  /^[A-Za-z_][A-Za-z0-9_]{0,23}(?:\[[0-9]{1,3}\]|\.[A-Za-z_][A-Za-z0-9_]{0,23}){0,3}$/;
 
-// 値が「そのまま返してよい識別子」か。**長さではなく綴りで絞る** —
-// 長さだけを見ていたときは 100 文字以内の散文が素通しし、実測で
-// `code: 'quota for org-ACME exhausted; plan=Enterprise; …'` や
-// `param: 'organization ACME Corp (tier: enterprise) has no access …'` がそのまま中継された。
-// 英数字・アンダースコア・ドット・ハイフンと、JSON パス用の角括弧だけを許す
-// (実在のベンダー値 invalid_request_error / context_length_exceeded / messages[0].content は通る)。
-// 空白を許さないので散文は入らず、制御文字・孤立サロゲートも同時に落ちる
-// (このリポジトリが他のすべての文字列に対して課している不変条件と揃う)。
-// 固定長の繰り返しなので ReDoS の余地は無い (§9)
-const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_.\-[\]]{1,64}$/;
+// 項目名 → その項目に許す綴り (許可リストはこの表が唯一の定義)
+const SAFE_ERROR_FIELDS: Readonly<Record<string, RegExp>> = {
+  // エラーの種別 (invalid_request_error / not_found_error など)
+  type: SAFE_CODE_PATTERN,
+  // 細かい理由コード (context_length_exceeded など)
+  code: SAFE_CODE_PATTERN,
+  // 問題のあった入力項目の名前 (messages[0].content など)
+  param: SAFE_PARAM_PATTERN,
+};
 
 // オブジェクト (連想配列) として読めるかどうか
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -44,12 +49,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-// 識別子として通してよい文字列だけを取り出す (それ以外は undefined)
-function safeIdentifier(value: unknown): string | undefined {
+// その項目に許した綴りに収まる文字列だけを取り出す (それ以外は undefined)
+function safeIdentifier(value: unknown, pattern: RegExp): string | undefined {
   // 文字列でなければ通さない
   if (typeof value !== 'string') return undefined;
-  // 識別子の綴りに収まるものだけを通す (fail-closed)
-  return SAFE_IDENTIFIER_PATTERN.test(value) ? value : undefined;
+  // 綴りに収まるものだけを通す (fail-closed)
+  return pattern.test(value) ? value : undefined;
 }
 
 /**
@@ -66,16 +71,16 @@ export function sanitizeUpstreamErrorBody(parsed: unknown): Record<string, unkno
   const root = asRecord(parsed);
   // 上流の error オブジェクト (OpenAI / Anthropic はどちらもここへ詳細を入れる)
   const upstreamError = root === null ? null : asRecord(root.error);
-  // 許可リストの項目だけを写す
+  // 許可リストの項目だけを、それぞれの綴りで確かめてから写す
   if (upstreamError !== null) {
-    for (const field of SAFE_ERROR_FIELDS) {
-      // 識別子として通してよい値のときだけ載せる
-      const value = safeIdentifier(upstreamError[field]);
+    for (const [field, pattern] of Object.entries(SAFE_ERROR_FIELDS)) {
+      // その項目に許した綴りに収まる値のときだけ載せる
+      const value = safeIdentifier(upstreamError[field], pattern);
       if (value !== undefined) error[field] = value;
     }
   }
-  // Anthropic は最上位にも type (常に 'error') を置くので、識別子として読めれば保つ
-  const topLevelType = root === null ? undefined : safeIdentifier(root.type);
+  // Anthropic は最上位にも type (常に 'error') を置くので、分類語彙として読めれば保つ
+  const topLevelType = root === null ? undefined : safeIdentifier(root.type, SAFE_CODE_PATTERN);
   // 組み直した本文 (上流の他の項目・request_id・自由記述はすべて落ちる)
   return topLevelType === undefined ? { error } : { type: topLevelType, error };
 }

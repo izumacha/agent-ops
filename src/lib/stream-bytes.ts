@@ -20,19 +20,20 @@ export type StreamReadResult =
  * ストリームを上限バイトまで読む。超えた時点で残りを読まずに打ち切る。
  * **読み取りそのものの失敗 (切断など) は投げたまま**にする — 切断を「ふつうの結果」に混ぜると、
  * 呼び出し側がクライアントの切断と上流の障害を区別できなくなる。
- * @param stream 読むストリーム (無ければ空文字を返す)
+ * @param stream 読むストリーム (null なら空文字を返す)
  * @param maxBytes 許す最大バイト数 (これを 1 バイトでも超えたら打ち切る)
  * @param options cancelOnOverflow: 上限超過で打ち切るときに下層のストリームも解放するか
  */
 export async function readStreamWithinByteLimit(
-  stream: ReadableStream<Uint8Array> | null | undefined,
+  stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
   options: { cancelOnOverflow?: boolean } = {},
 ): Promise<StreamReadResult> {
   // 本文が無ければ空文字 (呼び出し側が「空」として扱う)。
-  // **undefined も同じ扱いにする** — 標準の Request/Response は null を返すが、
-  // 本文を持たないテスト用の値などは undefined になり、getReader() で TypeError になっていた
-  if (stream === null || stream === undefined) return { ok: true, text: '' };
+  // **undefined は受け付けない** — Request.body / Response.body はどちらも本文が無いとき null を
+  // 返すので (Node 22 で実測)、undefined まで通すと「本文が無い」と「項目名を間違えた」が
+  // 同じ結果になり、後者が「空＝正常」として静かに通る (§9 fail-closed)
+  if (stream === null) return { ok: true, text: '' };
   // ストリームを少しずつ読む
   const reader = stream.getReader();
   // 読んだかたまりと合計バイト数
@@ -57,7 +58,17 @@ export async function readStreamWithinByteLimit(
         //     読むのをやめれば残りはランタイムが捨てるので、ここでは cancel しない
         //   - 上流の応答: cancel しないと応答ボディが未消費のまま残り、ソケットと fd が
         //     解放されない (実測で 502 を返した 20 秒後もソケットが閉じなかった)
-        if (options.cancelOnOverflow === true) await reader.cancel().catch(() => undefined);
+        // 解放そのものが失敗しても結果 (too_large) は変わらないので処理は続けるが、
+        // このオプションの目的が fd の滞留を防ぐことなので、失敗は運用上いちばん知りたい事象。
+        // 握り潰さずログだけ残す (§6 エラーを握り潰さない)
+        if (options.cancelOnOverflow === true) {
+          await reader.cancel().catch((error: unknown) => {
+            console.error(
+              '[stream] 上限超過後のストリーム解放に失敗しました:',
+              error instanceof Error ? error.name : typeof error,
+            );
+          });
+        }
         // 打ち切った理由
         return { ok: false, reason: 'too_large' };
       }

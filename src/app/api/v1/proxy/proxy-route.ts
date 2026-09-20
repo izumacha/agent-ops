@@ -23,8 +23,6 @@ import { proxyRequestSchema } from '@/lib/validations/proxy';
 const NO_TOKENS = 0;
 // 同じく記録する料金 (0 マイクロ USD)
 const NO_COST = 0n;
-// 上流が 5xx を返したかどうかの境目
-const SERVER_ERROR_THRESHOLD = 500;
 // 上流の応答が 2xx かどうかの上端 (これ未満なら成功として扱う)
 const SUCCESS_STATUS_CEILING = 300;
 
@@ -72,6 +70,33 @@ const UPSTREAM_STATUS_MASKING: Readonly<Partial<Record<number, MaskedResponse>>>
     relayRetryAfter: true,
   },
 };
+
+/**
+ * 上流の 4xx のうち、**ステータス番号をそのまま返してよいもの**（許可リスト）。
+ * 本文を定型文へ差し替えても、**番号そのもの**が共有している上流アカウントの状態を語る場合がある。
+ * とくに `402 Payment Required` は「プラットフォームの支払いが滞っている」を 1 ビットで伝え、
+ * 実測でも 402 / 409 / 451 がそのままクライアントへ届いていた。
+ *
+ * **拒否リスト（隠すものを並べる）ではなく許可リストにする** — 拒否リストだと、ベンダーが新しい
+ * 番号を使い始めた瞬間に黙って漏れる（§9 fail-closed: 不明なら拒否）。ここに並べるのは
+ * 「送り主自身の要求についての診断」と言い切れる 3 つだけで、それ以外の 4xx は 502 に写す。
+ */
+const RELAYABLE_CLIENT_ERROR_STATUSES: ReadonlySet<number> = new Set([
+  // 要求の組み立てが悪い
+  HTTP_STATUS.BAD_REQUEST,
+  // 要求が大きすぎる
+  HTTP_STATUS.PAYLOAD_TOO_LARGE,
+  // 要求の内容が上流の検証を通らない
+  HTTP_STATUS.UNPROCESSABLE_ENTITY,
+]);
+
+// 上流の応答をそのまま (ステータスを保って) 返してよいか
+function canRelayStatus(status: number): boolean {
+  // 2xx は中継する
+  if (status < SUCCESS_STATUS_CEILING) return true;
+  // 4xx は許可リストにあるものだけ。3xx・5xx とそれ以外の 4xx は中継しない
+  return RELAYABLE_CLIENT_ERROR_STATUSES.has(status);
+}
 
 // 中継してよい Retry-After の形 (RFC 9110 の delay-seconds = 整数の秒数)。
 // 上限桁数を決めた固定長の繰り返しなので ReDoS の余地は無い (§9)
@@ -206,9 +231,8 @@ export function proxyRoute(provider: Provider) {
         // トークン分を記録したのに応答は返さない「課金だけして捨てる」経路になる (実測)
         const masked = !bodyIsJson
           ? RELAY_FAILURE
-          : result.status >= SERVER_ERROR_THRESHOLD
-            ? RELAY_FAILURE
-            : UPSTREAM_STATUS_MASKING[result.status];
+          : (UPSTREAM_STATUS_MASKING[result.status] ??
+            (canRelayStatus(result.status) ? undefined : RELAY_FAILURE));
         // ステータスごと隠すものは、定型文の応答として返す
         if (masked !== undefined) {
           // 混雑のときだけ、形の整った Retry-After を中継する

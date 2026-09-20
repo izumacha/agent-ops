@@ -57,9 +57,25 @@ describe('上流のエラー本文の絞り込み', () => {
     ['長すぎる識別子', { code: 'x'.repeat(65) }],
     ['制御文字を含む値', { code: 'a\r\nX-Injected: 1\u0000b' }],
     ['孤立サロゲート', { code: '\ud800' }],
-    ['空文字', { type: '' }],
   ])('識別子の綴りに収まらない値は通さない: %s', (_label, error) => {
     // 長さだけを見ていたときは 100 文字以内の散文が素通しした (実測)
+    const safe = sanitizeUpstreamErrorBody({ error });
+    // 定型文だけが残る
+    expect(safe).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
+  });
+
+  it.each([
+    ['ドットとハイフンで繋いだ文 (code)', { code: 'billing.org-ACME_Corp.tier-enterprise' }],
+    ['ハイフン区切りの文 (type)', { type: 'org-ACME.tier-enterprise.balance-0' }],
+    [
+      '長い語を繋いだ文 (param)',
+      { param: 'credit_balance_too_low.add_funds_at_Plans_and_Billing' },
+    ],
+    ['キーの断片', { code: 'sk-proj-AbCdEf0123456789_XYZ.truncated_key_prefix' }],
+    ['5 語以上の snake_case', { code: 'organization_ACME_tier_enterprise_has_no_access' }],
+  ])('区切り文字で書いた文も通さない: %s', (_label, error) => {
+    // **空白が無いだけでは足りない** — 空白は `_` や `.` で置き換えられる。
+    // 1 本の正規表現に `.` と `-` をまとめて許していたときは、これらが全部素通りした (実測)
     const safe = sanitizeUpstreamErrorBody({ error });
     // 定型文だけが残る
     expect(safe).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
@@ -79,7 +95,9 @@ describe('上流のエラー本文の絞り込み', () => {
     ['ベンダーの種別', { type: 'invalid_request_error' }],
     ['ベンダーのコード', { code: 'context_length_exceeded' }],
     ['JSON パス形式の param', { param: 'messages[0].content' }],
-    ['ハイフンとドット', { code: 'rate-limit.exceeded' }],
+    ['4 語までの snake_case', { code: 'billing_hard_limit_reached' }],
+    ['PascalCase (Azure / Bedrock)', { type: 'OperationNotSupported' }],
+    ['入れ子の JSON パス', { param: 'tools[12].input_schema.properties' }],
   ])('実在するベンダーの識別子は通す: %s', (_label, error) => {
     // 絞りすぎて診断が消えていないことを確かめる (綴りの条件が厳しすぎると全部 undefined になる)
     const safe = sanitizeUpstreamErrorBody({ error }) as { error: Record<string, unknown> };

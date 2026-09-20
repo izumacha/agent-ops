@@ -604,12 +604,13 @@ paths:
         料金表 (src/domain/pricing/vendor-prices.json) に無いモデルは計測できないので中継せず 422。
         ストリーミング (stream: true) は Step2 の範囲外で 422。
 
-        上流の応答の扱い: 2xx はそのまま返す。**4xx はステータスだけを返し、本文は機械可読な項目
-        (`error.type` / `error.code` / `error.param` と最上位の `type`) に絞る** —
-        自由記述の `message` には上流アカウントの残高・組織名・契約ティアが載るため
-        (ステータス番号では「送り主の本文が悪い 400」と選り分けられない)。
-        401 / 403 は 502 に写し、429 は 429 のまま定型文へ差し替えて Retry-After
-        (整数の秒数のときだけ) を中継する。5xx は 502。
+        上流の応答の扱い: 2xx はそのまま返す。**ステータスを保って中継する 4xx は 400 / 413 / 422 だけ**
+        (「送り主自身の要求についての診断」と言い切れるもの。許可リストなので、それ以外の 4xx —
+        402 / 404 / 409 など — は 502 に写す。402 は番号そのものが上流アカウントの課金状態を語る)。
+        中継する場合も**本文は機械可読な項目 (`error.type` / `error.code` / `error.param` と
+        最上位の `type`) に絞る** — 自由記述の `message` には上流アカウントの残高・組織名・
+        契約ティアが載るため。401 / 403 は 502 に写し、429 は 429 のまま定型文へ差し替えて
+        Retry-After (整数の秒数のときだけ) を中継する。5xx は 502。
         **上流の本文が JSON として読めない場合 (HTML のエラーページ、本文を持てない 204 / 304、
         上限を超える大きさ) も 502** で、本文は返さない。
 
@@ -632,14 +633,12 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '422':
-          $ref: '#/components/responses/ValidationError'
+          $ref: '#/components/responses/ProxyRelayedError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '400':
-          $ref: '#/components/responses/ProxyRelayedError'
-        '404':
           $ref: '#/components/responses/ProxyRelayedError'
         '413':
           $ref: '#/components/responses/ProxyRelayedError'
@@ -677,14 +676,12 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '422':
-          $ref: '#/components/responses/ValidationError'
+          $ref: '#/components/responses/ProxyRelayedError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '400':
-          $ref: '#/components/responses/ProxyRelayedError'
-        '404':
           $ref: '#/components/responses/ProxyRelayedError'
         '413':
           $ref: '#/components/responses/ProxyRelayedError'
@@ -845,10 +842,12 @@ components:
             $ref: '#/components/schemas/Error'
     ProxyRelayedError:
       description: |
-        プロキシ自身が要求を拒否した (本文が JSON でない・上限超過など) か、上流が拒否したかの
-        どちらか。前者は API 共通のエラー形 ({status, message})、後者は上流の形を保った
-        RelayedUpstreamError で、**本文は機械可読な項目だけに絞ってある**
-        (自由記述には上流アカウントの残高・組織名・契約ティアが載るため)
+        プロキシ自身が要求を拒否した (本文が JSON でない・上限超過・未対応モデルなど) か、
+        上流が拒否したかのどちらか。前者は API 共通のエラー形 ({status, message} / {status, message, issues})、
+        後者は上流の形を保った RelayedUpstreamError で、**本文は機械可読な項目だけに絞ってある**
+        (自由記述には上流アカウントの残高・組織名・契約ティアが載るため)。
+        **ステータスを保って中継するのは 400 / 413 / 422 だけ**で、それ以外の上流 4xx は 502 に写す
+        (402 のように番号そのものが上流アカウントの課金状態を語るため。許可リスト = fail-closed)
       content:
         application/json:
           schema:

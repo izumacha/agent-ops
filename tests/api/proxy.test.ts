@@ -58,10 +58,19 @@ function stubUpstream(response: StubResponse | Error): void {
     if (response.delayMs !== undefined) {
       await new Promise((resolve) => setTimeout(resolve, response.delayMs));
     }
-    // 返す本文 (rawBody 優先。無ければ body を JSON 化する)。
-    // **本文を持てないステータスには null を渡す** — undici は 204 / 205 / 304 に空文字を渡しても
-    // TypeError で拒否するので、うっかり '' を渡すとスタブの fetch が投げ、
-    // 「本文が JSON として読めないから 502」ではなく「接続に失敗したから 502」を測ってしまう (実測)
+    // 本文を持てないステータスに本文を渡そうとしたら**黙って捨てずに落とす**。
+    // undici は 204 / 205 / 304 に空文字を渡しても TypeError で拒否するので、渡した本文を
+    // 無言で無視すると「204 の本文が中継されるか」を測ったつもりで別の経路を測ることになる
+    // (実際にそれで 204 の検査が空振りしていた)
+    if (
+      BODYLESS_STATUSES.has(response.status) &&
+      (response.body !== undefined || response.rawBody !== undefined)
+    ) {
+      throw new Error(
+        `${response.status} は本文を持てないステータスです (本文を渡すと別の経路を測ることになる)`,
+      );
+    }
+    // 返す本文 (rawBody 優先。無ければ body を JSON 化する)
     const body = BODYLESS_STATUSES.has(response.status)
       ? null
       : (response.rawBody ?? JSON.stringify(response.body));
@@ -496,6 +505,46 @@ describe('上流の失敗', () => {
     // 記録も残る
     expect(recordedEvents()[0].statusCode).toBe(400);
   });
+
+  it('許可リストに無い 4xx はステータスごと隠す (402 で課金状態を伝えない)', async () => {
+    // 本文を定型文へ差し替えても、**番号そのもの**が共有している上流アカウントの状態を語る。
+    // 402 は「プラットフォームの支払いが滞っている」を 1 ビットで伝える (実測でそのまま届いた)。
+    // 拒否リストではなく許可リストにしてあるので、ベンダーが新しい番号を使い始めても漏れない
+    for (const status of [402, 404, 409, 451]) {
+      // このループ内で数えるため毎回空にする
+      seed.store.usageEvents.clear();
+      stubUpstream({ status, body: { error: { type: 'billing_error' } } });
+      // 中継する
+      const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+      const result = await call(proxyAnthropic, {
+        token: key.secret,
+        body: { model: ANTHROPIC_MODEL },
+      });
+      // 上流のステータスは見せない
+      expect(result.status, `${status} が素通りしている`).toBe(502);
+      // 記録は**実際の上流のステータス**で残る (Step4 のエラー率ルールが読む)
+      expect(recordedEvents()[0].statusCode).toBe(status);
+    }
+  });
+
+  it.each([400, 413, 422])(
+    '許可リストにある %i は「送り主の要求についての診断」なのでステータスを保つ',
+    async (status) => {
+      // 許可リストが厳しすぎて全部 502 になっていないことを確かめる (両方向を塞ぐ)
+      stubUpstream({ status, body: { error: { type: 'invalid_request_error' } } });
+      // 中継する
+      const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+      const result = await call(proxyAnthropic, {
+        token: key.secret,
+        body: { model: ANTHROPIC_MODEL },
+      });
+      // ステータスはそのまま、本文は絞ったうえで返る
+      expect(result.status).toBe(status);
+      expect((result.json as { error?: Record<string, unknown> }).error?.type).toBe(
+        'invalid_request_error',
+      );
+    },
+  );
 
   it('上流の Retry-After は混雑 (429) 以外へは中継しない', async () => {
     // 401 を 502 へ写すときに待ち時間まで渡すと、「この 502 はバックオフ由来だ」という

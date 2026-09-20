@@ -695,4 +695,34 @@ describe('本文の上限はストリームで数える (Content-Length を偽�
     });
     expect(result.status).toBe(413);
   });
+
+  it('413 を返すとき、本文のストリームは cancel しない (413 が届く前に接続を切らない)', async () => {
+    // **上流の応答側とは事情が正反対**。cancel すると Next.js が下層の IncomingMessage ごと破棄し、
+    // 送信済みの 413 が届く前に接続が切れる (クライアントには ECONNRESET に見える)。
+    // この非対称こそ readStreamWithinByteLimit に cancelOnOverflow を足した理由なので、
+    // 「リクエスト本文側は渡さない」ことをここで固定する
+    // (固定する前は、こちらにも { cancelOnOverflow: true } を渡す変異が全件緑で通った)
+    let cancelled = false;
+    // 止めるまで流し続ける本文 (上限を必ず超える)
+    const rawBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        // 1 かたまりずつ流す
+        controller.enqueue(new TextEncoder().encode('x'.repeat(64 * 1024)));
+      },
+      cancel() {
+        // 解放されたことを記録する
+        cancelled = true;
+      },
+    });
+    // 送る
+    const result = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      method: 'POST',
+      rawBody,
+      headers: { 'content-type': 'application/json' },
+    });
+    // 上限超過として 413 が返り、本文のストリームは解放していない
+    expect(result.status).toBe(413);
+    expect(cancelled).toBe(false);
+  });
 });

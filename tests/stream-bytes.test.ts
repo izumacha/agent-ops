@@ -26,12 +26,9 @@ function bytes(text: string): Uint8Array {
 }
 
 describe('上限つきのストリーム読み取り', () => {
-  it.each([
-    ['null', null],
-    ['undefined', undefined],
-  ])('本文が %s なら空文字 (getReader で落ちない)', async (_label, stream) => {
-    // 標準の Request/Response は null を返すが、本文を持たない値は undefined になることがある
-    expect(await readStreamWithinByteLimit(stream, 10)).toEqual({ ok: true, text: '' });
+  it('本文が null なら空文字 (getReader で落ちない)', async () => {
+    // Request.body / Response.body はどちらも本文が無いとき null を返す
+    expect(await readStreamWithinByteLimit(null, 10)).toEqual({ ok: true, text: '' });
   });
 
   it('上限ちょうどまでは読める', async () => {

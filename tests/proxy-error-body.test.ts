@@ -110,12 +110,21 @@ describe('上流のエラー本文の絞り込み', () => {
     // 総長には収まるが語数・階層が 1 つ多い。**散文を止めているのはこちら**で、
     // 総長だけでは枠内の英文 (`your_credit_balance_is_too_low` 30 文字) が通ってしまう (実測)
     ['語数を 1 超える (code)', { code: 'a_b_c_d_e' }],
-    ['語数を 1 超える (type)', { type: 'a_b_c_d_e' }],
     ['階層を 1 超える (param)', { param: 'a.b.c.d.e.f.g' }],
     ['添字の階層を 1 超える (param)', { param: 'a[1][2][3][4][5][6]' }],
     ['添字の桁数を 1 超える (param)', { param: 'a[10000]' }],
     ['総長に収まる散文 (code)', { code: 'your_credit_balance_is_too_low' }],
     ['総長に収まる散文 (param)', { param: 'credit.balance.is.too.low.add.funds.now' }],
+    // **param のアンダースコア散文**。param 用の綴りを別に書いていたとき、文字クラスが `_` を
+    // トークンの内側に含んでいたため階層の上限が `_` を数えず、これらがそのまま中継された (実測)
+    ['アンダースコア散文 (param)', { param: 'your_credit_balance_is_too_low' }],
+    ['長いアンダースコア散文 (param)', { param: 'credit_balance_too_low_go_to_Plans_and_Billing' }],
+    [
+      'アンダースコアで繋いだキー形 (param)',
+      { param: 'sk_ant_api03_AAAABBBBCCCCDDDDEEEEFFFFGGGG' },
+    ],
+    // 先頭語を除く語の長さ (16) の境界
+    ['語の長さを 1 超える (code)', { code: `a_${'b'.repeat(17)}` }],
   ])('上限を 1 超えたら通さない: %s', (_label, error) => {
     // 上限を緩める変異を落とす。固定する前は語数・階層をいくら広げても全件緑だった (実測)
     expect(sanitizeUpstreamErrorBody({ error })).toEqual({
@@ -140,7 +149,8 @@ describe('上流のエラー本文の絞り込み', () => {
     ['語数ちょうど (code)', { code: 'a_b_c_d' }, 'code'],
     ['階層ちょうど (param)', { param: 'a.b.c.d.e.f' }, 'param'],
     ['添字の階層ちょうど (param)', { param: 'a[1][2][3][4][5]' }, 'param'],
-    ['4 桁の添字 (param)', { param: 'messages[1000].content' }, 'param'],
+    ['4 桁の添字ちょうど (param)', { param: 'a[9999]' }, 'param'],
+    ['語の長さちょうど (code)', { code: `a_${'b'.repeat(16)}` }, 'code'],
     ['総長ちょうどの 1 語 (code)', { code: 'a'.repeat(40) }, 'code'],
   ])('上限ちょうどは通す (絞りすぎて診断が消えていない): %s', (_label, error, field) => {
     // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない

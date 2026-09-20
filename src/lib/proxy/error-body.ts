@@ -29,6 +29,7 @@ import { API_MESSAGES } from '@/lib/constants';
 // 区切り文字で単語を繋いだ文（`billing.org-ACME_Corp.tier-enterprise` 等）が素通りする（実測）。
 //   type / code … ベンダーの分類語彙。snake_case か PascalCase で、区切りは `_` だけ
 //   param       … 問題のあった入力項目。`messages[0].content` のような JSON パスを取る
+// **ただし「トークン 1 つ」の綴りは共有する**（下記）。
 //
 // **絞りは 2 段いる。**
 //   (1) 総長の先読み `(?=.{1,N}$)` … 1 項目で運べる文字数の頭を押さえる。
@@ -37,13 +38,24 @@ import { API_MESSAGES } from '@/lib/constants';
 //   (2) 語数・階層の上限 … **散文を止めている主役はこちら**。総長だけでは枠内に収まる
 //       英文が通ってしまう（実測: `your_credit_balance_is_too_low` 30 文字、
 //       `credit.balance.is.too.low.add.funds.now` 39 文字）。
-// いまの上限は type / code が 40 文字・`_` 区切り 4 語まで、param が 48 文字・6 トークンまでで、
-// **1 応答あたり 168 文字**。語の長さを別に切らないのは総長が既に頭を押さえているためで、
-// 別に切ると実在の長い 1 語（Azure の ContentFilterResultsPolicyViolation 等）が落ちるだけになる。
+//
+// **トークンの定義は 1 つにする。** param 用の綴りを別に書いていたとき、あちらの文字クラスは
+// `_` を**トークンの内側**に含んでいたため、階層の上限が `_` を 1 つも数えず、
+// 上の (2) が param にだけ効かなかった（実測で 30〜48 文字のアンダースコア散文がそのまま中継された）。
+// トークンを共有すれば「語数を数える」という規則が両方へ同じように効く。
+const IDENTIFIER_TOKEN = String.raw`[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]{1,16}){0,3}`;
+
+// type / code … ベンダーの分類語彙。トークン 1 つで、総長 40 文字まで
+const SAFE_CODE_PATTERN = new RegExp(`^(?=.{1,40}$)${IDENTIFIER_TOKEN}$`);
+// param … 問題のあった入力項目。トークンを `.` と `[添字]` で 6 つまで繋いだ JSON パスで、総長 48 文字まで
+const SAFE_PARAM_PATTERN = new RegExp(
+  `^(?=.{1,48}$)${IDENTIFIER_TOKEN}(?:\\[[0-9]{1,4}\\]|\\.${IDENTIFIER_TOKEN}){0,5}$`,
+);
+// 数値の上限はこれだけで、いずれも tests/proxy-error-body.test.ts が上下両側で固定する:
+//   総長 40 / 48・1 トークンの語数 4・階層 6・添字の桁数 4・語の長さ 16（先頭語を除く）。
+// **先頭語だけ長さを切らない** — 実在の 1 語（Bedrock の ProvisionedThroughputExceededException
+// 38 文字）が落ちてしまうため。その副作用として、区切りの無い 40 文字のかたまりは通る。
 // 通る実在のベンダー値は tests/proxy-error-body.test.ts が固定する（件数はここに書かない）。
-const SAFE_CODE_PATTERN = /^(?=.{1,40}$)[A-Za-z][A-Za-z0-9]{0,39}(?:_[A-Za-z0-9]{1,39}){0,3}$/;
-const SAFE_PARAM_PATTERN =
-  /^(?=.{1,48}$)[A-Za-z_][A-Za-z0-9_]{0,47}(?:\[[0-9]{1,4}\]|\.[A-Za-z_][A-Za-z0-9_]{0,47}){0,5}$/;
 
 // 項目名 → その項目に許す綴り (許可リストはこの表が唯一の定義)
 const SAFE_ERROR_FIELDS: Readonly<Record<'type' | 'code' | 'param', RegExp>> = {

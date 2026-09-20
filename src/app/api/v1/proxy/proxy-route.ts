@@ -262,9 +262,16 @@ export function proxyRoute(provider: Provider) {
           headers: { 'content-type': 'application/json' },
         });
       } catch (error) {
-        // 中継そのものが失敗した場合 (時間切れ 504 / 接続不能 502 / 未設定 503) も記録を残す。
-        // 既に記録した呼び出し (上流の 5xx を 502 へ写した経路) は二重に記録しない
-        if (error instanceof ApiError && !alreadyRecorded) {
+        // 中継そのものが失敗した場合 (時間切れ 504 / 接続不能 502) も記録を残す。
+        // 既に記録した呼び出し (上流の 5xx を 502 へ写した経路) は二重に記録しない。
+        //
+        // **例外の種類で分けない。** `ApiError` だけを記録していると、上流を呼び終えた後に
+        // 想定外の例外が出たとき (500 になる経路) だけ記録が 1 行も残らない — 上流の課金は
+        // 発生しているのに、Step4 のコスト超過・エラー率のルールがその呼び出しを見落とす。
+        // 「課金されたのに記録が無い」は請求の根拠が壊れる側なので、種類を問わず記録する。
+        // (上流が未設定の 503 は `resolveUpstreamTarget` が **この try に入る前**に投げるので
+        //  ここには来ない。上流へ 1 バイトも出ていない呼び出しを記録しない方針は変えていない)
+        if (!alreadyRecorded) {
           await recordUsage(repos, {
             tenantId,
             agentId: agent.id,
@@ -274,7 +281,9 @@ export function proxyRoute(provider: Provider) {
             outputTokens: NO_TOKENS,
             costMicroUsd: NO_COST,
             latencyMs: Math.round(performance.now() - startedAt),
-            statusCode: error.status,
+            // 想定外の例外は route() が 500 に写すので、記録も同じ値にする
+            statusCode:
+              error instanceof ApiError ? error.status : HTTP_STATUS.INTERNAL_SERVER_ERROR,
           });
         }
         // 例外はそのまま上へ (route() が HTTP 応答へ写す)

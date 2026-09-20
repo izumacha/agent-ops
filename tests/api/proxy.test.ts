@@ -14,7 +14,7 @@ import {
 import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/route';
 import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
 import { AgentStatus, Provider } from '@/domain/types';
-import { costMicroUsd } from '@/domain/pricing';
+import * as pricing from '@/domain/pricing';
 import { JSON_BODY_MAX_BYTES } from '@/lib/constants';
 import { call, seedApiKey, seedEachTest } from './helpers';
 
@@ -315,7 +315,7 @@ describe('計測 (UsageEvent の記録)', () => {
     expect(events[0].outputTokens).toBe(567);
     // 料金は料金表から計算した値と一致する (料金の正しさ自体は tests/pricing.test.ts が固定する)
     expect(events[0].costMicroUsd).toBe(
-      costMicroUsd(Provider.anthropic, ANTHROPIC_MODEL, 1234, 567),
+      pricing.costMicroUsd(Provider.anthropic, ANTHROPIC_MODEL, 1234, 567),
     );
     // 上流のステータスとプロバイダも残る
     expect(events[0].statusCode).toBe(200);
@@ -335,7 +335,7 @@ describe('計測 (UsageEvent の記録)', () => {
     expect(recordedEvents()[0].outputTokens).toBe(22);
     // 料金は OpenAI の単価で計算される
     expect(recordedEvents()[0].costMicroUsd).toBe(
-      costMicroUsd(Provider.openai, OPENAI_MODEL, 11, 22),
+      pricing.costMicroUsd(Provider.openai, OPENAI_MODEL, 11, 22),
     );
   });
 
@@ -469,6 +469,35 @@ describe('上流の失敗', () => {
     expect(recordedEvents()).toHaveLength(1);
     expect(recordedEvents()[0].statusCode).toBe(500);
     expect(recordedEvents()[0].costMicroUsd).toBe(0n);
+  });
+
+  it('上流を呼び終えた後に想定外の例外が出ても記録は残る (課金だけして記録しない経路を作らない)', async () => {
+    // 上流は成功する — **この時点で上流の課金はもう発生している**
+    stubUpstream({ status: 200, body: anthropicResponse(7, 11) });
+    // 中継の後段 (応答を組み立てる手前) で想定外の例外を起こす。
+    // **記録の条件を `ApiError` に限っていたときは、この経路だけ記録が 0 行だった** —
+    // 上流に課金された呼び出しが台帳から消えるので、Step4 のコスト超過・エラー率が見落とす
+    const broken = vi.spyOn(pricing, 'costMicroUsd').mockImplementation(() => {
+      throw new Error('想定外の失敗');
+    });
+    // 後始末を必ず行う (他のテストへ漏らさない)
+    try {
+      // API キーで中継する
+      const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+      const result = await call(proxyAnthropic, {
+        token: key.secret,
+        body: { model: ANTHROPIC_MODEL },
+      });
+      // 想定外の例外は route() が 500 に写す (内部の詳細は返さない)
+      expect(result.status).toBe(500);
+      expect(JSON.stringify(result.json)).not.toContain('想定外の失敗');
+      // **記録は 1 行残る。** ステータスは利用者へ返した 500 と同じ
+      expect(recordedEvents(), '課金された呼び出しの記録が残っていない').toHaveLength(1);
+      expect(recordedEvents()[0].statusCode).toBe(500);
+    } finally {
+      // spy を戻す
+      broken.mockRestore();
+    }
   });
 
   it('上流の 4xx はステータスと機械可読な項目だけを返す (自由記述は落とす)', async () => {

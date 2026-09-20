@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { importSharedModule, sharedModuleNames } from './lib/script-files';
 
 // docs/ の場所
 const DOCS = join(process.cwd(), 'docs');
@@ -125,19 +125,15 @@ describe('Step0 の設計成果物', () => {
     // 次に `*-criteria.mjs` というファイル名の手がかりへ変えたが、それも
     // **別の名前 (`*-thresholds.mjs` 等) にリネームするだけで外れる** (実測で再現した)。
     // ファイル名ではなく **UPPER_SNAKE_CASE の定数を公開しているか**を手がかりにする
-    const sharedModules = readdirSync(join(process.cwd(), 'scripts', 'lib')).filter((name) =>
-      name.endsWith('.mjs'),
-    );
+    const sharedModules = sharedModuleNames();
     // 1 本も見つからなければ走査が壊れている (fail-closed)
     expect(sharedModules.length, '共有モジュールを 1 本も見つけられない').toBeGreaterThan(0);
     // 公開されている定数の名前を集める (関数は判定なので対象外)
     const criteriaNames = (
       await Promise.all(
         sharedModules.map(async (name) => {
-          // 動的 import はファイル URL で渡す (相対のテンプレートだと vite が毎回警告を出す)
-          const loaded = (await import(
-            pathToFileURL(join(process.cwd(), 'scripts', 'lib', name)).href
-          )) as Record<string, unknown>;
+          // 読み込みは共有ヘルパー経由 (ファイル URL の組み立てを 2 か所へ書き写さない)
+          const loaded = await importSharedModule(name);
           // 定数の綴り (UPPER_SNAKE_CASE) だけを見る
           return Object.keys(loaded).filter(
             (key) => /^[A-Z][A-Z0-9_]*$/.test(key) && typeof loaded[key] !== 'function',

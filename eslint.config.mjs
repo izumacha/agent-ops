@@ -18,11 +18,15 @@ const config = [
   // TypeScript 向けルールを展開してマージ
   ...nextTypescript,
   {
-    // 適用対象: _ プレフィックスの例外は **src / tests / scripts の全部**に効かせる。
-    // src だけに書いていたときは、同じ綴りが置き場所で赤・緑に分かれていた。
-    // lint が `--max-warnings=0` になった今は「意図的な未使用」を表す慣用が CI 失敗になるので、
-    // 対象をそろえておく (この例外は未使用を見逃すためではなく、意図を綴りで表すためのもの)
-    files: ['src/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}', 'scripts/**/*.{ts,mjs}'],
+    // 適用対象: _ プレフィックスの例外は **src と tests だけ**。
+    // tests には `it.each` のラベル引数 (`_label`) が多数あり、`--max-warnings=0` の下で
+    // 「意図的な未使用」を綴りで表せないと CI が落ちるので必要。
+    // **scripts には効かせない** — `scripts/lib/bench-criteria.mjs` と
+    // `tests/gate-scripts.test.ts` が「呼び出しを消すと import した名前が未使用になって eslint が
+    // 捕まえる」を前提にしているので、`import { X as _X }` で黙らせられる形を作らない
+    // (実測で、その改名と組み合わせるとベンチの判定を消しても全件緑になった)。
+    // scripts で `_` を使いたくなった時点で、前提への影響を考えたうえで広げる
+    files: ['src/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}'],
     rules: {
       // _ プレフィックスの変数・引数は意図的な未使用として警告しない (Proxy トラップの _target 等)
       '@typescript-eslint/no-unused-vars': [

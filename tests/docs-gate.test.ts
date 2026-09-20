@@ -14,14 +14,12 @@ import { PERMISSIONS } from '@/domain/rbac';
 // Step1 の受け入れ基準の値 (ゲートが読むのと同じ定義)。**名前空間でも読む** —
 // 「ゲート本体が基準を宣言し直していないか」を、公開されている名前の一覧から導くため
 import { ACTIONS, REQUIRED_PASSED_TESTS, ROLES } from '../scripts/lib/step1-criteria.mjs';
-import * as step1Criteria from '../scripts/lib/step1-criteria.mjs';
 // Step2 のベンチのしきい値 (ロードマップの散文と突き合わせる)
 import {
   PROXY_ADDED_LATENCY_P95_MAX_MS,
   USAGE_AGGREGATE_MAX_MS,
   USAGE_AGGREGATE_ROW_COUNT,
 } from '../scripts/lib/step2-criteria.mjs';
-import * as step2Criteria from '../scripts/lib/step2-criteria.mjs';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -119,9 +117,24 @@ describe('Step0 の設計成果物', () => {
   // `requiredPassedTests: 1` に書き換えると、この検査も tests/gate-scripts.test.ts も緑のまま通った。
   // 引数名と識別子の対応を見る形は書けるが、引数名を変えるだけで崩れるので採らない。
   // **基準の値が実際に渡っているかはレビューで見る**（この repo の他の除外表と同じ扱い）
-  it('ゲート本体は受け入れ基準の値を自分で宣言しない (共有の定義を読む)', () => {
+  it('ゲート本体は受け入れ基準の値を自分で宣言しない (共有の定義を読む)', async () => {
+    // **基準モジュールの一覧も導出する。** 以前は import した 2 本を手で並べていたため、
+    // 3 本目 (scripts/lib/bench-criteria.mjs) が増えた時点でそこに置いた値は照合から外れていた
+    // (実測: bench-criteria へ基準を足してゲート本体で宣言し直しても全件緑で通った)。
+    // 名前の付け方 (`*-criteria.mjs`) を手がかりにすれば、次に増えた 1 本も自動で対象に入る
+    const criteriaModules = readdirSync(join(process.cwd(), 'scripts', 'lib')).filter((name) =>
+      /-criteria\.mjs$/.test(name),
+    );
+    // 1 本も見つからなければ走査が壊れている (fail-closed)
+    expect(criteriaModules.length, '基準モジュールを 1 本も見つけられない').toBeGreaterThan(0);
     // 基準モジュールが公開している名前 (= ゲートが読むべき値の一覧)
-    const criteriaNames = [...Object.keys(step1Criteria), ...Object.keys(step2Criteria)];
+    const criteriaNames = (
+      await Promise.all(
+        criteriaModules.map(async (name) =>
+          Object.keys((await import(`../scripts/lib/${name}`)) as Record<string, unknown>),
+        ),
+      )
+    ).flat();
     // 1 つも読めなければ照合が空振りしている
     expect(criteriaNames.length, '基準モジュールから名前を 1 つも読めない').toBeGreaterThan(0);
     // ゲートスクリプトの一覧

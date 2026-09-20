@@ -81,81 +81,133 @@ describe('上流のエラー本文の絞り込み', () => {
     expect(safe).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
   });
 
-  it('最上位の type に入れた散文も通さない', () => {
-    // 最上位の type は Anthropic が 'error' を入れる項目。ここにも散文は入れられる
-    const safe = sanitizeUpstreamErrorBody({
-      type: 'org ACME Corp balance is $0.00 — upgrade at Plans & Billing',
-      error: {},
-    });
-    // 最上位の type ごと落ちる
-    expect(safe).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
-  });
+  // **同じ綴りを使う出力位置をすべて総当たりする。**
+  // `SAFE_CODE_PATTERN` を参照する箇所は 3 つある (`error.type` / `error.code` / 最上位 `type`)。
+  // 項目を 1 つ選んで検査すると、**別の箇所だけを差し替える変異が素通りする** —— 実測で、
+  // 語数の上限を最上位 `type` だけ緩める変異は 618 件すべて緑のまま通り、テスト件数も変わらなかった。
+  // 「同じ定数を指しているから 1 つ見れば足りる」は実装の都合であって契約ではない
+  const CODE_POSITIONS = ['error.type', 'error.code', '最上位 type'] as const;
+  // 検査したい位置へ値を載せた「上流の本文」を組み立てる
+  function upstreamBodyWith(position: (typeof CODE_POSITIONS)[number], value: string): unknown {
+    // error.type に載せる
+    if (position === 'error.type') return { error: { type: value } };
+    // error.code に載せる
+    if (position === 'error.code') return { error: { code: value } };
+    // 最上位の type に載せる (Anthropic が 'error' を入れる項目)
+    return { type: value, error: {} };
+  }
+  // 通ったとき、その値が応答のどこへ出るかを読む
+  function relayedValue(
+    position: (typeof CODE_POSITIONS)[number],
+    safe: Record<string, unknown>,
+  ): unknown {
+    // error オブジェクト (無ければ undefined)
+    const error = safe.error as Record<string, unknown> | undefined;
+    // 位置に応じて読む場所を変える
+    if (position === 'error.type') return error?.type;
+    if (position === 'error.code') return error?.code;
+    return safe.type;
+  }
+  // 位置ごとの検査ケースへ展開する (ラベルに位置を入れて、どこで落ちたか分かるようにする)
+  function forEachPosition(
+    cases: readonly (readonly [string, string])[],
+  ): readonly (readonly [string, (typeof CODE_POSITIONS)[number], string])[] {
+    // 値 × 位置の総当たり
+    return cases.flatMap(([label, value]) =>
+      CODE_POSITIONS.map((position) => [`${label} @ ${position}`, position, value] as const),
+    );
+  }
 
-  it.each([
-    ['ドットで繋いだ文 (type)', { type: 'billing.org_ACME_Corp.tier_enterprise' }],
-    ['JSON パスの形 (code)', { code: 'messages[0].content' }],
-  ])('param 用の綴りは type / code には効かない: %s', (_label, error) => {
-    // **項目ごとに綴りを分けたことの中核**。1 本にまとめると param 用のドットと角括弧が
-    // type / code にも効き、区切り文字で書いた文が素通りする。
-    // 固定する前は、type を param 用のパターンへ差し替える変異が全件緑で通った (実測)
-    expect(sanitizeUpstreamErrorBody({ error })).toEqual({
+  it.each(
+    forEachPosition([
+      // 語ごとの規則は満たすが総長が 1 文字だけ超える (先読みの上限だけを見る)
+      ['総長を 1 超える', `${'a'.repeat(32)}_${'b'.repeat(8)}`],
+      // 総長には収まるが語数が 1 つ多い。**分類語彙で散文を止めている主役はこちら**で、
+      // 総長だけでは枠内の英文 (`your_credit_balance_is_too_low` 30 文字) が通ってしまう (実測)
+      ['語数を 1 超える', 'a_b_c_d_e'],
+      // 先頭語を除く語の長さ (16) の境界
+      ['語の長さを 1 超える', `a_${'b'.repeat(17)}`],
+      // 上の 2 つが効いていることを、実際に漏れて困る形でも見る
+      ['総長に収まる散文', 'your_credit_balance_is_too_low'],
+      // **項目ごとに綴りを分けたことの中核**。1 本にまとめると param 用のドットと角括弧が
+      // 分類語彙にも効き、区切り文字で書いた文が素通りする (固定する前は変異が全件緑で通った)
+      ['ドットで繋いだ文', 'billing.org_ACME_Corp.tier_enterprise'],
+      ['JSON パスの形', 'messages[0].content'],
+      // 空白を含む散文 (上流の message をそのまま入れてきた場合)
+      ['空白を含む散文', 'org ACME Corp balance is $0.00 — upgrade at Plans & Billing'],
+      // **文字クラス (どの字を語に使えるか) も固定する。** 上の表はどれも `.` を含むので、
+      // 分類語彙はドットだけで落ちており、ハイフンや先頭の字種が一度も試されていなかった
+      // (実測: 語の中へ `-` を入れる / 区切りを `[_-]` にする / 先頭に `_` を許す、の 3 変異が
+      // いずれも全件緑で通った)。区切りが語に数えられない形は、この commit が `_` について
+      // 塞いだ退行とまったく同型
+      ['ハイフンで繋いだ文', 'org-ACME-Corp-tier-enterprise-balance-0'],
+      ['ハイフン 4 語', 'org-ACME-tier-enterprise'],
+      ['先頭のアンダースコア', '_billing_hard_limit_reached'],
+    ]),
+  )('分類語彙の上限を超えたら通さない: %s', (_label, position, value) => {
+    // 上限を緩める変異を落とす。固定する前は語数をいくら広げても全件緑だった (実測)
+    expect(sanitizeUpstreamErrorBody(upstreamBodyWith(position, value))).toEqual({
       error: { message: API_MESSAGES.upstreamRejected },
     });
   });
 
+  it.each(
+    forEachPosition([
+      ['総長ちょうどの語の連結', `${'a'.repeat(32)}_${'b'.repeat(7)}`],
+      ['語数ちょうど', 'a_b_c_d'],
+      ['語の長さちょうど', `a_${'b'.repeat(16)}`],
+      ['総長ちょうどの 1 語', 'a'.repeat(40)],
+    ]),
+  )(
+    '分類語彙の上限ちょうどは通す (絞りすぎて診断が消えていない): %s',
+    (_label, position, value) => {
+      // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない
+      const safe = sanitizeUpstreamErrorBody(upstreamBodyWith(position, value)) as Record<
+        string,
+        unknown
+      >;
+      expect(relayedValue(position, safe)).toBe(value);
+    },
+  );
+
   it.each([
-    // 語ごとの規則は満たすが総長が 1 文字だけ超える (先読みの上限だけを見る)
-    ['総長を 1 超える (code)', { code: `${'a'.repeat(32)}_${'b'.repeat(8)}` }],
-    ['総長を 1 超える (param)', { param: `a.${'b'.repeat(23)}.${'c'.repeat(23)}` }],
-    // 総長には収まるが語数・階層が 1 つ多い。**散文を止めているのはこちら**で、
-    // 総長だけでは枠内の英文 (`your_credit_balance_is_too_low` 30 文字) が通ってしまう (実測)
-    ['語数を 1 超える (code)', { code: 'a_b_c_d_e' }],
-    ['階層を 1 超える (param)', { param: 'a.b.c.d.e.f.g' }],
-    ['添字の階層を 1 超える (param)', { param: 'a[1][2][3][4][5][6]' }],
-    ['添字の桁数を 1 超える (param)', { param: 'a[10000]' }],
-    ['総長に収まる散文 (code)', { code: 'your_credit_balance_is_too_low' }],
-    ['総長に収まる散文 (param)', { param: 'credit.balance.is.too.low.add.funds.now' }],
+    // param は綴りが違う (ドットと角括弧を許す) ので、別の表で上下を固定する
+    ['総長を 1 超える', `a.${'b'.repeat(23)}.${'c'.repeat(23)}`],
+    ['階層を 1 超える', 'a.b.c.d.e.f.g'],
+    ['添字の階層を 1 超える', 'a[1][2][3][4][5][6]'],
+    ['添字の桁数を 1 超える', 'a[10000]'],
+    ['語の長さを 1 超える', `a_${'b'.repeat(17)}`],
+    ['階層で繋いだ散文', 'credit.balance.is.too.low.add.funds.now'],
     // **param のアンダースコア散文**。param 用の綴りを別に書いていたとき、文字クラスが `_` を
-    // トークンの内側に含んでいたため階層の上限が `_` を数えず、これらがそのまま中継された (実測)
-    ['アンダースコア散文 (param)', { param: 'your_credit_balance_is_too_low' }],
-    ['長いアンダースコア散文 (param)', { param: 'credit_balance_too_low_go_to_Plans_and_Billing' }],
-    [
-      'アンダースコアで繋いだキー形 (param)',
-      { param: 'sk_ant_api03_AAAABBBBCCCCDDDDEEEEFFFFGGGG' },
-    ],
-    // 先頭語を除く語の長さ (16) の境界
-    ['語の長さを 1 超える (code)', { code: `a_${'b'.repeat(17)}` }],
-  ])('上限を 1 超えたら通さない: %s', (_label, error) => {
-    // 上限を緩める変異を落とす。固定する前は語数・階層をいくら広げても全件緑だった (実測)
-    expect(sanitizeUpstreamErrorBody({ error })).toEqual({
+    // トークンの内側に含んでいたため語数の上限が `_` を数えず、これらがそのまま中継された (実測)
+    ['アンダースコア散文', 'your_credit_balance_is_too_low'],
+    ['長いアンダースコア散文', 'credit_balance_too_low_go_to_Plans_and_Billing'],
+    ['アンダースコアで繋いだキー形', 'sk_ant_api03_AAAABBBBCCCCDDDDEEEEFFFFGGGG'],
+    // param 側の文字クラス。添字は階層 1 つぶんとしか数えないので、字種を緩めると
+    // 「語数の枠外に自由な文字が乗る」形になる (実測: 添字を `[0-9A-Za-z]` にすると全件緑で通った)
+    ['ハイフンで繋いだ文', 'your-credit-balance-is-too-low'],
+    ['先頭のアンダースコア', '_credit.balance'],
+    ['添字に数字以外', 'org[ACME][Corp][tier][ent]'],
+  ])('JSON パスの上限を超えたら通さない: %s', (_label, param) => {
+    // param 側の上限も 1 つずつ上から押さえる
+    expect(sanitizeUpstreamErrorBody({ error: { param } })).toEqual({
       error: { message: API_MESSAGES.upstreamRejected },
     });
   });
 
-  it('最上位の type にも param 用の綴りは効かない', () => {
-    // 最上位の type も分類語彙 (Anthropic は 'error') なので code と同じ綴りで絞る
-    expect(
-      sanitizeUpstreamErrorBody({ type: 'billing.org_ACME_Corp.tier_enterprise', error: {} }),
-    ).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
-  });
-
   it.each([
-    ['総長ちょうどの語の連結 (code)', { code: `${'a'.repeat(32)}_${'b'.repeat(7)}` }, 'code'],
-    [
-      '総長ちょうどの JSON パス (param)',
-      { param: `a.${'b'.repeat(23)}.${'c'.repeat(22)}` },
-      'param',
-    ],
-    ['語数ちょうど (code)', { code: 'a_b_c_d' }, 'code'],
-    ['階層ちょうど (param)', { param: 'a.b.c.d.e.f' }, 'param'],
-    ['添字の階層ちょうど (param)', { param: 'a[1][2][3][4][5]' }, 'param'],
-    ['4 桁の添字ちょうど (param)', { param: 'a[9999]' }, 'param'],
-    ['語の長さちょうど (code)', { code: `a_${'b'.repeat(16)}` }, 'code'],
-    ['総長ちょうどの 1 語 (code)', { code: 'a'.repeat(40) }, 'code'],
-  ])('上限ちょうどは通す (絞りすぎて診断が消えていない): %s', (_label, error, field) => {
-    // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない
-    const safe = sanitizeUpstreamErrorBody({ error }) as { error: Record<string, unknown> };
-    expect(safe.error[field]).toBe((error as Record<string, string>)[field]);
+    ['総長ちょうどの JSON パス', `a.${'b'.repeat(23)}.${'c'.repeat(22)}`],
+    ['階層ちょうど', 'a.b.c.d.e.f'],
+    ['添字の階層ちょうど', 'a[1][2][3][4][5]'],
+    ['4 桁の添字ちょうど', 'a[9999]'],
+    ['語数ちょうど', 'a_b_c_d'],
+    ['語の長さちょうど', `a_${'b'.repeat(16)}`],
+  ])('JSON パスの上限ちょうどは通す (絞りすぎて診断が消えていない): %s', (_label, param) => {
+    // param 側の下側。実在の JSON パスを落としていないことを見る
+    const safe = sanitizeUpstreamErrorBody({ error: { param } }) as {
+      error: Record<string, unknown>;
+    };
+    expect(safe.error.param).toBe(param);
   });
 
   it.each([

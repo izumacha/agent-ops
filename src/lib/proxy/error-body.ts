@@ -15,8 +15,10 @@
 // **残る境界（形では塞げない。ADR-0007 決定 7 に同じことを書いてある）**:
 //   - `type` / `code` / `param` はいずれもベンダーの語彙なので、`billing_hard_limit_reached` の
 //     ように「共有している上流アカウントの状態」をカテゴリとして示す値は残る。
-//   - 短い snake_case を繋いだ語（`org_ACME_Corp.tier_enterprise.balance_zero` 等）も通る。
-//     綴りを締めるほど実在のベンダー値まで落ちるので、ここが実用的な下限。
+//   - 短い語を繋いだ文も総長の上限までは通る。`param` はドットを許すので
+//     `org_ACME_Corp.tier_enterprise.balance_zero`（42 文字）が通り、`type` / `code` は
+//     `_` 区切りだけなので同じ文字列は落ちる。綴りと長さを締めるほど実在のベンダー値まで
+//     落ちるので、ここが実用的な下限。
 //     **「空白が無いから散文は入らない」とは言えない** — 空白は `_` や `.` で置き換えられる（実測）。
 // 完全に塞ぐには「既知の安全なコードだけの閉じた語彙」にするしかないが、ベンダーが値を増やす
 // たびに診断が黙って消える（別の壊れ方）ので採らない。
@@ -25,14 +27,20 @@ import { API_MESSAGES } from '@/lib/constants';
 // 通してよい項目と、その項目に許す綴り。**項目ごとに形が違う**ので 1 本の正規表現にまとめない —
 // まとめると、param のために必要なドットと角括弧が type / code にも効いてしまい、
 // 区切り文字で単語を繋いだ文（`billing.org-ACME_Corp.tier-enterprise` 等）が素通りする（実測）。
-//   type / code … ベンダーの分類語彙。snake_case か PascalCase の短い語で、区切りは `_` だけ
+//   type / code … ベンダーの分類語彙。snake_case か PascalCase で、区切りは `_` だけ
 //   param       … 問題のあった入力項目。`messages[0].content` のような JSON パスを取る
-const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,23}(?:_[A-Za-z0-9]{1,23}){0,3}$/;
+//
+// **総長の先読みが要る。** 綴りだけを絞って 1 語ずつの長さで区切ると、語数ぶん掛け算になって
+// かえって**運べる文字数が増える**（項目別に分けた最初の版は 1 応答あたり 256 → 387 文字に増え、
+// 99 文字の散文がそのまま中継された。実測）。先頭に `(?=.{1,N}$)` を置いて総長で頭を押さえる。
+// いまの上限は type / code が 40 文字・param が 48 文字で、**1 応答あたり 168 文字**。
+// 実在のベンダー値（Anthropic / OpenAI / Azure OpenAI / Bedrock の 33 件）はすべて通る。
+const SAFE_CODE_PATTERN = /^(?=.{1,40}$)[A-Za-z][A-Za-z0-9]{0,31}(?:_[A-Za-z0-9]{1,23}){0,3}$/;
 const SAFE_PARAM_PATTERN =
-  /^[A-Za-z_][A-Za-z0-9_]{0,23}(?:\[[0-9]{1,3}\]|\.[A-Za-z_][A-Za-z0-9_]{0,23}){0,3}$/;
+  /^(?=.{1,48}$)[A-Za-z_][A-Za-z0-9_]{0,23}(?:\[[0-9]{1,4}\]|\.[A-Za-z_][A-Za-z0-9_]{0,23}){0,5}$/;
 
 // 項目名 → その項目に許す綴り (許可リストはこの表が唯一の定義)
-const SAFE_ERROR_FIELDS: Readonly<Record<string, RegExp>> = {
+const SAFE_ERROR_FIELDS: Readonly<Record<'type' | 'code' | 'param', RegExp>> = {
   // エラーの種別 (invalid_request_error / not_found_error など)
   type: SAFE_CODE_PATTERN,
   // 細かい理由コード (context_length_exceeded など)

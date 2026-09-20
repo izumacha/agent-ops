@@ -56,7 +56,7 @@ const RELAY_FAILURE: MaskedResponse = {
  * 存在しないステータスを引いても型の上では値があることになり、`undefined` の検査を落とす
  * リファクタを型検査が止めてくれない (落とすと通常の 2xx 応答が毎回クラッシュする)
  */
-const UPSTREAM_STATUS_MASKING: Readonly<Partial<Record<number, MaskedResponse>>> = {
+export const UPSTREAM_STATUS_MASKING: Readonly<Partial<Record<number, MaskedResponse>>> = {
   // 上流が資格情報を拒否した = こちらの設定の問題。利用者には中継の失敗としてだけ伝える
   [HTTP_STATUS.UNAUTHORIZED]: RELAY_FAILURE,
   // 上流が権限不足を返した場合も同じ (組織やモデルの許可はプラットフォーム側の設定)
@@ -79,9 +79,14 @@ const UPSTREAM_STATUS_MASKING: Readonly<Partial<Record<number, MaskedResponse>>>
  *
  * **拒否リスト（隠すものを並べる）ではなく許可リストにする** — 拒否リストだと、ベンダーが新しい
  * 番号を使い始めた瞬間に黙って漏れる（§9 fail-closed: 不明なら拒否）。ここに並べるのは
- * 「送り主自身の要求についての診断」と言い切れる 3 つだけで、それ以外の 4xx は 502 に写す。
+ * 「送り主自身の要求についての診断」に相当する 3 つだけで、それ以外の 4xx は 502 に写す。
+ *
+ * **400 は完全に安全ではない** — 上流によっては課金エラーも 400 で返るので、番号だけで
+ * 「プラットフォームの残高が切れている」ことを推測できる（ADR-0007 決定 7 の残る境界）。
+ * それでも 502 へ写さないのは、ベンダーの SDK が 502 を再試行し 400 を再試行しないため。
+ * 送り主の壊れたペイロードを 502 にすると、成功しえない要求の再試行で課金が膨らむ。
  */
-const RELAYABLE_CLIENT_ERROR_STATUSES: ReadonlySet<number> = new Set([
+export const RELAYABLE_CLIENT_ERROR_STATUSES: ReadonlySet<number> = new Set([
   // 要求の組み立てが悪い
   HTTP_STATUS.BAD_REQUEST,
   // 要求が大きすぎる

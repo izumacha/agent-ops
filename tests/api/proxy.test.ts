@@ -7,6 +7,10 @@
 //   3. 中継: クライアントのヘッダを上流へ渡さず、接続先・資格情報はサーバ側の設定だけで決まる
 //   4. 失敗: 上流の 5xx・時間切れでも記録を残し、上流の詳細は利用者へ返さない
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  RELAYABLE_CLIENT_ERROR_STATUSES,
+  UPSTREAM_STATUS_MASKING,
+} from '@/app/api/v1/proxy/proxy-route';
 import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/route';
 import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
 import { AgentStatus, Provider } from '@/domain/types';
@@ -48,6 +52,19 @@ interface StubResponse {
 
 // 上流の応答を 1 回分用意する (fetch の差し替え)
 function stubUpstream(response: StubResponse | Error): void {
+  // 本文を持てないステータスに本文を渡そうとしたら**この場で**落とす。
+  // **fake fetch の中で投げてはいけない** — callUpstream の catch-all が同じ 502 に写すので、
+  // テストは緑のまま別の経路 (接続の失敗) を測ることになる。これは 204 の検査が空振りしていたときと
+  // 投げる主体が変わっただけの同じ形で、実測でもガードの有無で結果が 1 ビットも変わらなかった
+  if (
+    !(response instanceof Error) &&
+    BODYLESS_STATUSES.has(response.status) &&
+    (response.body !== undefined || response.rawBody !== undefined)
+  ) {
+    throw new Error(
+      `${response.status} は本文を持てないステータスです (本文を渡すと別の経路を測ることになる)`,
+    );
+  }
   // fetch の代わりに呼ばれる関数
   const fake = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     // 呼び出しを記録する (URL とヘッダを後で検査する)
@@ -58,19 +75,8 @@ function stubUpstream(response: StubResponse | Error): void {
     if (response.delayMs !== undefined) {
       await new Promise((resolve) => setTimeout(resolve, response.delayMs));
     }
-    // 本文を持てないステータスに本文を渡そうとしたら**黙って捨てずに落とす**。
-    // undici は 204 / 205 / 304 に空文字を渡しても TypeError で拒否するので、渡した本文を
-    // 無言で無視すると「204 の本文が中継されるか」を測ったつもりで別の経路を測ることになる
-    // (実際にそれで 204 の検査が空振りしていた)
-    if (
-      BODYLESS_STATUSES.has(response.status) &&
-      (response.body !== undefined || response.rawBody !== undefined)
-    ) {
-      throw new Error(
-        `${response.status} は本文を持てないステータスです (本文を渡すと別の経路を測ることになる)`,
-      );
-    }
-    // 返す本文 (rawBody 優先。無ければ body を JSON 化する)
+    // 返す本文 (rawBody 優先。無ければ body を JSON 化する)。
+    // 本文を持てないステータスには null を渡す (undici は空文字でも TypeError で拒否する)
     const body = BODYLESS_STATUSES.has(response.status)
       ? null
       : (response.rawBody ?? JSON.stringify(response.body));
@@ -524,6 +530,41 @@ describe('上流の失敗', () => {
       expect(result.status, `${status} が素通りしている`).toBe(502);
       // 記録は**実際の上流のステータス**で残る (Step4 のエラー率ルールが読む)
       expect(recordedEvents()[0].statusCode).toBe(status);
+    }
+  });
+
+  it('3xx / 4xx の写し先は契約どおり (許可リストの広がりを別の手掛かりで照合する)', async () => {
+    // 402 の検査は番号を直書きで列挙するだけなので、**そこに無い番号を許可リストへ足しても気付けない**
+    // (実測で、3xx を全部素通しにする変異も 415 を許可リストへ足す変異も全件緑で通った)。
+    // ここは実装の集合を import せず、契約の 3 つ組をテスト側に直書きして 300〜499 を総なめする
+    // (実装を import すると恒真式になり、集合をどう変えてもテストが一緒に動いてしまう)
+    const RELAYED = new Set([400, 413, 422]);
+    // 300 から 499 まで
+    for (let status = 300; status < 500; status += 1) {
+      // 本文を持てないステータスは別の検査が扱う (本文を渡せないのでこのループでは測れない)
+      if (BODYLESS_STATUSES.has(status)) continue;
+      // このループ内で数えるため毎回空にする
+      seed.store.usageEvents.clear();
+      stubUpstream({ status, body: { error: { type: 'invalid_request_error' } } });
+      // 中継する
+      const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+      const result = await call(proxyAnthropic, {
+        token: key.secret,
+        body: { model: ANTHROPIC_MODEL },
+      });
+      // 許可リストならそのまま、429 は 429、それ以外は 502
+      const expected = RELAYED.has(status) ? status : status === 429 ? 429 : 502;
+      expect(result.status, `上流 ${status} の写し先`).toBe(expected);
+    }
+  });
+
+  it('ステータスの 2 つの表は重ならない (同じ番号を両方に書かない)', () => {
+    // 写像の表 (401/403/429) と許可リスト (400/413/422) は「上流のステータス N をどうするか」への
+    // 2 つの参照元。`??` の順で写像の表が先勝ちなので挙動は決まるが、重なり自体は誰も見ていなかった
+    const masked = Object.keys(UPSTREAM_STATUS_MASKING).map(Number);
+    // 許可リストに写像の表の番号が入っていないこと
+    for (const status of masked) {
+      expect(RELAYABLE_CLIENT_ERROR_STATUSES.has(status), `${status} が両方の表にある`).toBe(false);
     }
   });
 

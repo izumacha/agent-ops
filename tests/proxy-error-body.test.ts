@@ -92,11 +92,51 @@ describe('上流のエラー本文の絞り込み', () => {
   });
 
   it.each([
+    ['ドットで繋いだ文 (type)', { type: 'billing.org_ACME_Corp.tier_enterprise' }],
+    ['JSON パスの形 (code)', { code: 'messages[0].content' }],
+    // 語ごとの規則は満たすが総長が 1 文字だけ超える値 (先読みの上限だけを見る)
+    ['総長の上限を 1 超える語の連結 (code)', { code: `${'a'.repeat(32)}_${'b'.repeat(8)}` }],
+    ['総長の上限を超える JSON パス (param)', { param: `a.${'b'.repeat(23)}.${'c'.repeat(23)}` }],
+  ])('param 用の綴りは type / code には効かない: %s', (_label, error) => {
+    // **項目ごとに綴りを分けたことの中核**。1 本にまとめると param 用のドットと角括弧が
+    // type / code にも効き、区切り文字で書いた文が素通りする。
+    // 固定する前は、type を param 用のパターンへ差し替える変異が全件緑で通った (実測)
+    expect(sanitizeUpstreamErrorBody({ error })).toEqual({
+      error: { message: API_MESSAGES.upstreamRejected },
+    });
+  });
+
+  it('最上位の type にも param 用の綴りは効かない', () => {
+    // 最上位の type も分類語彙 (Anthropic は 'error') なので code と同じ綴りで絞る
+    expect(
+      sanitizeUpstreamErrorBody({ type: 'billing.org_ACME_Corp.tier_enterprise', error: {} }),
+    ).toEqual({ error: { message: API_MESSAGES.upstreamRejected } });
+  });
+
+  it.each([
+    ['総長ちょうどの語の連結 (code)', { code: `${'a'.repeat(32)}_${'b'.repeat(7)}` }, 'code'],
+    [
+      '総長ちょうどの JSON パス (param)',
+      { param: `a.${'b'.repeat(23)}.${'c'.repeat(22)}` },
+      'param',
+    ],
+  ])('上限ちょうどは通す (絞りすぎて診断が消えていない): %s', (_label, error, field) => {
+    // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない
+    const safe = sanitizeUpstreamErrorBody({ error }) as { error: Record<string, unknown> };
+    expect(safe.error[field]).toBe((error as Record<string, string>)[field]);
+  });
+
+  it.each([
     ['ベンダーの種別', { type: 'invalid_request_error' }],
     ['ベンダーのコード', { code: 'context_length_exceeded' }],
     ['JSON パス形式の param', { param: 'messages[0].content' }],
     ['4 語までの snake_case', { code: 'billing_hard_limit_reached' }],
-    ['PascalCase (Azure / Bedrock)', { type: 'OperationNotSupported' }],
+    ['PascalCase (Azure)', { type: 'OperationNotSupported' }],
+    ['長い PascalCase (Azure の innererror.code)', { code: 'ResponsibleAIPolicyViolation' }],
+    ['長い PascalCase (Bedrock)', { code: 'ServiceQuotaExceededException' }],
+    ['4 語の snake_case', { code: 'unsupported_country_region_territory' }],
+    ['入れ子の添字つき JSON パス', { param: 'messages[0].content[1].text' }],
+    ['4 桁の添字', { param: 'messages[1000].content' }],
     ['入れ子の JSON パス', { param: 'tools[12].input_schema.properties' }],
   ])('実在するベンダーの識別子は通す: %s', (_label, error) => {
     // 絞りすぎて診断が消えていないことを確かめる (綴りの条件が厳しすぎると全部 undefined になる)

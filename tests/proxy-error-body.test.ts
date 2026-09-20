@@ -152,26 +152,40 @@ describe('上流のエラー本文の絞り込み', () => {
       };
     }
   ).components?.schemas?.RelayedUpstreamError?.properties?.error?.properties;
-  // 契約の項目のうち、この総当たりの対象にしないもの (理由付き。増える差分はレビューで見る)
-  const CODE_SWEEP_EXCLUSIONS: Readonly<Record<string, string>> = {
-    message: 'プロキシの定型文。上流から読まないので綴りの検査は要らない',
-    param: 'JSON パス用の別の綴り (SAFE_PARAM_PATTERN)。専用の表で上下を固定している',
-  };
-  // 契約が読めなければ導出が空振りする (fail-closed)
-  expect(relayedErrorSchema, '契約から error の項目を読めない').toBeDefined();
-  // 総当たりの対象 = 契約の項目 − 除外
+  // **除外表ではなく「分割」にする。** 除外表にしていたときは、そこへ 1 行足すだけで
+  // その項目の検査 14 件が黙って消えた (実測: `type` を除外して綴りを緩めると 683 件すべて緑のまま
+  // `org_ACME_Corp.tier-enterprise.credit_balance_zero.add-funds` 59 文字が中継された)。
+  // 契約の項目は必ずどちらかの綴りの表に属する形にして、**和集合が契約を覆うこと**を固定する
+  const PARAM_SWEEP_FIELDS = ['param'];
+  // プロキシが自分で書く項目 (上流から読まないので綴りの検査の対象にならない)
+  const SELF_WRITTEN_FIELDS = ['message'];
+  // 分類語彙 (SAFE_CODE_PATTERN) の総当たり対象 = 契約の項目 − param の綴り − 自前の項目
   const CODE_FIELDS = Object.keys(relayedErrorSchema ?? {}).filter(
-    (field) => CODE_SWEEP_EXCLUSIONS[field] === undefined,
+    (field) => !PARAM_SWEEP_FIELDS.includes(field) && !SELF_WRITTEN_FIELDS.includes(field),
   );
 
-  it('綴りの総当たりは契約の項目を覆っている', () => {
-    // 1 つも残らなければ導出が壊れている
+  it('綴りの総当たりは契約の項目を過不足なく覆っている', () => {
+    // 1 つも残らなければ導出が壊れている (fail-closed)
     expect(CODE_FIELDS.length, '総当たりの対象が 0 件').toBeGreaterThan(0);
-    // 除外は実在する項目にだけ付けられる (契約から消えた項目の除外が残り続けないように)
-    for (const [field, reason] of Object.entries(CODE_SWEEP_EXCLUSIONS)) {
-      expect(relayedErrorSchema, `${field} は契約に無い`).toHaveProperty(field);
-      expect(reason.trim().length, `${field} の除外理由が空`).toBeGreaterThan(0);
-    }
+    // **3 つの表の和集合が契約と一致すること。** 片方へ移すことはできても、
+    // どこにも属さない項目 (＝検査されない項目) は作れない
+    expect(
+      [...CODE_FIELDS, ...PARAM_SWEEP_FIELDS, ...SELF_WRITTEN_FIELDS].sort(),
+      '契約の項目と総当たりの対象が食い違っている',
+    ).toEqual(Object.keys(relayedErrorSchema ?? {}).sort());
+  });
+
+  it.each(PARAM_SWEEP_FIELDS)('%s には JSON パスの綴りが当たっている', (field) => {
+    // 分類語彙の総当たりから項目を「param 側へ移す」だけで検査が消えないよう、
+    // **param の綴りでしか通らない値**で確かめる (分類語彙の綴りは `.` も `[添字]` も許さないので、
+    // 移した項目に分類語彙が当たっていればここで落ちる)
+    const safe = sanitizeUpstreamErrorBody({ error: { [field]: 'messages[0].content' } }) as {
+      error: Record<string, unknown>;
+    };
+    // JSON パスがそのまま通ること
+    expect(safe.error[field], `${field} に param の綴りが当たっていない`).toBe(
+      'messages[0].content',
+    );
   });
 
   // その項目へ値を載せた「上流の本文」を組み立てる

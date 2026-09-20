@@ -608,7 +608,22 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
           seen.add(ENUMERATION_MARKER);
           return Reflect.ownKeys(target);
         },
+        // **名指しの記述子読みも「読んだ」に数える。** `Object.getOwnPropertyDescriptor(x, 'k').value`
+        // は `get` にも `ownKeys` にも現れないので、これが無いと項目名を選んで読めてしまう
+        // (実測: 697 件すべて緑・件数も不変のまま、綴りの検査も総長の上限も掛からない値が中継された)
+        getOwnPropertyDescriptor(target, property) {
+          if (typeof property === 'string') seen.add(property);
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+        // 存在確認も数える (`Object.hasOwn` / `in` で当たりを付けてから読む形を捉える)
+        has(target, property) {
+          if (typeof property === 'string') seen.add(property);
+          return Reflect.has(target, property);
+        },
       });
+      // **この probe が覆うのは「項目の値へ到達する標準的な経路」** (get / ownKeys /
+      // getOwnPropertyDescriptor / has の 4 つ)。`defineProperty` のような他のトラップや、
+      // probe を渡していない階層 (3 段目以降) は原理的に見えない
       // 実装に通す (戻り値は使わない。見たいのは「何を読んだか」)
       sanitizeUpstreamErrorBody(build(probe));
       // 並びを固定して返す
@@ -619,6 +634,18 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       readKeysOf((probe) => probe),
       '最上位から読む項目名',
     ).toEqual(Object.keys(relayed?.properties ?? {}).sort());
+    // **未知キーを閉じていること。** リクエスト側には同じ検査があるのに応答側だけ無く、
+    // 実測で `additionalProperties` を true に変えても全件緑だった (契約が主張する性質を
+    // 誰も固定していない状態)
+    expect(
+      (relayed as { additionalProperties?: unknown } | undefined)?.additionalProperties,
+      'RelayedUpstreamError が未知キーを閉じていない',
+    ).toBe(false);
+    expect(
+      (relayed?.properties?.error as { additionalProperties?: unknown } | undefined)
+        ?.additionalProperties,
+      'RelayedUpstreamError.error が未知キーを閉じていない',
+    ).toBe(false);
     // 最上位 type の値は閉じた語彙。**契約の enum を期待値にする** — 値を実装・契約・テストの
     // 3 か所へ手書きしていたときは、契約の enum を別の値へ書き換えても全件緑だった (実測)
     const topLevelEnum = (relayed?.properties?.type as { enum?: unknown } | undefined)?.enum;

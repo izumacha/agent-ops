@@ -98,6 +98,11 @@ export function upstreamEndpoint(provider: Provider, env: NodeJS.ProcessEnv): UR
   return new URL(`${base.origin}${path}`);
 }
 
+// HTTP のフィールド値として送れる文字だけ (水平タブと印字可能な ASCII)。
+// これを外れる値を `Headers.set` へ渡すと TypeError になる — 資格情報は環境変数由来なので
+// 「設定が使えない」として 503 に倒し、上流を呼ぶ前に止める
+const HTTP_FIELD_VALUE_PATTERN = /^[\t\x20-\x7e]+$/;
+
 /** 中継に必要な材料 (接続先と上流の資格情報)。どちらも環境変数とコードだけから決まる */
 export interface UpstreamTarget {
   // 中継先の URL
@@ -117,6 +122,12 @@ export function resolveUpstreamTarget(provider: Provider, env = process.env): Up
   // 上流の資格情報 (未設定なら中継できない)
   const apiKey = env[UPSTREAMS[provider].apiKeyEnv]?.trim();
   if (apiKey === undefined || apiKey === '') throw notConfiguredError();
+  // **形も確かめる。** 空かどうかだけを見ていると、改行や非 ASCII が混じった値 (貼り付けミスで
+  // 十分起こる) が `Headers.set` の TypeError になり、それは `callUpstream` の中で起きるので
+  // catch-all が 502 へ写す。その 502 は利用イベントとして**記録される**ため、上流へ 1 バイトも
+  // 出ていない呼び出しで DB の行だけが増える (実測: fetch 0 回・記録 1 行)。
+  // 「設定が使えない」は 503 (記録しない) 側の事情なので、ここで倒す (ADR-0007 決定 7)
+  if (!HTTP_FIELD_VALUE_PATTERN.test(apiKey)) throw notConfiguredError();
   // 中継の材料
   return { endpoint, apiKey };
 }

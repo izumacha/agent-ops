@@ -813,6 +813,32 @@ describe('上流の失敗', () => {
     // 上流が未設定のあいだ有効なキー 1 本で DB の行だけを無制限に増やせる (実測)
     expect(recordedEvents()).toHaveLength(0);
   });
+
+  it.each([
+    ['改行入り', 'sk-ant\nX-Injected: 1'],
+    ['復帰入り', 'sk-ant\rX-Injected: 1'],
+    ['非 ASCII', 'キー'],
+    // NUL は環境変数に入らない (Node が C 文字列として扱い手前で切れる。実測で 'sk-ant' になった)
+  ])('資格情報の形が不正なら 503 (呼びに行かず記録もしない): %s', async (_label, apiKey) => {
+    // **空かどうかだけでは足りない。** これらの値は `Headers.set` が TypeError を投げ、
+    // それは callUpstream の中で起きるので catch-all が 502 へ写す。その 502 は
+    // 利用イベントとして記録されるため、上流へ 1 バイトも出ていない呼び出しで
+    // DB の行だけが増える (実測: fetch 0 回・記録 1 行)。貼り付けミスで十分起こる形
+    vi.stubEnv('ANTHROPIC_API_KEY', apiKey);
+    // 上流は呼ばれない
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // 「設定が使えない」側の 503 で、上流は呼ばない
+    expect(result.status).toBe(503);
+    expect(fetchCalls, '上流を呼んでいる').toHaveLength(0);
+    // 記録もしない
+    expect(recordedEvents(), '0 バイトの呼び出しを記録している').toHaveLength(0);
+  });
 });
 
 describe('サーバログ', () => {

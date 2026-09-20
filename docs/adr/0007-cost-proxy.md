@@ -53,7 +53,7 @@ Step2 の成果物は「LLM 呼び出しを中継するプロキシ（Anthropic/
 ## 結果
 
 - 実装は `src/lib/proxy/upstream.ts`（接続先とヘッダ）・`src/lib/proxy/usage.ts`（トークン数の読み取り）・`src/app/api/v1/proxy/proxy-route.ts`（本体）に分かれ、プロバイダごとの違いは前 2 つに閉じる。
-- 追加遅延は `scripts/bench-proxy.ts` が測る。ローカルに https のスタブ上流を立てるので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。測り方（逐次実行で 1 件あたりの増分を測る理由、p97.5 を使う理由）はスクリプト冒頭のコメントが正本。
+- 追加遅延は `scripts/bench-proxy.ts` が測る。ローカルに https のスタブ上流を立てるので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。測り方（逐次実行で 1 件あたりの増分を測る理由、p97.5 を使う理由、判定の前に捨て玉を流して初回コストを判定へ混ぜない理由）はスクリプト冒頭のコメントが正本。
 - ベンチに使う `autocannon` は devDependency。推移依存の `uuid@8` に moderate の勧告（GHSA-w5hq-g745-h8pq）があるが、対象は v3/v5/v6 に `buf` を渡す使い方で、`hyperid` は Node 22 の `crypto.randomUUID` を使う（無い環境でも v4）。配布物にも入らないため受け入れる。ゲートの基準（`npm audit --audit-level=high` が 0）は満たしたまま。
 
 ## 残る宿題

@@ -6,7 +6,7 @@ import { callUpstream, resolveUpstreamBaseUrl, upstreamEndpoint } from '@/lib/pr
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { UPSTREAM_MAX_RESPONSE_BYTES } from '@/lib/constants';
+import { UPSTREAM_MAX_RESPONSE_BYTES, USAGE_TOKENS_MAX } from '@/lib/constants';
 import { Provider } from '@/domain/types';
 
 // 環境変数の入れ物を作る (process.env を汚さずに判定だけを試す)
@@ -337,10 +337,30 @@ describe('上流の応答からのトークン数の読み取り', () => {
     ['トークン数が文字列', { usage: { input_tokens: '3', output_tokens: 4 } }],
     ['トークン数が負', { usage: { input_tokens: -1, output_tokens: 4 } }],
     ['トークン数が小数', { usage: { input_tokens: 1.5, output_tokens: 4 } }],
+    // **保存できる範囲を超える申告**。安全な整数まで通していたときは、記録が P2020 で落ちて
+    // `recordUsage` がそれを飲み、利用イベントが 1 行も残らなかった (実測)。中継は成功しているので
+    // 上流の課金は発生しており、「課金されたのに台帳に無い」状態になる (ADR-0007 決定 5)
+    [
+      '入力トークン数が列の範囲を超える',
+      { usage: { input_tokens: USAGE_TOKENS_MAX + 1, output_tokens: 4 } },
+    ],
+    [
+      '出力トークン数が列の範囲を超える',
+      { usage: { input_tokens: 4, output_tokens: Number.MAX_SAFE_INTEGER } },
+    ],
     ['応答が null', null],
     ['応答が配列', []],
   ])('%s ときは null (上流の申告値をそのまま信じない)', (_label, payload) => {
     // 読めなければ null (呼び出し側が「計測できなかった」として扱う)
     expect(readUpstreamUsage(Provider.anthropic, payload)).toBeNull();
+  });
+
+  it('列の範囲ちょうどは通す (絞りすぎて計測が消えていない)', () => {
+    // 上限ちょうどは保存できるので読めること (上側だけを見ると、上限をいくら下げても気付けない)
+    expect(
+      readUpstreamUsage(Provider.anthropic, {
+        usage: { input_tokens: USAGE_TOKENS_MAX, output_tokens: 0 },
+      }),
+    ).toEqual({ inputTokens: USAGE_TOKENS_MAX, outputTokens: 0 });
   });
 });

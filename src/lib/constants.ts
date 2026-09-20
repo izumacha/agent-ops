@@ -56,6 +56,13 @@ export const UPSTREAM_TIMEOUT_MS = 120_000;
 // 上限が無いと、壊れた前段ゲートウェイが巨大な本文を返したとき「同時リクエスト数 × 本文サイズ」の
 // ヒープを一度に握り、タイムアウトまで解放されない (実測で 64 MiB を丸ごとバッファした)
 export const UPSTREAM_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+// 上流が申告するトークン数として受け付ける上限。**`prisma/schema.prisma` の
+// `UsageEvent.inputTokens` / `outputTokens` が `Int` (PostgreSQL の integer = 2^31-1) なので、
+// それより大きい値は保存できない。** 受け入れてしまうと記録が P2020 で落ち、`recordUsage` が
+// それを飲むので**「上流の課金は発生しているのに台帳に 1 行も無い」**状態になる (実測で 0 行)。
+// 上限を超えた申告は「トークン数を読めなかった」として扱い、料金 0 の行を必ず 1 行残す
+// (ADR-0007 決定 5)。列の型を変えるときはここも合わせる
+export const USAGE_TOKENS_MAX = 2_147_483_647;
 // JSON 本文の上限 (バイト) の再公開。値そのものは `src/lib/body-limits.ts` が持つ
 // (`next.config.ts` が import する都合で、あちらは `@/...` を含まない定数だけのファイルにしてある)
 export { JSON_BODY_MAX_BYTES } from '@/lib/body-limits';

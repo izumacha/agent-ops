@@ -21,6 +21,12 @@ import {
   missingPriceCases,
 } from '../scripts/lib/gate-report.mjs';
 import { PRICE_TEST_PREFIX } from '../scripts/lib/step2-criteria.mjs';
+import {
+  WARMUP_MAX_MS,
+  intFromEnvValue,
+  warmupCountProblem,
+  warmupLatencyProblem,
+} from '../scripts/lib/bench-criteria.mjs';
 
 // 子プロセスでヘルパーを 1 つ呼び、終了コードと「その後に到達したか」を返す。
 // **なぜ子プロセスなのか**: process.exit の有無は戻り値に現れないので、同じプロセス内では確かめられない
@@ -284,5 +290,75 @@ describe('exitIfFailures', () => {
     // 正常終了し、続きまで到達すること
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('REACHED_END');
+  });
+});
+
+describe('intFromEnvValue', () => {
+  it('未設定なら既定値を返す', () => {
+    // 環境変数を置かない運用 (CI の既定) を壊さない
+    expect(intFromEnvValue('BENCH_WARMUP', undefined, 200, 0)).toBe(200);
+  });
+
+  it.each([
+    ['空文字', ''],
+    ['空白だけ', ' '],
+    ['改行だけ', '\n'],
+    ['単位つき', '2s'],
+    ['16 進', '0x10'],
+    ['指数表記', '2e2'],
+    ['前後に空白', ' 5 '],
+    ['小数', '1.5'],
+    ['負の数', '-1'],
+  ])('10 進の整数として読めない値は落とす: %s', (_label, raw) => {
+    // **空文字がいちばん危ない。** `Number('')` は 0 なので、最小値 0 の変数 (捨て玉の件数) では
+    // そのまま受理され、捨て玉とそれに掛かるガード 2 本がまとめて黙って外れる (実測)。
+    // CI の YAML で未設定の入力を渡すと空文字になるため、現実に踏む経路
+    expect(() => intFromEnvValue('BENCH_WARMUP', raw, 200, 0)).toThrow();
+  });
+
+  it('最小値を下回る値は落とす', () => {
+    // 0 を許さない変数 (秒数・接続数) で 0 を渡したとき
+    expect(() => intFromEnvValue('BENCH_DURATION', '0', 10, 1)).toThrow();
+  });
+
+  it.each([
+    ['0 (捨て玉を明示的に切る)', '0', 0, 0],
+    ['1', '1', 0, 1],
+    ['200', '200', 0, 200],
+  ])('正当な値は受理する: %s', (_label, raw, minimum, expected) => {
+    // 正当な値を弾かないこと (弾くと「捨て玉なしでも測れる」逃げ道が消える)
+    expect(intFromEnvValue('BENCH_WARMUP', raw, 999, minimum)).toBe(expected);
+  });
+});
+
+describe('warmupCountProblem', () => {
+  it('件数が一致していれば問題なし', () => {
+    // 指定どおりに止まった場合
+    expect(warmupCountProblem(200, 200)).toBeNull();
+  });
+
+  it.each([
+    ['多い (秒で回ってしまった)', 20109],
+    ['少ない (途中で止まった)', 37],
+  ])('件数が違えば理由を返す: %s', (_label, actual) => {
+    // どちらでも本計測の数字は信用できないので落とす
+    expect(warmupCountProblem(200, actual)).toContain('捨て玉が指定の件数で止まりませんでした');
+  });
+});
+
+describe('warmupLatencyProblem', () => {
+  it.each([
+    ['上限より小さい', 117],
+    ['上限ちょうど', WARMUP_MAX_MS],
+  ])('上限以内なら問題なし: %s', (_label, maxMs) => {
+    // 実測の初回コストは機械によって 88〜151ms なので、ここで落ちると日常的に赤くなる
+    expect(warmupLatencyProblem(maxMs, WARMUP_MAX_MS)).toBeNull();
+  });
+
+  it('上限を超えたら理由を返す', () => {
+    // 桁が変わる悪化だけを捕まえる (266ms 程度は意図的に通す。理由は bench-criteria.mjs)
+    expect(warmupLatencyProblem(WARMUP_MAX_MS + 1, WARMUP_MAX_MS)).toContain(
+      '初回コストが大きすぎます',
+    );
   });
 });

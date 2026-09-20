@@ -14,6 +14,7 @@ import { ApiError, validationError } from '@/lib/api/errors';
 import { requireProxyAgent } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
@@ -24,39 +25,69 @@ const NO_TOKENS = 0;
 const NO_COST = 0n;
 // 上流が 5xx を返したかどうかの境目
 const SERVER_ERROR_THRESHOLD = 500;
+// 上流の応答が 2xx かどうかの上端 (これ未満なら成功として扱う)
+const SUCCESS_STATUS_CEILING = 300;
+
+// 写像 1 件の形 (返すステータス・本文の定型文・上流の Retry-After を中継してよいか)
+interface MaskedResponse {
+  // 利用者へ返すステータス
+  status: number;
+  // 利用者へ返す定型文 (上流の文章は使わない)
+  message: string;
+  // 上流の Retry-After を中継してよいか
+  relayRetryAfter: boolean;
+}
+
+// 上流の応答をそのまま返せないときの、利用者向けの応答。
+// **同じ組を何か所にも書かない** (写像の表・5xx・本文が読めないときの 3 か所が引く)
+const RELAY_FAILURE: MaskedResponse = {
+  status: HTTP_STATUS.BAD_GATEWAY,
+  message: API_MESSAGES.upstreamFailure,
+  // 混雑ではないので待ち時間の指示は中継しない
+  relayRetryAfter: false,
+};
 
 /**
- * 上流の応答のうち、**本文をそのまま返してはいけない**ステータス。
+ * 上流の応答のうち、**ステータスごと利用者から隠す**もの。
  * 4xx を「送り主自身の本文についての診断」として素通しするのが既定だが、認証・認可・混雑は
  * 送り主ではなく**プラットフォーム側の上流アカウント**の状態を語る。実際に上流は 401 の本文へ
  * 部分マスクした API キーを、429 の本文へ組織名やクォータの状況を載せるため、素通しすると
- * 有効な API キーを持つ全テナントがそれを観測できてしまう (ADR-0007 の決定 7)
+ * 有効な API キーを持つ全テナントがそれを観測できてしまう (ADR-0007 の決定 7)。
+ *
+ * **型を Partial にしてあるのは、参照が `undefined` を含むようにするため** — `Record<number, T>` だと
+ * 存在しないステータスを引いても型の上では値があることになり、`undefined` の検査を落とす
+ * リファクタを型検査が止めてくれない (落とすと通常の 2xx 応答が毎回クラッシュする)
  */
-const UPSTREAM_STATUS_MASKING: Readonly<Record<number, { status: number; message: string }>> = {
+const UPSTREAM_STATUS_MASKING: Readonly<Partial<Record<number, MaskedResponse>>> = {
   // 上流が資格情報を拒否した = こちらの設定の問題。利用者には中継の失敗としてだけ伝える
-  [HTTP_STATUS.UNAUTHORIZED]: {
-    status: HTTP_STATUS.BAD_GATEWAY,
-    message: API_MESSAGES.upstreamFailure,
-  },
+  [HTTP_STATUS.UNAUTHORIZED]: RELAY_FAILURE,
   // 上流が権限不足を返した場合も同じ (組織やモデルの許可はプラットフォーム側の設定)
-  [HTTP_STATUS.FORBIDDEN]: {
-    status: HTTP_STATUS.BAD_GATEWAY,
-    message: API_MESSAGES.upstreamFailure,
-  },
-  // 混雑だけは「待てば通る」情報に意味があるので 429 のまま返す (本文は定型文へ差し替える)
+  [HTTP_STATUS.FORBIDDEN]: RELAY_FAILURE,
+  // 混雑だけは「待てば通る」情報に意味があるので 429 のまま返す (本文は定型文へ差し替える)。
+  // **この 1 件だけが上流の Retry-After を中継してよい** — 401/403 でも中継していたときは
+  // 「この 502 はバックオフ由来だ」というプラットフォーム側の状態が伝わっていた (実測)
   [HTTP_STATUS.TOO_MANY_REQUESTS]: {
     status: HTTP_STATUS.TOO_MANY_REQUESTS,
     message: API_MESSAGES.upstreamRateLimited,
+    relayRetryAfter: true,
   },
 };
 
-// 上流の応答が JSON かどうか (パラメータ付き `application/json; charset=utf-8` も許す)。
-// ベンダーの JSON API は `application/json` 系しか返さないので、それ以外は異常として扱う
-function isJsonMediaType(contentType: string | null): boolean {
-  // ヘッダが無ければ JSON とみなさない (fail-closed)
-  if (contentType === null) return false;
-  // パラメータを落として比較する
-  return contentType.split(';')[0].trim().toLowerCase() === 'application/json';
+// 中継してよい Retry-After の形 (RFC 9110 の delay-seconds = 整数の秒数)。
+// 上限桁数を決めた固定長の繰り返しなので ReDoS の余地は無い (§9)
+const RETRY_AFTER_SECONDS_PATTERN = /^[0-9]{1,7}$/;
+
+// 上流の Retry-After のうち、中継してよい形のものだけを返す (それ以外は undefined)。
+// 値を検証せず素通ししていたときは、非数値のバイト列も HTTP-date もそのままクライアントへ届いた (実測)
+function relayableRetryAfter(masked: MaskedResponse, value: string | null): string | undefined {
+  // 混雑以外では中継しない
+  if (!masked.relayRetryAfter) return undefined;
+  // ヘッダが無ければ中継しない
+  if (value === null) return undefined;
+  // 前後の空白を落とす
+  const seconds = value.trim();
+  // 整数の秒数だけを通す
+  return RETRY_AFTER_SECONDS_PATTERN.test(seconds) ? seconds : undefined;
 }
 
 // 利用イベントを 1 行記録する。**失敗しても投げない** (中継そのものは成功しているため)
@@ -129,58 +160,26 @@ export function proxyRoute(provider: Provider) {
         const result = await callUpstream({ provider, target, body: payload });
         // かかった時間
         const latencyMs = Math.round(performance.now() - startedAt);
-        // 上流の応答のうち、本文を返してはいけないもの (401 / 403 / 429) と 5xx は、
-        // 利用者向けの定型文へ写してから返す。記録は**実際の上流のステータス**で残す
-        const masked =
-          result.status >= SERVER_ERROR_THRESHOLD
-            ? { status: HTTP_STATUS.BAD_GATEWAY, message: API_MESSAGES.upstreamFailure }
-            : UPSTREAM_STATUS_MASKING[result.status];
-        if (masked !== undefined) {
-          // 記録してから
-          await recordUsage(repos, {
-            tenantId,
-            agentId: agent.id,
-            provider,
-            model: body.model,
-            inputTokens: NO_TOKENS,
-            outputTokens: NO_TOKENS,
-            costMicroUsd: NO_COST,
-            latencyMs,
-            statusCode: result.status,
-          });
-          // 記録済みの印を立ててから、定型文の応答として返す。
-          // 混雑 (429) のときだけ上流の Retry-After を中継する (待ち時間そのものは
-          // プラットフォーム側の情報を漏らさず、クライアントの再試行嵐を防ぐ)
-          alreadyRecorded = true;
-          throw new ApiError(
-            masked.status,
-            masked.message,
-            undefined,
-            result.retryAfter === null ? undefined : { 'Retry-After': result.retryAfter },
-          );
-        }
-        // 応答本文を JSON として読む (2xx でも壊れていれば usage は読めない)
+        // 応答本文を JSON として読む。**読めたかどうかを真偽値で覚えておく** —
+        // `JSON.parse('null')` は成功して null を返すので、値だけでは区別が付かない
         let parsed: unknown = null;
+        let bodyIsJson = false;
         try {
           parsed = JSON.parse(result.body);
+          bodyIsJson = true;
         } catch {
-          // 解釈できない本文は「計測できなかった呼び出し」として扱う (そのまま中継はする)
-          parsed = null;
+          // 解釈できない本文 (前段ゲートウェイの HTML のエラーページ、本文を持てない 204/304 の空文字 …)
+          bodyIsJson = false;
         }
         // トークン数を読む (読めなければ null)
         const usage = readUpstreamUsage(provider, parsed);
-        // 読めなかったことはサーバログに残す (料金 0 の行が黙って増えないように)。
-        // ここへ来る時点で 5xx は上で返しているので、ステータスの条件は足さない (常に真になる)
-        if (usage === null) {
-          console.error('[proxy] 上流の応答からトークン数を読めませんでした');
-        }
         // 料金を計算する (トークン数が読めなければ 0)
         const cost =
           usage === null
             ? NO_COST
             : (costMicroUsd(provider, body.model, usage.inputTokens, usage.outputTokens) ??
               NO_COST);
-        // 記録する (成功・4xx ともに 1 行)
+        // 記録する (成功・失敗ともに 1 行。ステータスは**実際の上流の値**)
         alreadyRecorded = true;
         await recordUsage(repos, {
           tenantId,
@@ -193,14 +192,43 @@ export function proxyRoute(provider: Provider) {
           latencyMs,
           statusCode: result.status,
         });
-        // 上流が JSON 以外 (前段のゲートウェイが返す HTML のエラーページ等) を返したときは、
-        // 本文を返さず 502 にする。**JSON だと名乗って HTML を返さない** —
-        // クライアントの JSON 解釈が理由不明で失敗するうえ、中身は上流側の内部情報でもある
-        if (!isJsonMediaType(result.contentType)) {
-          throw new ApiError(HTTP_STATUS.BAD_GATEWAY, API_MESSAGES.upstreamFailure);
+        // 成功なのにトークン数を読めなかったことはサーバログに残す (料金 0 の行が黙って増えないように)。
+        // **4xx では出さない** — 上流のエラー本文に usage は載らないので必ず読めず、
+        // 有効なキーを持つ相手が安く量産できる 400 でログが埋まって本物の異常が隠れる
+        if (usage === null && result.status < SUCCESS_STATUS_CEILING) {
+          console.error('[proxy] 上流の応答からトークン数を読めませんでした');
         }
-        // 上流の応答をそのまま返す (ヘッダは content-type だけ。上流のヘッダは転送しない)
-        return new Response(result.body, {
+        // **本文が JSON として読めなければ、ステータスに関わらず中継しない** (502)。
+        // 前段のゲートウェイが返す HTML のエラーページや、本文を持てない 204 / 304 がここに来る
+        // (204 を `new Response(body, { status: 204 })` に渡すと TypeError になり、
+        //  上流の異常が「自分の内部エラー」= 500 とスタック付きのログに化けていた。実測)。
+        // **Content-Type では判定しない** — 前段が付け替えただけの正しい JSON を捨てると、
+        // トークン分を記録したのに応答は返さない「課金だけして捨てる」経路になる (実測)
+        const masked = !bodyIsJson
+          ? RELAY_FAILURE
+          : result.status >= SERVER_ERROR_THRESHOLD
+            ? RELAY_FAILURE
+            : UPSTREAM_STATUS_MASKING[result.status];
+        // ステータスごと隠すものは、定型文の応答として返す
+        if (masked !== undefined) {
+          // 混雑のときだけ、形の整った Retry-After を中継する
+          const retryAfter = relayableRetryAfter(masked, result.retryAfter);
+          throw new ApiError(
+            masked.status,
+            masked.message,
+            undefined,
+            retryAfter === undefined ? undefined : { 'Retry-After': retryAfter },
+          );
+        }
+        // 2xx はそのまま返し、素通しする 4xx は**機械可読な項目だけ**に絞ってから返す。
+        // 上流の自由記述には残高不足・組織名・契約ティアが載るので、ステータス番号では選り分けられない
+        // (ADR-0007 決定 7。絞り込みの規則は src/lib/proxy/error-body.ts)
+        const relayedBody =
+          result.status < SUCCESS_STATUS_CEILING
+            ? result.body
+            : JSON.stringify(sanitizeUpstreamErrorBody(parsed));
+        // 上流の応答を返す (ヘッダは content-type だけ。上流のヘッダは転送しない)
+        return new Response(relayedBody, {
           status: result.status,
           headers: { 'content-type': 'application/json' },
         });

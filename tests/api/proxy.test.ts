@@ -448,20 +448,82 @@ describe('上流の失敗', () => {
     expect(recordedEvents()[0].costMicroUsd).toBe(0n);
   });
 
-  it('上流の 4xx はそのまま返し、記録も残す (送り主の本文の問題なので診断を渡す)', async () => {
-    // 上流が 400 を返す
-    stubUpstream({ status: 400, body: { error: { message: 'max_tokens is required' } } });
+  it('上流の 4xx はステータスと機械可読な項目だけを返す (自由記述は落とす)', async () => {
+    // 上流の 4xx の自由記述には**プラットフォーム側のアカウントの状態**が載る。
+    // 実測で確認した例: Anthropic の残高不足は 400 で「credit balance is too low … Plans & Billing」、
+    // OpenAI の model_not_found は 404 で「your organization <組織名> does not have access」。
+    // ステータス番号では「送り主の本文が悪い 400」と選り分けられないので、項目で絞る (ADR-0007 決定 7)
+    stubUpstream({
+      status: 400,
+      body: {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          code: 'context_length_exceeded',
+          param: 'max_tokens',
+          message:
+            'Your credit balance is too low. Go to Plans & Billing for organization acme-corp',
+        },
+        request_id: 'req_011CQabcdef',
+      },
+    });
     // 中継する
     const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
     const result = await call(proxyAnthropic, {
       token: key.secret,
       body: { model: ANTHROPIC_MODEL },
     });
-    // 上流のステータスと本文がそのまま返る
+    // ステータスはそのまま (送り主が再試行の可否を判断できる)
     expect(result.status).toBe(400);
-    expect(JSON.stringify(result.json)).toContain('max_tokens is required');
+    // 機械可読な項目は残る (どの入力が悪いのかは伝わる)
+    const body = result.json as { type?: string; error?: Record<string, unknown> };
+    expect(body.type).toBe('error');
+    expect(body.error?.type).toBe('invalid_request_error');
+    expect(body.error?.code).toBe('context_length_exceeded');
+    expect(body.error?.param).toBe('max_tokens');
+    // 自由記述と上流の識別子は落ちる
+    expect(JSON.stringify(result.json)).not.toContain('credit balance');
+    expect(JSON.stringify(result.json)).not.toContain('acme-corp');
+    expect(JSON.stringify(result.json)).not.toContain('req_011CQabcdef');
     // 記録も残る
     expect(recordedEvents()[0].statusCode).toBe(400);
+  });
+
+  it('上流の Retry-After は混雑 (429) 以外へは中継しない', async () => {
+    // 401 を 502 へ写すときに待ち時間まで渡すと、「この 502 はバックオフ由来だ」という
+    // プラットフォーム側の状態が利用者へ伝わる (上流のアカウントは全テナント共有)
+    for (const status of [401, 403, 500]) {
+      // このループ内で数えるため毎回空にする
+      seed.store.usageEvents.clear();
+      stubUpstream({ status, body: { error: 'x' }, headers: { 'retry-after': '3600' } });
+      // 中継する
+      const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+      const result = await call(proxyAnthropic, {
+        token: key.secret,
+        body: { model: ANTHROPIC_MODEL },
+      });
+      // どれも 502 で、待ち時間の指示は付かない
+      expect(result.status, `${status} の写し先が違う`).toBe(502);
+      expect(result.headers.get('Retry-After'), `${status} で Retry-After が漏れている`).toBeNull();
+    }
+  });
+
+  it('形の違う Retry-After は中継しない (整数の秒数だけを通す)', async () => {
+    // 上流の値を検証せず素通ししていたときは、非数値のバイト列も HTTP-date もそのまま届いた
+    stubUpstream({
+      status: 429,
+      body: { error: 'busy' },
+      headers: { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' },
+    });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // 429 は返るが、形の違う待ち時間は落とす
+    expect(result.status).toBe(429);
+    expect(result.headers.get('Retry-After')).toBeNull();
   });
 
   it('上流の 401 / 403 は 502 に写して本文を返さない (上流アカウントの状態を漏らさない)', async () => {
@@ -512,7 +574,7 @@ describe('上流の失敗', () => {
     expect(recordedEvents()[0].statusCode).toBe(429);
   });
 
-  it('上流が JSON 以外を返したら 502 (中身も返さない)', async () => {
+  it('上流の本文が JSON として読めなければ 502 (中身も返さない)', async () => {
     // 前段のゲートウェイが HTML のエラーページを返す形。JSON だと名乗って HTML を返すと
     // クライアントの解釈が理由不明で失敗し、中身は上流側の内部情報でもある
     stubUpstream({
@@ -532,6 +594,40 @@ describe('上流の失敗', () => {
     // 上流は実際に呼ばれているので記録は残る (ステータスは上流の 200)
     expect(recordedEvents()).toHaveLength(1);
     expect(recordedEvents()[0].statusCode).toBe(200);
+  });
+
+  it('本文を持てないステータス (204) でも 500 にならず 502 になる', async () => {
+    // 204 の本文は空文字なので JSON として読めない。**本文ごと Response へ渡すと TypeError** になり、
+    // 上流の異常が「自分の内部エラー」= 500 とスタック付きのログに化けていた (実測)
+    stubUpstream({ status: 204, rawBody: '' });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // 上流の異常として 502 (自分の内部エラーにしない)
+    expect(result.status).toBe(502);
+  });
+
+  it('Content-Type が違っても本文が JSON なら中継する (課金だけして捨てない)', async () => {
+    // 前段が Content-Type を付け替えただけの正しい JSON を捨てると、トークン分を記録したのに
+    // 応答は返さない「課金だけして捨てる」経路になる (実測で 33,000 マイクロ USD を記録して 502 を返した)
+    stubUpstream({
+      status: 200,
+      body: anthropicResponse(1000, 2000),
+      contentType: 'text/plain; charset=utf-8',
+    });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // 応答は返り、記録した料金と釣り合う
+    expect(result.status).toBe(200);
+    expect(recordedEvents()[0].inputTokens).toBe(1000);
+    expect(recordedEvents()[0].costMicroUsd).toBeGreaterThan(0n);
   });
 
   it('上流が時間内に応答しなければ 504 で、記録も残す', async () => {

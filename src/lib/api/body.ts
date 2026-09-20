@@ -1,6 +1,7 @@
 // リクエスト本文の読み取りと検証 (Content-Type・サイズ上限・JSON 構文・Zod スキーマ)
 import type { ZodType } from 'zod';
 import { API_MESSAGES, JSON_BODY_MAX_BYTES } from '@/lib/constants';
+import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
 import { ApiError, validationError, type ApiIssue } from './errors';
 import { HTTP_STATUS } from './http-status';
 
@@ -53,37 +54,16 @@ export function validateWith<T>(schema: ZodType<T>, value: unknown): T {
 /**
  * 本文を上限バイトまでで読む。request.text() は全量をメモリへ載せてからしか大きさが分からないため、
  * Content-Length を偽る・省く (chunked) 要求に対して上限が効かない。ストリームを読みながら数え、
- * 超えた時点で読むのをやめて 413 にする
+ * 超えた時点で読むのをやめて 413 にする。
+ * **数えながら読む処理そのものは src/lib/stream-bytes.ts と共有する** (上流の応答も同じ読み方が要る)。
+ * ここが持つのは「その結果をどの HTTP エラーへ写すか」だけ
  */
 async function readBodyWithinByteLimit(request: Request, maxBytes: number): Promise<string> {
-  // 本文が無ければ空文字
-  if (!request.body) return '';
-  // ストリームを少しずつ読む
-  const reader = request.body.getReader();
-  // 読んだかたまりと合計バイト数
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  // 上限を超えたら残りを読まずに打ち切る
+  // 上限まで読む (読み取り自体の失敗は投げたまま上がってくる)
+  let result;
   try {
-    // 終端まで読む
-    for (;;) {
-      // 次のかたまり
-      const { done, value } = await reader.read();
-      // 終端なら抜ける
-      if (done) break;
-      // 合計を更新し、上限超過なら残りを読まずに 413。reader.cancel() は呼ばない —
-      // Next.js の本文ストリームは cancel を受けると下層の IncomingMessage ごと破棄し、送信済みの 413 が届く前に
-      // 接続が切れる (クライアントには ECONNRESET に見える)。読むのをやめて応答を返せば、残りは Node が捨てる
-      total += value.byteLength;
-      if (total > maxBytes) {
-        throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
-      }
-      // 上限内なら取っておく
-      chunks.push(value);
-    }
+    result = await readStreamWithinByteLimit(request.body, maxBytes);
   } catch (error) {
-    // 上限超過 (ApiError) はそのまま
-    if (error instanceof ApiError) throw error;
     // 送信の途中でクライアントが切断すると read() が Node の切断エラーで reject する。サーバの障害ではないので
     // 500 と障害ログ (handler.ts の console.error) にせず 400 で終える (日常の切断で本物の内部エラーが埋もれない)
     if (request.signal.aborted || isConnectionReset(error)) {
@@ -91,17 +71,16 @@ async function readBodyWithinByteLimit(request: Request, maxBytes: number): Prom
     }
     // それ以外の失敗は内部エラーとして上へ
     throw error;
-  } finally {
-    // 打ち切り・完了のどちらでもストリームを解放する (§8 リソースを確実に解放する)
-    reader.releaseLock();
   }
-  // UTF-8 として連結する。不正なバイト列は置換 (U+FFFD) せず失敗させる (JSON は UTF-8 必須 (RFC 8259 §8.1)。
-  // 黙って置換すると、送り主の意図と違う名前が保存されて一意判定もその文字列で行われる)
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
-  } catch {
-    throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
+  // 上限内で読めた本文
+  if (result.ok) return result.text;
+  // 上限超過は 413
+  if (result.reason === 'too_large') {
+    throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
   }
+  // UTF-8 として壊れたバイト列は 400 (JSON は UTF-8 必須 (RFC 8259 §8.1)。黙って置換 (U+FFFD) すると、
+  // 送り主の意図と違う名前が保存されて一意判定もその文字列で行われる)
+  throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
 }
 
 /**

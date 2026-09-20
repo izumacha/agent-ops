@@ -98,9 +98,33 @@ describe('接続先の決定', () => {
     expect(withSlash.href).toBe('https://gateway.example.com/llm/v1/messages');
     expect(withoutSlash.href).toBe(withSlash.href);
   });
+
+  it('基底 URL のパスが // で始まっても接続先のホストは動かない (プロトコル相対 URL の罠)', () => {
+    // 末尾スラッシュの打ち間違いを模す。`new URL(path, base)` で組み立てると、この部分が
+    // **プロトコル相対 URL**として解釈され、上流の API キーごと別ホストへ送られる (実測)。
+    // resolveUpstreamBaseUrl はパスを検査しないので、この基底 URL 自体は設定として通る
+    const url = upstreamEndpoint(
+      Provider.anthropic,
+      env({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com//evil.example.com' }),
+    );
+    // 接続先のホストは基底の origin から動かない
+    expect(url.origin).toBe('https://api.anthropic.com');
+    expect(url.hostname).not.toBe('evil.example.com');
+  });
+
+  it('バックスラッシュで始まるパスでも接続先のホストは動かない', () => {
+    // WHATWG の URL はバックスラッシュをスラッシュとして扱うので、`\\host` も同じ罠になる
+    const url = upstreamEndpoint(
+      Provider.openai,
+      env({ OPENAI_BASE_URL: 'https://api.openai.com/\\evil.example.com' }),
+    );
+    // 接続先のホストは基底の origin から動かない
+    expect(url.origin).toBe('https://api.openai.com');
+    expect(url.hostname).not.toBe('evil.example.com');
+  });
 });
 
-describe('上流の呼び出し (時間切れ)', () => {
+describe('上流の呼び出し (時間切れ・本文の上限)', () => {
   // 差し替えた fetch を元へ戻す
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -135,6 +159,62 @@ describe('上流の呼び出し (時間切れ)', () => {
     // 504 として扱われる (合図を渡していなければ、この呼び出しは永久に解決しない)
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(HTTP_STATUS.GATEWAY_TIMEOUT);
+  });
+
+  it('応答本文が上限を超えたら 502 (全量をメモリへ載せない)', async () => {
+    // 壊れた前段ゲートウェイが巨大な本文を返す形。response.text() で読んでいたときは
+    // 64 MiB を丸ごとバッファした (実測)。上限を超えたら読むのをやめて 502 にする
+    const chunk = new TextEncoder().encode('x'.repeat(1024));
+    // 上限 (2 KiB) を必ず超える本文をストリームで返す
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                // 1 KiB のかたまりを 8 回流す
+                for (let i = 0; i < 8; i += 1) controller.enqueue(chunk);
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+    // 小さな上限で呼ぶ
+    const failure = await callUpstream({
+      provider: Provider.anthropic,
+      target: { endpoint: new URL('https://api.anthropic.com/v1/messages'), apiKey: 'k' },
+      body: '{}',
+      maxResponseBytes: 2 * 1024,
+    }).catch((error: unknown) => error);
+    // 上流の応答が使えなかったので 502
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(HTTP_STATUS.BAD_GATEWAY);
+  });
+
+  it('上限内の本文はそのまま読める (上限が常に噛むわけではない)', async () => {
+    // 上の検査が「いつも 502」になっていないことを確かめる
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+    // 同じ小さな上限でも、収まる本文は読める
+    const result = await callUpstream({
+      provider: Provider.anthropic,
+      target: { endpoint: new URL('https://api.anthropic.com/v1/messages'), apiKey: 'k' },
+      body: '{}',
+      maxResponseBytes: 2 * 1024,
+    });
+    // 本文がそのまま返る
+    expect(JSON.parse(result.body)).toEqual({ ok: true });
   });
 });
 

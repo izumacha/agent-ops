@@ -112,7 +112,13 @@ describe('Step0 の設計成果物', () => {
   // **見張る名前は基準モジュールの export から導く** — 手書きの一覧にすると、新しい基準を
   // 足した人が一覧へ足し忘れたぶんだけ検出網が静かに狭まる (実測で、名前を 2 つ直書きしていた
   // 当時は PROXY_ADDED_LATENCY_P95_MAX_MS をゲート本体で宣言し直しても全件緑で通った)。
-  // 対象は scripts/gate-step*.mjs の全部で、1 本も見つからなければ走査が壊れている (fail-closed)
+  // 対象は scripts/gate-step*.mjs の全部で、1 本も見つからなければ走査が壊れている (fail-closed)。
+  //
+  // **残る境界: 見ているのは「宣言の形」だけで、呼び出し側の直書きは素通りする。**
+  // 実測でも `evaluateStep2Report({ requiredPassedTests: REQUIRED_PASSED_TESTS, … })` を
+  // `requiredPassedTests: 1` に書き換えると、この検査も tests/gate-scripts.test.ts も緑のまま通った。
+  // 引数名と識別子の対応を見る形は書けるが、引数名を変えるだけで崩れるので採らない。
+  // **基準の値が実際に渡っているかはレビューで見る**（この repo の他の除外表と同じ扱い）
   it('ゲート本体は受け入れ基準の値を自分で宣言しない (共有の定義を読む)', () => {
     // 基準モジュールが公開している名前 (= ゲートが読むべき値の一覧)
     const criteriaNames = [...Object.keys(step1Criteria), ...Object.keys(step2Criteria)];

@@ -5,9 +5,10 @@
 // 素通しにすると、クライアントが送った Authorization が上流へ届いたり、上流向けの資格情報を
 // 上書きされたりする。必要になったヘッダ (anthropic-beta など) はここへ明示的に足す。
 import { Provider } from '@/domain/types';
-import { API_MESSAGES, UPSTREAM_TIMEOUT_MS } from '@/lib/constants';
+import { API_MESSAGES, UPSTREAM_MAX_RESPONSE_BYTES, UPSTREAM_TIMEOUT_MS } from '@/lib/constants';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
 
 // 1 プロバイダ分の結線 (既定の接続先・上書き用の環境変数名・資格情報の環境変数名・叩くパス)
 interface UpstreamConfig {
@@ -148,8 +149,6 @@ export interface UpstreamResult {
   // 上流が返した Retry-After (無ければ null)。混雑時の待ち時間だけは中継しても
   // プラットフォーム側の情報を漏らさないので、呼び出し側がクライアントへ渡せるようにする
   retryAfter: string | null;
-  // 上流が申告した Content-Type (無ければ null)。呼び出し側が「JSON 以外は返さない」判断に使う
-  contentType: string | null;
 }
 
 // 中継の入力
@@ -162,6 +161,8 @@ export interface UpstreamCall {
   body: string;
   // 応答を待つ上限 (ミリ秒)
   timeoutMs?: number;
+  // 応答本文を読む上限 (バイト)
+  maxResponseBytes?: number;
 }
 
 /**
@@ -172,6 +173,8 @@ export interface UpstreamCall {
 export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> {
   // 待ち時間の上限
   const timeoutMs = call.timeoutMs ?? UPSTREAM_TIMEOUT_MS;
+  // 応答本文の上限
+  const maxResponseBytes = call.maxResponseBytes ?? UPSTREAM_MAX_RESPONSE_BYTES;
   // 上流を呼ぶ
   try {
     // 上限時間で打ち切る (リダイレクトは追わない — 追うと接続先の allowlist を上流が書き換えられる)
@@ -182,16 +185,21 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> 
       redirect: 'error',
       signal: AbortSignal.timeout(timeoutMs),
     });
-    // 応答本文を読む (上流が壊れた本文を返しても、ここで読めた分をそのまま扱う)
-    const body = await response.text();
-    // ステータス・本文・待ち時間の指示・本文の種類を返す
+    // 応答本文を**上限バイトまで**読む。response.text() は全量をメモリへ載せてからしか大きさが
+    // 分からないので、壊れた前段ゲートウェイが巨大な本文を返すとそのぶんヒープを握ってしまう
+    const read = await readStreamWithinByteLimit(response.body, maxResponseBytes);
+    // 上限超過・UTF-8 として壊れた本文は「上流の応答が使えなかった」として 502 にする
+    // (中途半端に切り詰めた本文を JSON として解釈させない)
+    if (!read.ok) throw new ApiError(HTTP_STATUS.BAD_GATEWAY, API_MESSAGES.upstreamFailure);
+    // ステータス・本文・待ち時間の指示を返す
     return {
       status: response.status,
-      body,
+      body: read.text,
       retryAfter: response.headers.get('retry-after'),
-      contentType: response.headers.get('content-type'),
     };
   } catch (error) {
+    // 上で組み立てた ApiError (本文が大きすぎる等) はそのまま上げる
+    if (error instanceof ApiError) throw error;
     // 時間切れは 504 (上流が応答しなかった)
     if (error instanceof Error && error.name === 'TimeoutError') {
       throw new ApiError(HTTP_STATUS.GATEWAY_TIMEOUT, API_MESSAGES.upstreamTimeout);

@@ -5,7 +5,7 @@
 //   - 記録がテナント境界と複合 FK (tenantId, agentId) を越えないこと
 //   - BIGINT の料金が桁を落とさずに合計されること
 // RUN_PRISMA_CONTRACT=1 のときだけ走り、beforeEach で全テーブルを TRUNCATE するため開発 DB を指さない
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryRepos } from '@/data/adapters/memory';
 import type { DailyUsageTotal, Repositories, UsageEventRecord } from '@/data/ports';
 import { Provider } from '@/domain/types';
@@ -262,13 +262,18 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
     // 接続のタイムゾーンを東京にしたクライアントを別に作る (DSN の options で接続時に指定する)
     const dsn = new URL(process.env.DATABASE_URL ?? '');
     dsn.searchParams.set('options', '-c timezone=Asia/Tokyo');
-    // createPrismaClient() は環境変数から接続文字列を読むので、生成のあいだだけ差し替える
-    const original = process.env.DATABASE_URL;
-    process.env.DATABASE_URL = dsn.toString();
+    // createPrismaClient() は環境変数から接続文字列を読むので、生成のあいだだけ差し替える。
+    // **差し替えの復元は finally で行う** — 生成が投げると、以降のテストが東京の DSN を
+    // 見たまま走って理由の分かりにくい連鎖失敗になる
     const { createPrismaClient } = await import('@/lib/prisma-client');
     const { createPrismaRepos } = await import('@/data/adapters/prisma');
-    const shifted = createPrismaClient();
-    process.env.DATABASE_URL = original;
+    vi.stubEnv('DATABASE_URL', dsn.toString());
+    let shifted;
+    try {
+      shifted = createPrismaClient();
+    } finally {
+      vi.unstubAllEnvs();
+    }
     // 後始末を確実にしたうえで集計する
     try {
       // 指定が実際に効いていることを先に確かめる (効いていなければこの検査は何も見ていない)

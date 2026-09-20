@@ -51,6 +51,11 @@ export const USAGE_RANGE_MAX_DAYS = 366;
 // プロキシが上流 (Anthropic / OpenAI) の応答を待つ上限 (ミリ秒)。
 // 上流が黙り込んだときに接続を抱え続けないための打ち切りで、生成が長引く呼び出しも通せるよう長めに取る
 export const UPSTREAM_TIMEOUT_MS = 120_000;
+// プロキシが上流の応答本文を読む上限 (バイト)。リクエスト側 (JSON_BODY_MAX_BYTES) と**別の値**にする —
+// LLM の応答は入力より大きくなるのが普通なので、同じ値では正常な呼び出しを落としてしまう。
+// 上限が無いと、壊れた前段ゲートウェイが巨大な本文を返したとき「同時リクエスト数 × 本文サイズ」の
+// ヒープを一度に握り、タイムアウトまで解放されない (実測で 64 MiB を丸ごとバッファした)
+export const UPSTREAM_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 // JSON 本文の上限 (バイト) の再公開。値そのものは `src/lib/body-limits.ts` が持つ
 // (`next.config.ts` が import する都合で、あちらは `@/...` を含まない定数だけのファイルにしてある)
 export { JSON_BODY_MAX_BYTES } from '@/lib/body-limits';
@@ -90,6 +95,10 @@ export const API_MESSAGES = {
   upstreamRateLimited: '上流の LLM プロバイダが混雑しています。時間をおいて再試行してください。',
   upstreamTimeout: '上流の LLM プロバイダが時間内に応答しませんでした。',
   upstreamNotConfigured: 'このプロバイダへの中継は設定されていません。',
+  // 上流が要求を拒否したときの定型文。**上流の文章はそのまま返さない** — 自由記述の message には
+  // 残高不足・組織名・契約ティアといったプラットフォーム側のアカウント状態が載るため (ADR-0007 決定 7)
+  upstreamRejected:
+    '上流の LLM プロバイダが要求を受け付けませんでした。エラーの種別 (upstream) を参照してください。',
   invalidUsageDay: '日付は YYYY-MM-DD で指定してください。',
   reversedUsageRange: 'from は to 以前の日付を指定してください。',
   usageRangeTooLong: `期間は最大 ${USAGE_RANGE_MAX_DAYS} 日までです。`,

@@ -26,6 +26,62 @@ describe('上流のエラー本文の絞り込み', () => {
     });
   });
 
+  it('返す項目は message / type / code / param だけ (許可リストの広がりを別の手掛かりで照合する)', () => {
+    // **表そのものを固定する。** 値の綴りは出力位置ごとに総当たりしているが、「どの項目名を残すか」
+    // の表 (`SAFE_ERROR_FIELDS`) は 1 つも固定していなかった —— 実測で、表へ `message` を 1 行
+    // 足す変異が **654 件すべて緑**で通った。それは「自由記述を自前の定型文へ差し替える」という
+    // このモジュールの存在理由そのものを外す変更で、上流の残高・組織名がそのまま中継される。
+    // ステータス側 (tests/api/proxy.test.ts の 300〜599 の総なめ) と同じ流儀で、
+    // **実装の表を import せず**テスト側に契約を直書きして照合する
+    const RELAYED_FIELDS = ['code', 'param', 'type'];
+    // 上流が返しうる項目名を幅広く並べる (表を広げる差分がここに当たる)
+    const CANDIDATE_FIELDS = [
+      'type',
+      'code',
+      'param',
+      'message',
+      'detail',
+      'details',
+      'reason',
+      'status',
+      'statusCode',
+      'organization',
+      'org',
+      'account',
+      'plan',
+      'tier',
+      'balance',
+      'quota',
+      'limit',
+      'usage',
+      'request_id',
+      'requestId',
+      'doc_url',
+      'inner_error',
+      'innererror',
+      'error_subcode',
+      'metadata',
+    ];
+    // 綴りの検査は通る値にする。空白入りの値だと「表に無いから落ちた」のか
+    // 「綴りで落ちた」のかを区別できず、表を広げる変異を捕まえられない
+    const value = 'org_ACME_tier_enterprise';
+    for (const field of CANDIDATE_FIELDS) {
+      // その項目だけを載せた上流の本文を通す
+      const safe = sanitizeUpstreamErrorBody({ error: { [field]: value } }) as {
+        error: Record<string, unknown>;
+      };
+      // 応答の最上位は error だけ (上流の項目が最上位へ増えていないこと)
+      expect(Object.keys(safe).sort(), `${field} を入れたときの最上位`).toEqual(['error']);
+      // error の中身は「定型文」＋「契約で残す項目のうち今回載せたもの」だけ
+      const expectedKeys = RELAYED_FIELDS.includes(field) ? ['message', field].sort() : ['message'];
+      expect(Object.keys(safe.error).sort(), `${field} を入れたときの error`).toEqual(expectedKeys);
+      // message は必ず自前の定型文 (上流の自由記述で上書きされない)
+      expect(safe.error.message, `${field} を入れたときの message`).toBe(
+        API_MESSAGES.upstreamRejected,
+      );
+    }
+  });
+
   it('許可リストに無い項目は落とす (上流の識別子や入れ子も含む)', () => {
     // request_id や独自の項目、入れ子のオブジェクトは残さない
     const safe = sanitizeUpstreamErrorBody({
@@ -34,8 +90,9 @@ describe('上流のエラー本文の絞り込み', () => {
       error: {
         type: 'invalid_request_error',
         billing: { balance_usd: 0.12, organization: 'acme-corp' },
-        detail: 'credit balance is too low',
-        // detail は許可リストに無いので、綴りによらず落ちる
+        // **綴りを通る値にする。** 空白入りの値だと「表に無いから落ちた」のか
+        // 「綴りで落ちた」のかを区別できず、表を広げる変異に対して空振りする (実測)
+        detail: 'credit_balance_too_low',
       },
     });
     // 最上位の type と error.type だけが残る
@@ -86,35 +143,40 @@ describe('上流のエラー本文の絞り込み', () => {
   // 項目を 1 つ選んで検査すると、**別の箇所だけを差し替える変異が素通りする** —— 実測で、
   // 語数の上限を最上位 `type` だけ緩める変異は 618 件すべて緑のまま通り、テスト件数も変わらなかった。
   // 「同じ定数を指しているから 1 つ見れば足りる」は実装の都合であって契約ではない
-  const CODE_POSITIONS = ['error.type', 'error.code', '最上位 type'] as const;
-  // 検査したい位置へ値を載せた「上流の本文」を組み立てる
-  function upstreamBodyWith(position: (typeof CODE_POSITIONS)[number], value: string): unknown {
-    // error.type に載せる
-    if (position === 'error.type') return { error: { type: value } };
-    // error.code に載せる
-    if (position === 'error.code') return { error: { code: value } };
-    // 最上位の type に載せる (Anthropic が 'error' を入れる項目)
-    return { type: value, error: {} };
-  }
-  // 通ったとき、その値が応答のどこへ出るかを読む
-  function relayedValue(
-    position: (typeof CODE_POSITIONS)[number],
-    safe: Record<string, unknown>,
-  ): unknown {
-    // error オブジェクト (無ければ undefined)
-    const error = safe.error as Record<string, unknown> | undefined;
-    // 位置に応じて読む場所を変える
-    if (position === 'error.type') return error?.type;
-    if (position === 'error.code') return error?.code;
-    return safe.type;
-  }
+  const CODE_POSITIONS = {
+    // error.type へ載せる / 読む
+    'error.type': {
+      build: (value: string): unknown => ({ error: { type: value } }),
+      read: (safe: Record<string, unknown>): unknown =>
+        (safe.error as Record<string, unknown> | undefined)?.type,
+    },
+    // error.code へ載せる / 読む
+    'error.code': {
+      build: (value: string): unknown => ({ error: { code: value } }),
+      read: (safe: Record<string, unknown>): unknown =>
+        (safe.error as Record<string, unknown> | undefined)?.code,
+    },
+    // 最上位の type へ載せる / 読む (Anthropic が 'error' を入れる項目)
+    '最上位 type': {
+      build: (value: string): unknown => ({ type: value, error: {} }),
+      read: (safe: Record<string, unknown>): unknown => safe.type,
+    },
+    // **載せ方と読み方を位置ごとに 1 か所へ組にする。** 以前は if 2 本＋フォールスルーだったため、
+    // 位置を 1 つ足してヘルパーを書き忘れると、その位置が黙って「最上位 type」の重複になっていた
+    // (実測: 位置を足すだけで 92 → 106 件に増え、増えた 14 件はすべて最上位 type の複製だった)。
+    // 表にすれば、位置を足してエントリを書き忘れた時点で tsc が落ちる
+  } as const;
+  // 位置の名前 (表のキーが唯一の定義)
+  type CodePosition = keyof typeof CODE_POSITIONS;
   // 位置ごとの検査ケースへ展開する (ラベルに位置を入れて、どこで落ちたか分かるようにする)
   function forEachPosition(
     cases: readonly (readonly [string, string])[],
-  ): readonly (readonly [string, (typeof CODE_POSITIONS)[number], string])[] {
+  ): readonly (readonly [string, CodePosition, string])[] {
     // 値 × 位置の総当たり
     return cases.flatMap(([label, value]) =>
-      CODE_POSITIONS.map((position) => [`${label} @ ${position}`, position, value] as const),
+      (Object.keys(CODE_POSITIONS) as CodePosition[]).map(
+        (position) => [`${label} @ ${position}`, position, value] as const,
+      ),
     );
   }
 
@@ -146,7 +208,7 @@ describe('上流のエラー本文の絞り込み', () => {
     ]),
   )('分類語彙の上限を超えたら通さない: %s', (_label, position, value) => {
     // 上限を緩める変異を落とす。固定する前は語数をいくら広げても全件緑だった (実測)
-    expect(sanitizeUpstreamErrorBody(upstreamBodyWith(position, value))).toEqual({
+    expect(sanitizeUpstreamErrorBody(CODE_POSITIONS[position].build(value))).toEqual({
       error: { message: API_MESSAGES.upstreamRejected },
     });
   });
@@ -162,11 +224,11 @@ describe('上流のエラー本文の絞り込み', () => {
     '分類語彙の上限ちょうどは通す (絞りすぎて診断が消えていない): %s',
     (_label, position, value) => {
       // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない
-      const safe = sanitizeUpstreamErrorBody(upstreamBodyWith(position, value)) as Record<
+      const safe = sanitizeUpstreamErrorBody(CODE_POSITIONS[position].build(value)) as Record<
         string,
         unknown
       >;
-      expect(relayedValue(position, safe)).toBe(value);
+      expect(CODE_POSITIONS[position].read(safe)).toBe(value);
     },
   );
 
@@ -182,7 +244,9 @@ describe('上流のエラー本文の絞り込み', () => {
     // トークンの内側に含んでいたため語数の上限が `_` を数えず、これらがそのまま中継された (実測)
     ['アンダースコア散文', 'your_credit_balance_is_too_low'],
     ['長いアンダースコア散文', 'credit_balance_too_low_go_to_Plans_and_Billing'],
-    ['アンダースコアで繋いだキー形', 'sk_ant_api03_AAAABBBBCCCCDDDDEEEEFFFFGGGG'],
+    // **`_` / `-` 区切りのキー形**だけを落とす。`.` 区切りにすると param は通る
+    // (`skAnt.api03.AAAABBBBCCCCDDDDEEEEFFFFGGGG` 40 文字は PASS。実測)
+    ['アンダースコア区切りのキー形', 'sk_ant_api03_AAAABBBBCCCCDDDDEEEEFFFFGGGG'],
     // param 側の文字クラス。添字は階層 1 つぶんとしか数えないので、字種を緩めると
     // 「語数の枠外に自由な文字が乗る」形になる (実測: 添字を `[0-9A-Za-z]` にすると全件緑で通った)
     ['ハイフンで繋いだ文', 'your-credit-balance-is-too-low'],

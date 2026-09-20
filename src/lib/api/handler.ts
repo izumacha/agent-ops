@@ -3,7 +3,7 @@
 import { DuplicateError, getRepos, type Repositories } from '@/data';
 import { isResourceId } from '@/domain/resource-id';
 import { API_MESSAGES } from '@/lib/constants';
-import { authenticate, type Principal } from './auth';
+import { authenticate, authenticateApiKey, type Principal } from './auth';
 import { withPrivateCacheHeaders } from './cache-headers';
 import { ApiError, errorResponse, notFoundError, validationError } from './errors';
 import { HTTP_STATUS } from './http-status';
@@ -27,6 +27,20 @@ export interface HandlerInput<P> {
 
 // ハンドラ本体の型
 export type Handler<P> = (input: HandlerInput<P>) => Promise<Response>;
+
+/**
+ * そのルートが受け付ける資格情報の種類。
+ * 'user' (既定) はユーザートークンとプラットフォーム管理者トークン、'apiKey' は API キーだけ。
+ * **既定を 'user' にしてあるのが要点** — 新しいルートを足した人が何も書かなければ、
+ * プロキシ専用の API キーでは呼べない側に倒れる (ADR-0005 / ADR-0007)
+ */
+export type RouteAuth = 'user' | 'apiKey';
+
+// route() の任意設定
+export interface RouteOptions {
+  // 受け付ける資格情報の種類 (省略時は 'user')
+  auth?: RouteAuth;
+}
 
 // route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
 export const ROUTE_HANDLER_BRAND = Symbol.for('agent-ops.routeHandler');
@@ -115,7 +129,9 @@ function toErrorResponse(error: unknown): Response {
  * 認証付き Route Handler を組み立てる。
  * 認証 (401) はどのルートでも本体より前に行い、認可 (403) は本体の先頭で guard.ts を呼ぶ
  */
-export function route<P = Record<string, never>>(handler: Handler<P>) {
+export function route<P = Record<string, never>>(handler: Handler<P>, options: RouteOptions = {}) {
+  // このルートで使う認証関数を決める (指定が無ければユーザートークンの経路)
+  const authenticateRequest = options.auth === 'apiKey' ? authenticateApiKey : authenticate;
   // Next.js が呼ぶ形の関数
   const wrapped = async (request: Request, context: RouteContext<P>): Promise<Response> => {
     // 例外はすべて HTTP 応答へ写す
@@ -123,7 +139,7 @@ export function route<P = Record<string, never>>(handler: Handler<P>) {
       // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
       const repos = await getRepos();
       // 認証 (失敗は 401 の ApiError)
-      const principal = await authenticate(request, repos);
+      const principal = await authenticateRequest(request, repos);
       // 動的セグメントを解決する
       const params = await context.params;
       // 資源 id の形でないセグメントは本体へ渡さず 404 にする (DB へ渡すと 500 になる値を入口で止める)

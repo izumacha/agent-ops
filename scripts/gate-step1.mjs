@@ -16,15 +16,13 @@ import { STEP0_STEPS } from './lib/step0-steps.mjs';
 import { banner, exitIfFailures, runNpm, runSteps } from './lib/run-npm-steps.mjs';
 // 受け入れ基準の判定 (純粋関数。挙動は tests/gate-scripts.test.ts が固定する)
 import { evaluateStep1Report } from './lib/gate-report.mjs';
-
-// 受け入れ基準: テスト件数の下限
-const REQUIRED_PASSED_TESTS = 60;
-// 受け入れ基準: 権限違反テストの全パターン (役割 3 × 操作 3)。役割と操作の一覧そのものは
-// src/domain/rbac.ts が正本で、tests/rbac.test.ts が enum との網羅を固定する。ここは基準の文言どおり 3 × 3 を数える
-const ROLES = ['viewer', 'operator', 'admin'];
-const ACTIONS = ['view', 'execute', 'stop'];
-// RBAC 行列テストの名前の接頭辞 (tests/api/rbac-matrix.test.ts と一致させる)
-const MATRIX_TEST_PREFIX = 'RBAC 行列: ';
+// 受け入れ基準の値 (ロードマップの Step1 行と突き合わせる唯一の定義。後の Step のゲートも同じものを読む)
+import {
+  ACTIONS,
+  MATRIX_TEST_PREFIX,
+  REQUIRED_PASSED_TESTS,
+  ROLES,
+} from './lib/step1-criteria.mjs';
 
 // 1. Step0 の項目のうちテスト以外を流す (テストは JSON レポート付きで別に流す)
 runSteps(

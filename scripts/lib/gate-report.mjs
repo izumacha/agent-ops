@@ -1,4 +1,4 @@
-// gate:step1 の「受け入れ基準を満たしているか」の判定だけを取り出した純粋関数群。
+// gate:stepN の「受け入れ基準を満たしているか」の判定だけを取り出した純粋関数群。
 //
 // スクリプト本体に判定を書き下すと、値 (件数の下限) も判定そのものも黙って外せてしまう
 // — 実測では `REQUIRED_PASSED_TESTS` を小さくしても、`if (...)` を `if (false && ...)` にしても
@@ -66,6 +66,80 @@ export function evaluateStep1Report({
   // RBAC 行列の全パターンが存在し pass していること
   const missing = missingMatrixCases(report, { roles, actions, matrixPrefix });
   if (missing.length > 0) failures.push(`RBAC 行列のテストが不足/失敗: ${missing.join(', ')}`);
+  // 判定結果
+  return failures;
+}
+
+/**
+ * 料金表の各モデルについて、pass した「誤差 0」のテストが見つからないものを返す。
+ * **期待するテスト名は料金表 (正本の JSON) から導く** — 一覧をここに書き写すと、
+ * モデルを足した人がテストを書き忘れてもゲートは緑のままになる。
+ * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
+ * @param {{ models: { provider: string, model: string }[], pricePrefix: string }} pricing 料金表とテスト名の接頭辞
+ * @returns {string[]} 「provider model」の文字列の配列 (すべて揃っていれば空)
+ */
+export function missingPriceCases(report, { models, pricePrefix }) {
+  // 全テストの (フルネーム, 結果) を平坦化する
+  const results = (report.testResults ?? []).flatMap((file) =>
+    (file.assertionResults ?? []).map((test) => ({ name: test.fullName, status: test.status })),
+  );
+  // 見つからない・落ちているモデルを集める
+  const missing = [];
+  // 料金表の全モデルを見る
+  for (const { provider, model } of models) {
+    // 名前に「料金: <provider> <model>」を含む pass したテストがあるか
+    const needle = `${pricePrefix}${provider} ${model}`;
+    const hit = results.find(
+      (test) =>
+        typeof test.name === 'string' && test.name.includes(needle) && test.status === 'passed',
+    );
+    // 無ければ不足として記録する
+    if (!hit) missing.push(`${provider} ${model}`);
+  }
+  // 不足の一覧
+  return missing;
+}
+
+/**
+ * Step2 の受け入れ基準のうち、テストレポートから判定できるぶんを見る。
+ * Step1 の基準 (件数・RBAC 行列・失敗 0) は**引き継ぐ** — ゲートは常に最新 Step のものだけを回すので、
+ * ここで引き継がないと Step1 の基準が誰にも見られなくなる (docs/roadmap.md のゲート運用ルール 2)。
+ * 遅延と集計の基準はテストではなくベンチ (scripts/bench-*.ts) が測るので、ここでは扱わない。
+ * @param {object} input 判定材料
+ * @param {number} input.testStatus `npm run test` の終了コード
+ * @param {object} input.report vitest の JSON レポート
+ * @param {number} input.requiredPassedTests pass したテストの下限
+ * @param {string[]} input.roles 役割の一覧
+ * @param {string[]} input.actions 操作の一覧
+ * @param {string} input.matrixPrefix RBAC 行列テストの名前の接頭辞
+ * @param {{ provider: string, model: string }[]} input.models 料金表のモデル一覧 (正本の JSON から導く)
+ * @param {string} input.pricePrefix 料金テストの名前の接頭辞
+ * @returns {string[]} 失敗の理由 (基準を満たしていれば空)
+ */
+export function evaluateStep2Report({
+  testStatus,
+  report,
+  requiredPassedTests,
+  roles,
+  actions,
+  matrixPrefix,
+  models,
+  pricePrefix,
+}) {
+  // Step1 の基準をそのまま引き継ぐ
+  const failures = evaluateStep1Report({
+    testStatus,
+    report,
+    requiredPassedTests,
+    roles,
+    actions,
+    matrixPrefix,
+  });
+  // 料金表に 1 件もモデルが無ければ、照合が空振りしている (fail-closed)
+  if (models.length === 0) failures.push('料金表からモデルを 1 件も読めません');
+  // 料金表の全モデルに「誤差 0」のテストがあり pass していること
+  const missing = missingPriceCases(report, { models, pricePrefix });
+  if (missing.length > 0) failures.push(`料金計算のテストが不足/失敗: ${missing.join(', ')}`);
   // 判定結果
   return failures;
 }

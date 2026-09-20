@@ -25,6 +25,7 @@ import { apiKeyCreateSchema } from '@/lib/validations/api-key';
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
+import { proxyRequestSchema } from '@/lib/validations/proxy';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -80,6 +81,17 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   AgentUpdate: agentUpdateSchema,
   ApiKeyCreate: apiKeyCreateSchema,
   'PUT /users/{userId}/role': userRoleSchema,
+  ProxyRequest: proxyRequestSchema,
+};
+
+// **未知キーを許すことが意図である本文の除外表 (理由付き)。**
+// 原則は「契約も Zod も未知キーを閉じる」で、ここに載せた本文だけが例外。
+// エントリが増える差分は、理由の妥当性をレビューで必ず確認する (この表は機械化できないエスケープハッチ)。
+// 除外しても項目の一致 (契約の properties と Zod の shape) と「必須項目が実際に必須か」は下のテストが見る
+const OPEN_BODY_SCHEMAS: Record<string, string> = {
+  ProxyRequest:
+    'ベンダー (Anthropic / OpenAI) のペイロードをそのまま中継するため。未知キーを 422 にすると、' +
+    'ベンダーが新しいパラメータを足しただけで中継が止まる (docs/adr/0007-cost-proxy.md)',
 };
 
 // 契約に現れる本文スキーマを (キー, 定義) の並びで集める ($ref は components から解決する)
@@ -368,8 +380,13 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     // 1 つも集められなければ走査が壊れている (fail-closed)
     expect(bodies.length).toBeGreaterThan(0);
     for (const { key, schema } of bodies) {
-      // 契約側が未知キーを閉じていること
-      expect(schema?.additionalProperties, `${key} が未知キーを許している`).toBe(false);
+      // 未知キーを許すことが意図である本文 (除外表に理由付きで載っているもの) かどうか
+      const openReason = OPEN_BODY_SCHEMAS[key];
+      // 契約側が未知キーを閉じていること (除外した本文は逆に「開いている」ことを確かめる —
+      // 除外したまま閉じると、実装だけが通す形になって契約と食い違う)
+      expect(schema?.additionalProperties, `${key} の未知キーの扱い`).toBe(
+        openReason === undefined ? false : true,
+      );
       // 対応する Zod スキーマが表にあること (契約に本文が増えたら必ずここで落ちる)
       const zodSchema = BODY_SCHEMAS[key];
       expect(zodSchema, `${key} に対応する Zod スキーマが表に無い`).toBeDefined();
@@ -378,6 +395,8 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       expect(Object.keys(zodSchema.shape).sort(), `${key} の項目`).toEqual(
         Object.keys(schema.properties ?? {}).sort(),
       );
+      // 除外した本文は「未知キーを通す」ことだけを確かめて次へ (必須項目の検査は下の専用テスト)
+      if (openReason !== undefined) continue;
       // Zod 側も未知キーを拒否すること (z.object へ戻すとここで落ちる)
       const parsed = zodSchema.safeParse({ __unknown__: 1 });
       expect(parsed.success, `${key} は未知キーを受け入れてしまう`).toBe(false);
@@ -386,6 +405,46 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
           parsed.error.issues.some((issue) => issue.code === 'unrecognized_keys'),
           `${key} が未知キーを剥がしている`,
         ).toBe(true);
+      }
+    }
+  });
+
+  // 除外表そのものを見張る (実在しないキーを足して検査を緩められないようにする)
+  it('未知キーを許す本文の除外表は、実在する本文に理由付きで載っている', () => {
+    // 契約に現れる本文のキー
+    const keys = new Set(collectRequestBodies().map((body) => body.key));
+    // 除外表の各エントリ
+    for (const [key, reason] of Object.entries(OPEN_BODY_SCHEMAS)) {
+      // 契約に実在する本文であること (消えた本文の除外が残り続けない)
+      expect(keys.has(key), `除外表の ${key} が契約に無い`).toBe(true);
+      // 理由が空でないこと (「とりあえず黙らせる」使い方を塞ぐ)
+      expect(reason.trim().length, `${key} の除外理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  // 除外した本文でも「計測に必要な項目」は必須のままであること。
+  // 未知キーを許した瞬間に model まで任意になると、料金表を引けない呼び出しが中継できてしまう
+  it('未知キーを許す本文でも、契約の required は Zod でも必須になっている', () => {
+    // 契約に現れる本文を名前で引けるようにする
+    const bodies = new Map(collectRequestBodies().map((body) => [body.key, body.schema]));
+    for (const key of Object.keys(OPEN_BODY_SCHEMAS)) {
+      // 契約側の必須項目 (required)
+      const required = ((bodies.get(key) as { required?: string[] } | undefined)?.required ??
+        []) as string[];
+      // 必須項目が 1 つも無ければこの検査は意味を持たないので落とす (fail-closed)
+      expect(required.length, `${key} に required が無い`).toBeGreaterThan(0);
+      // 実装の Zod スキーマ
+      const zodSchema = BODY_SCHEMAS[key];
+      expect(zodSchema, `${key} に対応する Zod スキーマが表に無い`).toBeDefined();
+      if (!zodSchema) continue;
+      // 必須項目を 1 つずつ落とした本文は拒否されること
+      for (const field of required) {
+        // その項目だけを欠いた本文 (他の必須項目は形だけ埋める)
+        const body = Object.fromEntries(
+          required.filter((name) => name !== field).map((name) => [name, 'x']),
+        );
+        // 必須なので検証に失敗する
+        expect(zodSchema.safeParse(body).success, `${key} の ${field} が必須でない`).toBe(false);
       }
     }
   });

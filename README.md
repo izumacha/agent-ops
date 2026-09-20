@@ -3,7 +3,7 @@
 AI エージェントの**登録・権限・コスト・品質・停止**を一元管理する運用基盤（SaaS）。複数のエージェントを複数チームで運用し、コストと品質を可視化して事故（暴走・コスト超過・品質低下）を自動で止める。
 
 - スタック: Next.js 16（App Router）/ TypeScript / Prisma 7 / PostgreSQL 16 / Docker
-- 現在の段階: **Step1（エージェント台帳・権限）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
+- 現在の段階: **Step2（コスト計測プロキシ）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
 
 ## デモ
 
@@ -40,6 +40,28 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 
 新しいテナントは `PLATFORM_ADMIN_TOKEN` で `POST /api/v1/tenants` を呼ぶと、テナント・最初の admin・その admin のトークンがまとめて返る。エンドポイント一覧は [`docs/spec.md` §4](./docs/spec.md#4-api-一覧)、定義は [`openapi/openapi.yaml`](./openapi/openapi.yaml)。
 
+### LLM 呼び出しを中継してコストを記録する（Step2）
+
+プロキシは**エージェントに紐づく API キー**（`aop_k_...`）でだけ呼べる（ユーザートークンでは 401。[ADR-0007](./docs/adr/0007-cost-proxy.md)）。中継先は環境変数で決まり、上流の資格情報はサーバ側だけが持つ。
+
+```bash
+# 1. エージェントに紐づく API キーを発行する (平文は発行応答でしか返らない)
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"本番用","agentId":"<エージェントの id>"}' localhost:3000/api/v1/api-keys
+export API_KEY=aop_k_...
+
+# 2. そのキーで中継する (.env に ANTHROPIC_API_KEY を設定しておく)
+curl -s -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":128,"messages":[{"role":"user","content":"こんにちは"}]}' \
+  localhost:3000/api/v1/proxy/anthropic/messages
+
+# 3. 記録されたコストを日次で見る (view 権限。日の境目は UTC)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  'localhost:3000/api/v1/usage/daily?from=2026-09-01&to=2026-09-30'
+```
+
+料金は [`src/domain/pricing/vendor-prices.json`](./src/domain/pricing/vendor-prices.json)（出典 URL と取得日つき）の単価から整数で計算する。**表に無いモデルは中継せず 422**（計測できない呼び出しは通さない。[ADR-0008](./docs/adr/0008-usage-pricing-and-aggregation.md)）。
+
 ## 検証コマンド
 
 ```bash
@@ -50,9 +72,14 @@ npm run test:contract # prisma アダプタの契約テスト (RUN_PRISMA_CONTRA
 npm run build        # 本番ビルド (standalone 出力)
 npm run gate:step0   # Step0 の受け入れ基準を一括検査 (gen / db:generate / lint / format:check / typecheck / test / OpenAPI / ADR)
 npm run gate:step1   # Step1 の受け入れ基準を一括検査 (上記 + テスト 60 件以上 / RBAC 3×3 の 403 / npm audit high 0)
+npm run gate:step2   # Step2 の受け入れ基準を一括検査 (上記 + 料金計算が全モデル分 pass / 本番ビルド / ベンチ 2 本)
+npm run bench:usage  # 1 万件投入で日次集計 ≦ 1 秒 (専用 DB が必要)
+npm run bench:proxy  # プロキシ経由の追加遅延 ≦ 50ms (先に npm run build。専用 DB が必要)
 ```
 
-CI（`.github/workflows/ci.yml`）は `gate:step1` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
+`gate:step2` はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチは全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩くので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
+
+CI（`.github/workflows/ci.yml`）は `gate:step2` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
 
 ## ディレクトリ
 

@@ -1,6 +1,7 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step1`: gen / db:generate / lint / format:check / typecheck / テスト 60 件以上 /
-# RBAC 3×3 / npm audit high 0) を検査し、あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・
-# prisma アダプタの契約テスト・本番ビルド・Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step2`: gen / db:generate / lint / format:check / typecheck /
+# テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / npm audit high 0 / 本番ビルド / ベンチ 2 本) を検査し、
+# あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・
+# Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
 name: CI
 
 on:
@@ -23,6 +24,25 @@ jobs:
   gate:
     name: gate (実装済みの最新 Step の受け入れ基準)
     runs-on: ubuntu-latest
+    # Step2 のゲートはベンチ (1 万件投入の日次集計・プロキシ経由の追加遅延) を含むので DB が要る。
+    # **接続先は契約テストと同じ専用 DB (末尾 _contract)** — ベンチは全テーブルを TRUNCATE するので、
+    # 開発 DB を指していればベンチ側が 1 件も書かずに落ちる (fail-closed)
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: agent_ops_bench_contract
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_ops_bench_contract?schema=app
     steps:
       - uses: actions/checkout@v7
 
@@ -35,9 +55,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # ベンチが使うスキーマを作る (接続文字列の ?schema=app と同じ名前)
+      - name: Create bench schema
+        run: psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS app"
+
+      # ベンチ用のテーブルを用意する (ゲートの中でベンチが TRUNCATE して使う)
+      - name: Apply migrations (bench DB)
+        run: npm run db:deploy
+
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run latest step gate (gate:step1)
-        run: npm run gate:step1
+      - name: Run latest step gate (gate:step2)
+        run: npm run gate:step2
 
   migrate-and-build:
     name: Migrate (PostgreSQL) / Build

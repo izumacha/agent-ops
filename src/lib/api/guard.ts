@@ -3,7 +3,7 @@
 import { canPerform, type Action } from '@/domain/rbac';
 import { Role } from '@/domain/types';
 import { API_MESSAGES } from '@/lib/constants';
-import type { Principal, UserPrincipal } from './auth';
+import type { AgentPrincipal, Principal, UserPrincipal } from './auth';
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
 
@@ -39,6 +39,18 @@ export function requireAdminRole(principal: Principal): UserPrincipal {
     throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.forbidden);
   // 許可された
   return user;
+}
+
+// プロキシ経路: API キーで認証されたエージェントであることを要求する。
+// route() に auth: 'apiKey' を指定していれば必ず満たされるが、指定を落としたときに
+// 「ユーザートークンで中継できる」状態へ静かに変わらないよう、本体側でも確かめる (fail-closed)
+export function requireProxyAgent(principal: Principal): AgentPrincipal {
+  // エージェント以外 (ユーザー・プラットフォーム管理者) はこの経路を使えない
+  if (principal.kind !== 'agent') {
+    throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.apiKeyRequired);
+  }
+  // エージェント主体
+  return principal;
 }
 
 // プラットフォーム管理者であることを要求する (テナント作成・列挙)

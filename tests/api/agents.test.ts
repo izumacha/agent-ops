@@ -660,8 +660,18 @@ describe('停止・復帰・削除', () => {
   });
 
   it('履歴を持つエージェントは削除できず 409 (stop を使う。docs/spec.md §3)', async () => {
-    // 履歴があることにする
-    seed.store.agentIdsWithHistory.add(seed.a.agent.id);
+    // 履歴 (利用イベント) を 1 件作る。本番では UsageEvent の Restrict FK が削除を拒む
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: seed.a.agent.id,
+      provider: seed.a.agent.provider,
+      model: seed.a.agent.model,
+      inputTokens: 10,
+      outputTokens: 20,
+      costMicroUsd: 123n,
+      latencyMs: 30,
+      statusCode: 200,
+    });
     const result = await call(deleteAgent, {
       token: seed.a.tokens.admin,
       method: 'DELETE',

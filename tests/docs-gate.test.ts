@@ -11,6 +11,14 @@ const DOCS = join(process.cwd(), 'docs');
 import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 // RBAC の許可表 (役割と操作の唯一の真実の源)
 import { PERMISSIONS } from '@/domain/rbac';
+// Step1 の受け入れ基準の値 (ゲートが読むのと同じ定義)
+import { ACTIONS, REQUIRED_PASSED_TESTS, ROLES } from '../scripts/lib/step1-criteria.mjs';
+// Step2 のベンチのしきい値 (ロードマップの散文と突き合わせる)
+import {
+  PROXY_ADDED_LATENCY_P95_MAX_MS,
+  USAGE_AGGREGATE_MAX_MS,
+  USAGE_AGGREGATE_ROW_COUNT,
+} from '../scripts/lib/step2-criteria.mjs';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -70,40 +78,71 @@ describe('Step0 の設計成果物', () => {
   // 「基準を緩める変更はテスト側だけを書き換えない」(ADR-0004) を支えているのはこのスクリプトだけなのに、
   // その値を照合する検査が無かった。実測では件数の下限を 0 にしても、役割の一覧を 1 要素にしても全件緑で、
   // 役割が 4 種に増えてもゲートは 3 × 3 しか要求しないままだった
-  it('gate:step1 のしきい値がロードマップと RBAC の許可表と一致する', () => {
-    // 見るゲートスクリプトの名前 (Step 番号はここから導く。番号の写しを別に持たない)
-    const gateScript = 'gate-step1.mjs';
-    // ゲートの本文
-    const gate = readFileSync(join(process.cwd(), 'scripts', gateScript), 'utf8');
-    // テスト件数の下限 (読めなければ検出網が死んでいるので落とす)
-    const required = gate.match(/^const REQUIRED_PASSED_TESTS = (\d+);$/m);
-    expect(required, 'REQUIRED_PASSED_TESTS を読めない').not.toBeNull();
-    // ロードマップの「その Step の行」だけを見る。**表全体を対象にしない** — 別の行にある
-    // 「ADR 3 件以上」(Step0 の基準) にたまたま一致するので、下限を 3 にした変異が素通りする
-    // (実測で全件緑のまま通った)。数字の途中への一致も許さない (0 にすると「60 件以上」の末尾に当たる)
-    const stepNumber = /^gate-step(\d+)\.mjs$/.exec(gateScript)?.[1];
-    expect(stepNumber, 'ゲートスクリプト名から Step 番号を読めない').toBeDefined();
+  // ロードマップの「その Step の行」を取り出す (表全体を対象にしない — 別の行にある
+  // 「ADR 3 件以上」(Step0 の基準) にたまたま一致し、下限を 3 にした変異が素通りするため。実測で確認)
+  function roadmapStepRow(stepNumber: number): string {
+    // ロードマップを読む
     const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
     // 表の行のうち、先頭の列がその Step 番号で始まるもの
-    const stepRow = roadmap
+    const row = roadmap
       .split('\n')
       .find((line) => new RegExp(`^\\|\\s*${stepNumber}\\s`).test(line));
-    expect(stepRow, `ロードマップに Step ${stepNumber} の行が無い`).toBeDefined();
-    expect(stepRow ?? '', 'ロードマップの件数とゲートの下限がずれている').toMatch(
-      new RegExp(`(?<![0-9])${required?.[1]} 件以上`),
+    // 行が無ければ照合が成り立たない (fail-closed)
+    expect(row, `ロードマップに Step ${stepNumber} の行が無い`).toBeDefined();
+    return row ?? '';
+  }
+
+  it('Step1 の受け入れ基準の値がロードマップと RBAC の許可表と一致する', () => {
+    // 件数の下限は Step1 の行の散文と一致すること (数字の途中への一致は許さない)
+    expect(roadmapStepRow(1), 'ロードマップの件数とゲートの下限がずれている').toMatch(
+      new RegExp(`(?<![0-9])${REQUIRED_PASSED_TESTS} 件以上`),
     );
-    // 役割と操作の一覧が許可表と一致すること (許可表が唯一の真実の源。ゲートはその写しを持っている)
-    const roles = gate.match(/^const ROLES = \[(.*)\];$/m);
-    const actions = gate.match(/^const ACTIONS = \[(.*)\];$/m);
-    expect(roles, 'ROLES を読めない').not.toBeNull();
-    expect(actions, 'ACTIONS を読めない').not.toBeNull();
-    // 文字列リテラルの一覧を取り出す小さなヘルパー
-    const literals = (source: string): string[] =>
-      [...source.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-    expect(literals(roles?.[1] ?? '').sort()).toEqual(Object.keys(PERMISSIONS).sort());
+    // 役割と操作の一覧が許可表と一致すること (許可表が唯一の真実の源。基準側はその写しを持っている)
+    expect([...ROLES].sort()).toEqual(Object.keys(PERMISSIONS).sort());
     // 操作は許可表の値 (全役割の許可集合の和) から導く
     const allActions = new Set(Object.values(PERMISSIONS).flatMap((set) => [...set]));
-    expect(literals(actions?.[1] ?? '').sort()).toEqual([...allActions].sort());
+    expect([...ACTIONS].sort()).toEqual([...allActions].sort());
+  });
+
+  // **ゲート本体に基準の数値を書かせない。** 値を各ゲートが自分で宣言できると、新しい Step の
+  // ゲートで静かに緩められる (上の照合は共有の定義しか見ないので気付けない)。
+  // 対象は scripts/gate-step*.mjs の全部で、1 本も見つからなければ走査が壊れている (fail-closed)
+  it('ゲート本体は受け入れ基準の数値を自分で宣言しない (共有の定義を読む)', () => {
+    // ゲートスクリプトの一覧
+    const gateScripts = readdirSync(join(process.cwd(), 'scripts')).filter((name) =>
+      /^gate-step\d+\.mjs$/.test(name),
+    );
+    // 1 本も無ければ走査が壊れている
+    expect(gateScripts.length, 'ゲートスクリプトを 1 本も見つけられない').toBeGreaterThan(0);
+    // どのゲートも「= 数値」の形で基準を宣言していないこと
+    for (const name of gateScripts) {
+      const source = readFileSync(join(process.cwd(), 'scripts', name), 'utf8');
+      expect(source, `${name} が受け入れ基準の数値を直接宣言している`).not.toMatch(
+        /^const REQUIRED_PASSED_TESTS = \d+;$/m,
+      );
+      expect(source, `${name} が役割の一覧を直接宣言している`).not.toMatch(/^const ROLES = \[/m);
+    }
+  });
+
+  // Step2 の 3 つの基準のうち、ベンチが測る 2 つ (遅延・集計) のしきい値を散文と突き合わせる。
+  // 値はスクリプトとロードマップの 2 か所に現れるので、片方だけを緩める変更をここで落とす
+  it('Step2 のベンチのしきい値がロードマップと一致する', () => {
+    // ロードマップの Step2 の行
+    const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
+    const stepRow = roadmap.split('\n').find((line) => /^\|\s*2\s/.test(line));
+    expect(stepRow, 'ロードマップに Step 2 の行が無い').toBeDefined();
+    // 追加遅延の上限 (散文は「p95 ≦ 50ms」)
+    expect(stepRow ?? '', '追加遅延の上限がずれている').toContain(
+      `${PROXY_ADDED_LATENCY_P95_MAX_MS}ms`,
+    );
+    // 投入件数 (散文は「1 万件」。定数から万の単位へ直して突き合わせる)
+    expect(stepRow ?? '', '投入件数がずれている').toContain(
+      `${USAGE_AGGREGATE_ROW_COUNT / 10_000} 万件`,
+    );
+    // 集計の上限 (散文は「≦ 1 秒」。定数はミリ秒なので秒へ直す)
+    expect(stepRow ?? '', '集計の上限がずれている').toContain(
+      `${USAGE_AGGREGATE_MAX_MS / 1_000} 秒`,
+    );
   });
 
   // 生成元と計画書が消えていないことを固定する

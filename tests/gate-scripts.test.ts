@@ -14,7 +14,13 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { evaluateStep1Report, missingMatrixCases } from '../scripts/lib/gate-report.mjs';
+import {
+  evaluateStep1Report,
+  evaluateStep2Report,
+  missingMatrixCases,
+  missingPriceCases,
+} from '../scripts/lib/gate-report.mjs';
+import { PRICE_TEST_PREFIX } from '../scripts/lib/step2-criteria.mjs';
 
 // 子プロセスでヘルパーを 1 つ呼び、終了コードと「その後に到達したか」を返す。
 // **なぜ子プロセスなのか**: process.exit の有無は戻り値に現れないので、同じプロセス内では確かめられない
@@ -140,6 +146,112 @@ describe('evaluateStep1Report', () => {
     const cases = [{ role: 'viewer', action: 'view' }];
     const failures = evaluateStep1Report({ ...base, report: reportWith({ cases }) });
     expect(failures.some((message) => message.includes('RBAC 行列'))).toBe(true);
+  });
+});
+
+// 料金計算のテストの合否を組み立てる (合成入力。実際の料金表とは独立)
+const PRICED_MODELS = [
+  { provider: 'anthropic', model: 'claude-x' },
+  { provider: 'openai', model: 'gpt-x' },
+];
+
+// 指定したモデルの「料金: …」テストを持つレポートを組み立てる
+function priceReport(
+  cases: { provider: string; model: string; status?: string }[],
+  base: Record<string, unknown> = reportWith({}),
+): Record<string, unknown> {
+  // 既存の RBAC 行列のレポートへ、料金のテスト結果を足す
+  const testResults = base.testResults as { assertionResults: unknown[] }[];
+  return {
+    ...base,
+    testResults: [
+      {
+        assertionResults: [
+          ...testResults[0].assertionResults,
+          ...cases.map((entry) => ({
+            fullName: `${PRICE_TEST_PREFIX}${entry.provider} ${entry.model} は公表単価と誤差 0`,
+            status: entry.status ?? 'passed',
+          })),
+        ],
+      },
+    ],
+  };
+}
+
+describe('missingPriceCases', () => {
+  it('料金表の全モデル分が pass していれば不足なし', () => {
+    // 2 モデルとも pass
+    const report = priceReport(PRICED_MODELS);
+    expect(
+      missingPriceCases(report, { models: PRICED_MODELS, pricePrefix: PRICE_TEST_PREFIX }),
+    ).toEqual([]);
+  });
+
+  it('テストの無いモデルは不足として返る (モデルを足してテストを書き忘れた形)', () => {
+    // 1 モデル分しかテストが無い
+    const report = priceReport([PRICED_MODELS[0]]);
+    expect(
+      missingPriceCases(report, { models: PRICED_MODELS, pricePrefix: PRICE_TEST_PREFIX }),
+    ).toEqual(['openai gpt-x']);
+  });
+
+  it('存在しても落ちているテストは「不足」とみなす', () => {
+    // 2 モデル目が失敗
+    const report = priceReport([PRICED_MODELS[0], { ...PRICED_MODELS[1], status: 'failed' }]);
+    expect(
+      missingPriceCases(report, { models: PRICED_MODELS, pricePrefix: PRICE_TEST_PREFIX }),
+    ).toEqual(['openai gpt-x']);
+  });
+});
+
+describe('evaluateStep2Report', () => {
+  // 判定に渡す共通の材料
+  const base = {
+    testStatus: 0,
+    requiredPassedTests: 60,
+    ...MATRIX,
+    models: PRICED_MODELS,
+    pricePrefix: PRICE_TEST_PREFIX,
+  };
+
+  it('Step1 の基準と料金のテストがすべて揃っていれば失敗なし', () => {
+    // RBAC 行列も料金も揃っている
+    expect(evaluateStep2Report({ ...base, report: priceReport(PRICED_MODELS) })).toEqual([]);
+  });
+
+  it('Step1 の基準 (RBAC 行列) を引き継いでいる', () => {
+    // 行列を 1 組だけにする
+    const report = priceReport(
+      PRICED_MODELS,
+      reportWith({ cases: [{ role: 'viewer', action: 'view' }] }),
+    );
+    const failures = evaluateStep2Report({ ...base, report });
+    expect(failures.some((message) => message.includes('RBAC 行列'))).toBe(true);
+  });
+
+  it('Step1 の基準 (件数の下限) も引き継いでいる', () => {
+    // 59 件では足りない
+    const report = priceReport(PRICED_MODELS, reportWith({ passed: 59 }));
+    const failures = evaluateStep2Report({ ...base, report });
+    expect(failures.some((message) => message.includes('60 件未満'))).toBe(true);
+  });
+
+  it('料金のテストが欠けていれば失敗になる', () => {
+    // 1 モデル分しか無い
+    const failures = evaluateStep2Report({ ...base, report: priceReport([PRICED_MODELS[0]]) });
+    expect(failures.some((message) => message.includes('料金計算'))).toBe(true);
+  });
+
+  it('料金表からモデルを 1 件も読めなければ失敗になる (照合の空振りを通さない)', () => {
+    // models が空 = 正本を読めなかった状態
+    const failures = evaluateStep2Report({
+      ...base,
+      models: [],
+      report: priceReport(PRICED_MODELS),
+    });
+    expect(
+      failures.some((message) => message.includes('料金表からモデルを 1 件も読めません')),
+    ).toBe(true);
   });
 });
 

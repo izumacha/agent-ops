@@ -45,6 +45,12 @@ export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
 export const USER_TOKEN_BOOTSTRAP_NAME = '初期管理者トークン';
 // 開発用 CLI (scripts/issue-user-token.ts) が発行するトークンの既定の用途名 (--name 省略時)
 export const USER_TOKEN_CLI_NAME = 'CLI';
+// 日次集計で一度に指定できる期間の上限 (日)。無制限の期間は全件走査になるので必ず区切る (§8 / §9)。
+// 366 日 (うるう年を含む 1 年) は「昨年分をまとめて出す」という実際の使い方を 1 回で満たせる最小の値
+export const USAGE_RANGE_MAX_DAYS = 366;
+// プロキシが上流 (Anthropic / OpenAI) の応答を待つ上限 (ミリ秒)。
+// 上流が黙り込んだときに接続を抱え続けないための打ち切りで、生成が長引く呼び出しも通せるよう長めに取る
+export const UPSTREAM_TIMEOUT_MS = 120_000;
 // JSON 本文の上限 (バイト) の再公開。値そのものは `src/lib/body-limits.ts` が持つ
 // (`next.config.ts` が import する都合で、あちらは `@/...` を含まない定数だけのファイルにしてある)
 export { JSON_BODY_MAX_BYTES } from '@/lib/body-limits';
@@ -73,6 +79,19 @@ export const API_MESSAGES = {
   agentHasHistory:
     '利用・評価・インシデントの履歴があるエージェントは削除できません。停止 (stop) を使ってください。',
   agentNotInTenant: '指定したエージェントが見つかりません。',
+  apiKeyRequired: 'このエンドポイントは API キー (aop_k_...) で呼び出してください。',
+  apiKeyNotBoundToAgent:
+    'このAPI キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
+  agentNotActive: 'このエージェントは停止中です。復帰させてから呼び出してください。',
+  unsupportedModel:
+    '料金表に無いモデルです。対応モデルを指定してください (計測できない呼び出しは中継しません)。',
+  streamingNotSupported: 'ストリーミング (stream: true) には未対応です。',
+  upstreamFailure: '上流の LLM プロバイダへの呼び出しに失敗しました。',
+  upstreamTimeout: '上流の LLM プロバイダが時間内に応答しませんでした。',
+  upstreamNotConfigured: 'このプロバイダへの中継は設定されていません。',
+  invalidUsageDay: '日付は YYYY-MM-DD で指定してください。',
+  reversedUsageRange: 'from は to 以前の日付を指定してください。',
+  usageRangeTooLong: `期間は最大 ${USAGE_RANGE_MAX_DAYS} 日までです。`,
   invalidLimit: 'limit は 10 進の整数で指定してください。',
   invalidDecimalInteger: '10 進の整数で指定してください。',
   invalidCursor: 'cursor の形式が不正です。前の応答の nextCursor をそのまま指定してください。',

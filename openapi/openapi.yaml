@@ -22,6 +22,10 @@ tags:
     description: エージェント台帳 (Step1)
   - name: api-keys
     description: API キー発行 (Step1)
+  - name: proxy
+    description: LLM 呼び出しの中継とコスト計測 (Step2)
+  - name: usage
+    description: 利用量・コストの集計 (Step2)
 security:
   - bearerAuth: []
 paths:
@@ -588,6 +592,134 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /proxy/anthropic/messages:
+    post:
+      tags: [proxy]
+      operationId: proxyAnthropicMessages
+      summary: Anthropic Messages API への中継 (API キー認証。トークン・料金を UsageEvent に記録する)
+      description: |
+        本文をそのまま Anthropic の Messages API へ中継し、応答のトークン数から料金を計算して記録する。
+        **認証は API キー (aop_k_...) だけ**で、ユーザートークンでは 401 になる (docs/adr/0007-cost-proxy.md)。
+        エージェントに紐づいていないキー・停止中のエージェントのキーは 403。
+        料金表 (src/domain/pricing/vendor-prices.json) に無いモデルは計測できないので中継せず 422。
+        ストリーミング (stream: true) は Step2 の範囲外で 422。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProxyRequest'
+      responses:
+        '200':
+          description: 上流の応答 (本文の形はベンダーの仕様に従うためそのまま返す)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+  /proxy/openai/chat/completions:
+    post:
+      tags: [proxy]
+      operationId: proxyOpenAiChatCompletions
+      summary: OpenAI Chat Completions API への中継 (API キー認証。トークン・料金を UsageEvent に記録する)
+      description: |
+        Anthropic 向けの中継と同じ規律 (認証・未対応モデル・ストリーミング・上流エラーの扱い) で、
+        OpenAI の Chat Completions API へ中継する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProxyRequest'
+      responses:
+        '200':
+          description: 上流の応答 (本文の形はベンダーの仕様に従うためそのまま返す)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+  /usage/daily:
+    get:
+      tags: [usage]
+      operationId: getDailyUsage
+      summary: 日次のコスト集計 (view 権限)
+      description: |
+        期間内の UsageEvent を **UTC の日ごと**に集計する。期間 (from / to) は必須で、どちらも含む。
+        日の境目は配備先のタイムゾーンに依存しない (docs/adr/0008-usage-pricing-and-aggregation.md)。
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: 集計の開始日 (YYYY-MM-DD、含む)
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          description: 集計の終了日 (YYYY-MM-DD、含む)
+          schema:
+            type: string
+            format: date
+        - name: agentId
+          in: query
+          description: エージェントで絞る (省略時はテナント全体)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 日ごとの集計 (イベントが無い日は含まれない)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyUsageList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 components:
   securitySchemes:
     bearerAuth:
@@ -686,6 +818,24 @@ components:
             $ref: '#/components/schemas/Error'
     InternalServerError:
       description: サーバー内部のエラー (応答は内部詳細を含まない。詳細はサーバログに残る)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadGateway:
+      description: 上流の LLM プロバイダの呼び出しに失敗した
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: このプロバイダへの中継が設定されていない
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    GatewayTimeout:
+      description: 上流の LLM プロバイダが時間内に応答しなかった
       content:
         application/json:
           schema:
@@ -1050,3 +1200,52 @@ components:
             $ref: '#/components/schemas/ApiKey'
         nextCursor:
           type: string
+    ProxyRequest:
+      type: object
+      description: |
+        中継する本文。**ベンダーのペイロードそのもの**なので未知キーを許す (additionalProperties: true)。
+        計測に必要な model だけを必須とし、未対応の stream: true を拒む。この 1 件だけ
+        「未知キーを閉じる」原則の例外で、理由は tests/openapi.test.ts の除外表と ADR-0007 にある。
+      additionalProperties: true
+      required: [model]
+      properties:
+        model:
+          type: string
+          maxLength: 100
+          description: 使用するモデル名。料金表に無いモデルは中継せず 422
+        stream:
+          type: boolean
+          enum: [false]
+          description: ストリーミングは Step2 の範囲外。省略するか false を指定する
+    ProxyResponse:
+      type: object
+      description: 上流の応答をそのまま返す (項目はベンダーの仕様に従う)
+      additionalProperties: true
+    DailyUsage:
+      type: object
+      required: [day, requests, inputTokens, outputTokens, costMicroUsd]
+      properties:
+        day:
+          type: string
+          format: date
+          description: UTC の日 (YYYY-MM-DD)
+        requests:
+          type: integer
+          description: その日の中継回数 (上流が失敗した呼び出しも含む)
+        inputTokens:
+          type: integer
+          description: 入力トークンの合計
+        outputTokens:
+          type: integer
+          description: 出力トークンの合計
+        costMicroUsd:
+          type: string
+          description: 料金の合計 (マイクロ USD の整数。浮動小数誤差を避けるため文字列で運ぶ)
+    DailyUsageList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DailyUsage'

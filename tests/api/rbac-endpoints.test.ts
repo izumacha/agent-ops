@@ -28,6 +28,9 @@ import {
   POST as createUserToken,
 } from '@/app/api/v1/users/[userId]/tokens/route';
 import { DELETE as revokeUserToken } from '@/app/api/v1/users/[userId]/tokens/[tokenId]/route';
+import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/route';
+import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
+import { GET as getDailyUsage } from '@/app/api/v1/usage/daily/route';
 import { canPerform, type Action } from '@/domain/rbac';
 import { Role } from '@/domain/types';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
@@ -39,7 +42,17 @@ const seed = seedEachTest();
 //   - Action: 許可表 (src/domain/rbac.ts) の view / execute / stop
 //   - 'admin': 役割そのものが admin であること (ユーザー管理・トークン管理)
 //   - 'platform': プラットフォーム管理者トークン (テナントの外側。テナント内の役割はすべて 403)
-type Requirement = Action | 'admin' | 'platform';
+//   - 'apiKey': プロキシ専用。API キー (aop_k_...) でしか呼べず、ユーザートークンは**認証の段階で**弾かれる
+type Requirement = Action | 'admin' | 'platform' | 'apiKey';
+
+// 権限を満たさない資格情報で呼んだときに返るべきステータス。
+// プロキシだけ 401 なのは、ユーザートークンが「権限が足りない」のではなく
+// 「この経路では資格情報として受け付けない」ため (ADR-0007)。403 を期待すると、
+// 認証を緩めて認可で弾く形へ変えたときに気付けない
+function deniedStatus(requirement: Requirement): number {
+  // プロキシ経路は認証で弾く
+  return requirement === 'apiKey' ? 401 : 403;
+}
 
 // 契約の operationId → 「要る権限」と「呼び方」。
 // 本文・パラメータは 403 の判定に関係しないので最小限にする (認可は本文検証より前に走る)
@@ -186,6 +199,19 @@ const ENDPOINTS: Record<
         })
       ).status,
   },
+  proxyAnthropicMessages: {
+    requires: 'apiKey',
+    invoke: async (t) => (await call(proxyAnthropic, { token: t, body: {} })).status,
+  },
+  proxyOpenAiChatCompletions: {
+    requires: 'apiKey',
+    invoke: async (t) => (await call(proxyOpenAi, { token: t, body: {} })).status,
+  },
+  getDailyUsage: {
+    requires: 'view',
+    invoke: async (t) =>
+      (await call(getDailyUsage, { token: t, query: 'from=2026-01-01&to=2026-01-31' })).status,
+  },
 };
 
 // 認証が要らない公開オペレーション (表に載せない理由付きの唯一の除外)
@@ -195,6 +221,8 @@ const PUBLIC_OPERATIONS: Record<string, string> = {
 
 // その役割がそのオペレーションを呼べるか
 function allows(requirement: Requirement, role: Role): boolean {
+  // プロキシ専用の経路はどの役割のユーザートークンでも呼べない
+  if (requirement === 'apiKey') return false;
   // プラットフォーム管理者専用はテナント内の役割では呼べない
   if (requirement === 'platform') return false;
   // admin 限定は役割そのものを見る
@@ -209,22 +237,23 @@ describe('全オペレーションの認可', () => {
     for (const role of Object.values(Role)) {
       // 呼べる役割はここでは見ない (成功系は各 API テストが固定する)
       if (allows(endpoint.requires, role)) continue;
-      it(`${operationId} は ${role} が呼ぶと 403`, async () => {
+      it(`${operationId} は ${role} が呼ぶと ${deniedStatus(endpoint.requires)}`, async () => {
         // その役割のトークンで呼ぶ
         const status = await endpoint.invoke(seed.a.tokens[role]);
-        // 権限不足は 403 (404 や 422 に化けていないこと = 認可が本文検証より前にあることも同時に見る)
-        expect(status).toBe(403);
+        // 権限不足は 403 / 資格情報の種類違いは 401
+        // (404 や 422 に化けていないこと = 認証・認可が本文検証より前にあることも同時に見る)
+        expect(status).toBe(deniedStatus(endpoint.requires));
       });
     }
     // プラットフォーム管理者はテナントの外側の主体なので、テナント内の資源には一切触れない。
     // 役割だけを回していると、この不変条件を担う 1 行 (requireTenantUser) を requireAdminRole の
     // 経路で素通しにしても全件緑のまま通る (実測。ユーザー招待とトークン発行が通った)
     if (endpoint.requires !== 'platform') {
-      it(`${operationId} はプラットフォーム管理者が呼ぶと 403`, async () => {
+      it(`${operationId} はプラットフォーム管理者が呼ぶと ${deniedStatus(endpoint.requires)}`, async () => {
         // プラットフォーム管理者トークンで呼ぶ
         const status = await endpoint.invoke(PLATFORM_TOKEN);
-        // テナント内の資源なので 403
-        expect(status).toBe(403);
+        // テナント内の資源なので 403 (プロキシ経路は資格情報の種類が違うので 401)
+        expect(status).toBe(deniedStatus(endpoint.requires));
       });
     }
   }

@@ -12,6 +12,7 @@
 // (実測で `eslint . --max-warnings=0` が 1 を返す)。`package.json` の lint からその指定を外さないこと
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -360,5 +361,85 @@ describe('warmupLatencyProblem', () => {
     expect(warmupLatencyProblem(WARMUP_MAX_MS + 1, WARMUP_MAX_MS)).toContain(
       '初回コストが大きすぎます',
     );
+  });
+});
+
+describe('lint の指定そのもの', () => {
+  // `package.json` の lint スクリプト
+  const lintScript = (
+    JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    }
+  ).scripts.lint;
+
+  it('eslint を --max-warnings=0 で走らせる', () => {
+    // **この指定が 2 つのガードを支えている** — ベンチの判定と `exitIfFailures` は、
+    // 呼び出しを消すと eslint が「未使用」と言うだけで、warning は既定では exit 0 に埋もれる。
+    // 指定を外すと、その 2 つの変異がどちらも全件緑で通る状態に戻る (実測)
+    // **より狭い代替**: 指定をやめて `@typescript-eslint/no-unused-vars` を 'error' に上げる形でも
+    // 2 つのガードは支えられる。依存更新で warn ルールが増えて赤が常態化したらそちらへ切り替える
+    expect(lintScript, 'lint から --max-warnings=0 を外さないこと').toMatch(/--max-warnings[= ]0/);
+  });
+
+  it('warning だけでも非 0 終了する (綴りではなく挙動で確かめる)', () => {
+    // 未使用の変数だけを持つ一時ファイル (eslint の設定が当たる場所へ置く)
+    const probePath = join(process.cwd(), 'scripts', `lint-warning-probe.${process.pid}.mjs`);
+    // 後始末を必ず行う
+    try {
+      // warning を 1 つだけ起こす
+      writeFileSync(probePath, 'const unusedProbeValue = 1;\n');
+      // 既定の eslint は warning を通す (前提の確認。ここが変わったらこの検査の意味が変わる)
+      const lenient = spawnSync('npx', ['eslint', probePath], { encoding: 'utf8' });
+      expect(lenient.status, '既定の eslint が warning で落ちている').toBe(0);
+      // 指定を付けると落ちる
+      const strict = spawnSync('npx', ['eslint', probePath, '--max-warnings=0'], {
+        encoding: 'utf8',
+      });
+      expect(strict.status, '--max-warnings=0 が warning を失敗にしていない').not.toBe(0);
+    } finally {
+      // 一時ファイルを消す
+      rmSync(probePath, { force: true });
+    }
+  });
+});
+
+describe('判定の結線', () => {
+  // 判定結果を作るゲート (gate-report.mjs を読むもの) の一覧。
+  // **「全部のゲート」ではない** — gate-step0 は検証コマンドを順に流すだけで判定を持たず、
+  // 失敗はその場で止まる。判定を作るゲートだけが「結果で落とす」義務を負う
+  const judgingGates = readdirSync(join(process.cwd(), 'scripts'))
+    .filter((name) => /^gate-step\d+\.mjs$/.test(name))
+    .filter((name) =>
+      readFileSync(join(process.cwd(), 'scripts', name), 'utf8').includes('gate-report.mjs'),
+    );
+
+  it('判定を作るゲートを 1 本以上見つけられる', () => {
+    // 0 本なら走査が壊れている (fail-closed)
+    expect(judgingGates.length, '判定を作るゲートが 1 本も無い').toBeGreaterThan(0);
+  });
+
+  it.each(judgingGates)('%s は判定結果で落とす (exitIfFailures を呼ぶ)', (name) => {
+    // **呼び出しと import をまとめて消す変異は eslint にも映らない** (未使用が残らないため)。
+    // 実測で、その 3 点セットを当てると lint も tsc も vitest も全件緑のまま
+    // ゲートの最後の 1 歩 (非 0 終了) が消えた。ソースに呼び出しがあることを見る。
+    // **残る境界**: gate-report ごと読むのをやめる差分はここから外れる (判定を持たない
+    // ゲートと区別が付かないため)。ただし判定の塊が丸ごと消える差分なので目には付く
+    const source = readFileSync(join(process.cwd(), 'scripts', name), 'utf8');
+    expect(source, `${name} が exitIfFailures を呼んでいない`).toMatch(/exitIfFailures\(/);
+  });
+
+  it('ベンチは bench-criteria の判定を全部呼ぶ', async () => {
+    // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した関数が黙って外れる)
+    const criteria = (await import('../scripts/lib/bench-criteria.mjs')) as Record<string, unknown>;
+    // 関数として公開されているものが判定 (定数は除く)
+    const judgements = Object.keys(criteria).filter((key) => typeof criteria[key] === 'function');
+    // 1 つも無ければ導出が壊れている (fail-closed)
+    expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
+    // ベンチ本体のソース
+    const source = readFileSync(join(process.cwd(), 'scripts', 'bench-proxy.ts'), 'utf8');
+    for (const name of judgements) {
+      // 呼び出しの形で現れていること (import だけして使わない形を落とす)
+      expect(source, `bench-proxy.ts が ${name} を呼んでいない`).toContain(`${name}(`);
+    }
   });
 });

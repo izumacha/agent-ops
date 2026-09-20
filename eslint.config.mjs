@@ -18,8 +18,11 @@ const config = [
   // TypeScript 向けルールを展開してマージ
   ...nextTypescript,
   {
-    // 適用対象: src 配下の TypeScript / TSX ファイル全体 (除外なし)
-    files: ['src/**/*.{ts,tsx}'],
+    // 適用対象: _ プレフィックスの例外は **src / tests / scripts の全部**に効かせる。
+    // src だけに書いていたときは、同じ綴りが置き場所で赤・緑に分かれていた。
+    // lint が `--max-warnings=0` になった今は「意図的な未使用」を表す慣用が CI 失敗になるので、
+    // 対象をそろえておく (この例外は未使用を見逃すためではなく、意図を綴りで表すためのもの)
+    files: ['src/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}', 'scripts/**/*.{ts,mjs}'],
     rules: {
       // _ プレフィックスの変数・引数は意図的な未使用として警告しない (Proxy トラップの _target 等)
       '@typescript-eslint/no-unused-vars': [
@@ -30,6 +33,12 @@ const config = [
           destructuredArrayIgnorePattern: '^_', // 分割代入の _ プレフィックスを無視
         },
       ],
+    },
+  },
+  {
+    // 以下は **src 限定**のまま (対象を広げると意味が変わる)
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
       // 値をそのまま SQL へ混ぜる Prisma の API を禁止する (タグ付きテンプレートの $queryRaw を使う)。
       // これは編集中にすぐ気付くための二次的な網で、値の妥当性は実行時のガード
       // (src/lib/raw-sql-guard.ts) が担う。1 段の間接化 (分割代入・別名・計算添字) は捕まえられない

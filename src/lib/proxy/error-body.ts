@@ -19,9 +19,11 @@
 //     `org_ACME_Corp.tier_enterprise.balance_zero`（42 文字）が通り、`type` / `code` は
 //     `_` 区切りだけなので同じ文字列は落ちる。綴りと長さを締めるほど実在のベンダー値まで
 //     落ちるので、ここが実用的な下限。**`param` の語数は縛れていない**（下の (2) を参照）。
-//     1 応答で運べるのは `type` 40 ＋ `error.type` 40 ＋ `code` 40 ＋ `param` 48 = 168 文字。
-//   - **語数・階層の上限は数字を 1 文字も数えない。** 添字は 4 桁 × 5 階層、トークンの先頭語は
-//     桁数が無制限なので、残高・TPM・ティアのような**数値**は総長の枠いっぱいまで運べる
+//     1 応答で運べるのは `error.type` 40 ＋ `code` 40 ＋ `param` 48 = 128 文字
+//     （最上位 `type` は閉じた語彙なので 0 文字）。
+//   - **語数の上限を数字が迂回できる経路が 2 つある**（`_` で区切った語は中身が数字でも 1 語と
+//     数えるので、`A_1_2_3_4` は落ちる）: **トークンの先頭語**（長さ無制限）と **`[添字]`**
+//     （4 桁 × 5 階層）。この 2 つを使うと、残高・TPM・ティアのような**数値**は総長の枠いっぱいまで運べる
 //     （実測: `a[1234][5678][9012][3456][7890]` 31 文字・`Tpm4000Rpm1000Tier3BalanceUsd0` 30 文字・
 //     `creditsRemainingUsdCents00000123456789` 38 文字は、いずれも通る）。
 //   - **PascalCase に対して語数の上限は一切効かない**（区切りが無いので 1 語と数える）。
@@ -88,6 +90,9 @@ const SAFE_ERROR_FIELDS: Readonly<Record<'type' | 'code' | 'param', RegExp>> = {
   param: SAFE_PARAM_PATTERN,
 };
 
+// 上流が最上位の type に入れる唯一の値 (Anthropic の慣習)。ここは閉じた語彙で通す
+const UPSTREAM_ERROR_TYPE = 'error';
+
 // オブジェクト (連想配列) として読めるかどうか
 function asRecord(value: unknown): Record<string, unknown> | null {
   // null でないオブジェクトで、配列でないものだけ
@@ -126,8 +131,12 @@ export function sanitizeUpstreamErrorBody(parsed: unknown): Record<string, unkno
       if (value !== undefined) error[field] = value;
     }
   }
-  // Anthropic は最上位にも type (常に 'error') を置くので、分類語彙として読めれば保つ
-  const topLevelType = root === null ? undefined : safeIdentifier(root.type, SAFE_CODE_PATTERN);
+  // Anthropic は最上位にも type を置くが、**入る値は 'error' ただ 1 つ**なので閉じた語彙で通す。
+  // ここだけ分類語彙の綴り (40 文字) を許すと、診断を 1 ビットも増やさないまま搬送容量が 40 文字
+  // 増える (実測: `OrgAcmeCorpTierEnterpriseBalance0` 33 文字が最上位に乗った)。
+  // 綴りで絞ると診断が消えるという他の項目の事情は、値が 1 つしかないこの項目には当てはまらない
+  // (OpenAI / Azure / Bedrock は最上位 type をそもそも置かない)
+  const topLevelType = root?.type === UPSTREAM_ERROR_TYPE ? UPSTREAM_ERROR_TYPE : undefined;
   // 組み直した本文 (上流の他の項目・request_id・自由記述はすべて落ちる)
   return topLevelType === undefined ? { error } : { type: topLevelType, error };
 }

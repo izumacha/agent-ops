@@ -1275,7 +1275,10 @@ components:
       properties:
         type:
           type: string
-          description: 上流が最上位に置いた種別 (Anthropic は 'error')
+          enum: [error]
+          description: |
+            上流が最上位に置いた種別。入る値は 'error' ただ 1 つ (Anthropic の慣習) なので
+            閉じた語彙で通す。それ以外の値は中継せず、この項目ごと落ちる
         error:
           type: object
           properties:

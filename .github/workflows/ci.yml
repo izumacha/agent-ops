@@ -55,9 +55,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # ベンチが使うスキーマを作る (接続文字列の ?schema=app と同じ名前)
+      # ベンチが使うスキーマを作る (接続文字列の ?schema=app と同じ名前)。
+      # **接続文字列をそのまま psql へ渡さない** — psql は Prisma 用の ?schema= を解釈できず
+      # 「invalid URI query parameter」で落ちる (実測。migrate-and-build ジョブと同じ書き方にそろえる)
       - name: Create bench schema
-        run: psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS app"
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -d agent_ops_bench_contract -c 'CREATE SCHEMA IF NOT EXISTS app'
 
       # ベンチ用のテーブルを用意する (ゲートの中でベンチが TRUNCATE して使う)
       - name: Apply migrations (bench DB)

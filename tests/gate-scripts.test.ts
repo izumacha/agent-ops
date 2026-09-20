@@ -8,8 +8,8 @@
 // 「判定結果を捨てる」形 (`process.exit(1)` の 1 行削除) も実測で全件緑のまま通り、しかも実際に落ちる
 // テストを置いても `=== gate:step1 緑 ===` と出て exit 0 になったので、終了コードの扱いを
 // `exitIfFailures` へ集約して同じ子プロセス方式で固定した。
-// **残る境界**: `scripts/gate-step1.mjs` から `exitIfFailures(...)` の呼び出し行ごと消す変異は
-// 署名からは見分けられない (規約とレビューで守る。判定の塊が丸ごと消える差分なので目には付く)
+// **呼び出し行ごと消す変異は eslint が捕まえる** — `exitIfFailures` と `failures` が未使用になるため
+// (実測で `eslint . --max-warnings=0` が 1 を返す)。`package.json` の lint からその指定を外さないこと
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';

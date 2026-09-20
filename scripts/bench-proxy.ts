@@ -299,18 +299,22 @@ async function measureLatency(options: { url: string; headers: Record<string, st
     WARMUP_REQUESTS > 0 ? await runLoad({ ...options, amount: WARMUP_REQUESTS }) : null;
   // 本計測 (窓の長さは捨て玉に関わらず一定)
   const measured = await runLoad({ ...options, durationSeconds: DURATION_SECONDS });
-  // 捨て玉が指定どおりの件数で止まったかを確かめる。autocannon が `amount` より `duration` を
-  // 優先する版に変われば、捨て玉が秒で回って初回コストを吸収しきれなくなるが、**判定結果には
-  // 現れない** (本計測はそのまま緑になる) ので、ここで落とす (fail-closed)
-  const countProblem =
-    warmup === null ? null : warmupCountProblem(WARMUP_REQUESTS, warmup.requests);
-  if (countProblem !== null) throw new Error(countProblem);
-  // 初回コストそのものが桁で悪化していないかを見る。**捕まえるのは桁の悪化だけ** —
-  // たとえば起動直後に +150ms 増える程度 (実測で捨て玉の最大が 127→266ms) はこの上限では落ちない。
-  // 意図的にそうしてある: ここを判定 (50ms) へ近づけると、初回コストを判定から外すという
-  // 捨て玉の目的と衝突する。値と根拠は scripts/lib/bench-criteria.mjs の WARMUP_MAX_MS
-  const latencyProblem = warmup === null ? null : warmupLatencyProblem(warmup.maxMs, WARMUP_MAX_MS);
-  if (latencyProblem !== null) throw new Error(latencyProblem);
+  // 捨て玉そのものを 2 つの観点で確かめる (捨て玉を切っているときは対象が無いので飛ばす):
+  //   1. 指定どおりの件数で止まったか。autocannon が `amount` より `duration` を優先する版へ
+  //      変わると捨て玉が秒で回って初回コストを吸収しきれなくなるが、**判定結果には現れない**
+  //      (本計測はそのまま緑になる) ので、ここで落とす (fail-closed)
+  //   2. 初回コストそのものが桁で悪化していないか。**捕まえるのは桁の悪化だけ** —
+  //      起動直後に +150ms 増える程度 (実測で捨て玉の最大が 127→266ms) はこの上限では落ちない。
+  //      意図的にそうしてある: ここを判定 (50ms) へ近づけると、初回コストを判定から外すという
+  //      捨て玉の目的と衝突する。値と根拠は scripts/lib/bench-criteria.mjs の WARMUP_MAX_MS
+  if (warmup !== null) {
+    // 先に見つかった理由だけを出す
+    const problem =
+      warmupCountProblem(WARMUP_REQUESTS, warmup.requests) ??
+      warmupLatencyProblem(warmup.maxMs, WARMUP_MAX_MS);
+    // どちらかに引っ掛かれば、その理由で落とす
+    if (problem !== null) throw new Error(problem);
+  }
   // 捨て玉で失敗していたら本計測の数字も信用できない (認証の取り違え等) ので、件数を合算して返す。
   // **この合算は load-bearing** — 外すと「捨て玉の窓だけ 401 になる」設定ミスが丸ごと消える
   // (実測: 外した版は全件 2xx 扱いで `passed: true` を返した)

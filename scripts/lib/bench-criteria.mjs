@@ -6,9 +6,10 @@
 // `scripts/lib/gate-report.mjs` ＋ `tests/gate-scripts.test.ts` が取っているのと同じ形にして、
 // 判定を純粋関数へ出し、合成入力から挙動を固定する。
 //
-// **残る境界**: `scripts/bench-proxy.ts` から呼び出し行ごと消す変異は署名から見分けられない
-// (`tests/gate-scripts.test.ts` が `exitIfFailures` について書いている境界と同じ。
-// 判定の塊が丸ごと消える差分なので目には付く — 規約とレビューで守る)
+// **呼び出し行ごと消す変異は eslint が捕まえる** — import した名前が未使用になるため。
+// ただし warning なので、`npm run lint` に `--max-warnings=0` が無いと exit 0 で握り潰される
+// (実測: 2 本の判定を消すと vitest 675 緑・tsc 0・`eslint .` も 0、`eslint . --max-warnings=0`
+// だけが 1 になった)。`package.json` の lint からその指定を外さないこと
 
 // 捨て玉 (ウォームアップ) の最大遅延に置く上限 (ミリ秒)。
 // **受け入れ基準の 50ms から導かない。** あちらは「プロキシ経由と直接の差」の予算で、こちらは
@@ -32,6 +33,7 @@ export function intFromEnvValue(name, raw, fallback, minimum) {
   // `Number('2e2')` は 200 なので、`Number` の結果だけを見ると「10 進の整数」より緩くなる。
   // とくに空文字は minimum が 0 の変数 (捨て玉の件数) で 0 として通り、**捨て玉と、
   // それに掛かるガード 2 本がまとめて黙って外れる** (実測: `BENCH_WARMUP=` が警告なしで素通りした)
+  // **文言に生の値を出すので、機密を持つ変数には使わない** (呼び出し元はベンチの調整値 3 つだけ)
   if (!/^[0-9]+$/.test(raw)) {
     throw new Error(`${name} は 10 進の整数で指定してください (今の指定: ${JSON.stringify(raw)})`);
   }
@@ -39,7 +41,9 @@ export function intFromEnvValue(name, raw, fallback, minimum) {
   const parsed = Number(raw);
   // 下限未満は設定ミスとみなして止める
   if (parsed < minimum) {
-    throw new Error(`${name} は ${minimum} 以上で指定してください (今の指定: ${raw})`);
+    throw new Error(
+      `${name} は ${minimum} 以上で指定してください (今の指定: ${JSON.stringify(raw)})`,
+    );
   }
   // 読めた値
   return parsed;

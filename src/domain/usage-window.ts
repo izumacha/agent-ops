@@ -61,12 +61,6 @@ export function formatUtcDay(date: Date): string {
   return date.toISOString().slice(0, 'YYYY-MM-DD'.length);
 }
 
-/** Date を UTC のその日の 0 時へ丸める (memory アダプタの集計キーに使う) */
-export function startOfUtcDay(date: Date): Date {
-  // 年月日だけを取り出して 0 時として組み立て直す
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-}
-
 /**
  * 開始日・終了日 (どちらも 'YYYY-MM-DD'、終了日を含む) から集計期間を組み立てる。
  * 日数の上限を超える指定は拒否する (無制限の期間は全件走査になり、§9 のリソース枯渇そのもの)。

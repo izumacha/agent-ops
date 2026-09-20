@@ -1,6 +1,7 @@
 // 利用イベント (UsageEvent) の契約テスト (実 PostgreSQL)。
 // **memory アダプタでは見えないもの**をここで固定する:
-//   - 日次集計の SQL (date_trunc + AT TIME ZONE 'UTC') が memory の JS 集計と同じ結果を返すこと
+//   - 日次集計の SQL (date_trunc) が memory の JS 集計と同じ結果を返すこと
+//   - その日境界がセッションのタイムゾーン設定に左右されないこと (下の「タイムゾーン」のケース)
 //   - 記録がテナント境界と複合 FK (tenantId, agentId) を越えないこと
 //   - BIGINT の料金が桁を落とさずに合計されること
 // RUN_PRISMA_CONTRACT=1 のときだけ走り、beforeEach で全テーブルを TRUNCATE するため開発 DB を指さない
@@ -207,8 +208,10 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
       // prisma 側は createdAt を指定して直接入れる
       await insertAt({ tenantId: a.tenantId, agentId: a.agent.id, ...row });
       // memory 側は表へ直接入れる (同じ createdAt にするため)
-      memory.store.usageEvents.set(memory.store.nextId('usage'), {
-        id: memory.store.nextId('usage'),
+      // id は 1 度だけ採番する (キーと id で別々に呼ぶと 2 つの値がずれる)
+      const memoryId = memory.store.nextId('usage');
+      memory.store.usageEvents.set(memoryId, {
+        id: memoryId,
         tenantId: memoryTenant.tenant.id,
         agentId: memoryAgent.id,
         provider: Provider.anthropic,
@@ -230,6 +233,62 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
     const fromMemory = await memory.usageEvents.dailyTotals(memoryTenant.tenant.id, window);
     // 日付・件数・合計がすべて一致する
     expect(fromDb).toEqual(fromMemory);
+  });
+
+  it('日の境目はセッションのタイムゾーン設定に左右されない', async () => {
+    // **この検査だけが見えるもの**: 集計 SQL の date_trunc はセッションのタイムゾーンで日を切る。
+    // `createdAt` の列は timestamp without time zone (= UTC の壁時計) なので、SQL 側で
+    // `AT TIME ZONE 'UTC'` を挟むと「UTC の壁時計を現地時刻として読み直す」ことになり、
+    // 接続のタイムゾーンが UTC 以外のとき日がずれる (実測: Asia/Tokyo で 1 日ぶん繰り上がった)。
+    // CI もローカルも既定は UTC なので、通常の集計テストではこのずれが一切現れない
+    const a = await makeTenantWithAgent(repos, 'A');
+    // 同じ UTC の日 (3/1) に収まる 2 件。JST に読み替えると 3/1 11:00 と 3/2 05:00 で日がまたがる
+    await insertAt({
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      createdAt: '2026-03-01T02:00:00Z',
+      inputTokens: 1,
+      outputTokens: 2,
+      costMicroUsd: 10n,
+    });
+    await insertAt({
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      createdAt: '2026-03-01T20:00:00Z',
+      inputTokens: 3,
+      outputTokens: 4,
+      costMicroUsd: 20n,
+    });
+    // 接続のタイムゾーンを東京にしたクライアントを別に作る (DSN の options で接続時に指定する)
+    const dsn = new URL(process.env.DATABASE_URL ?? '');
+    dsn.searchParams.set('options', '-c timezone=Asia/Tokyo');
+    // createPrismaClient() は環境変数から接続文字列を読むので、生成のあいだだけ差し替える
+    const original = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = dsn.toString();
+    const { createPrismaClient } = await import('@/lib/prisma-client');
+    const { createPrismaRepos } = await import('@/data/adapters/prisma');
+    const shifted = createPrismaClient();
+    process.env.DATABASE_URL = original;
+    // 後始末を確実にしたうえで集計する
+    try {
+      // 指定が実際に効いていることを先に確かめる (効いていなければこの検査は何も見ていない)
+      const [{ timezone }] = await shifted.$queryRaw<
+        { timezone: string }[]
+      >`SELECT current_setting('TimeZone') AS "timezone"`;
+      expect(timezone, 'セッションのタイムゾーンを変更できていない').toBe('Asia/Tokyo');
+      // 東京のセッションで 3/1 の 1 日ぶんを集計する
+      const totals = await createPrismaRepos(shifted).usageEvents.dailyTotals(a.tenantId, {
+        start: new Date('2026-03-01T00:00:00Z'),
+        endExclusive: new Date('2026-03-02T00:00:00Z'),
+      });
+      // UTC の日で切れているので 3/1 の 1 行にまとまる (現地時刻で切ると 3/1 と 3/2 の 2 行になる)
+      expect(totals).toEqual([
+        { day: '2026-03-01', requests: 2, inputTokens: 4, outputTokens: 6, costMicroUsd: 30n },
+      ] satisfies DailyUsageTotal[]);
+    } finally {
+      // 余分な接続を残さない
+      await shifted.$disconnect();
+    }
   });
 
   it('エージェントで絞れる (同テナントの別エージェントは入らない)', async () => {

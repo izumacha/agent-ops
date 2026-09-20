@@ -3,6 +3,7 @@
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
 import { DuplicateError } from '@/data/errors';
 import { fetchCount, toPage, type CursorKey } from '@/data/page';
+import { toSafeCount } from '@/data/safe-count';
 import type {
   AgentFilter,
   AgentRecord,
@@ -615,18 +616,6 @@ interface DailyTotalRow {
   costMicroUsd: bigint;
 }
 
-// BIGINT の合計を JSON で運べる数値にする。**安全な整数の範囲を超えたら落とす (fail-closed)** —
-// Number へ丸めて返すと請求や上限判定が静かにずれる (1 日に 9 千兆トークンは現実には起きないが、
-// 起きたときに黙って間違った値を返すより落ちるほうがよい)
-function toSafeCount(value: bigint, label: string): number {
-  // 安全な整数の範囲に収まらなければ、その場で気付けるように投げる
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`日次集計の ${label} が数値として表せる範囲を超えました`);
-  }
-  // 範囲内なので数値へ落とす
-  return Number(value);
-}
-
 // 利用イベント Port の prisma 実装
 class PrismaUsageEvents implements UsageEventsPort {
   // クライアントを受け取る
@@ -651,10 +640,18 @@ class PrismaUsageEvents implements UsageEventsPort {
     const agentId = query.agentId ?? null;
     // 集計を 1 クエリで行う。**タグ付きテンプレート**なので値はすべてパラメータとして渡る
     // (guardRawSql() が許すのはこの形だけ。文字列連結の SQL は実行時に拒否される)。
-    // 日の切り出しは date_trunc + to_char で、アプリ側の formatUtcDay と同じ 'YYYY-MM-DD' にそろえる
+    // 日の切り出しは date_trunc + to_char で、アプリ側の formatUtcDay と同じ 'YYYY-MM-DD' にそろえる。
+    //
+    // **`AT TIME ZONE 'UTC'` を書いてはいけない。** `createdAt` は `TIMESTAMP(3)`
+    // (without time zone) に UTC の値をそのまま入れている列で、そこへ `AT TIME ZONE 'UTC'` を掛けると
+    // `timestamptz` へ変換され、続く date_trunc / to_char が**接続セッションの TimeZone 設定**で評価される。
+    // 期間の絞り込み (createdAt >= $start) は素の比較なので UTC のまま効き、**日のバケット分けだけが
+    // ローカル時刻**という食い違いになる。実測 (セッション Asia/Tokyo): 2026-01-01T20:00Z と
+    // 2026-01-01T02:00Z が 01-02 と 01-01 に割れ、memory アダプタとの一致検査が落ちた。
+    // CI の postgres:16-alpine は既定が UTC なので、この食い違いは配備先でだけ現れる
     const rows = await this.db.$queryRaw<DailyTotalRow[]>`
       SELECT
-        to_char(date_trunc('day', "createdAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "day",
+        to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS "day",
         COUNT(*)::bigint AS "requests",
         COALESCE(SUM("inputTokens"), 0)::bigint AS "inputTokens",
         COALESCE(SUM("outputTokens"), 0)::bigint AS "outputTokens",

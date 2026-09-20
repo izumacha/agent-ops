@@ -81,12 +81,13 @@ export const API_MESSAGES = {
   agentNotInTenant: '指定したエージェントが見つかりません。',
   apiKeyRequired: 'このエンドポイントは API キー (aop_k_...) で呼び出してください。',
   apiKeyNotBoundToAgent:
-    'このAPI キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
+    'この API キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
   agentNotActive: 'このエージェントは停止中です。復帰させてから呼び出してください。',
   unsupportedModel:
     '料金表に無いモデルです。対応モデルを指定してください (計測できない呼び出しは中継しません)。',
   streamingNotSupported: 'ストリーミング (stream: true) には未対応です。',
   upstreamFailure: '上流の LLM プロバイダへの呼び出しに失敗しました。',
+  upstreamRateLimited: '上流の LLM プロバイダが混雑しています。時間をおいて再試行してください。',
   upstreamTimeout: '上流の LLM プロバイダが時間内に応答しませんでした。',
   upstreamNotConfigured: 'このプロバイダへの中継は設定されていません。',
   invalidUsageDay: '日付は YYYY-MM-DD で指定してください。',

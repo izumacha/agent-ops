@@ -603,6 +603,15 @@ paths:
         エージェントに紐づいていないキー・停止中のエージェントのキーは 403。
         料金表 (src/domain/pricing/vendor-prices.json) に無いモデルは計測できないので中継せず 422。
         ストリーミング (stream: true) は Step2 の範囲外で 422。
+
+        上流の応答の扱い: 2xx と 4xx は原則そのまま返すが、**401 / 403 / 429 の本文は返さない**
+        (上流アカウントの資格情報・組織名・クォータが載るため)。401 / 403 は 502 に写し、
+        429 は 429 のまま定型文へ差し替えて Retry-After だけ中継する。5xx は 502、
+        上流が JSON 以外を返した場合も 502 にする。
+
+        **本文は受け取ったバイト列をそのまま流さず、検証済みの値を JSON へ組み立て直して送る**。
+        そのため JSON の正規化が起きる: 2^53 を超える整数は丸められ、1e400 は null、-0 は 0 になる。
+        巨大な整数を seed などに渡す場合はこの点に注意する。
       requestBody:
         required: true
         content:
@@ -634,6 +643,8 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '504':
           $ref: '#/components/responses/GatewayTimeout'
   /proxy/openai/chat/completions:
@@ -675,6 +686,8 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '504':
           $ref: '#/components/responses/GatewayTimeout'
   /usage/daily:
@@ -818,6 +831,20 @@ components:
             $ref: '#/components/schemas/Error'
     InternalServerError:
       description: サーバー内部のエラー (応答は内部詳細を含まない。詳細はサーバログに残る)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: |
+        上流の LLM プロバイダが混雑を返した。本文は定型文に差し替える (上流の本文には組織名や
+        クォータの状況が載るため) が、上流が Retry-After を返した場合はその値だけ中継する
+      headers:
+        Retry-After:
+          description: 再試行までの待ち時間 (上流が指示した場合のみ)
+          required: false
+          schema:
+            type: string
       content:
         application/json:
           schema:

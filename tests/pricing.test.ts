@@ -6,7 +6,7 @@
 // 実装を呼んで実装と比べると、単価の読み違いも端数の取り違えも一緒に動いて必ず緑になる。
 import { describe, expect, it } from 'vitest';
 import { costMicroUsd, findModelPrice, listModelPrices } from '@/domain/pricing';
-import { parseUsdDecimalToMicro } from '@/domain/money';
+import { MICRO_USD_MAX, parseUsdDecimalToMicro } from '@/domain/money';
 import { Provider } from '@/domain/types';
 import vendorPrices from '@/domain/pricing/vendor-prices.json';
 
@@ -202,5 +202,14 @@ describe('USD 10 進文字列 → マイクロ USD', () => {
   ])('%s は受け付けない (静かに丸めない)', (_label, text) => {
     // 表せない・読めない値は null (呼び出し側が落とす)
     expect(parseUsdDecimalToMicro(text)).toBeNull();
+  });
+
+  it('BIGINT の範囲を超える単価は受け付けない', () => {
+    // 形の検査 (整数部 13 桁まで) は通るが、マイクロへ 100 万倍すると BIGINT に収まらない値。
+    // **形だけを見て範囲を見ない実装を落とす** — 範囲の検査を外すと、この値が
+    // 9999999999999000000 という列へ書けない数として通り、保存の時点で初めて落ちる
+    expect(parseUsdDecimalToMicro('9999999999999')).toBeNull();
+    // 範囲に収まる側 (境界のすぐ内側) は通る
+    expect(parseUsdDecimalToMicro('9223372036854.775807')).toBe(MICRO_USD_MAX);
   });
 });

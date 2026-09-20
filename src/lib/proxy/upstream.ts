@@ -90,8 +90,34 @@ export function upstreamEndpoint(provider: Provider, env: NodeJS.ProcessEnv): UR
   const base = resolveUpstreamBaseUrl(provider, env);
   // 基底のパスの末尾スラッシュを整えてから固定パスを足す
   const path = `${base.pathname.replace(/\/+$/, '')}${UPSTREAMS[provider].path}`;
-  // 新しい URL として組み立てる (元の URL を書き換えない)
-  return new URL(path, base);
+  // **必ず基底の origin へ繋ぐ**。`new URL(path, base)` で組み立てると、基底のパスが `//` で始まるとき
+  // (`https://api.anthropic.com//evil.example.com` のような末尾スラッシュの打ち間違い) その部分が
+  // プロトコル相対 URL として解釈され、**別ホストへ上流の API キーごと送られる** (実測)。
+  // origin を前に置いて組み立てれば、パスがどう書かれていても接続先のホストは動かない
+  return new URL(`${base.origin}${path}`);
+}
+
+/** 中継に必要な材料 (接続先と上流の資格情報)。どちらも環境変数とコードだけから決まる */
+export interface UpstreamTarget {
+  // 中継先の URL
+  endpoint: URL;
+  // 上流の資格情報 (クライアントからは決して受け取らない)
+  apiKey: string;
+}
+
+/**
+ * 中継先と資格情報を決める。設定が無い・安全でなければ 503 を投げる。
+ * **呼び出し側は「上流を叩く前」にこれを呼ぶ** — 到達すらしなかった呼び出しを
+ * 利用イベントとして記録しないため (記録するのは実際に上流へ出た呼び出しだけ。ADR-0007)
+ */
+export function resolveUpstreamTarget(provider: Provider, env = process.env): UpstreamTarget {
+  // 中継先 (設定が安全でなければここで 503)
+  const endpoint = upstreamEndpoint(provider, env);
+  // 上流の資格情報 (未設定なら中継できない)
+  const apiKey = env[UPSTREAMS[provider].apiKeyEnv]?.trim();
+  if (apiKey === undefined || apiKey === '') throw notConfiguredError();
+  // 中継の材料
+  return { endpoint, apiKey };
 }
 
 /** 上流へ送るヘッダを組み立てる (クライアントのヘッダは 1 つも含めない) */
@@ -119,16 +145,21 @@ export interface UpstreamResult {
   status: number;
   // 上流の応答本文 (文字列のまま。解釈は呼び出し側)
   body: string;
+  // 上流が返した Retry-After (無ければ null)。混雑時の待ち時間だけは中継しても
+  // プラットフォーム側の情報を漏らさないので、呼び出し側がクライアントへ渡せるようにする
+  retryAfter: string | null;
+  // 上流が申告した Content-Type (無ければ null)。呼び出し側が「JSON 以外は返さない」判断に使う
+  contentType: string | null;
 }
 
 // 中継の入力
 export interface UpstreamCall {
   // どのプロバイダへ送るか
   provider: Provider;
+  // 中継先と資格情報 (resolveUpstreamTarget で先に決めたもの)
+  target: UpstreamTarget;
   // 送る本文 (検証済みの JSON 文字列)
   body: string;
-  // 環境変数 (テストから差し替えられるよう引数で受ける)
-  env?: NodeJS.ProcessEnv;
   // 応答を待つ上限 (ミリ秒)
   timeoutMs?: number;
 }
@@ -139,29 +170,27 @@ export interface UpstreamCall {
  * **上流の失敗の詳細は利用者へ返さない** (サーバログに残すのは呼び出し側の責務)。
  */
 export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> {
-  // 環境変数 (既定はプロセスのもの)
-  const env = call.env ?? process.env;
-  // 中継先 (設定が安全でなければここで 503)
-  const endpoint = upstreamEndpoint(call.provider, env);
-  // 上流の資格情報 (未設定なら中継できない)
-  const apiKey = env[UPSTREAMS[call.provider].apiKeyEnv]?.trim();
-  if (apiKey === undefined || apiKey === '') throw notConfiguredError();
   // 待ち時間の上限
   const timeoutMs = call.timeoutMs ?? UPSTREAM_TIMEOUT_MS;
   // 上流を呼ぶ
   try {
     // 上限時間で打ち切る (リダイレクトは追わない — 追うと接続先の allowlist を上流が書き換えられる)
-    const response = await fetch(endpoint, {
+    const response = await fetch(call.target.endpoint, {
       method: 'POST',
-      headers: upstreamHeaders(call.provider, apiKey),
+      headers: upstreamHeaders(call.provider, call.target.apiKey),
       body: call.body,
       redirect: 'error',
       signal: AbortSignal.timeout(timeoutMs),
     });
     // 応答本文を読む (上流が壊れた本文を返しても、ここで読めた分をそのまま扱う)
     const body = await response.text();
-    // ステータスと本文を返す
-    return { status: response.status, body };
+    // ステータス・本文・待ち時間の指示・本文の種類を返す
+    return {
+      status: response.status,
+      body,
+      retryAfter: response.headers.get('retry-after'),
+      contentType: response.headers.get('content-type'),
+    };
   } catch (error) {
     // 時間切れは 504 (上流が応答しなかった)
     if (error instanceof Error && error.name === 'TimeoutError') {

@@ -1,11 +1,6 @@
 // 集計期間の規則 (src/domain/usage-window.ts)。日の境目は UTC で、API と両アダプタが同じ規則を使う
 import { describe, expect, it } from 'vitest';
-import {
-  formatUtcDay,
-  parseUtcDay,
-  resolveUsageWindow,
-  startOfUtcDay,
-} from '@/domain/usage-window';
+import { formatUtcDay, parseUtcDay, resolveUsageWindow } from '@/domain/usage-window';
 
 describe('UTC の日付の読み書き', () => {
   it('YYYY-MM-DD を UTC の 0 時として読む', () => {
@@ -34,13 +29,6 @@ describe('UTC の日付の読み書き', () => {
   it('Date を UTC の日付文字列にする', () => {
     // 時刻を持つ Date でも日付だけになる
     expect(formatUtcDay(new Date('2026-03-01T23:59:59Z'))).toBe('2026-03-01');
-  });
-
-  it('UTC のその日の 0 時へ丸める', () => {
-    // 時刻は落ちる
-    expect(startOfUtcDay(new Date('2026-03-01T23:59:59Z')).toISOString()).toBe(
-      '2026-03-01T00:00:00.000Z',
-    );
   });
 });
 

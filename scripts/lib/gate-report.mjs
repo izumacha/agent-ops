@@ -7,33 +7,73 @@
 // 見分けられないので、そこは規約とレビューで守る。
 
 /**
+ * vitest の JSON レポートから、「この名前を含む pass したテスト」が見つからない項目を返す。
+ * 名前の作り方だけを呼び出し側から受け取り、走査と判定はここに 1 つだけ置く
+ * (RBAC 行列と料金表で同じ走査を書き写していたので、片方を直したときにもう片方が取り残される形だった)。
+ * @template T 期待する項目の型
+ * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
+ * @param {T[]} expected 期待する項目の一覧
+ * @param {(item: T) => string} needleOf その項目に対応するテスト名の一部
+ * @param {(item: T) => string} labelOf 不足として表示するときの名前
+ * @returns {string[]} 見つからない・落ちている項目のラベル (すべて揃っていれば空)
+ */
+function missingPassedCases(report, expected, needleOf, labelOf) {
+  // 全テストの (フルネーム, 結果) を平坦化する
+  const results = (report.testResults ?? []).flatMap((file) =>
+    (file.assertionResults ?? []).map((test) => ({ name: test.fullName, status: test.status })),
+  );
+  // 見つからない・落ちている項目を集める
+  const missing = [];
+  // 期待する項目をすべて見る
+  for (const item of expected) {
+    // その項目に対応するテスト名の一部
+    const needle = needleOf(item);
+    // 名前にそれを含む pass したテストがあるか
+    const hit = results.find(
+      (test) =>
+        typeof test.name === 'string' && test.name.includes(needle) && test.status === 'passed',
+    );
+    // 無ければ不足として記録する
+    if (!hit) missing.push(labelOf(item));
+  }
+  // 不足の一覧
+  return missing;
+}
+
+/**
  * RBAC 行列 (役割 × 操作) のうち、pass したテストが見つからない組を返す。
  * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
  * @param {{ roles: string[], actions: string[], matrixPrefix: string }} matrix 期待する組み合わせ
  * @returns {string[]} 「役割 × 操作」の文字列の配列 (すべて揃っていれば空)
  */
 export function missingMatrixCases(report, { roles, actions, matrixPrefix }) {
-  // 全テストの (フルネーム, 結果) を平坦化する
-  const results = (report.testResults ?? []).flatMap((file) =>
-    (file.assertionResults ?? []).map((test) => ({ name: test.fullName, status: test.status })),
+  // 役割 × 操作をすべて組み合わせる
+  const pairs = roles.flatMap((role) => actions.map((action) => ({ role, action })));
+  // 「RBAC 行列: <役割> × <操作>」を含む pass したテストがあるか
+  return missingPassedCases(
+    report,
+    pairs,
+    ({ role, action }) => `${matrixPrefix}${role} × ${action}`,
+    ({ role, action }) => `${role} × ${action}`,
   );
-  // 見つからない・落ちている組を集める
-  const missing = [];
-  // 役割 × 操作をすべて見る
-  for (const role of roles) {
-    for (const action of actions) {
-      // 名前に「RBAC 行列: <役割> × <操作>」を含む pass したテストがあるか
-      const needle = `${matrixPrefix}${role} × ${action}`;
-      const hit = results.find(
-        (test) =>
-          typeof test.name === 'string' && test.name.includes(needle) && test.status === 'passed',
-      );
-      // 無ければ不足として記録する
-      if (!hit) missing.push(`${role} × ${action}`);
-    }
-  }
-  // 不足の一覧
-  return missing;
+}
+
+/**
+ * 料金表の各モデルについて、pass した「誤差 0」のテストが見つからないものを返す。
+ * **期待するテスト名は料金表 (正本の JSON) から導く** — 一覧をここに書き写すと、
+ * モデルを足した人がテストを書き忘れてもゲートは緑のままになる。
+ * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
+ * @param {{ models: { provider: string, model: string }[], pricePrefix: string }} pricing 料金表とテスト名の接頭辞
+ * @returns {string[]} 「provider model」の文字列の配列 (すべて揃っていれば空)
+ */
+export function missingPriceCases(report, { models, pricePrefix }) {
+  // 「料金: <provider> <model>」を含む pass したテストがあるか
+  return missingPassedCases(
+    report,
+    models,
+    ({ provider, model }) => `${pricePrefix}${provider} ${model}`,
+    ({ provider, model }) => `${provider} ${model}`,
+  );
 }
 
 /**
@@ -68,36 +108,6 @@ export function evaluateStep1Report({
   if (missing.length > 0) failures.push(`RBAC 行列のテストが不足/失敗: ${missing.join(', ')}`);
   // 判定結果
   return failures;
-}
-
-/**
- * 料金表の各モデルについて、pass した「誤差 0」のテストが見つからないものを返す。
- * **期待するテスト名は料金表 (正本の JSON) から導く** — 一覧をここに書き写すと、
- * モデルを足した人がテストを書き忘れてもゲートは緑のままになる。
- * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
- * @param {{ models: { provider: string, model: string }[], pricePrefix: string }} pricing 料金表とテスト名の接頭辞
- * @returns {string[]} 「provider model」の文字列の配列 (すべて揃っていれば空)
- */
-export function missingPriceCases(report, { models, pricePrefix }) {
-  // 全テストの (フルネーム, 結果) を平坦化する
-  const results = (report.testResults ?? []).flatMap((file) =>
-    (file.assertionResults ?? []).map((test) => ({ name: test.fullName, status: test.status })),
-  );
-  // 見つからない・落ちているモデルを集める
-  const missing = [];
-  // 料金表の全モデルを見る
-  for (const { provider, model } of models) {
-    // 名前に「料金: <provider> <model>」を含む pass したテストがあるか
-    const needle = `${pricePrefix}${provider} ${model}`;
-    const hit = results.find(
-      (test) =>
-        typeof test.name === 'string' && test.name.includes(needle) && test.status === 'passed',
-    );
-    // 無ければ不足として記録する
-    if (!hit) missing.push(`${provider} ${model}`);
-  }
-  // 不足の一覧
-  return missing;
 }
 
 /**

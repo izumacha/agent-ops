@@ -27,18 +27,43 @@ const STUB_BASE_URL = 'http://127.0.0.1:4010';
 // 差し替えた fetch が受け取った呼び出し (URL とオプション)
 let fetchCalls: { url: string; init: RequestInit }[] = [];
 
+// スタブ上流に用意させる応答。body は JSON 化して返す (rawBody を渡した場合はそのまま返す)
+interface StubResponse {
+  // 返す HTTP ステータス
+  status: number;
+  // 返す本文 (JSON 化する)
+  body?: unknown;
+  // 本文を文字列のまま返したいとき (JSON でない応答を模す)
+  rawBody?: string;
+  // Content-Type (省略時は application/json)
+  contentType?: string;
+  // 追加のヘッダ (Retry-After など)
+  headers?: Record<string, string>;
+  // 応答を返すまでの待ち時間 (ミリ秒。遅延の記録を確かめるときに使う)
+  delayMs?: number;
+}
+
 // 上流の応答を 1 回分用意する (fetch の差し替え)
-function stubUpstream(response: { status: number; body: unknown } | Error): void {
+function stubUpstream(response: StubResponse | Error): void {
   // fetch の代わりに呼ばれる関数
   const fake = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     // 呼び出しを記録する (URL とヘッダを後で検査する)
     fetchCalls.push({ url: String(input), init: init ?? {} });
     // 例外を模すときはそのまま投げる (時間切れ・接続不能)
     if (response instanceof Error) throw response;
+    // 遅延の指定があれば待つ (latencyMs の記録を確かめるため)
+    if (response.delayMs !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, response.delayMs));
+    }
+    // 返す本文 (rawBody 優先。無ければ body を JSON 化する)
+    const body = response.rawBody ?? JSON.stringify(response.body);
     // 応答を返す
-    return new Response(JSON.stringify(response.body), {
+    return new Response(body, {
       status: response.status,
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': response.contentType ?? 'application/json',
+        ...(response.headers ?? {}),
+      },
     });
   });
   // グローバルの fetch を差し替える
@@ -206,6 +231,20 @@ describe('中継するヘッダと接続先', () => {
     expect(headers.get('authorization')).toBeNull();
     // クライアントの独自ヘッダも渡さない
     expect(headers.get('x-attacker')).toBeNull();
+  });
+
+  it('リダイレクトを追わず、時間切れの合図つきで呼ぶ', async () => {
+    // **この 2 つは応答の形に現れない**ので、fetch へ渡したオプションそのものを見る。
+    // redirect を 'follow' に戻すと上流の 302 で接続先の allowlist を上流側が書き換えられ、
+    // signal を外すと応答が来ない上流に対して待ち続ける (どちらも他の検査は全件緑のまま通る)
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
+    // リダイレクトは追わずエラーにする
+    expect(fetchCalls[0].init.redirect).toBe('error');
+    // 時間切れの合図が渡っている
+    expect(fetchCalls[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('OpenAI 経路は Bearer で資格情報を渡し、パスも OpenAI のものになる', async () => {
@@ -425,6 +464,76 @@ describe('上流の失敗', () => {
     expect(recordedEvents()[0].statusCode).toBe(400);
   });
 
+  it('上流の 401 / 403 は 502 に写して本文を返さない (上流アカウントの状態を漏らさない)', async () => {
+    // 上流の 401 の本文には部分マスクした API キーや組織名が載る。4xx をそのまま素通しすると、
+    // 有効なキーを持つ全テナントがそれを観測できてしまう (ADR-0007 の決定 7)
+    for (const status of [401, 403]) {
+      // 記録と呼び出しの履歴をこのループ内で数えるため、毎回空にする
+      fetchCalls = [];
+      seed.store.usageEvents.clear();
+      // 上流が資格情報を拒否する (内部情報を含む本文)
+      stubUpstream({ status, body: { error: { message: 'invalid x-api-key sk-ant-...9f2' } } });
+      // 中継する
+      const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+      const result = await call(proxyAnthropic, {
+        token: key.secret,
+        body: { model: ANTHROPIC_MODEL },
+      });
+      // 利用者には中継の失敗としてだけ伝える
+      expect(result.status, `${status} を素通ししている`).toBe(502);
+      expect(JSON.stringify(result.json)).not.toContain('sk-ant-');
+      // 記録は**実際の上流のステータス**で 1 行だけ残る (二重記録もしない)
+      expect(recordedEvents()).toHaveLength(1);
+      expect(recordedEvents()[0].statusCode).toBe(status);
+    }
+  });
+
+  it('上流の 429 は 429 のまま返すが本文は定型文にし、Retry-After だけ中継する', async () => {
+    // 混雑は「待てば通る」情報に意味があるので 429 のまま返す。本文にはクォータや組織名が載るので返さない
+    stubUpstream({
+      status: 429,
+      body: { error: { message: 'rate limit for organization acme-corp' } },
+      headers: { 'retry-after': '7' },
+    });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // ステータスは 429 のまま
+    expect(result.status).toBe(429);
+    // 上流の本文は返さない
+    expect(JSON.stringify(result.json)).not.toContain('acme-corp');
+    // 待ち時間の指示だけは中継する (クライアントの再試行嵐を防ぐ)
+    expect(result.headers.get('Retry-After')).toBe('7');
+    // 記録は 429 で 1 行
+    expect(recordedEvents()).toHaveLength(1);
+    expect(recordedEvents()[0].statusCode).toBe(429);
+  });
+
+  it('上流が JSON 以外を返したら 502 (中身も返さない)', async () => {
+    // 前段のゲートウェイが HTML のエラーページを返す形。JSON だと名乗って HTML を返すと
+    // クライアントの解釈が理由不明で失敗し、中身は上流側の内部情報でもある
+    stubUpstream({
+      status: 200,
+      rawBody: '<html><body>upstream gateway error: pool exhausted</body></html>',
+      contentType: 'text/html; charset=utf-8',
+    });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // 502 で、上流の本文は返さない
+    expect(result.status).toBe(502);
+    expect(JSON.stringify(result.json)).not.toContain('pool exhausted');
+    // 上流は実際に呼ばれているので記録は残る (ステータスは上流の 200)
+    expect(recordedEvents()).toHaveLength(1);
+    expect(recordedEvents()[0].statusCode).toBe(200);
+  });
+
   it('上流が時間内に応答しなければ 504 で、記録も残す', async () => {
     // AbortSignal.timeout が投げるのと同じ名前の例外
     const timeout = new Error('timed out');
@@ -471,5 +580,21 @@ describe('上流の失敗', () => {
     // 503 で、上流は呼ばない
     expect(result.status).toBe(503);
     expect(fetchCalls).toHaveLength(0);
+    // **記録もしない** — 上流へ 1 バイトも出ていない呼び出しを利用イベントにすると、
+    // 上流が未設定のあいだ有効なキー 1 本で DB の行だけを無制限に増やせる (実測)
+    expect(recordedEvents()).toHaveLength(0);
+  });
+});
+
+describe('遅延の記録', () => {
+  it('上流にかかった時間を latencyMs として記録する', async () => {
+    // 上流が 30 ミリ秒かけて応答する
+    const delayMs = 30;
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1), delayMs });
+    // 中継する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
+    // 測った時間が記録されている (0 固定や未計測の変異を落とす。上振れは環境次第なので下限だけ見る)
+    expect(recordedEvents()[0].latencyMs).toBeGreaterThanOrEqual(delayMs);
   });
 });

@@ -1,10 +1,11 @@
 // 上流への接続先の決め方 (src/lib/proxy/upstream.ts)。**ここが SSRF の防御線**で、
 // 「接続先はコードと環境変数だけから決まる」ことを固定する。
 // 呼び出しそのもの (ヘッダ・タイムアウト・記録) は tests/api/proxy.test.ts が API 経路で見る
-import { describe, expect, it } from 'vitest';
-import { resolveUpstreamBaseUrl, upstreamEndpoint } from '@/lib/proxy/upstream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { callUpstream, resolveUpstreamBaseUrl, upstreamEndpoint } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { ApiError } from '@/lib/api/errors';
+import { HTTP_STATUS } from '@/lib/api/http-status';
 import { Provider } from '@/domain/types';
 
 // 環境変数の入れ物を作る (process.env を汚さずに判定だけを試す)
@@ -96,6 +97,44 @@ describe('接続先の決定', () => {
     // どちらも同じ接続先
     expect(withSlash.href).toBe('https://gateway.example.com/llm/v1/messages');
     expect(withoutSlash.href).toBe(withSlash.href);
+  });
+});
+
+describe('上流の呼び出し (時間切れ)', () => {
+  // 差し替えた fetch を元へ戻す
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('上限の時間までに応答しなければ 504 にする (実際に中断する)', async () => {
+    // 応答を返さず、中断の合図が来たときだけ AbortError で終わる上流を模す
+    // (fetch の実装と同じ振る舞い。AbortSignal.timeout は Node 内部のタイマーで動くので
+    //  偽タイマーでは進められず、**短い上限を渡して実時間で確かめる**のが唯一の方法)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            // 合図が中断になったら、fetch と同じく例外で終わる
+            init?.signal?.addEventListener('abort', () => {
+              const aborted = new Error('aborted');
+              // AbortSignal.timeout は理由として TimeoutError を渡す
+              aborted.name = (init.signal?.reason as Error | undefined)?.name ?? 'AbortError';
+              reject(aborted);
+            });
+          }),
+      ),
+    );
+    // ごく短い上限で呼ぶ (既定の 2 分を待たない)
+    const failure = await callUpstream({
+      provider: Provider.anthropic,
+      target: { endpoint: new URL('https://api.anthropic.com/v1/messages'), apiKey: 'k' },
+      body: '{}',
+      timeoutMs: 20,
+    }).catch((error: unknown) => error);
+    // 504 として扱われる (合図を渡していなければ、この呼び出しは永久に解決しない)
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(HTTP_STATUS.GATEWAY_TIMEOUT);
   });
 });
 

@@ -12,7 +12,7 @@
 // (実測で `eslint . --max-warnings=0` が 1 を返す)。`package.json` の lint からその指定を外さないこと
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -28,7 +28,13 @@ import {
   warmupCountProblem,
   warmupLatencyProblem,
 } from '../scripts/lib/bench-criteria.mjs';
-import { callsFunction, gateScriptNames, importSharedModule } from './lib/script-files';
+import {
+  SCRIPTS_DIR,
+  callsFunction,
+  gateScriptNames,
+  importSharedModule,
+  importedSharedNames,
+} from './lib/script-files';
 
 // 子プロセスでヘルパーを 1 つ呼び、終了コードと「その後に到達したか」を返す。
 // **なぜ子プロセスなのか**: process.exit の有無は戻り値に現れないので、同じプロセス内では確かめられない
@@ -388,6 +394,29 @@ describe('判定の結線', () => {
     }
   });
 
+  it('除外したゲートは判定を 1 つも持たない (理由が構造としても成り立っている)', async () => {
+    // **理由の文字列だけでは裏打ちにならない。** もっともらしい理由を 1 行足すだけで、
+    // そのゲートの結線の検査が黙って消える (実測: `gate-step2.mjs` を除外して
+    // `exitIfFailures` の呼び出しごと消すと 698 件すべて緑だった)。
+    // 除外してよいのは「判定を持たない」ゲートだけなので、そこを構造で確かめる
+    //
+    // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した判定が黙って外れる)
+    const report = await importSharedModule('gate-report.mjs');
+    // 関数として公開されているものが判定 (定数は除く)
+    const judgements = Object.keys(report).filter((key) => typeof report[key] === 'function');
+    // 1 つも無ければ導出が壊れている (fail-closed)
+    expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
+    for (const name of Object.keys(GATE_EXIT_EXCLUSIONS)) {
+      for (const judgement of judgements) {
+        // 判定を呼んでいるなら「判定を持たない」という除外理由が成り立っていない
+        expect(
+          callsFunction(join(process.cwd(), 'scripts', name), judgement),
+          `${name} は ${judgement} で判定しているので除外できない`,
+        ).toBe(false);
+      }
+    }
+  });
+
   it.each(gateScriptNames().filter((name) => GATE_EXIT_EXCLUSIONS[name] === undefined))(
     '%s は判定結果で落とす (exitIfFailures を呼ぶ)',
     (name) => {
@@ -395,36 +424,86 @@ describe('判定の結線', () => {
       // 実測で、その 3 点セットを当てると lint も tsc も vitest も全件緑のまま
       // ゲートの最後の 1 歩 (非 0 終了) が消えた。**構文木で見る** — 文字列一致だと、
       // 呼び出しを消してコメントに残すだけで満たされる (実測で全件緑・件数も不変)
+      // **第 2 引数が素の識別子であることまで見る。** 式を許すと、渡す値そのものを無害化する
+      // 変異 (`exitIfFailures('gate:step2', failures.filter(() => false))`) が素通りする (実測)
       expect(
-        callsFunction(join(process.cwd(), 'scripts', name), 'exitIfFailures'),
-        `${name} が exitIfFailures を呼んでいない`,
+        callsFunction(join(process.cwd(), 'scripts', name), 'exitIfFailures', {
+          identifierArgument: 1,
+        }),
+        `${name} が exitIfFailures を判定結果そのもので呼んでいない`,
       ).toBe(true);
     },
   );
 
-  it('ベンチは bench-criteria の判定を全部呼ぶ', async () => {
+  // 判定を持つ共有モジュールのうち、**ベンチが必ず通さなければならない**もの。
+  // ベンチは全テーブルを TRUNCATE するので、接続先が専用 DB かの判定は 1 本も飛ばせない
+  const REQUIRED_BENCH_MODULE = 'contract-database.mjs';
+  // ベンチスクリプトの一覧 (名前の付け方が手がかり)
+  const benchScriptNames = (): string[] =>
+    readdirSync(SCRIPTS_DIR).filter((name) => /^bench-.*\.ts$/.test(name));
+
+  it('ベンチは scripts/lib から取り込んだ判定を全部呼ぶ', async () => {
+    // ベンチが 1 本も無ければ導出が壊れている (fail-closed)
+    const benches = benchScriptNames();
+    expect(benches.length, 'ベンチが 1 本も無い').toBeGreaterThan(0);
+    // 実際に検査した判定の数 (0 件のまま緑にしない)
+    let checked = 0;
+    for (const bench of benches) {
+      // **取り込みは構文木から導く** — 文字列一致だと、コメントに綴りがあるだけで対象に数え、
+      // 逆に対象から外す変異には気付けない
+      for (const [moduleName, names] of importedSharedNames(join(SCRIPTS_DIR, bench))) {
+        // そのモジュールの実体 (関数かどうかを見るため)
+        const shared = await importSharedModule(moduleName);
+        for (const { exported, local } of names) {
+          // 定数の取り込みは対象外 (呼ぶものではない)
+          if (typeof shared[exported] !== 'function') continue;
+          // 1 件検査する
+          checked += 1;
+          // 取り込んだまま呼ばない形 (判定を素通りさせる変異) を落とす
+          expect(
+            callsFunction(join(SCRIPTS_DIR, bench), local),
+            `${bench} が ${moduleName} の ${exported} を取り込んだまま呼んでいない`,
+          ).toBe(true);
+        }
+      }
+    }
+    // 1 件も見ていなければ導出が壊れている (fail-closed)
+    expect(checked, '判定を 1 つも検査していない').toBeGreaterThan(0);
+  });
+
+  it('ベンチは bench-criteria の判定を全部呼ぶ (取り込みごと消す形も落とす)', async () => {
     // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した関数が黙って外れる)
     const criteria = await importSharedModule('bench-criteria.mjs');
     // 関数として公開されているものが判定 (定数は除く)
     const judgements = Object.keys(criteria).filter((key) => typeof criteria[key] === 'function');
     // 1 つも無ければ導出が壊れている (fail-closed)
     expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
-    // 判定を使うベンチ (bench-criteria を読んでいるものから導く)
-    const benches = readdirSync(join(process.cwd(), 'scripts'))
-      .filter((name) => /^bench-.*\.ts$/.test(name))
-      .filter((name) =>
-        readFileSync(join(process.cwd(), 'scripts', name), 'utf8').includes('bench-criteria.mjs'),
-      );
+    // 判定を使うベンチ (**取り込みの有無を構文木で見る**。以前は本文の文字列一致だったので、
+    // コメントに綴りが残っているだけのファイルも対象に入っていた)
+    const benches = benchScriptNames().filter((name) =>
+      importedSharedNames(join(SCRIPTS_DIR, name)).has('bench-criteria.mjs'),
+    );
     // 1 本も無ければ導出が壊れている
     expect(benches.length, '判定を使うベンチが 1 本も無い').toBeGreaterThan(0);
     for (const bench of benches) {
       for (const name of judgements) {
-        // 呼び出しの形で現れていること (import だけして使わない形・コメントに残す形を落とす)
+        // 呼び出しの形で現れていること (取り込みごと消して判定を飛ばす形もここで落ちる)
         expect(
-          callsFunction(join(process.cwd(), 'scripts', bench), name),
+          callsFunction(join(SCRIPTS_DIR, bench), name),
           `${bench} が ${name} を呼んでいない`,
         ).toBe(true);
       }
+    }
+  });
+
+  it('ベンチは必ず専用 DB の判定を取り込む', () => {
+    // ベンチは全テーブルを TRUNCATE するので、開発 DB を指していないかの判定を飛ばせない。
+    // (取り込んだ判定を実際に呼んでいることは上の「取り込んだ判定を全部呼ぶ」が見る)
+    for (const bench of benchScriptNames()) {
+      expect(
+        importedSharedNames(join(SCRIPTS_DIR, bench)).has(REQUIRED_BENCH_MODULE),
+        `${bench} が ${REQUIRED_BENCH_MODULE} を取り込んでいない`,
+      ).toBe(true);
     }
   });
 });

@@ -39,6 +39,10 @@ const DURATION_SECONDS = Number(process.env.BENCH_DURATION ?? '10');
 //   - 1 接続・無制限 (これ): 追加 11ms。待ち行列もペース配分も無いので、増えた時間だけが出る
 // 同時実行時の振る舞いは Step7 の負荷試験 (同時 100 リクエストでエラー率 < 1%) が見る
 const CONNECTIONS = Number(process.env.BENCH_CONNECTIONS ?? '1');
+// 計測の前に捨てて回す**件数** (**判定には使わない**。理由は下の measureLatency のコメント)。
+// 秒ではなく件数で決めるのは、吸収したい初回コストが「最初の数十件」という**件数の現象**だから。
+// 秒で決めると遅い機械ほど捨てられる件数が減り、いちばん必要な場所で効かなくなる
+const WARMUP_REQUESTS = Number(process.env.BENCH_WARMUP ?? '200');
 // 計測として成立する最小の件数 (これを下回る = ほとんど流せていないので判定しない)
 const MIN_REQUESTS = 100;
 // 中継するモデル (料金表にある値)
@@ -212,27 +216,85 @@ async function startApp(port: number, upstreamPort: number, caPath: string): Pro
   }
 }
 
-// 1 本の計測 (autocannon) を回して上位 percentile の遅延を返す
-async function measureLatency(options: {
+// 1 回ぶんの負荷を掛けて、遅延の分布をそのまま返す (判定に使う値は呼び出し側が選ぶ)
+async function runLoad(options: {
   url: string;
   headers: Record<string, string>;
-}): Promise<{ latencyMs: number; non2xx: number; requests: number }> {
+  // 秒で回す (本計測) か、件数で回す (捨て玉) かのどちらか
+  durationSeconds?: number;
+  amount?: number;
+}): Promise<{
+  p97_5Ms: number;
+  p50Ms: number;
+  p99Ms: number;
+  maxMs: number;
+  non2xx: number;
+  requests: number;
+}> {
   // 負荷を掛ける
   const result = await autocannon({
     url: options.url,
     connections: CONNECTIONS,
-    duration: DURATION_SECONDS,
+    // amount を渡した回は「その件数を流し終えたら止まる」(autocannon は duration より amount を優先する)
+    ...(options.amount === undefined
+      ? { duration: options.durationSeconds }
+      : { amount: options.amount }),
     method: 'POST',
     headers: { 'content-type': 'application/json', ...options.headers },
     body: REQUEST_BODY,
     // スタブは自己署名証明書なので、計測側は検証しない (信頼の判断はアプリ側で行っている)
     tlsOptions: { rejectUnauthorized: false },
   });
-  // p97.5 (ミリ秒)・2xx 以外の件数・総リクエスト数
+  // 分布と、2xx 以外の件数・総リクエスト数
   return {
-    latencyMs: result.latency.p97_5,
+    p97_5Ms: result.latency.p97_5,
+    p50Ms: result.latency.p50,
+    p99Ms: result.latency.p99,
+    maxMs: result.latency.max,
     non2xx: result.non2xx + result.errors + result.timeouts,
     requests: result.requests.total,
+  };
+}
+
+// 1 本の計測。**先に捨て玉 (ウォームアップ) を流してから測る。**
+//
+// なぜ要るか: 起動直後の十数件だけが桁違いに遅い (Next.js のルート読み込み・Prisma の接続確立・
+// 上流への TLS 確立・JIT)。これは「中継 1 件あたり何ミリ秒増えるか」ではなく**初回コスト**なので、
+// 定常状態を見る受け入れ基準の判定へ混ぜない。
+//
+// **混ざると判定が機械の速さで割れる。** 遅い機械ほど 10 秒間に流せる件数が減り、同じ初回コストが
+// 上位 percentile を押し上げる。実測 (どちらも同じコミット・捨て玉なし):
+//   - この開発機 (2 コアに固定): proxied 1358 件・p50 6ms・p99 16ms・**max 113ms** → p97.5 12ms で合格
+//   - CI ランナー (2 vCPU・Postgres 同居): proxied 606 件・平均 16.5ms・**p97.5 155ms** → 不合格。
+//     606 件の 2.5% は 15 件しかないので、初回の十数件だけで p97.5 が決まってしまう
+// 捨て玉を入れた同じ機械での実測: 捨て玉側の max 109ms に対し、本計測は max 113→35ms・p99 16→12ms。
+// **外れ値が捨て玉の窓に移った**ことが、これが初回コストである (再発する GC 等ではない) 証拠
+//
+// **基準は緩めていない** — 上限 50ms・percentile・追加遅延の定義 (プロキシ − 直接) はそのまま。
+// 捨てた側も黙らせず JSON に出すので、初回コストが悪化したときは結果を読めば分かる
+async function measureLatency(options: { url: string; headers: Record<string, string> }): Promise<{
+  latencyMs: number;
+  p50Ms: number;
+  p99Ms: number;
+  maxMs: number;
+  non2xx: number;
+  requests: number;
+  warmup: { maxMs: number; requests: number } | null;
+}> {
+  // 捨て玉 (0 件を指定したときは流さない。**捨て玉なしでも測れる**ことを残しておく)
+  const warmup =
+    WARMUP_REQUESTS > 0 ? await runLoad({ ...options, amount: WARMUP_REQUESTS }) : null;
+  // 本計測 (窓の長さは捨て玉に関わらず一定)
+  const measured = await runLoad({ ...options, durationSeconds: DURATION_SECONDS });
+  // 捨て玉で失敗していたら本計測の数字も信用できない (認証の取り違え等) ので、件数を合算して返す
+  return {
+    latencyMs: measured.p97_5Ms,
+    p50Ms: measured.p50Ms,
+    p99Ms: measured.p99Ms,
+    maxMs: measured.maxMs,
+    non2xx: measured.non2xx + (warmup?.non2xx ?? 0),
+    requests: measured.requests,
+    warmup: warmup === null ? null : { maxMs: warmup.maxMs, requests: warmup.requests },
   };
 }
 
@@ -295,11 +357,27 @@ async function main(): Promise<void> {
         connections: CONNECTIONS,
         durationSeconds: DURATION_SECONDS,
         percentile: 'p97.5 (p95 は autocannon が出さないため、より厳しい側で測る)',
+        warmupRequests: WARMUP_REQUESTS,
         directMs: direct.latencyMs,
         proxiedMs: proxied.latencyMs,
         addedMs,
         limitMs: PROXY_ADDED_LATENCY_P95_MAX_MS,
         requests: { direct: direct.requests, proxied: proxied.requests },
+        // 判定には使わないが、初回コストや裾の伸びを読めるように残す (上の measureLatency のコメント)
+        distribution: {
+          direct: {
+            p50: direct.p50Ms,
+            p99: direct.p99Ms,
+            max: direct.maxMs,
+            warmup: direct.warmup,
+          },
+          proxied: {
+            p50: proxied.p50Ms,
+            p99: proxied.p99Ms,
+            max: proxied.maxMs,
+            warmup: proxied.warmup,
+          },
+        },
         passed: addedMs <= PROXY_ADDED_LATENCY_P95_MAX_MS,
       }),
     );

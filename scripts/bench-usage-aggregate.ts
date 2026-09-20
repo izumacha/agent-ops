@@ -3,7 +3,7 @@
 // **開発 DB では走らない** — 全テーブルを TRUNCATE してから投入するので、契約テストと同じ
 // 「専用 DB の名前 (末尾 _contract)」の判定を通らなければ 1 件も書かずに落ちる (fail-closed)
 import 'dotenv/config';
-import { contractDatabaseProblem } from './lib/contract-database.mjs';
+import { requireContractDatabase } from './lib/contract-database.mjs';
 import { USAGE_AGGREGATE_MAX_MS, USAGE_AGGREGATE_ROW_COUNT } from './lib/step2-criteria.mjs';
 import { createPrismaRepos } from '../src/data/adapters/prisma';
 import { createPrismaClient } from '../src/lib/prisma-client';
@@ -22,11 +22,6 @@ const MODEL = 'claude-sonnet-4-6';
 
 // ベンチ本体
 async function main(): Promise<void> {
-  // 接続先が専用 DB か (開発 DB を指していたらここで落ちる)
-  const problem = contractDatabaseProblem(process.env.DATABASE_URL);
-  if (problem !== null) {
-    throw new Error(`bench:usage は専用 DB でだけ実行してください: ${problem}`);
-  }
   // 本番と同じ結線でクライアントを作る
   const client = createPrismaClient();
   // 本番と同じアダプタ (集計の SQL もここが持つ)
@@ -117,6 +112,12 @@ async function main(): Promise<void> {
     await client.$disconnect();
   }
 }
+
+// **接続先が専用 DB かをここで確かめる** (開発 DB を TRUNCATE しない)。
+// 判定と throw をまとめた関数を**トップレベルの式文として**呼ぶ — main の中で
+// `const problem = …; if (problem !== null && 何か) throw` と書けると、条件を 1 つ足すだけで
+// ガードが実質外れる (実測で 705 件すべて緑だった)。この形なら外すには呼び出しごと消すしかない
+requireContractDatabase('bench:usage');
 
 // 実行する (失敗は非 0 終了にする)
 main().catch((error: unknown) => {

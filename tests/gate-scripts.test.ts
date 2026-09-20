@@ -33,7 +33,9 @@ import {
   callsFunction,
   gateScriptNames,
   importSharedModule,
+  importedModuleSpecifiers,
   importedSharedNames,
+  reachableCallNames,
 } from './lib/script-files';
 
 // 子プロセスでヘルパーを 1 つ呼び、終了コードと「その後に到達したか」を返す。
@@ -376,6 +378,10 @@ describe('判定の結線', () => {
   // 以前は「gate-report.mjs を読んでいるゲートだけ」を対象にしていたが、
   // **判定をゲート本体へインライン化して exitIfFailures も捨てる**差分が対象から外れて全件緑だった
   // (実測。しかも `includes` の文字列一致なので、コメントに書いてあるだけでも対象に残っていた)
+  // 除外したゲートに許す呼び出し (検証コマンドを順に流して結果を表示するだけ)。
+  // 判定を書き写すとレポートの読み取り等でこの外の呼び出しが必ず増えるので、そこで落ちる
+  const EXCLUDED_GATE_ALLOWED_CALLS = ['runSteps', 'banner'];
+
   const GATE_EXIT_EXCLUSIONS: Readonly<Record<string, string>> = {
     'gate-step0.mjs': '判定を持たず検証コマンドを順に流すだけ。失敗は runSteps がその場で落とす',
   };
@@ -401,34 +407,76 @@ describe('判定の結線', () => {
     // 除外してよいのは「判定を持たない」ゲートだけなので、そこを構造で確かめる
     //
     // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した判定が黙って外れる)
-    const report = await importSharedModule('gate-report.mjs');
-    // 関数として公開されているものが判定 (定数は除く)
-    const judgements = Object.keys(report).filter((key) => typeof report[key] === 'function');
+    const judgements = await judgementNames();
     // 1 つも無ければ導出が壊れている (fail-closed)
     expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
     for (const name of Object.keys(GATE_EXIT_EXCLUSIONS)) {
+      // **取り込みの有無で見るのが主**。`callsFunction` は「捉えられない形は false」なので、
+      // **false を期待するこの検査では偽陰性が緑側に出る** — 実測で、判定を別名で取り込み
+      // (`import { evaluateStep2Report as evalReport }`)、`exitIfFailures` の呼び出しを消し、
+      // 除外表へもっともらしい理由を 1 行足すと **赤ゼロ**で通った (痕跡は件数が 1 減るだけ)。
+      // 取り込みは別名でも同じモジュール名として現れるので、この向きなら偽陰性が赤側に出る
+      expect(
+        importedSharedNames(join(SCRIPTS_DIR, name)).has('gate-report.mjs'),
+        `${name} は判定のモジュールを取り込んでいるので除外できない`,
+      ).toBe(false);
       for (const judgement of judgements) {
-        // 判定を呼んでいるなら「判定を持たない」という除外理由が成り立っていない
+        // 取り込まずに判定名を呼ぶ形 (同名の自前関数など) も一応見る (補助)
         expect(
-          callsFunction(join(process.cwd(), 'scripts', name), judgement),
+          callsFunction(join(SCRIPTS_DIR, name), judgement),
           `${name} は ${judgement} で判定しているので除外できない`,
         ).toBe(false);
+      }
+      // **判定を書き写せば除外の理由は成り立ってしまう。** 実測で、gate-report.mjs の
+      // 取り込みをやめて判定を数行インライン化し、除外表へ 1 行足すと**赤ゼロ**で通った
+      // (痕跡は件数が 1 減るだけ)。除外できるのは「検証コマンドを順に流すだけ」のゲートなので、
+      // **構造そのもの**を要求する: 取り込みは共有モジュールだけ、呼び出しは実行ヘルパーだけ
+      for (const specifier of importedModuleSpecifiers(join(SCRIPTS_DIR, name))) {
+        expect(
+          importedSharedNames(join(SCRIPTS_DIR, name)).size > 0 && specifier.includes('/lib/'),
+          `${name} は共有モジュール以外 (${specifier}) を取り込んでいるので除外できない`,
+        ).toBe(true);
+      }
+      for (const called of reachableCallNames(join(SCRIPTS_DIR, name))) {
+        expect(
+          EXCLUDED_GATE_ALLOWED_CALLS.includes(called),
+          `${name} は ${called} を呼んでいるので「順に流すだけ」ではない`,
+        ).toBe(true);
       }
     }
   });
 
+  // 判定 (gate-report.mjs が公開する関数) の名前。**一覧を手書きしない** — 足した判定が黙って外れる
+  const judgementNames = async (): Promise<string[]> => {
+    // モジュールの実体を読む
+    const report = await importSharedModule('gate-report.mjs');
+    // 関数として公開されているものが判定 (定数は除く)
+    return Object.keys(report).filter((key) => typeof report[key] === 'function');
+  };
+
   it.each(gateScriptNames().filter((name) => GATE_EXIT_EXCLUSIONS[name] === undefined))(
     '%s は判定結果で落とす (exitIfFailures を呼ぶ)',
-    (name) => {
+    async (name) => {
       // **呼び出しと import をまとめて消す変異は eslint にも映らない** (未使用が残らないため)。
       // 実測で、その 3 点セットを当てると lint も tsc も vitest も全件緑のまま
       // ゲートの最後の 1 歩 (非 0 終了) が消えた。**構文木で見る** — 文字列一致だと、
       // 呼び出しを消してコメントに残すだけで満たされる (実測で全件緑・件数も不変)
-      // **第 2 引数が素の識別子であることまで見る。** 式を許すと、渡す値そのものを無害化する
-      // 変異 (`exitIfFailures('gate:step2', failures.filter(() => false))`) が素通りする (実測)
+      // 判定の名前 (この表が渡してよい値の唯一の源)
+      const judgements = await judgementNames();
+      // 1 つも無ければ導出が壊れている (fail-closed)
+      expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
+      // **綴りの一致だけでは、実測で 4 通りの迂回があった** (いずれも全件緑・lint も 0):
+      //   (a) `const failures = rawFailures.filter(() => false);` と **1 文はさむ**
+      //   (b) 呼び出しを `if (process.env.GATE_STRICT === '1') …` と**条件で囲む**
+      //   (c) import をやめ、**同名のローカル no-op** をその場で宣言する
+      //   (d) 一度も呼ばれない関数の中へ移す
+      // そこで 4 つまとめて要求する: **トップレベルの式文**として (b)(d)、
+      // **共有モジュールから取り込んだ名前**で (c)、**判定の戻り値で束縛された引数**を渡して (a)
       expect(
-        callsFunction(join(process.cwd(), 'scripts', name), 'exitIfFailures', {
-          identifierArgument: 1,
+        callsFunction(join(SCRIPTS_DIR, name), 'exitIfFailures', {
+          atTopLevel: true,
+          importedFrom: 'run-npm-steps.mjs',
+          argument: { index: 1, boundToCallOf: judgements },
         }),
         `${name} が exitIfFailures を判定結果そのもので呼んでいない`,
       ).toBe(true);
@@ -496,13 +544,19 @@ describe('判定の結線', () => {
     }
   });
 
-  it('ベンチは必ず専用 DB の判定を取り込む', () => {
-    // ベンチは全テーブルを TRUNCATE するので、開発 DB を指していないかの判定を飛ばせない。
-    // (取り込んだ判定を実際に呼んでいることは上の「取り込んだ判定を全部呼ぶ」が見る)
+  it('ベンチは専用 DB のガードをトップレベルで呼ぶ', () => {
+    // ベンチは全テーブルを TRUNCATE するので、開発 DB を指していないかのガードを飛ばせない。
+    // **「呼んでいるか」だけでは足りない** — 実測で `if (problem !== null &&
+    // process.env.BENCH_STRICT_DB === '1') throw …` と条件を 1 つ足すだけで、呼び出しは
+    // 残したままガードが実質外れた (705 件すべて緑)。判定と throw をまとめた関数を、
+    // **トップレベルの式文として**、共有モジュールから取り込んだ名前で呼ぶことまで求める
     for (const bench of benchScriptNames()) {
       expect(
-        importedSharedNames(join(SCRIPTS_DIR, bench)).has(REQUIRED_BENCH_MODULE),
-        `${bench} が ${REQUIRED_BENCH_MODULE} を取り込んでいない`,
+        callsFunction(join(SCRIPTS_DIR, bench), 'requireContractDatabase', {
+          atTopLevel: true,
+          importedFrom: REQUIRED_BENCH_MODULE,
+        }),
+        `${bench} が専用 DB のガードをトップレベルで呼んでいない`,
       ).toBe(true);
     }
   });

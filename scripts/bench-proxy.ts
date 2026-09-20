@@ -22,7 +22,7 @@ import { createServer as createTcpServer } from 'node:net';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { contractDatabaseProblem } from './lib/contract-database.mjs';
+import { requireContractDatabase } from './lib/contract-database.mjs';
 import { PROXY_ADDED_LATENCY_P95_MAX_MS } from './lib/step2-criteria.mjs';
 import {
   WARMUP_MAX_MS,
@@ -343,11 +343,6 @@ function distributionOf(measured: {
 
 // ベンチ本体
 async function main(): Promise<void> {
-  // 接続先が専用 DB か (開発 DB を TRUNCATE しない)
-  const problem = contractDatabaseProblem(process.env.DATABASE_URL);
-  if (problem !== null) {
-    throw new Error(`bench:proxy は専用 DB でだけ実行してください: ${problem}`);
-  }
   // 証明書や一時ファイルの置き場
   const workDir = mkdtempSync(join(tmpdir(), 'agent-ops-bench-'));
   // 起動したもの (後始末で止める)
@@ -424,6 +419,12 @@ async function main(): Promise<void> {
     rmSync(workDir, { recursive: true, force: true });
   }
 }
+
+// **接続先が専用 DB かをここで確かめる** (開発 DB を TRUNCATE しない)。
+// 判定と throw をまとめた関数を**トップレベルの式文として**呼ぶ — main の中で
+// `const problem = …; if (problem !== null && 何か) throw` と書けると、条件を 1 つ足すだけで
+// ガードが実質外れる (実測で 705 件すべて緑だった)。この形なら外すには呼び出しごと消すしかない
+requireContractDatabase('bench:proxy');
 
 // 実行する (失敗は非 0 終了にする)
 main().catch((error: unknown) => {

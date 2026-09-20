@@ -62,8 +62,11 @@ describe('上流のエラー本文の絞り込み', () => {
     'error_subcode',
     'metadata',
   ];
-  // 契約で中継する項目 (これ以外は落ちる)
-  const RELAYED_FIELDS = ['code', 'param', 'type'];
+  // 契約で中継する項目 (これ以外は落ちる)。**手書きの写しにしない** —
+  // 実装と契約を同時に広げる差分が、写しを直し忘れたときにだけ赤くなる形になって信用できない。
+  // `message` は上流から読まずこちらが書く項目なので、中継される側には数えない
+  const relayedFields = (): string[] =>
+    Object.keys(relayedErrorSchema ?? {}).filter((field) => !SELF_WRITTEN_FIELDS.includes(field));
 
   it.each(CANDIDATE_FIELDS)('返すのは契約の項目だけ (%s)', (field) => {
     // 綴りの検査は通る値にする。空白入りの値だと「表に無いから落ちた」のか
@@ -76,7 +79,7 @@ describe('上流のエラー本文の絞り込み', () => {
     // 応答の最上位は error だけ (上流の項目が最上位へ増えていないこと)
     expect(Object.keys(safe).sort(), '最上位').toEqual(['error']);
     // error の中身は「定型文」＋「契約で残す項目のうち今回載せたもの」だけ
-    const expectedKeys = RELAYED_FIELDS.includes(field) ? ['message', field].sort() : ['message'];
+    const expectedKeys = relayedFields().includes(field) ? ['message', field].sort() : ['message'];
     expect(Object.keys(safe.error).sort(), 'error の項目').toEqual(expectedKeys);
     // message は必ず自前の定型文 (上流の自由記述で上書きされない)
     expect(safe.error.message, 'message').toBe(API_MESSAGES.upstreamRejected);
@@ -145,13 +148,15 @@ describe('上流のエラー本文の絞り込み', () => {
   // その位置の検査 14 件が黙って消え、痕跡は件数の減少だけだった。実測では、消したうえで
   // `code` の総長を 40→64 に緩めると **677 件すべて緑**のまま
   // `OrgAcmeCorpTierEnterpriseCreditBalanceZeroGoToPlansAndBilling` (61 文字) が中継された
-  const relayedErrorSchema = (
+  const relayedTopLevelSchema = (
     parse(readFileSync(join(process.cwd(), 'openapi', 'openapi.yaml'), 'utf8') as string) as {
       components?: {
-        schemas?: Record<string, { properties?: { error?: { properties?: object } } }>;
+        schemas?: Record<string, { properties?: Record<string, { properties?: object }> }>;
       };
     }
-  ).components?.schemas?.RelayedUpstreamError?.properties?.error?.properties;
+  ).components?.schemas?.RelayedUpstreamError?.properties;
+  // error の中で中継する項目 (綴りの総当たりの対象をここから導く)
+  const relayedErrorSchema = relayedTopLevelSchema?.error?.properties;
   // **除外表ではなく「分割」にする。** 除外表にしていたときは、そこへ 1 行足すだけで
   // その項目の検査 14 件が黙って消えた (実測: `type` を除外して綴りを緩めると 683 件すべて緑のまま
   // `org_ACME_Corp.tier-enterprise.credit_balance_zero.add-funds` 59 文字が中継された)。
@@ -186,6 +191,89 @@ describe('上流のエラー本文の絞り込み', () => {
     expect(safe.error[field], `${field} に param の綴りが当たっていない`).toBe(
       'messages[0].content',
     );
+  });
+
+  it.each(SELF_WRITTEN_FIELDS)('%s は上流の値を一切運ばない (自前で書く項目)', (field) => {
+    // **こちらの表にも裏打ちが要る。** 無いと、分類語彙の総当たりから項目を「自前で書く側へ移す」
+    // だけでその項目の検査が黙って消える (実測: `type` をこちらへ移して綴りを緩めると
+    // 685 件すべて緑のまま `OrgAcmeCorpTierEnterpriseCreditBalanceZeroGoToPlansAndBilling`
+    // 61 文字が中継された)。移した項目は「上流から読まない」はずなので、そこを直接確かめる
+    // **綴りの検査を通る値を使う** — 落ちた理由が「綴り」だと、移された項目を捕まえられない
+    const value = 'org_ACME_tier_enterprise';
+    // その項目だけに値を載せて通す
+    const safe = sanitizeUpstreamErrorBody(buildAt(field, value));
+    // 上流の値が出口のどこにも現れないこと (別の項目名へ移し替える形もここで落ちる)
+    expect(JSON.stringify(safe), `${field} が上流の値を運んでいる`).not.toContain(value);
+  });
+
+  // 出口に出てはいけない値の目印 (**綴りの検査は通る形**にして、落ちた理由を「綴り」にしない)
+  const LEAK_MARKER = 'zzleak';
+  // 綴りの検査を通る値 (分類語彙・JSON パスのどちらの綴りにも収まる)
+  const PASSING_VALUE = 'org_ACME_tier_enterprise';
+
+  it('候補を全部同時に載せても契約の項目しか出ない (条件付きの読み取りも捕まえる)', () => {
+    // **1 項目ずつの総当たりでは「条件付きの読み取り」が一度も実行されない。**
+    // 上の総当たりは項目を 1 つだけ載せ、tests/openapi.test.ts の観測は空の入れ物を渡すので、
+    // 「ある項目が通ったときに限り別の項目も中継する」実装はどちらの経路でも走らない
+    // (実測: `code` が通ったときだけ `hint` を載せる変異は **699 件すべて緑**のまま、
+    // 残高・組織名・契約ティアを含む散文をそのまま中継した)。ここでは全項目に同時に値を載せ、
+    // 分岐が実際に実行される状態で**出口だけ**を見る
+    //
+    // **入れ物は Proxy にする。** 候補の名前を手で書き並べると、そこに無い名前を読む実装が
+    // 黙って外れる。どんな名前を読まれても目印つきの値を返せば、出口に出た時点で捕まる
+    const relayable = new Set([...CODE_FIELDS, ...PARAM_SWEEP_FIELDS]);
+    // 契約が読めていなければ照合にならない (fail-closed)
+    expect(relayable.size, '中継する項目が 0 件').toBeGreaterThan(0);
+    // 列挙でまとめて読む実装のために、目に見える名前も持たせる (重複は Proxy の規約違反なので潰す)
+    const enumerableKeys = [...new Set([...CANDIDATE_FIELDS, ...relayable])];
+    // 名前を問わず値を返す入れ物を作る
+    const fieldProxy = (values: Record<string, unknown>): Record<string, unknown> =>
+      new Proxy({} as Record<string, unknown>, {
+        // どの名前で読まれても値を返す
+        get(target, property) {
+          // Symbol は言語側の問い合わせなので素通しする
+          if (typeof property !== 'string') return Reflect.get(target, property);
+          // 明示した項目はその値、それ以外は「出てはいけない値」
+          return property in values ? values[property] : `${LEAK_MARKER}_${property}`;
+        },
+        // 列挙 (Object.entries / スプレッド) でも同じ値が見えるようにする
+        ownKeys: () => [...new Set([...enumerableKeys, ...Object.keys(values)])],
+        // 列挙した名前が実際に読めるよう、記述子も返す (enumerable でないと entries に出ない)
+        getOwnPropertyDescriptor(target, property) {
+          // Symbol は素通し
+          if (typeof property !== 'string')
+            return Reflect.getOwnPropertyDescriptor(target, property);
+          // 値つきの記述子を返す (target に無い項目なので configurable は必須)
+          return {
+            value: property in values ? values[property] : `${LEAK_MARKER}_${property}`,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          };
+        },
+        // 存在確認はすべて真 (当たりを付けてから読む形にも値を渡す)
+        has: () => true,
+      });
+    // error の中身: 中継する項目だけ綴りを通る値にして、分岐が実行される状態にする
+    const upstreamError = fieldProxy(
+      Object.fromEntries([...relayable].map((field) => [field, PASSING_VALUE])),
+    );
+    // 最上位: type は閉じた語彙の値、error は上の入れ物、それ以外は目印つきの値
+    const safe = sanitizeUpstreamErrorBody(
+      fieldProxy({ type: 'error', error: upstreamError }),
+    ) as Record<string, unknown>;
+    // 出口の最上位に、契約に無い項目が出ていないこと
+    const topLevelFields = new Set(Object.keys(relayedTopLevelSchema ?? {}));
+    // 契約が読めていなければ照合にならない (fail-closed)
+    expect(topLevelFields.size, '契約の最上位の項目が 0 件').toBeGreaterThan(0);
+    for (const key of Object.keys(safe))
+      expect(topLevelFields.has(key), `契約に無い項目が最上位に出た: ${key}`).toBe(true);
+    // 出口の error の中にも、契約に無い項目が出ていないこと
+    const errorFields = new Set(Object.keys(relayedErrorSchema ?? {}));
+    for (const key of Object.keys((safe.error ?? {}) as Record<string, unknown>))
+      expect(errorFields.has(key), `契約に無い項目が error に出た: ${key}`).toBe(true);
+    // 目印つきの値が 1 つも出ていないこと (契約の項目名の下へ移し替える形もここで落ちる)
+    expect(JSON.stringify(safe), '通してはいけない値が出口に現れた').not.toContain(LEAK_MARKER);
   });
 
   // その項目へ値を載せた「上流の本文」を組み立てる

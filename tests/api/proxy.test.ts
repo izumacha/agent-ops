@@ -533,14 +533,17 @@ describe('上流の失敗', () => {
     }
   });
 
-  it('3xx / 4xx の写し先は契約どおり (許可リストの広がりを別の手掛かりで照合する)', async () => {
+  it('3xx / 4xx / 5xx の写し先は契約どおり (許可リストの広がりを別の手掛かりで照合する)', async () => {
     // 402 の検査は番号を直書きで列挙するだけなので、**そこに無い番号を許可リストへ足しても気付けない**
     // (実測で、3xx を全部素通しにする変異も 415 を許可リストへ足す変異も全件緑で通った)。
     // ここは実装の集合を import せず、契約の 3 つ組をテスト側に直書きして 300〜499 を総なめする
     // (実装を import すると恒真式になり、集合をどう変えてもテストが一緒に動いてしまう)
     const RELAYED = new Set([400, 413, 422]);
-    // 300 から 499 まで
-    for (let status = 300; status < 500; status += 1) {
+    // **5xx まで見る。** 許可リストは名前こそ CLIENT_ERROR だが、canRelayStatus は範囲を問わず
+    // この集合を引くので、5xx が 1 行紛れ込むと上流の 5xx がそのまま返る
+    // (Anthropic の 529 overloaded_error は「プラットフォーム側の上流が詰まっている」を 1 ビットで伝える。
+    //  実測で、許可リストに 529 を足しても 4xx までの総なめでは全件緑だった)
+    for (let status = 300; status < 600; status += 1) {
       // 本文を持てないステータスは別の検査が扱う (本文を渡せないのでこのループでは測れない)
       if (BODYLESS_STATUSES.has(status)) continue;
       // このループ内で数えるため毎回空にする
@@ -555,6 +558,9 @@ describe('上流の失敗', () => {
       // 許可リストならそのまま、429 は 429、それ以外は 502
       const expected = RELAYED.has(status) ? status : status === 429 ? 429 : 502;
       expect(result.status, `上流 ${status} の写し先`).toBe(expected);
+      // 写し先に関わらず、上流へ出た呼び出しは 1 行記録される (Step4 のエラー率ルールが読む)
+      expect(recordedEvents(), `上流 ${status} の記録`).toHaveLength(1);
+      expect(recordedEvents()[0].statusCode, `上流 ${status} の記録のステータス`).toBe(status);
     }
   });
 

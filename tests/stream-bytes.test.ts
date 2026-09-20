@@ -1,6 +1,6 @@
 // バイト列のストリームを上限まで読む共有処理 (src/lib/stream-bytes.ts)。
 // リクエスト本文 (413) と上流の応答 (502) の**両方**が通るので、HTTP から切り離してここで固定する
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
 
 // バイト列を 1 かたまりずつ流すストリームを作る
@@ -26,6 +26,12 @@ function bytes(text: string): Uint8Array {
 }
 
 describe('上限つきのストリーム読み取り', () => {
+  // 差し替えたモックを必ず戻す (末尾の mockRestore だけだと、assertion が落ちたときに残って
+  //  後続テストの console が黙る = 赤いときにだけ診断が消える)
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('本文が null なら空文字 (getReader で落ちない)', async () => {
     // Request.body / Response.body はどちらも本文が無いとき null を返す
     expect(await readStreamWithinByteLimit(null, 10)).toEqual({ ok: true, text: '' });
@@ -108,8 +114,6 @@ describe('上限つきのストリーム読み取り', () => {
     expect(logged.mock.calls.filter((args) => String(args[0]).includes('解放に失敗'))).toHaveLength(
       1,
     );
-    // 差し替えを戻す
-    logged.mockRestore();
   });
 
   it('UTF-8 として壊れたバイト列は置換せずに失敗として返す', async () => {

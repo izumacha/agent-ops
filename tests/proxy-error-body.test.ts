@@ -94,13 +94,30 @@ describe('上流のエラー本文の絞り込み', () => {
   it.each([
     ['ドットで繋いだ文 (type)', { type: 'billing.org_ACME_Corp.tier_enterprise' }],
     ['JSON パスの形 (code)', { code: 'messages[0].content' }],
-    // 語ごとの規則は満たすが総長が 1 文字だけ超える値 (先読みの上限だけを見る)
-    ['総長の上限を 1 超える語の連結 (code)', { code: `${'a'.repeat(32)}_${'b'.repeat(8)}` }],
-    ['総長の上限を超える JSON パス (param)', { param: `a.${'b'.repeat(23)}.${'c'.repeat(23)}` }],
   ])('param 用の綴りは type / code には効かない: %s', (_label, error) => {
     // **項目ごとに綴りを分けたことの中核**。1 本にまとめると param 用のドットと角括弧が
     // type / code にも効き、区切り文字で書いた文が素通りする。
     // 固定する前は、type を param 用のパターンへ差し替える変異が全件緑で通った (実測)
+    expect(sanitizeUpstreamErrorBody({ error })).toEqual({
+      error: { message: API_MESSAGES.upstreamRejected },
+    });
+  });
+
+  it.each([
+    // 語ごとの規則は満たすが総長が 1 文字だけ超える (先読みの上限だけを見る)
+    ['総長を 1 超える (code)', { code: `${'a'.repeat(32)}_${'b'.repeat(8)}` }],
+    ['総長を 1 超える (param)', { param: `a.${'b'.repeat(23)}.${'c'.repeat(23)}` }],
+    // 総長には収まるが語数・階層が 1 つ多い。**散文を止めているのはこちら**で、
+    // 総長だけでは枠内の英文 (`your_credit_balance_is_too_low` 30 文字) が通ってしまう (実測)
+    ['語数を 1 超える (code)', { code: 'a_b_c_d_e' }],
+    ['語数を 1 超える (type)', { type: 'a_b_c_d_e' }],
+    ['階層を 1 超える (param)', { param: 'a.b.c.d.e.f.g' }],
+    ['添字の階層を 1 超える (param)', { param: 'a[1][2][3][4][5][6]' }],
+    ['添字の桁数を 1 超える (param)', { param: 'a[10000]' }],
+    ['総長に収まる散文 (code)', { code: 'your_credit_balance_is_too_low' }],
+    ['総長に収まる散文 (param)', { param: 'credit.balance.is.too.low.add.funds.now' }],
+  ])('上限を 1 超えたら通さない: %s', (_label, error) => {
+    // 上限を緩める変異を落とす。固定する前は語数・階層をいくら広げても全件緑だった (実測)
     expect(sanitizeUpstreamErrorBody({ error })).toEqual({
       error: { message: API_MESSAGES.upstreamRejected },
     });
@@ -120,6 +137,11 @@ describe('上流のエラー本文の絞り込み', () => {
       { param: `a.${'b'.repeat(23)}.${'c'.repeat(22)}` },
       'param',
     ],
+    ['語数ちょうど (code)', { code: 'a_b_c_d' }, 'code'],
+    ['階層ちょうど (param)', { param: 'a.b.c.d.e.f' }, 'param'],
+    ['添字の階層ちょうど (param)', { param: 'a[1][2][3][4][5]' }, 'param'],
+    ['4 桁の添字 (param)', { param: 'messages[1000].content' }, 'param'],
+    ['総長ちょうどの 1 語 (code)', { code: 'a'.repeat(40) }, 'code'],
   ])('上限ちょうどは通す (絞りすぎて診断が消えていない): %s', (_label, error, field) => {
     // 上限の下側も見る。上側だけだと、上限をいくら広げても気付けない
     const safe = sanitizeUpstreamErrorBody({ error }) as { error: Record<string, unknown> };
@@ -134,6 +156,8 @@ describe('上流のエラー本文の絞り込み', () => {
     ['PascalCase (Azure)', { type: 'OperationNotSupported' }],
     ['長い PascalCase (Azure の innererror.code)', { code: 'ResponsibleAIPolicyViolation' }],
     ['長い PascalCase (Bedrock)', { code: 'ServiceQuotaExceededException' }],
+    ['最も長い 1 語 (Bedrock)', { code: 'ProvisionedThroughputExceededException' }],
+    ['長い 1 語 (Azure の Content Filter)', { code: 'ContentFilterResultsPolicyViolation' }],
     ['4 語の snake_case', { code: 'unsupported_country_region_territory' }],
     ['入れ子の添字つき JSON パス', { param: 'messages[0].content[1].text' }],
     ['4 桁の添字', { param: 'messages[1000].content' }],

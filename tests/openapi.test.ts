@@ -26,6 +26,7 @@ import { tenantCreateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
+import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -564,5 +565,54 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
         expect(declared, `${schemaName}.${property} の maxLength`).toBe(max);
       }
     }
+  });
+
+  // 中継するエラー本文の**項目名**を契約と突き合わせる。リクエスト側には同じ形の検査
+  // (上の「本文スキーマは契約と Zod で項目が一致し…」) があるのに、応答側だけ無かった。
+  //
+  // **手書きの候補リストでは足りない。** 実装の許可リストへ候補に無い名前を足す変異
+  // (`subcode` / `hint` / `quota_type`) は、候補を総当たりする検査があっても
+  // **675 件すべて緑・テスト件数も不変**で通った (実測)。上流が返しうる項目名は無限なので、
+  // 包含リストは載せ忘れたぶんだけ黙って狭くなる。
+  //
+  // 代わりに両側とも導出する: **期待値は契約** (`additionalProperties: false` 付き)、
+  // **実測値は「実装が上流の本文から読んだ項目名」**を Proxy の get で観測する。
+  // 実装の表を import しないので、表を写して両方が同時に古くなることもない
+  it('中継するエラー本文の項目は契約と一致する (実装が読む項目名を観測して照合)', () => {
+    // 契約側の宣言 (中継するエラー本文)
+    const relayed = spec.components?.schemas?.RelayedUpstreamError as
+      { properties?: Record<string, { properties?: Record<string, unknown> }> } | undefined;
+    // 契約が読めなければ照合できない (fail-closed)
+    expect(relayed?.properties, 'RelayedUpstreamError が契約に無い').toBeDefined();
+    // 実装が上流の本文から読んだ項目名を集める
+    const readKeysOf = (build: (probe: Record<string, unknown>) => unknown): string[] => {
+      // 読まれた項目名
+      const seen = new Set<string>();
+      // 触られた項目名を記録するだけの入れ物
+      const probe = new Proxy({} as Record<string, unknown>, {
+        get(target, property) {
+          // 文字列のキーだけ数える (Symbol は言語側の問い合わせ)
+          if (typeof property === 'string') seen.add(property);
+          return Reflect.get(target, property);
+        },
+      });
+      // 実装に通す (戻り値は使わない。見たいのは「何を読んだか」)
+      sanitizeUpstreamErrorBody(build(probe));
+      // 並びを固定して返す
+      return [...seen].sort();
+    };
+    // 最上位: 契約の properties をそのまま期待値にする (実装は type と error を読む)
+    expect(
+      readKeysOf((probe) => probe),
+      '最上位から読む項目名',
+    ).toEqual(Object.keys(relayed?.properties ?? {}).sort());
+    // error の中: 契約の properties から message を除いたもの。
+    // **message だけは上流から読まずこちらが書く項目**なので、読んだ項目名には現れない
+    // (逆に現れたら、上流の自由記述が定型文を上書きする経路ができている)
+    const errorFields = Object.keys(relayed?.properties?.error?.properties ?? {});
+    expect(
+      readKeysOf((probe) => ({ error: probe })),
+      'error から読む項目名',
+    ).toEqual(errorFields.filter((field) => field !== 'message').sort());
   });
 });

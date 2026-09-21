@@ -12,8 +12,17 @@
 // (実測で `eslint . --max-warnings=0` が 1 を返す)。`package.json` の lint からその指定を外さないこと
 import { describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
@@ -141,6 +150,68 @@ function runInChild(statements: string[]): { status: number | null; stdout: stri
 
 // リポジトリのルート
 const ROOT = process.cwd();
+
+// npm のシムが呼ばれたことを示す印 (ゲートが実際に検証を始めたかを見る)
+const NPM_SHIM_MARKER = 'NPM_SHIM_INVOKED';
+
+/**
+ * **必ず失敗する `npm` を PATH の先頭に置いて**ゲートを実行し、終了コードと出力を返す。
+ *
+ * **なぜ要るか（高度の話）**: 「どう書けば `process` へ届くか」を静的に列挙する形では、
+ * 綴りを 1 つ塞ぐたびに次の形が出てくる（実測で `globalThis.process` → `globalThis['process']`
+ * → 別名束縛 → `globalThis.globalThis.process` → `globalThis[変数]` → `const R = …` を 1 つ挟む
+ * → `function(){}.constructor('…')()` と 7 巡続き、どれも全件緑のままゲートを無言で exit 0 に
+ * できた）。**綴りに依存しない層で 1 度見る**のがこの検査で、同じ考え方は
+ * `importsWithoutExiting`（共有モジュール）と `runBenchInCleanChild`（ベンチ）が既に使っている
+ * — **ゲートにだけこの層が無かった**。
+ *
+ * 見るのは 2 つ: (a) 検証が失敗しているのに 0 で終わらないこと、(b) そもそも `npm` を
+ * 呼ぶところまで到達していること（何も検査せず落ちる形も落とす）。
+ * **残る境界**: 最初の検証コマンドより後ろでしか走らない場所に隠した終了はここでは見えない
+ * @param name ゲートのファイル名 (`gate-step<N>.mjs`)
+ * @returns 終了コードと標準出力・標準エラー
+ */
+function runGateWithFailingNpm(name: string): {
+  status: number | null;
+  output: string;
+} {
+  // シムを置く一時ディレクトリ
+  const shimDir = mkdtempSync(join(tmpdir(), 'agent-ops-gate-shim-'));
+  try {
+    // POSIX 用のシム (印を出して失敗する)
+    writeFileSync(
+      join(shimDir, 'npm'),
+      `#!/bin/sh
+echo ${NPM_SHIM_MARKER}
+exit 1
+`,
+    );
+    // 実行できるようにする
+    chmodSync(join(shimDir, 'npm'), 0o755);
+    // Windows 用のシム (npm.cmd が探される)
+    writeFileSync(
+      join(shimDir, 'npm.cmd'),
+      `@echo ${NPM_SHIM_MARKER}
+@exit /b 1
+`,
+    );
+    // vitest の印を落とした env に、シムを先頭に置いた PATH を渡す
+    const env = cleanChildEnv();
+    env.PATH = `${shimDir}${delimiter}${env.PATH ?? ''}`;
+    // ゲートを素の Node で実行する
+    const result = spawnSync(process.execPath, [join(SCRIPTS_DIR, name)], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env,
+      timeout: 120_000,
+    });
+    // 終了コードと、標準出力・標準エラーを合わせたもの
+    return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+  } finally {
+    // 一時ディレクトリを片付ける (§8 リソースを確実に解放する)
+    rmSync(shimDir, { recursive: true, force: true });
+  }
+}
 // 判定に渡す役割・操作・接頭辞 (ゲート本体と同じ形。ここでは合成入力なので値は何でもよい)
 const MATRIX = {
   roles: ['viewer', 'admin'],
@@ -1421,16 +1492,28 @@ describe('判定の結線', () => {
     );
   });
 
-  it('ベンチが取り込んでよいアプリ本体のモジュールは実在する', () => {
+  it('ベンチが取り込んでよいアプリ本体のモジュールは実在し、実際に使われている', () => {
     // 0 本なら空振りで緑になる (fail-closed)
     expect(ALLOWED_BENCH_SRC_MODULES.size, '許可リストが空').toBeGreaterThan(0);
-    for (const modulePath of ALLOWED_BENCH_SRC_MODULES)
+    // ベンチが実際に取り込んでいる先 (絶対パス)
+    const imported = new Set(
+      benchScriptNames().flatMap((bench) =>
+        foreignModuleSpecifiers(join(SCRIPTS_DIR, bench))
+          .filter((specifier) => specifier.startsWith('.'))
+          .map((specifier) => resolve(SCRIPTS_DIR, specifier)),
+      ),
+    );
+    for (const modulePath of ALLOWED_BENCH_SRC_MODULES) {
       // 指定子は拡張子を書かないので、ファイルかディレクトリの index かを見る。
       // **実在しないエントリを放置すると、綴り違いのまま許可だけが広がる**
       expect(
         existsSync(`${modulePath}.ts`) || existsSync(join(modulePath, 'index.ts')),
         `${modulePath} は実在しない (許可リストの綴りが古い)`,
       ).toBe(true);
+      // **逆向きも見る** — 使っていないエントリを先に足しておける形にすると、
+      // 「あとで使う」名目で許可だけを広げられる (除外表を両向きに突き合わせるのと同じ流儀)
+      expect(imported.has(modulePath), `${modulePath} はどのベンチも取り込んでいない`).toBe(true);
+    }
   });
 
   // ゲートと共有モジュールが `process` に触れてよい形 (実測した現在の使用がそのまま入る)。
@@ -1507,6 +1590,20 @@ describe('判定の結線', () => {
           `${path} に process.exit(${argument}) がある (非 0 の数値リテラルだけを許す)`,
         ).toBe(true);
   });
+
+  it.each(gateScriptNames())(
+    '%s は検証が失敗すれば非 0 で終わる (綴りに依存しない実行での確認)',
+    (name) => {
+      // 必ず失敗する npm を PATH の先頭に置いて実行する
+      const { status, output } = runGateWithFailingNpm(name);
+      // **そもそも検証を始めていること** — 何も検査せずに落ちる形もここで落とす
+      expect(output, `${name} が npm を 1 度も呼んでいない`).toContain(NPM_SHIM_MARKER);
+      // **検証が失敗しているのに 0 で終わらないこと。** 静的検査が捉えられない書き方
+      // (`function(){}.constructor('process.exit(0)')()` など) もこの 1 つの理由で落ちる
+      expect(status, `${name} が検証の失敗を無視して成功終了した`).not.toBe(0);
+    },
+    180_000,
+  );
 
   it('共有モジュールは import しただけでプロセスを終わらせない', () => {
     // 共有モジュールの一覧 (0 本なら導出が壊れている)

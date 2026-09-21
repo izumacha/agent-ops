@@ -603,7 +603,7 @@ paths:
         エージェントに紐づいていないキー・停止中のエージェントのキーは 403。
         料金表 (src/domain/pricing/vendor-prices.json) に無いモデルは計測できないので中継せず 422。
         ストリーミング (stream: true) は Step2 の範囲外で 422。
-        本文の入れ子が深すぎる場合も 422（規則は 422 応答の説明を参照。全操作に共通）。
+        本文の入れ子が深すぎる場合も 422（規則は ValidationError の説明を参照。全操作に共通）。
 
         上流の応答の扱い: 2xx はそのまま返す。**ステータスを保って中継する 4xx は 400 / 413 / 422 だけ**
         (「送り主自身の要求についての診断」と言い切れるもの。許可リストなので、それ以外の 4xx —
@@ -843,7 +843,9 @@ components:
             $ref: '#/components/schemas/Error'
     ProxyRelayedError:
       description: |
-        プロキシ自身が要求を拒否した (本文が JSON でない・上限超過・未対応モデルなど) か、
+        プロキシ自身が要求を拒否した (本文が JSON でない・上限超過・未対応モデル・
+        **本文の入れ子が深すぎる** など。深さの規則は ValidationError の説明が正本で、
+        本文を取るすべての操作に等しく効く) か、
         上流が拒否したかのどちらか。前者は API 共通のエラー形 ({status, message} / {status, message, issues})、
         後者は上流の形を保った RelayedUpstreamError で、**本文は機械可読な項目だけに絞ってある**
         (自由記述には上流アカウントの残高・組織名・契約ティアが載るため)。
@@ -894,10 +896,10 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     ValidationError:
-      description: >-
+      description: |-
         入力検証エラー。スキーマに合わない本文のほか、**本文の入れ子が深すぎる場合**も含む
-        (上限は src/lib/body-limits.ts の JSON_BODY_MAX_DEPTH。サイズだけでは資源の消費を
-        縛れないため深さにも明示の上限を置いており、判定は本文を読む共通の入口にあるので
+        (上限は src/lib/body-limits.ts の JSON_BODY_MAX_DEPTH。サイズだけでは資源の消費を縛れないため
+        深さにも明示の上限を置いており、判定は本文を読む共通の入口にあるので
         本文を取るすべての操作に等しく効く)
       content:
         application/json:

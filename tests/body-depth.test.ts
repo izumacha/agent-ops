@@ -57,15 +57,33 @@ describe('exceedsMaxDepth', () => {
     expect(exceedsMaxDepth(value, JSON_BODY_MAX_DEPTH)).toBe(true);
   });
 
-  it('__proto__ をキーにした入れ子も数える', () => {
-    // `JSON.parse` は `__proto__` を**自分のキー**として作る（プロトタイプは差し替わらない）ので、
-    // 辿る側も普通のキーとして扱う。**実測で、オブジェクトの枝に
-    // `if (key === '__proto__') continue;`（汚染対策としていかにも書かれそうな 1 行）を足すと
-    // 808 件すべて緑・件数も不変のまま、この形だけが上限をすり抜けて 4,000 段が中継され、
-    // 4,600 段は 500 になった**
-    const inner = `${'{"__proto__":'.repeat(JSON_BODY_MAX_DEPTH)}1${'}'.repeat(JSON_BODY_MAX_DEPTH)}`;
-    expect(exceedsMaxDepth(JSON.parse(`{"x":${inner}}`), JSON_BODY_MAX_DEPTH)).toBe(true);
+  it.each([
+    ['配列の末尾', (deep: unknown) => [0, 1, deep]],
+    ['オブジェクトの 2 番目のキー', (deep: unknown) => ({ a: 1, b: deep })],
+  ])('先頭以外に置かれた深い値も数える: %s', (_label, wrap) => {
+    // **既存のケースは深い値が「配列の 0 番目・最初のキー」にしかなかった** — 実測で、
+    // 子を辿るループを `current.node.slice(0, 1)` / `Object.keys(record).slice(0, 1)` に
+    // 絞る変異はどちらも 811 件すべて緑のまま通り、深い値を 2 番目以降に置いた本文が
+    // 上限をすり抜けて `JSON.stringify` の RangeError（＝ 500）に戻った
+    let deep: unknown = 1;
+    for (let level = 0; level < JSON_BODY_MAX_DEPTH; level += 1) deep = [deep];
+    expect(exceedsMaxDepth(wrap(deep), JSON_BODY_MAX_DEPTH)).toBe(true);
   });
+
+  it.each(['__proto__', 'constructor', 'prototype', 'messages'])(
+    '特定のキーを読み飛ばさない: %s',
+    (key) => {
+      // `JSON.parse` は `__proto__` を**自分のキー**として作る（プロトタイプは差し替わらない）ので、
+      // 辿る側も普通のキーとして扱う。**実測で、オブジェクトの枝に
+      // `if (key === '__proto__') continue;`（汚染対策としていかにも書かれそうな 1 行）を足すと
+      // 808 件すべて緑・件数も不変のまま、この形だけが上限をすり抜けて 4,000 段が中継され、
+      // 4,600 段は 500 になった**。`constructor` / `prototype` は同じ反射がまず名指しする綴り、
+      // `messages` は実在の本文の主要キーで、どれも「1 つだけ飛ばす」変異が書ける場所
+      const opening = `{${JSON.stringify(key)}:`;
+      const inner = `${opening.repeat(JSON_BODY_MAX_DEPTH)}1${'}'.repeat(JSON_BODY_MAX_DEPTH)}`;
+      expect(exceedsMaxDepth(JSON.parse(`{"x":${inner}}`), JSON_BODY_MAX_DEPTH)).toBe(true);
+    },
+  );
 
   it('判定そのものは深い入力でも落ちない (再帰で書いていない)', () => {
     // **`JSON.stringify` が RangeError になる深さ**を与えても、判定は落ちずに true を返す

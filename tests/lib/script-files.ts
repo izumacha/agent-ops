@@ -310,15 +310,20 @@ function isDeclarationName(node: ts.Identifier): boolean {
   // 親が無ければ宣言ではない
   if (parent === undefined) return false;
   // 宣言の名前の位置にいるか (変数・関数・引数・クラス)
-  return (
-    ((ts.isVariableDeclaration(parent) ||
+  if (
+    (ts.isVariableDeclaration(parent) ||
       ts.isFunctionDeclaration(parent) ||
       ts.isParameter(parent) ||
       ts.isClassDeclaration(parent)) &&
-      parent.name === node) ||
-    ts.isImportSpecifier(parent) ||
-    ts.isImportClause(parent)
-  );
+    parent.name === node
+  )
+    return true;
+  // catch が束縛する変数 (`catch (Function) { … }`)
+  if (ts.isCatchClause(parent)) return parent.variableDeclaration?.name === node;
+  // 分割代入の要素 (`const { eval: x } = o` の `eval` はプロパティ名、`x` は束縛する名前)
+  if (ts.isBindingElement(parent)) return parent.name === node || parent.propertyName === node;
+  // import で束縛する名前
+  return ts.isImportSpecifier(parent) || ts.isImportClause(parent);
 }
 
 /**
@@ -402,14 +407,20 @@ function isStaticallyFollowedGlobal(node: ts.Identifier): boolean {
     return false;
   // その access が `process` として読めるなら、外側の判定が拾う
   if (isProcessObject(parent)) return true;
-  // 読めなかった access の外側 (さらに辿る・呼ぶ形なら、その先は追えない)
+  // 読めなかった access の外側
   const outer = parent.parent;
-  // 行き止まり (代入の左辺など) なら免除、手繰っているなら免除しない
-  return !(
+  // **免除するのは「書き込みの左辺」だけ。** 値がそこから外へ出ない唯一の形で、
+  // 現在の正当な用途 (`globalThis[MARKER] = true` の印) がこれにあたる。
+  // **「さらに辿る・呼ぶ形でなければ免除」にしてはいけない** — 値は変数宣言・括弧・実引数など
+  // あらゆる式の文脈から外へ出られるので、間に `const` を 1 つ置くだけで免除された
+  // (実測: `const R = globalThis.globalThis; R.process.exit(0);` は 811 件すべて緑・件数も不変の
+  // ままゲートを無言で exit 0 にできた。`const EV = globalThis.eval; EV('…')` も同じ形で
+  // `eval` の検出を迂回した)。免除の条件そのものが「親の形」の列挙になっていたのが誤り
+  return (
     outer !== undefined &&
-    ((ts.isPropertyAccessExpression(outer) && outer.expression === parent) ||
-      (ts.isElementAccessExpression(outer) && outer.expression === parent) ||
-      (ts.isCallExpression(outer) && outer.expression === parent))
+    ts.isBinaryExpression(outer) &&
+    outer.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    outer.left === parent
   );
 }
 
@@ -543,8 +554,23 @@ export function processUses(path: string): string[] {
       !isWrittenAsName(node)
     )
       found.add('globalThis');
+    // **`.constructor` も不透明なホップ** — `[].constructor.constructor('process.exit(0)')()` は
+    // `Function` を名指しせずに同じことをするので、名前の一覧では捉えられない
+    // (実測で 4 形すべて 811 件緑のままゲートを無言で exit 0 にでき、ベンチでは偽の合格 payload を
+    // 出して受け入れ基準を通せた)。`scripts/` 配下に `constructor` の出現は 0 件なので誤検知は無い
+    if (
+      (ts.isPropertyAccessExpression(node) && node.name.text === 'constructor') ||
+      (ts.isElementAccessExpression(node) &&
+        ts.isStringLiteralLike(node.argumentExpression) &&
+        node.argumentExpression.text === 'constructor')
+    )
+      found.add('constructor');
     // **静的解析がそこで途切れる組み込みも同じ扱い** — `eval('process.exit(0)')` や
-    // `new Function('return process')().exit(0)` は名前としては見えるのに中身を追えない
+    // `new Function('return process')().exit(0)` は名前としては見えるのに中身を追えない。
+    // **残る境界**: 同名のローカル束縛への参照 (`catch (Function) { return Function; }`) も
+    // ここでは数える (宣言そのものは除くが、参照までは区別しない)。現在そう書いた箇所は無く、
+    // 出たときは名前を変えれば済む。**名前に一切現れない形** (`function(){}.constructor('…')`)
+    // は原理的に捉えられないので、ゲートの挙動検査 (子プロセスで実際に走らせる) が受け持つ
     if (
       ts.isIdentifier(node) &&
       OPAQUE_GLOBAL_NAMES.has(node.text) &&
@@ -697,10 +723,17 @@ export function foreignModuleSpecifiers(path: string): string[] {
       // 動的 import か require か
       const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
       const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
-      // 第 1 引数が文字列リテラルのときだけ読める
+      // 第 1 引数 (取り込む先)
       const first = node.arguments[0];
-      if ((isDynamicImport || isRequire) && first !== undefined && ts.isStringLiteral(first))
-        specifiers.push(first.text);
+      // **読めない指定子を「無かったこと」にしない** — リテラルのときだけ記録していた版では、
+      // `await import('./preflight' + '.js')` と 1 文字足すだけでその import が判定の視界から
+      // 消え、許可リストの検査が「取り込みは 0 件」として緑になった (実測で 811 件すべて緑・
+      // 件数も不変のままゲートが無言で exit 0)。走査と許可の不等号ではなく「どちらにも現れない」
+      // 形なので、集合の導出をどう直しても届かない。読めないことを名前として残して落とす
+      if (isDynamicImport || isRequire)
+        specifiers.push(
+          first !== undefined && ts.isStringLiteral(first) ? first.text : '<読めない指定子>',
+        );
     }
     // 子を辿る
     ts.forEachChild(node, visit);

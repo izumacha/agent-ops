@@ -27,6 +27,7 @@ import { PROXY_ADDED_LATENCY_P95_MAX_MS } from './lib/step2-criteria.mjs';
 import {
   WARMUP_MAX_MS,
   intFromEnvValue,
+  requireAddedLatencyWithinLimit,
   warmupCountProblem,
   warmupLatencyProblem,
 } from './lib/bench-criteria.mjs';
@@ -406,12 +407,8 @@ async function main(): Promise<void> {
         passed: addedMs <= PROXY_ADDED_LATENCY_P95_MAX_MS,
       }),
     );
-    // 基準を超えていれば失敗
-    if (addedMs > PROXY_ADDED_LATENCY_P95_MAX_MS) {
-      throw new Error(
-        `追加遅延が大きすぎます: ${addedMs}ms (上限 ${PROXY_ADDED_LATENCY_P95_MAX_MS}ms)`,
-      );
-    }
+    // 基準を超えていれば失敗 (判定は scripts/lib/bench-criteria.mjs が持つ)
+    requireAddedLatencyWithinLimit(addedMs, PROXY_ADDED_LATENCY_P95_MAX_MS);
   } finally {
     // アプリとスタブを止め、一時ファイルを消す (§8 リソースを確実に解放する)
     app?.kill('SIGKILL');

@@ -75,3 +75,33 @@ export function warmupLatencyProblem(maxMs, limitMs) {
   // 上限を超えた = 初回コストが桁で悪化している
   return `初回コストが大きすぎます: 捨て玉の最大 ${maxMs}ms (上限 ${limitMs}ms)`;
 }
+
+/**
+ * 受け入れ基準「プロキシ経由の追加遅延 ≦ 上限」を判定し、超えていればその場で throw する。
+ *
+ * **判定をベンチ本体に `if` で残さない。** 残していたときは `if (false && addedMs > 上限)` と
+ * 書き換えるだけで受け入れ基準の判定が黙って外れ、718 件すべて緑・lint も 0 のまま
+ * ベンチが常に成功した (実測)。共有モジュールへ出せば「取り込んだ判定を全部呼ぶ」検査が効く
+ * @param {number} addedMs 実測した追加遅延
+ * @param {number} limitMs 上限
+ */
+export function requireAddedLatencyWithinLimit(addedMs, limitMs) {
+  // 上限以内なら何もしない
+  if (addedMs <= limitMs) return;
+  // 超えていれば受け入れ基準を満たしていない
+  throw new Error(`追加遅延が大きすぎます: ${addedMs}ms (上限 ${limitMs}ms)`);
+}
+
+/**
+ * 受け入れ基準「1 万件投入で日次集計 ≦ 上限」を判定し、超えていればその場で throw する。
+ * 理由は上の `requireAddedLatencyWithinLimit` と同じ
+ * @param {number} slowestMs 実測した最遅の所要時間
+ * @param {number} limitMs 上限
+ * @param {number} rowCount 投入した行数 (文言に入れる)
+ */
+export function requireAggregateLatencyWithinLimit(slowestMs, limitMs, rowCount) {
+  // 上限以内なら何もしない
+  if (slowestMs <= limitMs) return;
+  // 超えていれば受け入れ基準を満たしていない
+  throw new Error(`集計が遅すぎます: ${slowestMs}ms (上限 ${limitMs}ms、${rowCount} 件)`);
+}

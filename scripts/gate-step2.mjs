@@ -147,8 +147,10 @@ banner('ベンチ: 日次集計 (1 万件)');
 exitIfFailures(
   'gate:step2',
   benchOutputProblems({
-    label: 'usage-aggregate',
+    // **材料 (status / stdout) は必ずこの展開で運ぶ。** 先頭に置くのは、後ろの項目を
+    // 実行時に上書きされないため (検出網もこの並びを要求する)
     ...runNpmCapturingStdout(['run', 'bench:usage']),
+    label: 'usage-aggregate',
     valueField: 'slowestMs',
     limitField: 'limitMs',
     limit: USAGE_AGGREGATE_MAX_MS,
@@ -158,8 +160,10 @@ banner('ベンチ: プロキシの追加遅延');
 exitIfFailures(
   'gate:step2',
   benchOutputProblems({
-    label: 'proxy-latency',
+    // **材料 (status / stdout) は必ずこの展開で運ぶ。** 先頭に置くのは、後ろの項目を
+    // 実行時に上書きされないため (検出網もこの並びを要求する)
     ...runNpmCapturingStdout(['run', 'bench:proxy']),
+    label: 'proxy-latency',
     valueField: 'addedMs',
     limitField: 'limitMs',
     limit: PROXY_ADDED_LATENCY_P95_MAX_MS,

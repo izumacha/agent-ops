@@ -265,6 +265,45 @@ export function topLevelCallNames(path: string): string[] {
 }
 
 /**
+ * そのファイルにある `process.exit(...)` の実引数を、書かれた順に返す。
+ * 数値リテラルはその値、それ以外 (変数・式・省略) は `'<非リテラル>'`。
+ * **なぜ要るか**: ゲートは正当に `process.exit(1)` を使うので `process` の使用そのものは禁じられない。
+ * 一方で `process.exit(0)` を 1 行足すだけでゲート全体が無言で成功終了する (実測で 779 件すべて緑・
+ * CI の gate ジョブも緑のまま、Step0〜Step2 の全基準が一度も走らない)。**非 0 だけを許す**
+ * @param path 対象ファイルの絶対パス
+ * @returns 実引数の一覧 (書かれた順)
+ */
+export function processExitArguments(path: string): string[] {
+  // 構文木にする
+  const source = parseScript(path);
+  // 見つかった実引数
+  const found: string[] = [];
+  // すべての節点を辿る
+  const visit = (node: ts.Node): void => {
+    // `process.exit(...)` の形だけを見る
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === 'process' &&
+      node.expression.name.text === 'exit'
+    ) {
+      // 第 1 引数 (省略されていれば 0 と同じ意味になる)
+      const argument = node.arguments[0];
+      found.push(
+        argument !== undefined && ts.isNumericLiteral(argument) ? argument.text : '<非リテラル>',
+      );
+    }
+    // 子を辿る
+    ts.forEachChild(node, visit);
+  };
+  // 根から辿る
+  ts.forEachChild(source, visit);
+  // 集めた結果
+  return found;
+}
+
+/**
  * モジュールのトップレベルに**式文として**置かれた呼び出しの、実引数の形を返す。
  * 形は `literal`（文字列・数値などのリテラル）/ `identifier`（素の識別子）/ `other`（それ以外）。
  * **なぜ要るか**: 実引数は呼び出しより先に評価されるので、`requireContractDatabase(f())` の
@@ -608,7 +647,8 @@ export function describedNamesWithTests(path: string): string[] {
  *   `identifierArgument` はその位置の実引数が指定した**素の識別子そのもの**であることを求める
  *   (本物を呼んでから値を丸める関数へ差し替える形を落とす)。`argument.objectArgument` はその判定へ
  *   渡すオブジェクトリテラルが、指定した項目を持ち (`keys`)、指定した項目が指定の文字列リテラルで
- *   あること (`literals`) まで求める (どのベンチの結線かを取り違えさせない)
+ *   あること (`literals`)、指定した呼び出しの結果を展開していること (`spreadOf`) まで求める
+ *   (どのベンチの結線かを取り違えさせない／材料の出どころをリテラルへ差し替えさせない)
  * @returns 条件を満たす呼び出しがあれば true
  */
 export function callsFunction(
@@ -625,6 +665,12 @@ export function callsFunction(
         index: number;
         literals: Readonly<Record<string, string>>;
         keys: readonly string[];
+        spreadOf?: {
+          callOf: string;
+          importedFrom: string;
+          arrayArgument: { index: number; values: readonly string[] };
+        };
+        forbiddenKeys?: readonly string[];
       };
     };
     literalArgument?: { index: number; value: string };
@@ -690,14 +736,56 @@ export function callsFunction(
       const target = argument.arguments[options.argument.objectArgument.index];
       // オブジェクトリテラルでなければ中身を確かめられない
       if (target === undefined || !ts.isObjectLiteralExpression(target)) continue;
-      // 書かれている項目の名前 (素の識別子か文字列のキーだけ読む)
+      // 書かれている項目の名前と値
       const written = new Map<string, ts.Expression>();
+      // 展開 (`...式`) の式
+      const spreads: ts.Expression[] = [];
       for (const property of target.properties) {
-        // `名前: 値` の形だけを読む (短縮形・スプレッドは名前しか分からないので値を null にする)
+        // `名前: 値` の形
         if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name))
           written.set(property.name.text, property.initializer);
+        // 短縮形 (`名前,`)
         else if (ts.isShorthandPropertyAssignment(property))
           written.set(property.name.text, property.name);
+        // 展開 (`...式`)。**ここを読まないと材料の出どころが視界の外になる** — 実測で、
+        // `...runNpmCapturingStdout([…])` を `status: 0, stdout: '<偽の結果 JSON>'` へ
+        // 差し替えるとベンチを 1 本も起動せずにゲートが緑になった (779 件すべて緑)
+        else if (ts.isSpreadAssignment(property)) spreads.push(property.expression);
+      }
+      // **直書きを禁じた項目が書かれていないこと** (展開で運ぶ材料を手で上書きさせない)
+      const forbidden = options.argument.objectArgument.forbiddenKeys ?? [];
+      if (forbidden.some((key) => written.has(key))) continue;
+      // **展開は先頭の 1 つだけ。** 後ろに置くと、ピン留めした項目を実行時に上書きできてしまう
+      // (実測で `limit:` の直後に `...{ valueField: 'limitMs' }` を足すと全件緑のまま恒真式になった)
+      if (spreads.length > 1) continue;
+      if (spreads.length === 1 && target.properties[0] !== undefined) {
+        // 先頭の項目が展開そのものであること
+        const first = target.properties[0];
+        if (!ts.isSpreadAssignment(first) || first.expression !== spreads[0]) continue;
+      }
+      // 展開している呼び出しまで求めるなら、その形を見る
+      const spreadOf = options.argument.objectArgument.spreadOf;
+      if (spreadOf !== undefined) {
+        // 条件を満たす展開が 1 つでもあること
+        const matched = spreads.some((expression) => {
+          // 素の識別子への呼び出しであること
+          if (!ts.isCallExpression(expression) || !ts.isIdentifier(expression.expression))
+            return false;
+          // 名前が一致し、共有モジュール由来であること
+          if (expression.expression.text !== spreadOf.callOf) return false;
+          if (!comesFromSharedModule(path, source, spreadOf.importedFrom, spreadOf.callOf))
+            return false;
+          // 指定した位置の実引数が配列リテラルで、中身が文字列リテラルとして一致すること
+          const list = expression.arguments[spreadOf.arrayArgument.index];
+          if (list === undefined || !ts.isArrayLiteralExpression(list)) return false;
+          if (list.elements.length !== spreadOf.arrayArgument.values.length) return false;
+          return list.elements.every(
+            (element, index) =>
+              ts.isStringLiteral(element) && element.text === spreadOf.arrayArgument.values[index],
+          );
+        });
+        // 1 つも無ければこの呼び出しは求めた形ではない
+        if (!matched) continue;
       }
       // 求めた項目がすべて書かれていること
       if (!options.argument.objectArgument.keys.every((key) => written.has(key))) continue;

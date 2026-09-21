@@ -30,8 +30,9 @@ import {
   aggregateLatencyProblem,
   benchCriteriaFields,
   benchCriteriaJudges,
+  benchLabels,
+  intFromEnv,
   intFromEnvValue,
-  isBenchLabel,
   judgeBenchPayload,
   measuredRequestsProblem,
   non2xxProblem,
@@ -50,6 +51,7 @@ import {
   gateScriptNames,
   importSharedModule,
   foreignModuleSpecifiers,
+  processExitArguments,
   processUses,
   sharedModuleNames,
   topLevelCallArgumentKinds,
@@ -59,6 +61,39 @@ import {
   importedSharedNames,
   reachableCallNames,
 } from './lib/script-files';
+
+// vitest 由来の印と NODE_ENV を落とした env (「テストのときだけ通す」分岐を成立させないため)
+function cleanChildEnv(): NodeJS.ProcessEnv {
+  // 親の env を写し取る
+  const env = { ...process.env };
+  // vitest の印をすべて落とす
+  for (const key of Object.keys(env)) if (key.startsWith('VITEST')) delete env[key];
+  // NODE_ENV も本番相当にする (vitest は 'test' を立てたまま子へ継承する)
+  env.NODE_ENV = 'production';
+  return env;
+}
+
+// **素の Node** で runBench を 1 回動かし、その標準出力と終了コードを返す。
+// 静的検査は「その綴りがあるか」しか見ないので、基準が本当に強制されているかはこれで確かめる
+function runBenchInCleanChild(label: string, payload: Record<string, number>): string {
+  // 共有モジュールの場所
+  const moduleUrl = pathToFileURL(join(SCRIPTS_DIR, 'lib', 'bench-criteria.mjs')).href;
+  // import → 計測結果を渡して実行 → 終了コードの印 の順に並べる
+  const code = [
+    `const { runBench } = await import(${JSON.stringify(moduleUrl)});`,
+    `await runBench(${JSON.stringify(label)}, async () => (${JSON.stringify(payload)}));`,
+    `console.log('EXIT_CODE=' + String(process.exitCode));`,
+  ].join('\n');
+  // 実行する
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: cleanChildEnv(),
+    timeout: 60_000,
+  });
+  // 標準出力 (結果の JSON と終了コードの印が入る)
+  return result.stdout;
+}
 
 // 共有モジュールを**素の Node**で import し、その先へ到達できたかを返す。
 // **vitest の印 (`VITEST`) を外して起動する** — 付いたままだと
@@ -70,14 +105,11 @@ function importsWithoutExiting(modulePath: string): string {
     `await import(${JSON.stringify(pathToFileURL(modulePath).href)});`,
     `console.log('REACHED_END');`,
   ].join('\n');
-  // vitest 由来の環境変数を落とした env を組み立てる
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith('VITEST')) delete env[key];
-  // 実行する
+  // 実行する (vitest の印と NODE_ENV を落とした env で)
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
     cwd: ROOT,
     encoding: 'utf8',
-    env,
+    env: cleanChildEnv(),
     timeout: 60_000,
   });
   // 標準出力 (到達印が出ていれば import の先へ進めている)
@@ -346,6 +378,24 @@ describe('exitIfFailures', () => {
     // 正常終了し、続きまで到達すること
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('REACHED_END');
+  });
+});
+
+describe('intFromEnv', () => {
+  it('環境変数を名前で読んで整数にする', () => {
+    // 変数名を 1 度しか書かせないための包み (名前 → 値の読み取りまでを共有モジュールが持つ)
+    process.env.AGENT_OPS_BENCH_PROBE = '42';
+    try {
+      expect(intFromEnv('AGENT_OPS_BENCH_PROBE', 7, 0)).toBe(42);
+    } finally {
+      delete process.env.AGENT_OPS_BENCH_PROBE;
+    }
+  });
+
+  it('未設定なら既定値を返す', () => {
+    // 設定していない変数は既定値 (空文字は打ち間違いとして intFromEnvValue が落とす)
+    delete process.env.AGENT_OPS_BENCH_PROBE;
+    expect(intFromEnv('AGENT_OPS_BENCH_PROBE', 7, 0)).toBe(7);
   });
 });
 
@@ -629,13 +679,10 @@ describe('benchOutputProblems', () => {
   });
 });
 
-describe('isBenchLabel', () => {
-  it('表にあるラベルだけを認める', () => {
-    // 実在するラベル
-    expect(isBenchLabel('usage-aggregate')).toBe(true);
-    // 打ち間違い・プロトタイプ由来の名前は認めない (fail-closed)
-    expect(isBenchLabel('usage_aggregate')).toBe(false);
-    expect(isBenchLabel('toString')).toBe(false);
+describe('benchLabels', () => {
+  it('基準を持つベンチのラベルをすべて返す', () => {
+    // 表のキーをそのまま列挙する (検査はこれと突き合わせて網羅を確かめる)
+    expect(benchLabels().sort()).toEqual(['proxy-latency', 'usage-aggregate']);
   });
 });
 
@@ -1061,10 +1108,13 @@ describe('判定の結線', () => {
   // ベンチのファイル名と、そのベンチが掛かる受け入れ基準のラベルの対応。
   // **これが「どのベンチがどの基準に掛かるか」の唯一の宣言**で、両向きに突き合わせる
   // (表に無いベンチ・実在しないベンチ・共有モジュール側の基準との食い違いをすべて落とす)
-  const BENCH_LABELS: Readonly<Record<string, string>> = {
-    'bench-proxy.ts': 'proxy-latency',
-    'bench-usage-aggregate.ts': 'usage-aggregate',
+  const BENCH_LABELS: Readonly<Record<string, { label: string; valueField: string }>> = {
+    'bench-proxy.ts': { label: 'proxy-latency', valueField: 'addedMs' },
+    'bench-usage-aggregate.ts': { label: 'usage-aggregate', valueField: 'slowestMs' },
   };
+
+  // 出力 JSON に載る上限の項目名 (ベンチ共通)
+  const BENCH_LIMIT_FIELD = 'limitMs';
 
   // ベンチが `process` に触れてよい形。**すべて純粋な読み取りだけ**で、
   // ここに無い形 (`process.exit` / 要素アクセス / 別名束縛 / `process.on('exit', …)` /
@@ -1092,11 +1142,17 @@ describe('判定の結線', () => {
   // 載っていた `intFromEnv` の本体に 1 行足すと、専用 DB のガードより前に 3 回走った)。
   // **エントリを足す差分は、その呼び出しが副作用を持たないかをレビューで必ず確認する**
   const ALLOWED_TOP_LEVEL_INITIALIZER_CALLS = new Set([
-    'intFromEnvValue',
+    'intFromEnv',
     'join',
     'process.cwd',
     'JSON.stringify',
   ]);
+
+  // 上のうち「このファイルで宣言されていない」ことまで求めるもの (共有モジュール由来であること)。
+  // **ローカルに同名の関数を宣言すれば許可リストを満たせてしまう** ので、出どころまで固定する
+  const SHARED_INITIALIZER_CALLS: Readonly<Record<string, string>> = {
+    intFromEnv: 'bench-criteria.mjs',
+  };
 
   // ベンチのトップレベルに置いてよい文の種類。**許す側を列挙する** —
   // 禁じたい形 (条件・繰り返し・try・ラベル文) を綴りで並べると 1 つ漏らすたびに静かな穴になる
@@ -1116,12 +1172,13 @@ describe('判定の結線', () => {
     );
     // **ラベルは共有モジュール側の基準の表と過不足なく一致すること** —
     // 片方にだけ足すと「誰も掛けない基準」か「基準の無いベンチ」が黙って生まれる
-    const labels = Object.values(BENCH_LABELS);
-    for (const label of labels)
-      expect(isBenchLabel(label), `${label} は bench-criteria の基準に無い`).toBe(true);
+    const labels = Object.values(BENCH_LABELS).map((entry) => entry.label);
+    // **基準の表のラベルと過不足なく一致すること** — 片方にだけ足すと「誰も掛けない基準」か
+    // 「基準の無いベンチ」が黙って生まれる (実測: 表に 3 本目を足しても検査は 1 件も増えなかった)
+    expect([...labels].sort(), 'ベンチのラベルと基準の表が食い違う').toEqual(benchLabels().sort());
     // 重複したラベルを許すと 2 本が同じ基準を指して片方の基準が消える
     expect(new Set(labels).size, 'ラベルが重複している').toBe(labels.length);
-    for (const [bench, label] of Object.entries(BENCH_LABELS)) {
+    for (const [bench, { label }] of Object.entries(BENCH_LABELS)) {
       // そのベンチのパス
       const path = join(SCRIPTS_DIR, bench);
       // **runBench を、そのベンチのラベルで、トップレベルの式文として呼ぶこと。**
@@ -1164,11 +1221,19 @@ describe('判定の結線', () => {
       // トップレベルの変数初期化子は定数を組み立てるだけ。**ここが視界の外だった** — 実測で
       // `const CLEARED = await CLIENT.$executeRaw\`TRUNCATE …\`;` を専用 DB のガードより前へ
       // 置くと全件緑のまま、ガードが約束する「1 件も書かずに止める」が破れた
-      for (const effect of topLevelInitializerEffects(path))
+      for (const effect of topLevelInitializerEffects(path)) {
         expect(
           ALLOWED_TOP_LEVEL_INITIALIZER_CALLS.has(effect),
           `${bench} のトップレベルの初期化子が ${effect} を起こす`,
         ).toBe(true);
+        // 共有モジュール由来を求めるものは、出どころまで見る (同名のローカル宣言を落とす)
+        const from = SHARED_INITIALIZER_CALLS[effect];
+        if (from !== undefined)
+          expect(
+            callsFunction(path, effect, { importedFrom: from }),
+            `${bench} の ${effect} が ${from} 由来でない`,
+          ).toBe(true);
+      }
       // 相対 import の先は共有モジュール (scripts/lib) かアプリ本体 (src) だけ。
       // **ここも視界の外だった** — 実測で `scripts/preflight.mjs` に `process.exit(0)` を置いて
       // `import './preflight.mjs';` を 1 行足すと、全件緑のまま出力ゼロで exit 0 になった
@@ -1208,8 +1273,9 @@ describe('判定の結線', () => {
   // bench-criteria が export する関数のうち、**受け入れ基準の判定ではない**もの。
   // 判定は残らず BENCH_CRITERIA のどれかで使われていなければならず、外すには export ごと消すしかない
   const JUDGE_EXCLUSIONS: Readonly<Record<string, string>> = {
-    intFromEnvValue: '環境変数の読み取り (基準ではなく入力の検証)',
-    isBenchLabel: 'ラベルが表にあるかの問い合わせ',
+    benchLabels: '基準を持つベンチのラベルの一覧 (網羅の照合に使う導出)',
+    intFromEnv: '環境変数の読み取り (基準ではなく入力の検証)',
+    intFromEnvValue: '同上 (値を受け取る側。テストから直接呼ぶために分けてある)',
     benchCriteriaFields: '基準の読み取り項目を検査へ渡すための導出',
     benchCriteriaJudges: 'この検査そのものが使う導出',
     judgeBenchPayload: '基準を掛ける側 (判定を呼ぶ人)',
@@ -1246,7 +1312,9 @@ describe('判定の結線', () => {
     const gate = join(SCRIPTS_DIR, 'gate-step2.mjs');
     // 0 本なら空振りで緑になる (fail-closed)
     expect(Object.keys(BENCH_LABELS).length, 'ベンチが 1 本も無い').toBeGreaterThan(0);
-    for (const label of Object.values(BENCH_LABELS)) {
+    for (const [bench, { label, valueField }] of Object.entries(BENCH_LABELS)) {
+      // そのベンチを起動する npm スクリプト名 (ゲートが実際に流すコマンドの正本)
+      const script = benchNpmScriptOf(bench);
       // **新しい最終防衛線も、他の結線と同じ強さで見張る** — ここが無いと、ゲートから
       // `benchOutputProblems` の呼び出しを丸ごと外して終了コードだけを見る形へ戻しても
       // 赤が 1 件も出なかった (実測で 773 件すべて緑・件数も不変)
@@ -1258,17 +1326,86 @@ describe('判定の結線', () => {
             index: 1,
             callOf: ['benchOutputProblems'],
             importedFrom: 'gate-report.mjs',
-            // ラベルはそのベンチのもので、上限との独立比較に要る 3 項目が揃っていること
+            // ラベルと比較する項目名はそのベンチのもので、上限との独立比較に要る 4 項目が揃い、
+            // **材料 (status / stdout) はそのベンチを実際に流した結果を展開したものであること**。
+            // 実測で、展開をリテラルの `status: 0` / `stdout: '<偽の結果 JSON>'` へ差し替えると、
+            // ベンチを 1 本も起動せずにゲートが緑になった (779 件すべて緑・件数も不変)。
+            // 比較する項目名も固定する — `valueField: 'limitMs'` の 1 語書き換えで
+            // `limitMs <= limit` という恒真式になり、独立比較が消えた (実測)
             objectArgument: {
               index: 0,
-              literals: { label },
+              literals: { label, valueField, limitField: BENCH_LIMIT_FIELD },
               keys: ['label', 'valueField', 'limitField', 'limit'],
+              // 材料は展開でしか運べない (手で書いた `status: 0` / `stdout: '…'` を許さない)
+              forbiddenKeys: ['status', 'stdout'],
+              spreadOf: {
+                callOf: 'runNpmCapturingStdout',
+                importedFrom: 'run-npm-steps.mjs',
+                arrayArgument: { index: 0, values: ['run', script] },
+              },
             },
           },
         }),
-        `gate-step2.mjs が ${label} の結果を benchOutputProblems で検査していない`,
+        `gate-step2.mjs が ${label} を実際に流してその結果を benchOutputProblems で検査していない`,
       ).toBe(true);
     }
+  });
+
+  it.each(Object.keys(BENCH_PAYLOADS))(
+    '素の Node でも基準を破れば passed: false と非 0 終了: %s',
+    (label) => {
+      // **これが「基準が本当に強制されているか」の唯一の実行時の担保。**
+      // 静的検査はどれも「その綴りがあるか」しか見ないので、共有モジュールの中に
+      // `if (process.env.NODE_ENV !== 'test') payload.slowestMs = 0;` を 1 行入れるだけで
+      // 受け入れ基準が完全に無効化されるのに全件緑だった (実測)。**vitest の印と NODE_ENV を
+      // 落とした子プロセス**で、基準を破る実測値を実際に通して落ちることを確かめる
+      const broken = { ...BENCH_PAYLOADS[label].ok, ...BENCH_PAYLOADS[label].breaks[0] };
+      const run = runBenchInCleanChild(label, broken);
+      // 基準を満たしていないと出ること
+      expect(run, `${label} が素の Node で passed: false にならない`).toContain('"passed":false');
+      // **実測値がそのまま出ていること** (テストのときだけ本物を使う分岐を落とす)
+      for (const [field, value] of Object.entries(broken))
+        expect(run, `${label} の ${field} が書き換えられている`).toContain(
+          `${JSON.stringify(field)}:${JSON.stringify(value)}`,
+        );
+      // 非 0 で終わること (ゲートは終了コードも見る)
+      expect(run, `${label} が素の Node で非 0 終了しない`).toContain('EXIT_CODE=1');
+    },
+  );
+
+  it.each(Object.keys(BENCH_PAYLOADS))(
+    '素の Node で基準を満たせば passed: true と終了コード据え置き: %s',
+    (label) => {
+      // 片側だけだと「常に落とす」実装でも緑にできるので、通る側も見る
+      const run = runBenchInCleanChild(label, BENCH_PAYLOADS[label].ok);
+      expect(run).toContain('"passed":true');
+      expect(run).toContain('EXIT_CODE=undefined');
+    },
+  );
+
+  it('挙動を確かめる表がベンチのラベルを網羅している', () => {
+    // **3 本目のベンチを足して表に書き忘れると、そのベンチは挙動を 1 件も固定されないまま出荷される**
+    expect(Object.keys(BENCH_PAYLOADS).sort(), '挙動の表と基準の表が食い違う').toEqual(
+      benchLabels().sort(),
+    );
+  });
+
+  it('ゲートと共有モジュールの process.exit は非 0 だけ', () => {
+    // ゲートは正当に process.exit(1) を使うので、使用そのものは禁じられない。
+    // **`process.exit(0)` を 1 行足すだけでゲート全体が無言で成功終了した** (実測で全件緑・
+    // CI の gate ジョブも緑のまま、Step0〜Step2 の全基準が一度も走らない)
+    const paths = [
+      ...gateScriptNames().map((name) => join(SCRIPTS_DIR, name)),
+      ...sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name)),
+    ];
+    // 0 本なら空振りで緑になる (fail-closed)
+    expect(paths.length, '検査対象が 1 つも無い').toBeGreaterThan(0);
+    for (const path of paths)
+      for (const argument of processExitArguments(path))
+        expect(
+          /^[1-9][0-9]*$/.test(argument),
+          `${path} に process.exit(${argument}) がある (非 0 の数値リテラルだけを許す)`,
+        ).toBe(true);
   });
 
   it('共有モジュールは import しただけでプロセスを終わらせない', () => {

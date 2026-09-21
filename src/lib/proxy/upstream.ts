@@ -44,14 +44,16 @@ const UPSTREAMS: Readonly<Record<Provider, UpstreamConfig>> = {
 };
 
 /**
- * 上流の接続先と資格情報を決める環境変数の名前を、**全プロバイダぶん**返す。
+ * 上流の接続先と資格情報を決める環境変数の名前を、**全プロバイダぶん・役割つきで**返す。
  * ベンチはここから名前を導いてローカルのスタブへ差し替える —— 一覧を書き写すと、
  * プロバイダを足した人が上書きを書き忘れ、開発機の実キーで本物のベンダーを叩いて課金する。
- * @returns 環境変数名の一覧 (接続先・資格情報の順で並ぶ)
+ * **役割をここで付けて返す**のが要点で、名前だけを平坦に返すと呼び出し側が接尾辞
+ * (`_BASE_URL`) で分類し直すことになり、どこにも強制されていない命名規約に依存する
+ * @returns プロバイダごとの環境変数名 (接続先と資格情報)
  */
-export function upstreamEnvNames(): string[] {
+export function upstreamEnvNames(): { baseUrlEnv: string; apiKeyEnv: string }[] {
   // 結線表からそのまま導く (写しを作らない)
-  return Object.values(UPSTREAMS).flatMap((config) => [config.baseUrlEnv, config.apiKeyEnv]);
+  return Object.values(UPSTREAMS).map(({ baseUrlEnv, apiKeyEnv }) => ({ baseUrlEnv, apiKeyEnv }));
 }
 
 // ループバック (自分自身) を指すホスト名。**非本番でだけ** http を許す相手

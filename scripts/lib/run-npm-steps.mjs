@@ -61,10 +61,17 @@ export function runNpmCapturingStdout(args) {
     // 秘密鍵入り一時ディレクトリの削除) が飛ぶ。ベンチは JSON 1 行しか出さないので、
     // 進捗出力を足しても当分越えない余裕を取る
     maxBuffer: 64 * 1024 * 1024,
+    // 上限時間も明示する。固まったベンチがゲートを無期限に止めると、CI のジョブ上限まで
+    // 何も分からない (赤にはなるので fail-open ではないが、理由が残らない)。
+    // ベンチ 1 本は実測で 25〜40 秒なので、桁の余裕を取って 15 分に置く
+    timeout: 15 * 60 * 1000,
     shell: IS_WINDOWS,
   });
-  // 出力が上限を超えた場合は「起動できない」ではないので、理由を分けて残す
-  if (result.error?.code === 'ENOBUFS')
+  // 上限時間を超えた場合も「起動できない」ではない
+  if (result.error?.code === 'ETIMEDOUT')
+    console.error('[gate] ベンチが上限時間内に終わりませんでした (子プロセスを打ち切りました)');
+  // 出力が上限を超えた場合も同じく理由を分けて残す
+  else if (result.error?.code === 'ENOBUFS')
     console.error('[gate] ベンチの標準出力が上限を超えました (子プロセスを打ち切りました)');
   // それ以外の起動失敗は原因を残す (§6 エラーを握り潰さない)
   else if (result.error) console.error(`[gate] npm を起動できません: ${result.error.message}`);

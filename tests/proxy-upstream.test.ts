@@ -4,7 +4,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { callUpstream, resolveUpstreamBaseUrl, upstreamEndpoint } from '@/lib/proxy/upstream';
+import {
+  callUpstream,
+  resolveUpstreamBaseUrl,
+  upstreamEndpoint,
+  upstreamEnvNames,
+} from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
@@ -395,5 +400,24 @@ describe('上流の応答からのトークン数の読み取り', () => {
         usage: { input_tokens: USAGE_TOKENS_MAX, output_tokens: 0 },
       }),
     ).toEqual({ inputTokens: USAGE_TOKENS_MAX, outputTokens: 0 });
+  });
+});
+
+describe('upstreamEnvNames', () => {
+  it('全プロバイダの接続先と資格情報の変数名を役割つきで返す', () => {
+    // **ベンチがローカルのスタブへ差し替える一覧の正本** (写しを持つと足し忘れで実 API を叩く)。
+    // 役割 (接続先 / 資格情報) をここで付けて返すので、呼び出し側が名前で分類し直さずに済む
+    expect(upstreamEnvNames()).toEqual([
+      { baseUrlEnv: 'ANTHROPIC_BASE_URL', apiKeyEnv: 'ANTHROPIC_API_KEY' },
+      { baseUrlEnv: 'OPENAI_BASE_URL', apiKeyEnv: 'OPENAI_API_KEY' },
+    ]);
+  });
+
+  it('接続先と資格情報を取り違えていない', () => {
+    // 取り違えると「資格情報に URL を入れる」形になり、上流のダミー化が成立しなくなる
+    for (const { baseUrlEnv, apiKeyEnv } of upstreamEnvNames()) {
+      expect(baseUrlEnv).toContain('BASE_URL');
+      expect(apiKeyEnv).toContain('API_KEY');
+    }
   });
 });

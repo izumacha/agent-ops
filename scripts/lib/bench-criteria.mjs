@@ -61,6 +61,22 @@ export function intFromEnvValue(name, raw, fallback, minimum) {
 }
 
 /**
+ * 環境変数を名前で読み、0 以上の整数として解釈する。
+ * **変数名を 1 度しか書かせない**のが要点 — 呼び出し側で `process.env[name]` を渡す形にすると
+ * 名前が 2 か所に現れ、`intFromEnvValue('BENCH_DURATION', process.env.BENCH_WARMUP, …)` の
+ * ような食い違いを誰も見られない。ベンチ側にこの包みを置くと本体が検出網の視界の外になるので、
+ * **共有モジュール側に置く** (ここの挙動は tests/gate-scripts.test.ts が固定する)
+ * @param {string} name 変数名
+ * @param {number} fallback 未設定のときに使う既定値
+ * @param {number} minimum 許す最小値
+ * @returns {number} 読み取れた整数
+ */
+export function intFromEnv(name, fallback, minimum) {
+  // 生の値を渡して判定させる (読めなければ例外)
+  return intFromEnvValue(name, process.env[name], fallback, minimum);
+}
+
+/**
  * 捨て玉が指定どおりの件数で止まったかを判定する。
  * @param {number} expected 指定した件数
  * @param {number} actual 実際に流れた件数
@@ -184,11 +200,19 @@ const BENCH_CRITERIA = {
 };
 
 /**
- * そのベンチのラベルが表に載っているか (載っていなければ設定ミス)。
- * @param {string} label ベンチのラベル
- * @returns {boolean} 表に載っていれば true
+ * 受け入れ基準を持つベンチのラベルをすべて返す。
+ * **列挙できる形にするのが要点** — 「そのラベルが載っているか」だけを外へ出していたときは、
+ * 表に 3 本目のラベルを足しても検査が 1 件も増えず、そのベンチは挙動を 1 つも固定されないまま
+ * 出荷できた (実測で全件緑・痕跡ゼロ)。検査はこの一覧と突き合わせて網羅を確かめる
+ * @returns {string[]} ベンチのラベル (表に書かれた順)
  */
-export function isBenchLabel(label) {
+export function benchLabels() {
+  // 表のキー (プロトタイプ由来の名前は入らない)
+  return Object.keys(BENCH_CRITERIA);
+}
+
+// そのベンチのラベルが表に載っているか (載っていなければ設定ミス)
+function isBenchLabel(label) {
   // 表のキーとして存在するか (プロトタイプ由来の名前を拾わないよう自前の項目だけを見る)
   return Object.hasOwn(BENCH_CRITERIA, label);
 }

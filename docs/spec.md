@@ -43,15 +43,19 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 
 ### UC-05 プロキシ経由で LLM を呼び出しコストを記録する（Step2）
 
-- 主体: エージェント（API キーで認証）
+- 主体: エージェント（API キーで認証。ユーザートークンでは呼べず 401）
 - 流れ: Anthropic/OpenAI 互換のエンドポイントへ送信 → 上流へ中継 → トークン数・料金・遅延を `UsageEvent` に記録
-- 基準: 追加遅延 p95 ≦ 50ms、料金計算はベンダー公表単価と誤差 0
+- 事後条件: 成功・失敗とも 1 回の呼び出しにつき `UsageEvent` が 1 行増える（失敗はトークン 0・料金 0・`statusCode` は実際の値）
+- 例外: 料金表に無いモデルは中継せず 422／エージェントに紐づかないキー・停止中のエージェントは 403／`stream: true` は 422（Step2 は非ストリーミングのみ）／上流の 5xx は 502、時間切れは 504
+- 基準: 追加遅延 p95 ≦ 50ms、料金計算はベンダー公表単価と誤差 0（ADR-0007 / ADR-0008）
 
 ### UC-06 コストを日次で集計して閲覧する（Step2 / Step5）
 
 - 主体: `viewer` 以上
 - 流れ: テナント・エージェント・日付で `UsageEvent` を集計 → ダッシュボードに表示
-- 基準: 1 万件投入で集計 SQL ≦ 1 秒
+- 事後条件: 日の境目は **UTC**（配備先のタイムゾーンで結果が変わらない）。イベントが無い日は行が出ない
+- 例外: 期間（`from` / `to`）は必須で、読めない日付・逆順・366 日を超える指定は 422
+- 基準: 1 万件投入で集計 SQL ≦ 1 秒（ADR-0008）
 
 ### UC-07 エージェントの応答品質を評価する（Step3）
 
@@ -215,6 +219,7 @@ erDiagram
 - **`view` / `execute` / `stop`** — テナント内 RBAC の操作。`src/domain/rbac.ts` の許可表 `PERMISSIONS`（役割 3 × 操作 3）が唯一の真実の源。
 - **`admin` ロール限定** — ユーザー招待・役割変更のような「役割そのものを扱う」操作。3 操作の表とは別軸で、実装は「役割が `admin` であること」を明示的に確かめる（`role === 'admin'` を許す唯一の用途）。Step1 の 403 テスト（役割 3 × 操作 3）に加えて、`viewer` / `operator` がこれらを呼ぶと 403 になることも固定する。
 - **プラットフォーム管理者** — テナントを作る・列挙する操作。テナントの外側にいるため RBAC の表では表現しない。環境変数 `PLATFORM_ADMIN_TOKEN` と一致する Bearer トークンで認証し、テナント内の資源には閲覧も含めて触れない（403。ADR-0005）。
+- **API キー（プロキシ専用）** — エージェントが LLM を呼ぶときの資格情報（`aop_k_...`）。プロキシのエンドポイントだけで使え、他の API では 401。逆にユーザートークンでプロキシを呼んでも 401（資格情報の種類が違うので、権限不足の 403 とは区別する。ADR-0007）。
 
 | メソッド | パス                       | operationId      | 必要権限       | Step |
 | -------- | -------------------------- | ---------------- | -------------- | ---- |
@@ -240,12 +245,16 @@ erDiagram
 | GET      | `/api-keys`                | `listApiKeys`    | view           | 1    |
 | POST     | `/api-keys`                | `createApiKey`   | execute        | 1    |
 | DELETE   | `/api-keys/{apiKeyId}`     | `revokeApiKey`   | stop           | 1    |
+| POST     | `/proxy/anthropic/messages` | `proxyAnthropicMessages` | API キー（プロキシ専用） | 2 |
+| POST     | `/proxy/openai/chat/completions` | `proxyOpenAiChatCompletions` | API キー（プロキシ専用） | 2 |
+| GET      | `/usage/daily`             | `getDailyUsage`  | view           | 2    |
 
-Step2 以降（プロキシ `/proxy/*`、集計 `/usage/daily`、評価 `/evaluations`、ルール `/guardrails`、インシデント `/incidents`、課金 `/billing`）は各 Step の着手時にこの表と OpenAPI 定義へ追加する。
+Step3 以降（評価 `/evaluations`、ルール `/guardrails`、インシデント `/incidents`、課金 `/billing`）は各 Step の着手時にこの表と OpenAPI 定義へ追加する。
 
 ## 5. 非機能要件（抜粋）
 
 - **セキュリティ**: 全 Server Action / Route Handler で認証・RBAC・`tenantId` の絞り込みを強制（CLAUDE.md §9）。API キー・ユーザートークンはハッシュのみ保存。JSON 本文は上限（`src/lib/constants.ts` の `JSON_BODY_MAX_BYTES`）まで（413）、`Content-Type` は `application/json` 限定（415）。監査ログは追記専用。
-- **性能**: 一覧は必ず上限（既定 50、最大 200）。プロキシの追加遅延 p95 ≦ 50ms。
+- **性能**: 一覧は必ず上限（既定 50、最大 200）。日次集計の期間は最大 366 日。プロキシの追加遅延 p95 ≦ 50ms。
+- **プロキシ（Step2）**: 中継先はコードと環境変数だけから決める（クライアントの入力は接続先に影響しない）。上流の資格情報はサーバ側の環境変数から取り、クライアントのヘッダは 1 つも転送しない。上流の応答を待つ上限は `UPSTREAM_TIMEOUT_MS`。
 - **可観測性**: `/api/v1/health` で DB 到達性を返す。エラーは内部詳細を出さずサーバログへ。
 - **移植性**: PostgreSQL 16 / Node 22 / Docker。ローカルと CI で検証が完結する（人手の外部手順に依存しない）。

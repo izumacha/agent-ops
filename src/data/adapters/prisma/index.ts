@@ -3,6 +3,7 @@
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
 import { DuplicateError } from '@/data/errors';
 import { fetchCount, toPage, type CursorKey } from '@/data/page';
+import { toSafeCount } from '@/data/safe-count';
 import type {
   AgentFilter,
   AgentRecord,
@@ -15,13 +16,19 @@ import type {
   CreateTenantResult,
   CreateUserInput,
   CreateUserTokenInput,
+  DailyUsageQuery,
+  DailyUsageTotal,
   DeleteAgentResult,
+  ApiKeyLookup,
   Page,
   PageQuery,
+  RecordUsageEventInput,
   Repositories,
   TenantRecord,
   TenantsPort,
   UpdateAgentInput,
+  UsageEventRecord,
+  UsageEventsPort,
   UserMutationResult,
   UserRecord,
   UserTokenLookup,
@@ -206,6 +213,24 @@ function apiKeyCreateData(input: CreateApiKeyInput): {
     prefix: input.prefix,
     keyHash: input.keyHash,
     name: input.name,
+  };
+}
+
+// 利用イベントの記録
+function usageEventCreateData(input: RecordUsageEventInput): {
+  [K in keyof Required<RecordUsageEventInput>]: RecordUsageEventInput[K];
+} {
+  // 許した項目だけを写す (発生日時 createdAt は DB の既定値に任せる)
+  return {
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    provider: input.provider,
+    model: input.model,
+    inputTokens: input.inputTokens,
+    outputTokens: input.outputTokens,
+    costMicroUsd: input.costMicroUsd,
+    latencyMs: input.latencyMs,
+    statusCode: input.statusCode,
   };
 }
 
@@ -553,6 +578,20 @@ class PrismaApiKeys implements ApiKeysPort {
     });
   }
 
+  // ハッシュで引く (プロキシの認証経路。**テナントを跨いで検索する唯一の操作**)
+  async findByHash(keyHash: string): Promise<ApiKeyLookup | null> {
+    // 一意なハッシュで検索し、紐づくエージェントを同時に読む (N+1 を避ける)
+    const row = await this.db.apiKey.findUnique({
+      where: { keyHash },
+      include: { agent: true },
+    });
+    // 無ければ null
+    if (!row) return null;
+    // エージェント部分を分離して返す (テナント共通キーなら null)
+    const { agent, ...key } = row;
+    return { key, agent };
+  }
+
   // 失効 (見つからなければ null。既に失効済みなら日時はそのまま)
   async revoke(tenantId: string, id: string): Promise<ApiKeyRecord | null> {
     // 共通の失効の形 (条件付き更新 → 読み直し)
@@ -567,6 +606,75 @@ class PrismaApiKeys implements ApiKeysPort {
   }
 }
 
+// 集計の 1 行を SQL から受け取る形 (数値はすべて BIGINT で返させる。
+// COUNT(*) と SUM() の戻りの型がプロバイダ次第で変わると、合計だけが静かに丸まる)
+interface DailyTotalRow {
+  day: string;
+  requests: bigint;
+  inputTokens: bigint;
+  outputTokens: bigint;
+  costMicroUsd: bigint;
+}
+
+// 利用イベント Port の prisma 実装
+class PrismaUsageEvents implements UsageEventsPort {
+  // クライアントを受け取る
+  constructor(private readonly db: PrismaClient) {}
+
+  // 記録 (エージェントが同テナントに無ければ null)
+  async record(input: RecordUsageEventInput): Promise<UsageEventRecord | null> {
+    // 挿入を試みる
+    try {
+      return await this.db.usageEvent.create({ data: usageEventCreateData(input) });
+    } catch (error) {
+      // 複合 FK (tenantId, agentId) 違反 = 同テナントにそのエージェントが居ない
+      if (isPrismaError(error, FOREIGN_KEY_VIOLATION)) return null;
+      // それ以外は握り潰さず投げ直す
+      throw error;
+    }
+  }
+
+  // 日次集計 (UTC の日ごと。memory アダプタと同じ規則で、契約テストが両者の一致を固定する)
+  async dailyTotals(tenantId: string, query: DailyUsageQuery): Promise<DailyUsageTotal[]> {
+    // エージェントの絞り込み (指定が無ければ null を渡して条件を効かせない)
+    const agentId = query.agentId ?? null;
+    // 集計を 1 クエリで行う。**タグ付きテンプレート**なので値はすべてパラメータとして渡る
+    // (guardRawSql() が許すのはこの形だけ。文字列連結の SQL は実行時に拒否される)。
+    // 日の切り出しは date_trunc + to_char で、アプリ側の formatUtcDay と同じ 'YYYY-MM-DD' にそろえる。
+    //
+    // **`AT TIME ZONE 'UTC'` を書いてはいけない。** `createdAt` は `TIMESTAMP(3)`
+    // (without time zone) に UTC の値をそのまま入れている列で、そこへ `AT TIME ZONE 'UTC'` を掛けると
+    // `timestamptz` へ変換され、続く date_trunc / to_char が**接続セッションの TimeZone 設定**で評価される。
+    // 期間の絞り込み (createdAt >= $start) は素の比較なので UTC のまま効き、**日のバケット分けだけが
+    // ローカル時刻**という食い違いになる。実測 (セッション Asia/Tokyo): 2026-01-01T20:00Z と
+    // 2026-01-01T02:00Z が 01-02 と 01-01 に割れ、memory アダプタとの一致検査が落ちた。
+    // CI の postgres:16-alpine は既定が UTC なので、この食い違いは配備先でだけ現れる
+    const rows = await this.db.$queryRaw<DailyTotalRow[]>`
+      SELECT
+        to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS "day",
+        COUNT(*)::bigint AS "requests",
+        COALESCE(SUM("inputTokens"), 0)::bigint AS "inputTokens",
+        COALESCE(SUM("outputTokens"), 0)::bigint AS "outputTokens",
+        COALESCE(SUM("costMicroUsd"), 0)::bigint AS "costMicroUsd"
+      FROM "UsageEvent"
+      WHERE "tenantId" = ${tenantId}
+        AND "createdAt" >= ${query.start}
+        AND "createdAt" < ${query.endExclusive}
+        AND (${agentId}::text IS NULL OR "agentId" = ${agentId})
+      GROUP BY 1
+      ORDER BY 1
+    `;
+    // SQL の戻り (BIGINT) を Port の型へ写す
+    return rows.map((row) => ({
+      day: row.day,
+      requests: toSafeCount(row.requests, '呼び出し回数'),
+      inputTokens: toSafeCount(row.inputTokens, '入力トークン'),
+      outputTokens: toSafeCount(row.outputTokens, '出力トークン'),
+      costMicroUsd: row.costMicroUsd,
+    }));
+  }
+}
+
 // prisma アダプタ一式を組み立てる (Composition Root と契約テストが呼ぶ)
 export function createPrismaRepos(db: PrismaClient): Repositories {
   // 各 Port を同じクライアントで結線して返す
@@ -576,5 +684,6 @@ export function createPrismaRepos(db: PrismaClient): Repositories {
     userTokens: new PrismaUserTokens(db),
     agents: new PrismaAgents(db),
     apiKeys: new PrismaApiKeys(db),
+    usageEvents: new PrismaUsageEvents(db),
   };
 }

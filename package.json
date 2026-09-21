@@ -11,7 +11,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
@@ -21,8 +21,11 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
+    "bench:proxy": "tsx scripts/bench-proxy.ts",
+    "bench:usage": "tsx scripts/bench-usage-aggregate.ts",
     "gate:step0": "node scripts/gate-step0.mjs",
-    "gate:step1": "node scripts/gate-step1.mjs"
+    "gate:step1": "node scripts/gate-step1.mjs",
+    "gate:step2": "node scripts/gate-step2.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",
@@ -36,10 +39,12 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@types/autocannon": "^7.12.7",
     "@types/node": "^22.20.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@types/semver": "^7.8.0",
+    "autocannon": "^8.0.0",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.3.4",
     "openapi-typescript": "^7.9.1",

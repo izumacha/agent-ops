@@ -18,8 +18,15 @@ const config = [
   // TypeScript 向けルールを展開してマージ
   ...nextTypescript,
   {
-    // 適用対象: src 配下の TypeScript / TSX ファイル全体 (除外なし)
-    files: ['src/**/*.{ts,tsx}'],
+    // 適用対象: _ プレフィックスの例外は **src と tests だけ**。
+    // tests には `it.each` のラベル引数 (`_label`) が多数あり、`--max-warnings=0` の下で
+    // 「意図的な未使用」を綴りで表せないと CI が落ちるので必要。
+    // **scripts には効かせない** — `scripts/lib/bench-criteria.mjs` と
+    // `tests/gate-scripts.test.ts` が「呼び出しを消すと import した名前が未使用になって eslint が
+    // 捕まえる」を前提にしているので、`import { X as _X }` で黙らせられる形を作らない
+    // (実測で、その改名と組み合わせるとベンチの判定を消しても全件緑になった)。
+    // scripts で `_` を使いたくなった時点で、前提への影響を考えたうえで広げる
+    files: ['src/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}'],
     rules: {
       // _ プレフィックスの変数・引数は意図的な未使用として警告しない (Proxy トラップの _target 等)
       '@typescript-eslint/no-unused-vars': [
@@ -30,6 +37,12 @@ const config = [
           destructuredArrayIgnorePattern: '^_', // 分割代入の _ プレフィックスを無視
         },
       ],
+    },
+  },
+  {
+    // 以下は **src 限定**のまま (対象を広げると意味が変わる)
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
       // 値をそのまま SQL へ混ぜる Prisma の API を禁止する (タグ付きテンプレートの $queryRaw を使う)。
       // これは編集中にすぐ気付くための二次的な網で、値の妥当性は実行時のガード
       // (src/lib/raw-sql-guard.ts) が担う。1 段の間接化 (分割代入・別名・計算添字) は捕まえられない

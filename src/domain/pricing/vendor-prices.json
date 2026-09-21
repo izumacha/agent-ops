@@ -1,0 +1,61 @@
+{
+  "note": "ベンダーが公表している 100 万トークンあたりの単価 (USD)。この JSON が料金の正本で、src/domain/pricing.ts はここからしか単価を読まない。値を変えるときは source を開いて確認し retrievedAt を更新する (詳細は docs/adr/0008-usage-pricing-and-aggregation.md)。",
+  "models": [
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "inputUsdPerMillionTokens": "3.00",
+      "outputUsdPerMillionTokens": "15.00",
+      "source": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+      "retrievedAt": "2026-09-20"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-1",
+      "inputUsdPerMillionTokens": "15.00",
+      "outputUsdPerMillionTokens": "75.00",
+      "source": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+      "retrievedAt": "2026-09-20"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "inputUsdPerMillionTokens": "1.00",
+      "outputUsdPerMillionTokens": "5.00",
+      "source": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+      "retrievedAt": "2026-09-20"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5",
+      "inputUsdPerMillionTokens": "1.25",
+      "outputUsdPerMillionTokens": "10.00",
+      "source": "https://platform.openai.com/docs/pricing",
+      "retrievedAt": "2026-09-20"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "inputUsdPerMillionTokens": "0.25",
+      "outputUsdPerMillionTokens": "2.00",
+      "source": "https://platform.openai.com/docs/pricing",
+      "retrievedAt": "2026-09-20"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "inputUsdPerMillionTokens": "2.00",
+      "outputUsdPerMillionTokens": "8.00",
+      "source": "https://platform.openai.com/docs/pricing",
+      "retrievedAt": "2026-09-20"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4.1-mini",
+      "inputUsdPerMillionTokens": "0.40",
+      "outputUsdPerMillionTokens": "1.60",
+      "source": "https://platform.openai.com/docs/pricing",
+      "retrievedAt": "2026-09-20"
+    }
+  ]
+}

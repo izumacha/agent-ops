@@ -11,14 +11,23 @@ export function banner(text) {
   console.log(`\n=== ${text} ===`);
 }
 
+// npm の起動に渡す引数を整える (Windows だけ引用が要るので 1 か所に集める)
+// Windows の npm は .cmd なので shell 経由で起動する
+// (Node 22 は .cmd/.bat の shell 無し spawn を EINVAL で拒否する。引数は固定配列と一時ファイルのパスだけなので
+//  インジェクションの余地は無いが、shell 経由では空白を含む引数 (例: ユーザー名に空白があるときの一時パス) が
+//  分割されるため、空白を含む引数だけ二重引用符で囲む)
+function npmArgs(args) {
+  // Windows 以外はそのまま
+  return IS_WINDOWS ? args.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)) : args;
+}
+
+// npm の実行ファイル名 (Windows は .cmd)
+const NPM_COMMAND = IS_WINDOWS ? 'npm.cmd' : 'npm';
+
 // npm を引数付きで実行し、終了コードを返す (出力はそのまま流す)
 export function runNpm(args) {
-  // Windows の npm は .cmd なので shell 経由で起動する
-  // (Node 22 は .cmd/.bat の shell 無し spawn を EINVAL で拒否する。引数は固定配列と一時ファイルのパスだけなので
-  //  インジェクションの余地は無いが、shell 経由では空白を含む引数 (例: ユーザー名に空白があるときの一時パス) が
-  //  分割されるため、空白を含む引数だけ二重引用符で囲む)
-  const shellArgs = IS_WINDOWS ? args.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)) : args;
-  const result = spawnSync(IS_WINDOWS ? 'npm.cmd' : 'npm', shellArgs, {
+  // 同期実行する
+  const result = spawnSync(NPM_COMMAND, npmArgs(args), {
     cwd: process.cwd(),
     stdio: 'inherit',
     shell: IS_WINDOWS,
@@ -27,6 +36,50 @@ export function runNpm(args) {
   if (result.error) console.error(`[gate] npm を起動できません: ${result.error.message}`);
   // 終了コード (シグナル終了・起動失敗で null なら 1 扱い)
   return result.status ?? 1;
+}
+
+/**
+ * npm を引数付きで実行し、**標準出力を捕まえたうえでそのまま流す**。
+ *
+ * **なぜ要るか**: ゲートはこれまでベンチの終了コードしか見ていなかった。そのため、ベンチを
+ * 「何も出さずに exit 0」にする変異はどれもゲートを緑のまま通した (実測で 3 通り:
+ * `process['exit'](0)` / `const { exit } = process;` / 副作用を持つモジュールの import)。
+ * 結果の JSON を読めば、静的解析が捉えられなかった形もまとめて落ちる (§11 実行で確かめる)
+ * @param {string[]} args npm へ渡す引数
+ * @returns {{ status: number, stdout: string }} 終了コードと標準出力
+ */
+export function runNpmCapturingStdout(args) {
+  // 同期実行する
+  const result = spawnSync(NPM_COMMAND, npmArgs(args), {
+    cwd: process.cwd(),
+    // 標準出力だけ捕まえ、エラー出力はそのまま流す (進捗と失敗理由は人が読めるままにする)。
+    // **注意**: 標準出力は子の終了後にまとめて出るので、エラー出力との前後関係は保たれない
+    stdio: ['inherit', 'pipe', 'inherit'],
+    encoding: 'utf8',
+    // **上限を明示する。** 既定の 1MiB を超えると spawnSync は子を SIGTERM で殺し、
+    // Node は SIGTERM で finally を走らせない (実測) ため、ベンチの後始末 (起動したアプリの停止・
+    // 秘密鍵入り一時ディレクトリの削除) が飛ぶ。ベンチは JSON 1 行しか出さないので、
+    // 進捗出力を足しても当分越えない余裕を取る
+    maxBuffer: 64 * 1024 * 1024,
+    // 上限時間も明示する。固まったベンチがゲートを無期限に止めると、CI のジョブ上限まで
+    // 何も分からない (赤にはなるので fail-open ではないが、理由が残らない)。
+    // ベンチ 1 本は実測で 25〜40 秒なので、桁の余裕を取って 15 分に置く
+    timeout: 15 * 60 * 1000,
+    shell: IS_WINDOWS,
+  });
+  // 上限時間を超えた場合も「起動できない」ではない
+  if (result.error?.code === 'ETIMEDOUT')
+    console.error('[gate] ベンチが上限時間内に終わりませんでした (子プロセスを打ち切りました)');
+  // 出力が上限を超えた場合も同じく理由を分けて残す
+  else if (result.error?.code === 'ENOBUFS')
+    console.error('[gate] ベンチの標準出力が上限を超えました (子プロセスを打ち切りました)');
+  // それ以外の起動失敗は原因を残す (§6 エラーを握り潰さない)
+  else if (result.error) console.error(`[gate] npm を起動できません: ${result.error.message}`);
+  // 捕まえた標準出力を人にも見せる (捕まえたぶん黙ってしまわないように)
+  const stdout = result.stdout ?? '';
+  if (stdout.length > 0) process.stdout.write(stdout);
+  // 終了コードと出力
+  return { status: result.status ?? 1, stdout };
 }
 
 /**

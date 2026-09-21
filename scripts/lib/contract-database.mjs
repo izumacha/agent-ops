@@ -43,6 +43,40 @@ export function contractDatabaseProblem(url) {
 }
 
 /**
+ * ベンチの接続先ガード。専用 DB でなければ理由を表示して非 0 終了する。
+ *
+ * **判定と終了を 1 つの関数にまとめるのが要点** — 呼び出し側で
+ * `const problem = contractDatabaseProblem(...); if (problem !== null && 何か) throw ...` と
+ * 書けると、条件を 1 つ足すだけでガードが実質外れる (実測で全件緑だった)。
+ *
+ * **環境変数を引数で受け取らない。** 受け取れるようにしていたときは、呼び出し側が
+ * `requireContractDatabase('bench:usage', { DATABASE_URL: '…_contract' })` と偽の env を
+ * 渡すだけでガードが完全に死んだ (実測で 713 件すべて緑のまま、開発 DB への `TRUNCATE` に到達)。
+ * テストから判定を確かめたいときは `contractDatabaseProblem` を直接呼ぶ。
+ *
+ * **残る境界: 「引数で受け取らない」だけでは import 時の書き換えを防げない。**
+ * ESM は import した側のどのトップレベル文よりも先に import 先を評価するので、ベンチが取り込む
+ * モジュール (`scripts/lib/*.mjs` / `src/**`) のトップレベルで `process.env.DATABASE_URL` を
+ * 書き換えられると、このガードは書き換え後の値を見て黙って通る (実測: 専用 DB でない接続先を
+ * 指したまま `TRUNCATE` まで到達し、検出網は全件緑だった)。
+ * **これは静的検査では閉じきれない** — import 時の副作用を走査で禁じると、正当なモジュール
+ * 初期化のたびに許可リストへの追加を強いられ、その許可リスト自体が緩む圧力になる。
+ * 一方この形は差分に露骨に現れる (`src/domain/types.ts` の末尾に env の代入が生える) ので、
+ * **規約とレビューで守る**。検出網が守るのは「差分を見ても悪意に見えない変更」のほう
+ * @param {string} label ゲート/ベンチの名前 (失敗の文言に入れる)
+ */
+export function requireContractDatabase(label) {
+  // 駄目な理由 (専用 DB なら null)
+  const problem = contractDatabaseProblem(process.env.DATABASE_URL);
+  // 専用 DB なら何もしない
+  if (problem === null) return;
+  // 理由を表示して落とす (`exitIfFailures` と同じ形。トップレベルで throw するとスタックが出る)
+  console.error(`[${label}] 専用 DB でだけ実行してください: ${problem}`);
+  // 非 0 終了 (1 件も書かずに止める)
+  process.exit(1);
+}
+
+/**
  * 契約テストの接続先ガード本体。走った印を置き、専用 DB でなければ throw する。
  * 印と判定を同じ関数に入れるのが要点 — 印だけ別に置くと、判定を消しても印は付いたままになり
  * 「結線を見張るテスト」が緑のまま通る (実測)。env を引数に取るのはテストから直接呼べるようにするため

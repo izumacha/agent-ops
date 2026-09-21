@@ -14,13 +14,19 @@ import type {
   CreateTenantResult,
   CreateUserInput,
   CreateUserTokenInput,
+  DailyUsageQuery,
+  DailyUsageTotal,
   DeleteAgentResult,
+  ApiKeyLookup,
   Page,
   PageQuery,
+  RecordUsageEventInput,
   Repositories,
   TenantRecord,
   TenantsPort,
   UpdateAgentInput,
+  UsageEventRecord,
+  UsageEventsPort,
   UserMutationResult,
   UserRecord,
   UserTokenLookup,
@@ -30,6 +36,7 @@ import type {
   UsersPort,
 } from '@/data/ports';
 import { AgentStatus, Plan, Role } from '@/domain/types';
+import { formatUtcDay } from '@/domain/usage-window';
 import { paginate } from './paginate';
 import { MemoryStore } from './store';
 
@@ -235,6 +242,11 @@ class MemoryUserTokens implements UserTokensPort {
     // 発行先ユーザー (FK があるので必ず居る)
     const user = this.store.users.get(token.userId);
     if (!user) return null;
+    // **トークンと発行先のテナントが一致すること** — 本番は複合 FK (tenantId, userId) が
+    // この組み合わせを作らせないが、memory の表は直接 seed できるので読み取り側でも確かめる
+    // (書き込み側の create は既に確かめているのに、読み取り側だけが素通しだった)。
+    // 食い違う行は「無い」ものとして扱う (§9 fail-closed)
+    if (token.tenantId !== user.tenantId) return null;
     // 両方を複製して返す
     return { token: clone(token), user: clone(user) };
   }
@@ -352,8 +364,9 @@ class MemoryAgents implements AgentsPort {
     // 対象行 (テナント境界内)
     const row = this.store.agents.get(id);
     if (!row || row.tenantId !== tenantId) return 'not_found';
-    // 履歴を持つエージェントは削除できない (本番では Restrict FK が拒否する)
-    if (this.store.agentIdsWithHistory.has(id)) return 'restricted';
+    // 履歴 (利用イベント) を持つエージェントは削除できない (本番では Restrict FK が拒否する)
+    const hasHistory = [...this.store.usageEvents.values()].some((event) => event.agentId === id);
+    if (hasHistory) return 'restricted';
     // 設定 (API キー) は一緒に消える (本番の Cascade と同じ)
     for (const [keyId, key] of this.store.apiKeys) {
       if (key.agentId === id) this.store.apiKeys.delete(keyId);
@@ -407,6 +420,23 @@ class MemoryApiKeys implements ApiKeysPort {
     return clone(row);
   }
 
+  // ハッシュで引く (プロキシの認証経路。テナントを跨いで検索する唯一の操作)
+  async findByHash(keyHash: string): Promise<ApiKeyLookup | null> {
+    // ハッシュが一致する行を探す (本番では keyHash が一意なので高々 1 件)
+    const key = [...this.store.apiKeys.values()].find((row) => row.keyHash === keyHash);
+    // 無ければ null (失効済みかどうかは呼び出し側が見る)
+    if (!key) return null;
+    // 紐づくエージェントを同時に取る (テナント共通キーなら null のまま)
+    const agent = key.agentId === null ? null : (this.store.agents.get(key.agentId) ?? null);
+    // **キーと紐づくエージェントのテナントが一致すること** — 本番は複合 FK (tenantId, agentId)
+    // がこの組み合わせを作らせないが、memory の表は直接 seed できる。
+    // 認証は `found.agent.tenantId` を主体のテナントに採るので、食い違う行を返すと
+    // 「テナント A のキーがテナント B のエージェントとして認証される」形になる (§9 fail-closed)
+    if (agent !== null && agent.tenantId !== key.tenantId) return null;
+    // キーと複製したエージェントを返す
+    return { key: clone(key), agent: agent === null ? null : clone(agent) };
+  }
+
   // 失効
   async revoke(tenantId: string, id: string): Promise<ApiKeyRecord | null> {
     // 対象行 (テナント境界内)
@@ -415,6 +445,71 @@ class MemoryApiKeys implements ApiKeysPort {
     // まだ有効なら失効日時を入れる
     row.revokedAt ??= this.store.now();
     return clone(row);
+  }
+}
+
+// 利用イベント Port の memory 実装
+class MemoryUsageEvents implements UsageEventsPort {
+  // 共有の表を受け取る
+  constructor(private readonly store: MemoryStore) {}
+
+  // 1 回の呼び出しを記録する (エージェントが同テナントに無ければ null)
+  async record(input: RecordUsageEventInput): Promise<UsageEventRecord | null> {
+    // 記録先のエージェント (本番では複合 FK (tenantId, agentId) が同じ判定をする)
+    const agent = this.store.agents.get(input.agentId);
+    // 同テナントに居なければ記録しない
+    if (!agent || agent.tenantId !== input.tenantId) return null;
+    // 新しい行 (発生日時は表の時計から取る)
+    const row: UsageEventRecord = {
+      id: this.store.nextId('usage'),
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      provider: input.provider,
+      model: input.model,
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+      costMicroUsd: input.costMicroUsd,
+      latencyMs: input.latencyMs,
+      statusCode: input.statusCode,
+      createdAt: this.store.now(),
+    };
+    // 表へ入れて複製を返す
+    this.store.usageEvents.set(row.id, row);
+    return clone(row);
+  }
+
+  // 期間内を UTC の日ごとに集計する (prisma 側の SQL と同じ規則。日の境目は src/domain/usage-window.ts)
+  async dailyTotals(tenantId: string, query: DailyUsageQuery): Promise<DailyUsageTotal[]> {
+    // 日ごとの合計を貯める表
+    const totals = new Map<string, DailyUsageTotal>();
+    // テナント・期間・エージェントで絞りながら足し込む
+    for (const event of this.store.usageEvents.values()) {
+      // 他テナントの行は数えない
+      if (event.tenantId !== tenantId) continue;
+      // 期間は半開区間 (開始は含み、終了は含まない)
+      if (event.createdAt < query.start || event.createdAt >= query.endExclusive) continue;
+      // エージェントの指定があれば一致する行だけ
+      if (query.agentId !== undefined && event.agentId !== query.agentId) continue;
+      // その行が属する UTC の日
+      const day = formatUtcDay(event.createdAt);
+      // その日の合計 (初回は 0 から始める)
+      const total = totals.get(day) ?? {
+        day,
+        requests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        costMicroUsd: 0n,
+      };
+      // 回数とトークン・料金を足す
+      total.requests += 1;
+      total.inputTokens += event.inputTokens;
+      total.outputTokens += event.outputTokens;
+      total.costMicroUsd += event.costMicroUsd;
+      // 表へ戻す
+      totals.set(day, total);
+    }
+    // 日の昇順に並べて返す (SQL 側の ORDER BY と同じ)
+    return [...totals.values()].sort((left, right) => left.day.localeCompare(right.day));
   }
 }
 
@@ -430,6 +525,7 @@ export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repos
     userTokens: new MemoryUserTokens(store),
     agents: new MemoryAgents(store),
     apiKeys: new MemoryApiKeys(store),
+    usageEvents: new MemoryUsageEvents(store),
   };
 }
 

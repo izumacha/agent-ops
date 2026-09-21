@@ -3,12 +3,20 @@
 import type {
   AgentRecord,
   ApiKeyRecord,
+  DailyUsageTotal,
   Page,
   TenantRecord,
   UserRecord,
   UserTokenRecord,
 } from '@/data';
-import type { AgentDto, ApiKeyDto, TenantDto, UserDto, UserTokenDto } from '@/lib/api-types';
+import type {
+  AgentDto,
+  ApiKeyDto,
+  DailyUsageDto,
+  TenantDto,
+  UserDto,
+  UserTokenDto,
+} from '@/lib/api-types';
 
 // 一覧の応答 (OpenAPI の *List スキーマ共通の形: items と、次ページがあるときだけ nextCursor)
 export interface ListDto<T> {
@@ -92,5 +100,17 @@ export function toApiKeyDto(row: ApiKeyRecord): ApiKeyDto {
     name: row.name,
     createdAt: row.createdAt.toISOString(),
     revokedAt: isoOrNull(row.revokedAt),
+  };
+}
+
+// 日次集計の 1 日分 (料金は BigInt なので文字列で運ぶ。金額の扱いは docs/spec.md §3 と同じ)
+export function toDailyUsageDto(row: DailyUsageTotal): DailyUsageDto {
+  // 公開するプロパティだけを写す
+  return {
+    day: row.day,
+    requests: row.requests,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    costMicroUsd: row.costMicroUsd.toString(),
   };
 }

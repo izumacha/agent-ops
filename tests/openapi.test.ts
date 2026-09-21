@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { ALLOWED_ROUTE_FILE_NAME, ROUTE_FILE_PATTERN } from './lib/route-files';
 import {
+  API_MESSAGES,
   EMAIL_MAX_LENGTH,
   LONG_TEXT_MAX_LENGTH,
   PAGE_CURSOR_MAX_LENGTH,
@@ -25,6 +26,8 @@ import { apiKeyCreateSchema } from '@/lib/validations/api-key';
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
+import { proxyRequestSchema } from '@/lib/validations/proxy';
+import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -80,6 +83,17 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   AgentUpdate: agentUpdateSchema,
   ApiKeyCreate: apiKeyCreateSchema,
   'PUT /users/{userId}/role': userRoleSchema,
+  ProxyRequest: proxyRequestSchema,
+};
+
+// **未知キーを許すことが意図である本文の除外表 (理由付き)。**
+// 原則は「契約も Zod も未知キーを閉じる」で、ここに載せた本文だけが例外。
+// エントリが増える差分は、理由の妥当性をレビューで必ず確認する (この表は機械化できないエスケープハッチ)。
+// 除外しても項目の一致 (契約の properties と Zod の shape) と「必須項目が実際に必須か」は下のテストが見る
+const OPEN_BODY_SCHEMAS: Record<string, string> = {
+  ProxyRequest:
+    'ベンダー (Anthropic / OpenAI) のペイロードをそのまま中継するため。未知キーを 422 にすると、' +
+    'ベンダーが新しいパラメータを足しただけで中継が止まる (docs/adr/0007-cost-proxy.md)',
 };
 
 // 契約に現れる本文スキーマを (キー, 定義) の並びで集める ($ref は components から解決する)
@@ -368,8 +382,13 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     // 1 つも集められなければ走査が壊れている (fail-closed)
     expect(bodies.length).toBeGreaterThan(0);
     for (const { key, schema } of bodies) {
-      // 契約側が未知キーを閉じていること
-      expect(schema?.additionalProperties, `${key} が未知キーを許している`).toBe(false);
+      // 未知キーを許すことが意図である本文 (除外表に理由付きで載っているもの) かどうか
+      const openReason = OPEN_BODY_SCHEMAS[key];
+      // 契約側が未知キーを閉じていること (除外した本文は逆に「開いている」ことを確かめる —
+      // 除外したまま閉じると、実装だけが通す形になって契約と食い違う)
+      expect(schema?.additionalProperties, `${key} の未知キーの扱い`).toBe(
+        openReason === undefined ? false : true,
+      );
       // 対応する Zod スキーマが表にあること (契約に本文が増えたら必ずここで落ちる)
       const zodSchema = BODY_SCHEMAS[key];
       expect(zodSchema, `${key} に対応する Zod スキーマが表に無い`).toBeDefined();
@@ -378,6 +397,8 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       expect(Object.keys(zodSchema.shape).sort(), `${key} の項目`).toEqual(
         Object.keys(schema.properties ?? {}).sort(),
       );
+      // 除外した本文は「未知キーを通す」ことだけを確かめて次へ (必須項目の検査は下の専用テスト)
+      if (openReason !== undefined) continue;
       // Zod 側も未知キーを拒否すること (z.object へ戻すとここで落ちる)
       const parsed = zodSchema.safeParse({ __unknown__: 1 });
       expect(parsed.success, `${key} は未知キーを受け入れてしまう`).toBe(false);
@@ -386,6 +407,46 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
           parsed.error.issues.some((issue) => issue.code === 'unrecognized_keys'),
           `${key} が未知キーを剥がしている`,
         ).toBe(true);
+      }
+    }
+  });
+
+  // 除外表そのものを見張る (実在しないキーを足して検査を緩められないようにする)
+  it('未知キーを許す本文の除外表は、実在する本文に理由付きで載っている', () => {
+    // 契約に現れる本文のキー
+    const keys = new Set(collectRequestBodies().map((body) => body.key));
+    // 除外表の各エントリ
+    for (const [key, reason] of Object.entries(OPEN_BODY_SCHEMAS)) {
+      // 契約に実在する本文であること (消えた本文の除外が残り続けない)
+      expect(keys.has(key), `除外表の ${key} が契約に無い`).toBe(true);
+      // 理由が空でないこと (「とりあえず黙らせる」使い方を塞ぐ)
+      expect(reason.trim().length, `${key} の除外理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  // 除外した本文でも「計測に必要な項目」は必須のままであること。
+  // 未知キーを許した瞬間に model まで任意になると、料金表を引けない呼び出しが中継できてしまう
+  it('未知キーを許す本文でも、契約の required は Zod でも必須になっている', () => {
+    // 契約に現れる本文を名前で引けるようにする
+    const bodies = new Map(collectRequestBodies().map((body) => [body.key, body.schema]));
+    for (const key of Object.keys(OPEN_BODY_SCHEMAS)) {
+      // 契約側の必須項目 (required)
+      const required = ((bodies.get(key) as { required?: string[] } | undefined)?.required ??
+        []) as string[];
+      // 必須項目が 1 つも無ければこの検査は意味を持たないので落とす (fail-closed)
+      expect(required.length, `${key} に required が無い`).toBeGreaterThan(0);
+      // 実装の Zod スキーマ
+      const zodSchema = BODY_SCHEMAS[key];
+      expect(zodSchema, `${key} に対応する Zod スキーマが表に無い`).toBeDefined();
+      if (!zodSchema) continue;
+      // 必須項目を 1 つずつ落とした本文は拒否されること
+      for (const field of required) {
+        // その項目だけを欠いた本文 (他の必須項目は形だけ埋める)
+        const body = Object.fromEntries(
+          required.filter((name) => name !== field).map((name) => [name, 'x']),
+        );
+        // 必須なので検証に失敗する
+        expect(zodSchema.safeParse(body).success, `${key} の ${field} が必須でない`).toBe(false);
       }
     }
   });
@@ -505,5 +566,112 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
         expect(declared, `${schemaName}.${property} の maxLength`).toBe(max);
       }
     }
+  });
+
+  // 中継するエラー本文の**項目名**を契約と突き合わせる。リクエスト側には同じ形の検査
+  // (上の「本文スキーマは契約と Zod で項目が一致し…」) があるのに、応答側だけ無かった。
+  //
+  // **手書きの候補リストでは足りない。** 実装の許可リストへ候補に無い名前を足す変異
+  // (`subcode` / `hint` / `quota_type`) は、候補を総当たりする検査があっても
+  // **675 件すべて緑・テスト件数も不変**で通った (実測)。上流が返しうる項目名は無限なので、
+  // 包含リストは載せ忘れたぶんだけ黙って狭くなる。
+  //
+  // 代わりに両側とも導出する: **期待値は契約** (`additionalProperties: false` 付き)、
+  // **実測値は「実装が上流の本文から読んだ項目名」**を Proxy の get で観測する。
+  // 実装の表を import しないので、表を写して両方が同時に古くなることもない
+  it('中継するエラー本文の項目は契約と一致する (実装が読む項目名を観測して照合)', () => {
+    // 契約側の宣言 (中継するエラー本文)
+    const relayed = spec.components?.schemas?.RelayedUpstreamError as
+      { properties?: Record<string, { properties?: Record<string, unknown> }> } | undefined;
+    // 契約が読めなければ照合できない (fail-closed)
+    expect(relayed?.properties, 'RelayedUpstreamError が契約に無い').toBeDefined();
+    // 列挙でまとめて読んだことを表す印 (契約の項目名と衝突しない綴りにする)
+    const ENUMERATION_MARKER = '<列挙>';
+    // 実装が上流の本文から読んだ項目名を集める
+    const readKeysOf = (build: (probe: Record<string, unknown>) => unknown): string[] => {
+      // 読まれた項目名
+      const seen = new Set<string>();
+      // 触られた項目名を記録するだけの入れ物
+      const probe = new Proxy({} as Record<string, unknown>, {
+        get(target, property) {
+          // 文字列のキーだけ数える (Symbol は言語側の問い合わせ)
+          if (typeof property === 'string') seen.add(property);
+          return Reflect.get(target, property);
+        },
+        // **列挙も「読んだ」に数える。** `get` だけを見ていると、`Object.entries` /
+        // `Object.keys` / スプレッドのように**項目名を選ばずまとめて読む**実装が死角になる
+        // (入れ物が空なので get が 1 度も発火しない)。実測で、許可リストの直後に
+        // `Object.entries(upstreamError)` で 2 項目を中継する変異を入れると、
+        // **691 件すべて緑・件数も不変**のまま組織名・ティアが中継された。
+        // 列挙は契約に無い印として記録するので、そういう実装はここで落ちる
+        ownKeys(target) {
+          seen.add(ENUMERATION_MARKER);
+          return Reflect.ownKeys(target);
+        },
+        // **名指しの記述子読みも「読んだ」に数える。** `Object.getOwnPropertyDescriptor(x, 'k').value`
+        // は `get` にも `ownKeys` にも現れないので、これが無いと項目名を選んで読めてしまう
+        // (実測: 697 件すべて緑・件数も不変のまま、綴りの検査も総長の上限も掛からない値が中継された)
+        getOwnPropertyDescriptor(target, property) {
+          if (typeof property === 'string') seen.add(property);
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+        // 存在確認も数える (`Object.hasOwn` / `in` で当たりを付けてから読む形を捉える)
+        has(target, property) {
+          if (typeof property === 'string') seen.add(property);
+          return Reflect.has(target, property);
+        },
+      });
+      // **この probe が覆うのは「項目の値へ到達する標準的な経路」** (get / ownKeys /
+      // getOwnPropertyDescriptor / has の 4 つ)。`defineProperty` のような他のトラップや、
+      // probe を渡していない階層 (3 段目以降) は原理的に見えない
+      // 実装に通す (戻り値は使わない。見たいのは「何を読んだか」)
+      sanitizeUpstreamErrorBody(build(probe));
+      // 並びを固定して返す
+      return [...seen].sort();
+    };
+    // 最上位: 契約の properties をそのまま期待値にする (実装は type と error を読む)
+    expect(
+      readKeysOf((probe) => probe),
+      '最上位から読む項目名',
+    ).toEqual(Object.keys(relayed?.properties ?? {}).sort());
+    // **未知キーを閉じていること。** リクエスト側には同じ検査があるのに応答側だけ無く、
+    // 実測で `additionalProperties` を true に変えても全件緑だった (契約が主張する性質を
+    // 誰も固定していない状態)
+    expect(
+      (relayed as { additionalProperties?: unknown } | undefined)?.additionalProperties,
+      'RelayedUpstreamError が未知キーを閉じていない',
+    ).toBe(false);
+    expect(
+      (relayed?.properties?.error as { additionalProperties?: unknown } | undefined)
+        ?.additionalProperties,
+      'RelayedUpstreamError.error が未知キーを閉じていない',
+    ).toBe(false);
+    // 最上位 type の値は閉じた語彙。**契約の enum を期待値にする** — 値を実装・契約・テストの
+    // 3 か所へ手書きしていたときは、契約の enum を別の値へ書き換えても全件緑だった (実測)
+    const topLevelEnum = (relayed?.properties?.type as { enum?: unknown } | undefined)?.enum;
+    // enum が無ければ閉じた語彙という決定が契約から消えている (fail-closed)
+    expect(
+      Array.isArray(topLevelEnum) && topLevelEnum.length > 0,
+      '最上位 type の enum が契約に無い',
+    ).toBe(true);
+    for (const allowed of (topLevelEnum as string[]) ?? []) {
+      // 契約が許す値はそのまま中継される
+      expect(sanitizeUpstreamErrorBody({ type: allowed, error: {} }), `${allowed} は通す`).toEqual({
+        type: allowed,
+        error: { message: API_MESSAGES.upstreamRejected },
+      });
+    }
+    // 綴りとしては妥当でも、契約の語彙に無い値は落ちる
+    expect(sanitizeUpstreamErrorBody({ type: 'invalid_request_error', error: {} })).toEqual({
+      error: { message: API_MESSAGES.upstreamRejected },
+    });
+    // error の中: 契約の properties から message を除いたもの。
+    // **message だけは上流から読まずこちらが書く項目**なので、読んだ項目名には現れない
+    // (逆に現れたら、上流の自由記述が定型文を上書きする経路ができている)
+    const errorFields = Object.keys(relayed?.properties?.error?.properties ?? {});
+    expect(
+      readKeysOf((probe) => ({ error: probe })),
+      'error から読む項目名',
+    ).toEqual(errorFields.filter((field) => field !== 'message').sort());
   });
 });

@@ -25,7 +25,9 @@ Agent Ops — AI エージェントの**登録・権限・コスト・品質・�
 npm run dev          # Next.js dev server (http://localhost:3000)
 npm run build        # 本番ビルド（Docker 用 standalone 出力）
 npm run typecheck    # tsc --noEmit
-npm run lint         # eslint . (ESLint 9 flat config + next/core-web-vitals)
+npm run lint         # eslint . --max-warnings=0 (ESLint 9 flat config + next/core-web-vitals)
+                     # **--max-warnings=0 は外さない** — warning 止まりの規則（未使用 import 等）が
+                     # ベンチ・ゲートの判定を 1 行消した変異を落とす唯一の経路になっている
 npm run format       # Prettier で整形 (100 col, single quotes, trailing commas)
 npm run format:check # Prettier の検査だけ (ゲートが実行する。書式の崩れは lint / typecheck / test では拾えない)
 npm run test         # Vitest — tests/**/*.test.ts のユニット・API テスト（DB 不要。契約テストは RUN_PRISMA_CONTRACT 無しではスキップ）

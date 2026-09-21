@@ -65,7 +65,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ## 検証コマンド
 
 ```bash
-npm run lint         # ESLint 9 (flat config + next/core-web-vitals)
+npm run lint         # ESLint 9 (flat config + next/core-web-vitals)。--max-warnings=0 付き
 npm run typecheck    # tsc --noEmit
 npm run test         # Vitest (tests/**/*.test.ts。API テストは memory アダプタで DB 不要)
 npm run test:contract # prisma アダプタの契約テスト (RUN_PRISMA_CONTRACT=1 + 専用 DB の DATABASE_URL が必要。全テーブルを TRUNCATE する)

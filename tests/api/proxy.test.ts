@@ -233,6 +233,25 @@ describe('プロキシの認証 (API キー限定)', () => {
     expect(recordedEvents()[0].tenantId).toBe(seed.b.id);
     expect(recordedEvents()[0].agentId).toBe(seed.b.agent.id);
   });
+
+  it('キーとエージェントのテナントが食い違う行では認証できない (本番の複合 FK と同じ不変条件)', async () => {
+    // 上流は正常応答 (中継まで進んだら分かるように)
+    stubUpstream({ status: 200, body: anthropicResponse(10, 20) });
+    // **本番では作れない組み合わせ**: テナント A のキーがテナント B のエージェントを指す
+    // (ApiKey の複合 FK (tenantId, agentId) がこの行を作らせない)。memory の表は直接
+    // seed できるので、読み取り側 (findByHash) が素通しだとここで認証が通ってしまう
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.b.agent.id });
+    // 中継を呼ぶ
+    const response = await call(proxyAnthropic, {
+      token: key.secret,
+      body: { model: ANTHROPIC_MODEL },
+    });
+    // **401** — 認証は `found.agent.tenantId` を主体のテナントに採るので、素通しにすると
+    // 「テナント A のキーがテナント B のエージェントとして認証される」形になる
+    expect(response.status).toBe(401);
+    // 中継も記録もしていないこと
+    expect(recordedEvents()).toHaveLength(0);
+  });
 });
 
 describe('中継するヘッダと接続先', () => {

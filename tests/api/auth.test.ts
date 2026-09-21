@@ -221,4 +221,16 @@ describe('GET /me', () => {
     // テナントの外側
     expect((await call(getMe, { token: PLATFORM_TOKEN })).status).toBe(403);
   });
+
+  it('トークンと発行先ユーザーのテナントが食い違う行では認証できない (本番の複合 FK と同じ不変条件)', async () => {
+    // **本番では作れない組み合わせ**: トークン行のテナントだけを別テナントへ書き換える
+    // (UserToken の複合 FK (tenantId, userId) がこの行を作らせない)。memory の表は直接
+    // 触れるので、読み取り側 (findByHash) が素通しだと食い違う組で認証が通ってしまう
+    const row = seed.a.tokenRows.operator;
+    seed.store.userTokens.set(row.id, { ...row, tenantId: seed.b.id });
+    // そのトークンで呼ぶ
+    const result = await call(getMe, { token: seed.a.tokens.operator });
+    // 401 (食い違う行は「無い」ものとして扱う = fail-closed)
+    expect(result.status).toBe(401);
+  });
 });

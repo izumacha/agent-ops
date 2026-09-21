@@ -242,6 +242,11 @@ class MemoryUserTokens implements UserTokensPort {
     // 発行先ユーザー (FK があるので必ず居る)
     const user = this.store.users.get(token.userId);
     if (!user) return null;
+    // **トークンと発行先のテナントが一致すること** — 本番は複合 FK (tenantId, userId) が
+    // この組み合わせを作らせないが、memory の表は直接 seed できるので読み取り側でも確かめる
+    // (書き込み側の create は既に確かめているのに、読み取り側だけが素通しだった)。
+    // 食い違う行は「無い」ものとして扱う (§9 fail-closed)
+    if (token.tenantId !== user.tenantId) return null;
     // 両方を複製して返す
     return { token: clone(token), user: clone(user) };
   }
@@ -423,6 +428,11 @@ class MemoryApiKeys implements ApiKeysPort {
     if (!key) return null;
     // 紐づくエージェントを同時に取る (テナント共通キーなら null のまま)
     const agent = key.agentId === null ? null : (this.store.agents.get(key.agentId) ?? null);
+    // **キーと紐づくエージェントのテナントが一致すること** — 本番は複合 FK (tenantId, agentId)
+    // がこの組み合わせを作らせないが、memory の表は直接 seed できる。
+    // 認証は `found.agent.tenantId` を主体のテナントに採るので、食い違う行を返すと
+    // 「テナント A のキーがテナント B のエージェントとして認証される」形になる (§9 fail-closed)
+    if (agent !== null && agent.tenantId !== key.tenantId) return null;
     // キーと複製したエージェントを返す
     return { key: clone(key), agent: agent === null ? null : clone(agent) };
   }

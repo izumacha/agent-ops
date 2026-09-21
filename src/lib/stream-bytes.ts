@@ -7,6 +7,9 @@
 // ここでは「読めたか・大きすぎたか・UTF-8 として壊れているか」だけを返し、
 // どの HTTP エラーへ写すかは呼び出し側に任せる。
 
+// エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
+import { describeError } from '@/lib/describe-error';
+
 // 読み取りの結果 (成功なら本文、失敗なら理由)
 export type StreamReadResult =
   // 上限内で読み切れた
@@ -65,7 +68,7 @@ export async function readStreamWithinByteLimit(
           await reader.cancel().catch((error: unknown) => {
             console.error(
               '[stream] 上限超過後のストリーム解放に失敗しました:',
-              error instanceof Error ? error.name : typeof error,
+              describeError(error),
             );
           });
         }

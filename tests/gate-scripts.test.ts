@@ -430,6 +430,30 @@ describe('missingPriceCases', () => {
       missingPriceCases(report, { models: PRICED_MODELS, pricePrefix: PRICE_TEST_PREFIX }),
     ).toEqual(['openai gpt-x']);
   });
+
+  it('接頭辞が一致するだけの別モデルのテストで代用されない', () => {
+    // **実在する綴り** — 料金表には `openai gpt-5` と `openai gpt-5-mini`、
+    // `openai gpt-4.1` と `openai gpt-4.1-mini` のように一方が他方の接頭辞になる行がある。
+    // 単なる `includes` だと、短い側のテストが 1 件も無くても長い側の名前が当たってしまい、
+    // ゲートは緑のまま「誤差 0」を一度も確かめずに通った (実測。料金表の 3 番目と 5 番目の
+    // モデルを落としたレポートで基準が満たされてしまうことをレポート側の probe が掘り当てた)
+    const models = [
+      { provider: 'openai', model: 'gpt-5' },
+      { provider: 'openai', model: 'gpt-5-mini' },
+    ];
+    // 長い側のテストだけがある
+    const report = priceReport([{ provider: 'openai', model: 'gpt-5-mini' }]);
+    expect(missingPriceCases(report, { models, pricePrefix: PRICE_TEST_PREFIX })).toEqual([
+      'openai gpt-5',
+    ]);
+  });
+
+  it('区切りが続く名前なら項目として数える (境界の判定が厳しすぎない)', () => {
+    // 接頭辞の直後が空白なら、その項目のテストとして正しく当たること
+    const models = [{ provider: 'openai', model: 'gpt-5' }];
+    const report = priceReport([{ provider: 'openai', model: 'gpt-5' }]);
+    expect(missingPriceCases(report, { models, pricePrefix: PRICE_TEST_PREFIX })).toEqual([]);
+  });
 });
 
 describe('evaluateStep2Report', () => {
@@ -1667,7 +1691,7 @@ describe('判定の結線', () => {
   // 受け入れ基準を**すべて満たす**テストレポートを組み立てる (シムに書かせる中身)。
   // **名前の形はここで組み立てるが、組み立てた結果を判定に通して空を要求する**ので、
   // 形がずれたら「基準を満たすはずのレポートが落ちる」という形で必ず赤くなる (写しが腐らない)
-  function fullMarksReport(dropLastPricedModel = false): string {
+  function fullMarksReport(dropPricedIndex = -1): string {
     // 料金表の正本 (ゲートが読むのと同じファイル)
     const models = (
       JSON.parse(
@@ -1677,13 +1701,16 @@ describe('判定の結線', () => {
     // 料金表のモデルごとのテスト名
     const priced = models.map(({ provider, model }) => `${PRICE_TEST_PREFIX}${provider} ${model}`);
     // 基準が名前で探すテスト (RBAC 行列 × 料金表の全モデル)。
-    // 落とすときは**最後の 1 件だけ**を外す (件数の下限は下の埋めで保たれるので、
-    // 「全モデルを見ているか」だけが試される)
+    // 落とすときは**指定した 1 件だけ**を外す (件数の下限は下の埋めで保たれるので、
+    // 「全モデルを見ているか」だけが試される)。**末尾 1 件だけを試すのでは足りない** —
+    // 末尾を含んだまま縮める変異 (`readPricedModels().slice(1)`・偶数添字だけを残す形) は
+    // どちらも 128 件すべて緑のまま通った (実測)。添字ごとに 1 本ずつ試せば、
+    // 「どれか 1 つでも見ていないモデルがある」形はその添字の probe が必ず落とす
     const named = [
       ...ROLES.flatMap((role) =>
         ACTIONS.map((action) => `${MATRIX_TEST_PREFIX}${role} × ${action}`),
       ),
-      ...(dropLastPricedModel ? priced.slice(0, -1) : priced),
+      ...priced.filter((_name, index) => index !== dropPricedIndex),
     ];
     // 件数の下限まで埋める
     const filler = Math.max(0, REQUIRED_PASSED_TESTS - named.length);
@@ -1710,7 +1737,7 @@ describe('判定の結線', () => {
       pricePrefix: PRICE_TEST_PREFIX,
     });
     // 落としたなら基準を満たさないこと、満点なら満たすこと
-    if (dropLastPricedModel)
+    if (dropPricedIndex >= 0)
       expect(
         failures.length,
         '料金表の 1 件を落としたのに基準を満たしてしまう (組み立ての形が古い)',
@@ -1752,7 +1779,14 @@ describe('判定の結線', () => {
       // 検証が negative control の対象から外れて「壊しても落ちない」窓が開く。実行側にしか
       // 現れない npm があればここで落ちる
       for (const script of new Set(clean.invoked))
-        expect(required, `${name} が導出に無い ${script} を流している`).toContain(script);
+        expect(
+          required,
+          // **直し方を文言に書く** — この赤は「npm へ渡す引数をソースから読めなかった」
+          // という意味で、検出網を緩める方向へ行かせないために直し方を添える
+          `${name} が導出に無い ${script} を流している` +
+            ' (npm へ渡す引数は実行ヘルパーの呼び出し位置に直接書く。変数へ括り出したり' +
+            'ヘルパーを別名で import したりすると、ソースから読めず検査の対象から外れる)',
+        ).toContain(script);
       // **negative control**: 流すと書いてあるものを 1 つずつ壊す
       for (const target of required) {
         const broken = runGateUnderShim(name, target, report, benches);
@@ -1765,23 +1799,30 @@ describe('判定の結線', () => {
     300_000,
   );
 
-  it('最新のゲートは料金表の 1 モデル分の欠落を見逃さない (レポート側の negative control)', () => {
-    // **npm はすべて成功させたまま、レポートの中身だけを 1 件欠かす。**
-    // 検証コマンドの成否を 1 つずつ壊す行列は「ゲートが何を流すか」しか見ないので、
-    // 「料金表の一部しか見ない」変異 (`readPricedModels().slice(0, 1)` など) は
-    // どの npm も失敗しないまま素通りする。欠落を見逃さないことはここで固定する
-    const short = runGateUnderShim(
-      latestGateScriptName(),
-      '',
-      fullMarksReport(true),
-      benchMaterials(),
-    );
-    // 非 0 で終わっていること (0 なら料金表の全モデルを見ていない)
-    expect(
-      typeof short.status === 'number' && short.status !== 0,
-      `料金表の 1 モデル分の欠落を見逃した (終了コード ${String(short.status)})`,
-    ).toBe(true);
-  }, 120_000);
+  it.each(pricedModelIndexes())(
+    '最新のゲートは料金表の %i 番目のモデルの欠落を見逃さない (レポート側の negative control)',
+    (dropAt) => {
+      // **npm はすべて成功させたまま、レポートの中身だけを 1 件欠かす。**
+      // 検証コマンドの成否を 1 つずつ壊す行列は「ゲートが何を流すか」しか見ないので、
+      // 「料金表の一部しか見ない」変異 (`readPricedModels().slice(0, 1)` など) は
+      // どの npm も失敗しないまま素通りする。欠落を見逃さないことはここで固定する。
+      // **添字ごとに 1 本ずつ試す** — 末尾だけだと `slice(1)` のように末尾を含んだまま
+      // 縮める変異が、ゲートを落としたまま (= 検査は緑のまま) 通る。料金表は小さいので
+      // 全添字を回しても数秒で、これで「部分集合にする」族がまとめて閉じる
+      const short = runGateUnderShim(
+        latestGateScriptName(),
+        '',
+        fullMarksReport(dropAt),
+        benchMaterials(),
+      );
+      // 非 0 で終わっていること (0 なら料金表の全モデルを見ていない)
+      expect(
+        typeof short.status === 'number' && short.status !== 0,
+        `料金表の ${dropAt} 番目のモデルの欠落を見逃した (終了コード ${String(short.status)})`,
+      ).toBe(true);
+    },
+    120_000,
+  );
 
   it('共有モジュールは import しただけでプロセスを終わらせない', () => {
     // 共有モジュールの一覧 (0 本なら導出が壊れている)
@@ -1797,6 +1838,19 @@ describe('判定の結線', () => {
       expect(stdout, `${name} が import の時点でプロセスを終わらせる`).toContain('REACHED_END');
     }
   });
+
+  // 料金表のモデルの添字一覧 (件数を書き写さず正本から導く。0 件なら導出が壊れている)
+  function pricedModelIndexes(): number[] {
+    // 正本の JSON
+    const models = (
+      JSON.parse(
+        readFileSync(join(ROOT, 'src', 'domain', 'pricing', 'vendor-prices.json'), 'utf8'),
+      ) as { models: unknown[] }
+    ).models;
+    // 1 件も読めなければ fail-closed
+    expect(models.length, '料金表のモデルを 1 つも読めない').toBeGreaterThan(0);
+    return models.map((_model, index) => index);
+  }
 
   // ベンチが出す JSON の材料を npm スクリプト名ごとに組み立てる (ラベル・上限の写しを作らない)
   function benchMaterials(): Record<

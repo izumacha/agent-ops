@@ -17,6 +17,34 @@
  * @param {(item: T) => string} labelOf 不足として表示するときの名前
  * @returns {string[]} 見つからない・落ちている項目のラベル (すべて揃っていれば空)
  */
+// 識別子（モデル名・役割名）を続けられる文字。この文字が needle の直後にあるうちは、
+// 「別の項目の名前の一部をたまたま拾っただけ」で、その項目のテストが有るとは言えない
+const IDENTIFIER_CHARACTER = /[A-Za-z0-9._-]/;
+
+/**
+ * そのテスト名が、期待する項目の名前を**項目として**含んでいるか。
+ *
+ * **単なる `includes` では足りない** — 料金表には `openai gpt-5` と `openai gpt-5-mini` の
+ * ように一方が他方の接頭辞になる綴りがあり、部分一致だけだと `gpt-5` のテストが 1 件も
+ * 無くても `gpt-5-mini` のテストが代わりに当たってしまう（実測で、ゲートは緑のまま
+ * `gpt-5` の「誤差 0」を一度も確かめずに通った。`gpt-4.1` と `gpt-4.1-mini` も同じ）。
+ * そこで needle の直後が「識別子を続けられない文字」（空白・文末など）であることまで求める。
+ * @param {string} name テストのフルネーム
+ * @param {string} needle 期待する項目の名前
+ * @returns {boolean} 項目として含んでいれば true
+ */
+function namesCase(name, needle) {
+  // 出現位置をすべて見る（後ろの出現で境界を満たすことがある）
+  for (let at = name.indexOf(needle); at >= 0; at = name.indexOf(needle, at + 1)) {
+    // needle の直後の 1 文字（文末なら undefined）
+    const next = name[at + needle.length];
+    // 続きが無いか、識別子を続けられない文字なら「項目として」含んでいる
+    if (next === undefined || !IDENTIFIER_CHARACTER.test(next)) return true;
+  }
+  // どの出現も別の項目の一部だった
+  return false;
+}
+
 function missingPassedCases(report, expected, needleOf, labelOf) {
   // 全テストの (フルネーム, 結果) を平坦化する
   const results = (report.testResults ?? []).flatMap((file) =>
@@ -28,10 +56,10 @@ function missingPassedCases(report, expected, needleOf, labelOf) {
   for (const item of expected) {
     // その項目に対応するテスト名の一部
     const needle = needleOf(item);
-    // 名前にそれを含む pass したテストがあるか
+    // 名前にそれを含む pass したテストがあるか (**部分一致では終わらせない**。下記)
     const hit = results.find(
       (test) =>
-        typeof test.name === 'string' && test.name.includes(needle) && test.status === 'passed',
+        typeof test.name === 'string' && namesCase(test.name, needle) && test.status === 'passed',
     );
     // 無ければ不足として記録する
     if (!hit) missing.push(labelOf(item));

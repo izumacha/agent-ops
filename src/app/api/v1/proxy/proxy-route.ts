@@ -18,6 +18,8 @@ import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
+// エラーをログへ落とす形 (PII やクエリ引数を message ごと出さないための唯一の経路)
+import { describeError } from '@/lib/describe-error';
 
 // 中継できなかった・計測できなかったときに記録するトークン数 (0)
 const NO_TOKENS = 0;
@@ -145,10 +147,7 @@ async function recordUsage(
     }
   } catch (error) {
     // DB の障害などで記録できなくても中継は成立しているので、ログだけ残して続ける
-    console.error(
-      '[proxy] 利用イベントの記録に失敗しました:',
-      error instanceof Error ? error.name : typeof error,
-    );
+    console.error('[proxy] 利用イベントの記録に失敗しました:', describeError(error));
   }
 }
 

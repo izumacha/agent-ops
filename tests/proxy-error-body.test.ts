@@ -470,6 +470,48 @@ describe('上流のエラー本文の絞り込み', () => {
     for (const [key, value] of Object.entries(error)) expect(safe.error[key]).toBe(value);
   });
 
+  // 各項目のトークンに許してよい文字 (**表を正本にする**。ここから negative control を導く)。
+  // `param` だけは JSON パスの区切り (`.` と `[添字]`) を追加で許す
+  const ALLOWED_CHARACTERS: Readonly<Record<'type' | 'code' | 'param', string>> = {
+    type: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_',
+    code: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_',
+    param: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.[]',
+  };
+
+  // 印字できる ASCII のうち、その項目に許していない文字をすべて挙げる
+  function forbiddenCharacters(field: 'type' | 'code' | 'param'): string[] {
+    // 空白 (0x20) から `~` (0x7e) まで
+    return Array.from({ length: 0x7f - 0x20 }, (_v, offset) =>
+      String.fromCharCode(0x20 + offset),
+    ).filter((character) => !ALLOWED_CHARACTERS[field].includes(character));
+  }
+
+  it.each(['type', 'code', 'param'] as const)(
+    '%s は許していない ASCII 文字を 1 つでも含めば通さない (文字クラスの negative control)',
+    (field) => {
+      // 許していない文字 (0 個なら導出が壊れている = fail-closed)
+      const forbidden = forbiddenCharacters(field);
+      expect(forbidden.length, `${field} に許していない文字が 1 つも無い`).toBeGreaterThan(0);
+      // **1 文字ずつ、それだけを混ぜた値で試す** — 既存の negative control は
+      // `'quota for org-ACME exhausted; plan=Enterprise'` のように禁止文字を複数含むため、
+      // どれか 1 つが漏れても他の文字が落としてしまい、**単独の抜けが見えなかった**。
+      // 実測で `[A-Za-z0-9]` → `[A-Za-z0-9 ]` と空白を 1 文字足すだけで 116 件すべて緑になり、
+      // `'Your credit balance is too low'` が type / code / param の 3 項目すべてに載った
+      // (`:` `=` `,` `/` `$` も同じ。ハイフンだけは既存のケースが単独で落としていた)
+      for (const character of forbidden) {
+        // 前後を許した文字で挟み、禁止文字 1 つだけが違いになるようにする
+        const value = `abc${character}def`;
+        const safe = sanitizeUpstreamErrorBody({ error: { [field]: value } }) as {
+          error: Record<string, unknown>;
+        };
+        expect(
+          safe.error[field],
+          `${field} が「${character}」(U+${character.charCodeAt(0).toString(16).padStart(4, '0')}) を含む値を通した`,
+        ).toBeUndefined();
+      }
+    },
+  );
+
   it.each([
     ['文字列でない値', { error: { type: 42, code: null, param: ['a'] } }],
     ['空文字', { error: { type: '' } }],

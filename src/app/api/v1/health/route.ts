@@ -7,7 +7,7 @@ import type { HealthDto } from '@/lib/api-types';
 // HTTP ステータスの唯一の参照元 (§6)
 import { HTTP_STATUS } from '@/lib/api/http-status';
 // エラーをログへ落とす形の唯一の参照元 (message を出さず name / code / フレームだけを残す)
-import { describeError } from '@/lib/api/handler';
+import { describeError } from '@/lib/describe-error';
 // 保存を禁じる Cache-Control の値 (route() が全ルートへ付けているのと同じ値。唯一の参照元は constants)
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 

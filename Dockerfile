@@ -64,6 +64,7 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/src/lib/prisma-client.ts ./src/lib/prisma-client.ts
 COPY --from=builder /app/src/lib/pg-search-path.ts ./src/lib/pg-search-path.ts
 COPY --from=builder /app/src/lib/raw-sql-guard.ts ./src/lib/raw-sql-guard.ts
+COPY --from=builder /app/src/lib/describe-error.ts ./src/lib/describe-error.ts
 COPY --from=builder /app/src/domain/tenant.ts ./src/domain/tenant.ts
 COPY --from=builder /app/src/domain/types.ts ./src/domain/types.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json

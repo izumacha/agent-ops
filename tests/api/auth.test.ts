@@ -5,7 +5,7 @@ import { GET as listTenants } from '@/app/api/v1/tenants/route';
 import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
 import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { generateSecret } from '@/lib/tokens';
-import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
+import { call, PLATFORM_TOKEN, seedApiKey, seedEachTest } from './helpers';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
 const seed = seedEachTest();
@@ -16,6 +16,21 @@ describe('認証 (401 の経路)', () => {
     const result = await call(getMe);
     expect(result.status).toBe(401);
     expect(result.headers.get('www-authenticate')).toBe('Bearer realm="agent-ops"');
+  });
+
+  it('有効な API キーをユーザー向け API へ出しても 401 (資格情報の系統を混ぜない)', async () => {
+    // エージェントに紐づいた有効な API キーを 1 本発行する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // ユーザー向け API へ出す
+    const result = await call(getMe, { token: key.secret });
+    // **401 であること (403 ではない)** — `authenticate()` が API キーも受け付けるように
+    // なると、エージェント用の資格情報 (CI やエージェント実行環境に配るので流出しやすい) が
+    // ユーザー向け API の認証を通る。実測で、`authenticate()` に 1 行足して受理させると
+    // 864 件すべて緑・件数も不変のまま、`/me` が 403「テナントのユーザーとして認証した
+    // ときだけ…」を返すようになり、**キーが有効か・紐づくエージェントが停止中かを
+    // 答えるオラクル**がユーザー向け API 上に生えた (403 を許すとこのオラクルが残る)。
+    // 逆向き (API キー経路がユーザートークンを受け付ける) は既に 6 件が赤くなる
+    expect(result.status).toBe(401);
   });
 
   it('Bearer 以外の方式・トークン無し・余分な語は 401', async () => {

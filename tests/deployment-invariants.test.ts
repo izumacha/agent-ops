@@ -7,6 +7,10 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 // 契約テスト用 DB の判定 (入口ガード・setupFiles と同じ関数を使う。規則の写しを作らない)
 import { contractDatabaseProblem } from '../scripts/lib/contract-database.mjs';
+// Step0 の検証コマンド一覧 (ゲートが流すものを導く手掛かり。値の写しを作らない)
+import { STEP0_STEPS } from '../scripts/lib/step0-steps.mjs';
+// ゲートのソースから npm の引数を読む (行列の negative control と同じ手掛かり)
+import { latestGateScriptName, npmArgvsInSource, UNREADABLE_ARG } from './lib/script-files';
 
 // リポジトリのルート
 const ROOT = process.cwd();
@@ -252,6 +256,18 @@ describe('Dockerfile', () => {
   });
 });
 
+// ゲートが流す検証のうち、**CI で二重化しないもの**と、その理由。
+// 表に無いものは CI にそのままの綴りのステップが要る (新しい検証を足した人は必ず一度、
+// 「二重化するか、なぜ要らないか」を決めることになる)。**エントリが増える差分は
+// 理由の妥当性をレビューで確認する** (この repo の他の除外表と同じ扱い)
+const NOT_DUPLICATED_IN_CI: Record<string, string> = {
+  'npm run test':
+    'ゲート本体が JSON レポート付きのリテラルで別に流すので、STEP0_STEPS から消えても残る',
+  'npm run bench:usage':
+    '受け入れ基準の計測そのもの。CI で二重に回すと所要時間が倍になるので、削除はレビューで見る',
+  'npm run bench:proxy': '同上 (プロキシの追加遅延の計測)',
+};
+
 describe('CI ワークフロー', () => {
   // ci.yml のジョブ定義
   const jobs = readYaml('.github', 'workflows', 'ci.yml').jobs as Record<
@@ -266,15 +282,13 @@ describe('CI ワークフロー', () => {
     expect(steps.length).toBeGreaterThan(0);
     // scripts/ にある gate-stepN.mjs のうち最大の N が「実装済みの最新 Step」。
     // **CI 側の綴りから導かない** — ci.yml だけを見る検査は ci.yml を変えた瞬間に一緒に緩むので、
-    // 手掛かりを「リポジトリにどのゲートが実装されているか」へ移す
-    const numbers = readdirSync(join(ROOT, 'scripts'))
-      .map((name) => /^gate-step(\d+)\.mjs$/.exec(name))
-      .filter((match): match is RegExpExecArray => match !== null)
-      .map((match) => Number(match[1]));
-    // ゲートが 1 つも無ければ手掛かりが消えている (fail-closed)
-    expect(numbers.length, 'scripts/ に gate-stepN.mjs が無い').toBeGreaterThan(0);
+    // 手掛かりを「リポジトリにどのゲートが実装されているか」へ移す。
+    // 導出そのものは `tests/lib/script-files.ts` の 1 か所に置く (§6 DRY)
+    const matched = /^gate-step(\d+)\.mjs$/.exec(latestGateScriptName());
+    // 名前の形が変わっていれば手掛かりが消えている (fail-closed)
+    expect(matched, 'ゲートの名前から Step 番号を読めない').not.toBeNull();
     // 最新のゲート名
-    const latest = `gate:step${Math.max(...numbers)}`;
+    const latest = `gate:step${matched?.[1] ?? ''}`;
     // **テスト件数 / RBAC 3×3 / 料金表の網羅 / ベンチ 2 本を CI で回しているのはこの 1 コマンドだけ**。
     // 実測では、ci.yml から gate ジョブを丸ごと消しても他のジョブは緑のままで、何も鳴らなかった
     expect(
@@ -286,22 +300,47 @@ describe('CI ワークフロー', () => {
   it('ゲートが流す検証のうち、消されても気付けないものを二重化している', () => {
     // ステップを 1 つも読めなければ走査が壊れている (fail-closed)
     expect(steps.length).toBeGreaterThan(0);
+    // ci.yml の `run:` を `&&` で割り、1 つずつの素のコマンドとして集める。
+    // **部分一致で見ない** — `includes()` だと `npm run lint || true` も
+    // `npm audit --audit-level=critical` も一致してしまい、二重化が無音で外れた
+    // (どちらも実測で 8 件すべて緑のまま通った。前者は削除と等価、後者は受け入れ基準そのものの緩和)
+    const ciCommands = new Set(
+      steps.flatMap((step) => (step.run ?? '').split('&&').map((part) => part.trim())),
+    );
+    // **ゲートが流す検証を、行列の negative control と同じ手掛かりから導く**
+    // (`STEP0_STEPS` ＋ ゲートのソースに書いてある npm の引数)。手書きの一覧にすると、
+    // 新しい検証を足した人が「二重化するか」を一度も問われない
+    const argvs = [
+      ...STEP0_STEPS.map((step) => step.args),
+      ...npmArgvsInSource(join(ROOT, 'scripts', latestGateScriptName())),
+    ];
+    // 1 つも導けなければ導出が壊れている (fail-closed)
+    expect(argvs.length, 'ゲートが流す npm を 1 つも導けない').toBeGreaterThan(0);
+    // 「npm ＋ 引数」の綴り。読めなかった引数を含む並びは綴りを突き合わせられないので外す
+    const gateCommands = new Set(
+      argvs
+        .filter((argv) => !argv.includes(UNREADABLE_ARG))
+        .map((argv) => ['npm', ...argv].join(' ')),
+    );
+    // 除外表のキーが実在すること (古い登録が黙って残らないように)
+    for (const [command, reason] of Object.entries(NOT_DUPLICATED_IN_CI)) {
+      expect(gateCommands.has(command), `${command} はゲートが流していない (除外表が古い)`).toBe(
+        true,
+      );
+      expect(reason.trim().length, `${command} の除外に理由が無い`).toBeGreaterThan(0);
+    }
     // **ゲートからステップを丸ごと消す形は検出網では捉えられない** — ゲートの検査は
     // 「流すと書いてあるもの」をソースから導くので、書くのをやめれば要求も消える。
     // 実測で `STEP0_STEPS` から Lint / Typecheck の行を 1 つ消しても全件緑だった。
-    // そこで CI に別ステップとしても置く。**その保険が黙って外れないようにここで見張る**
-    // (`gen` / `db:generate` / `build` は migrate-and-build ジョブが、`test` はゲート本体の
-    // リテラルが二重化しているので、ここで求めるのは残りの 4 つ)
-    for (const command of [
-      'npm run lint',
-      'npm run format:check',
-      'npm run typecheck',
-      'npm audit',
-    ])
+    // そこで CI に別ステップとしても置き、**その保険が黙って外れないようにここで見張る**
+    for (const command of gateCommands) {
+      // 二重化しないものは理由付きの表にだけ登録する
+      if (command in NOT_DUPLICATED_IN_CI) continue;
       expect(
-        steps.some((step) => step.run?.includes(command)),
-        `ci.yml が ${command} を別ステップとして流していない (ゲートから消えても気付けない)`,
+        ciCommands.has(command),
+        `ci.yml が「${command}」をそのままの綴りで流していない (ゲートから消えても気付けない)`,
       ).toBe(true);
+    }
   });
 
   it('契約テストを専用 DB で実際に実行している', () => {

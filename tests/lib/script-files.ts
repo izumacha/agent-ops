@@ -795,10 +795,36 @@ export function latestGateScriptName(): string {
  * @returns サブコマンド名 (重複なし・書かれた順)
  */
 export function npmInvocationsInSource(path: string): string[] {
+  // 引数の並びから、シムと同じ規則でサブコマンドのキーを取り出す
+  return [
+    ...new Set(
+      npmArgvsInSource(path)
+        // `['run', '<スクリプト>']` なら 2 番目、それ以外は先頭がキー
+        .map((argv) => (argv[0] === 'run' ? argv[1] : argv[0]))
+        // 読めなかった位置は「そのキーは分からない」ので落とす (旧来の挙動と同じ)
+        .filter((key): key is string => key !== undefined && key !== UNREADABLE_ARG),
+    ),
+  ];
+}
+
+/** ソースから読み取れなかった引数を表す印 (綴りが分からないので、綴りの突き合わせから外す)。 */
+export const UNREADABLE_ARG = '<読めない引数>';
+
+/**
+ * そのスクリプトが **`npm` へ渡す引数の並び**を、ソースから読み取れた分だけ集める。
+ *
+ * `npmInvocationsInSource` はここからキーだけを取り出す。並びまで要るのは
+ * 「CI が二重化しているコマンドが、ゲートの流すものと 1 文字も違わないか」を見る検査で、
+ * キーだけで突き合わせると `npm audit --audit-level=critical` のように**受け入れ基準
+ * そのものを緩めた綴り**が一致してしまう (実測で 8 件すべて緑のまま通った)。
+ * @param path 読むスクリプトの絶対パス
+ * @returns 引数の並び (読めなかった要素は `UNREADABLE_ARG`)
+ */
+export function npmArgvsInSource(path: string): string[][] {
   // 構文木にする
   const source = parseScript(path);
-  // 見つかったサブコマンド
-  const found = new Set<string>();
+  // 見つかった引数の並び
+  const found: string[][] = [];
   // その配列リテラルが「npm へ渡す引数」の位置にいるか
   //  - `runNpm([...])` / `runNpmCapturingStdout([...])` の第 1 引数
   //  - `{ name: '…', args: [...] }` の `args`
@@ -810,9 +836,22 @@ export function npmInvocationsInSource(path: string): string[] {
     const parent = node.parent;
     // 親が無ければ引数ではない
     if (parent === undefined) return false;
-    // `args: [...]` の値
+    // `{ name: '…', args: [...] }` の `args` の値
     if (ts.isPropertyAssignment(parent))
-      return ts.isIdentifier(parent.name) && parent.name.text === 'args';
+      return (
+        ts.isIdentifier(parent.name) &&
+        parent.name.text === 'args' &&
+        // **`args` という名前だけで拾わない** — npm と無関係な `{ args: ['--version'] }` を
+        // 足すだけで「--version を流していない」という直しようの無い赤になる (実測)。
+        // runSteps のステップは必ず `name` を併せ持つので、その形に絞る
+        ts.isObjectLiteralExpression(parent.parent) &&
+        parent.parent.properties.some(
+          (property) =>
+            ts.isPropertyAssignment(property) &&
+            ts.isIdentifier(property.name) &&
+            property.name.text === 'name',
+        )
+      );
     // 実行ヘルパーの第 1 引数
     return (
       ts.isCallExpression(parent) &&
@@ -824,26 +863,20 @@ export function npmInvocationsInSource(path: string): string[] {
   // すべての節点を辿る
   const visit = (node: ts.Node): void => {
     // npm へ渡す引数の位置にある配列だけを見る
-    if (ts.isArrayLiteralExpression(node) && isNpmArgumentPosition(node)) {
-      // 先頭の要素
-      const first = node.elements[0];
-      // 先頭が文字列リテラルのときだけ見る
-      if (first !== undefined && ts.isStringLiteralLike(first)) {
-        // `['run', '<スクリプト>']` の形
-        const second = node.elements[1];
-        if (first.text === 'run' && second !== undefined && ts.isStringLiteralLike(second))
-          found.add(second.text);
-        // `['audit', …]` のように run 以外を直接渡す形
-        else if (first.text !== 'run') found.add(first.text);
-      }
-    }
+    if (ts.isArrayLiteralExpression(node) && isNpmArgumentPosition(node))
+      // 要素をそのまま並びにする (文字列リテラルでない要素は「読めない」印にする)
+      found.push(
+        node.elements.map((element) =>
+          ts.isStringLiteralLike(element) ? element.text : UNREADABLE_ARG,
+        ),
+      );
     // 子を辿る
     ts.forEachChild(node, visit);
   };
   // 根から辿る
   ts.forEachChild(source, visit);
   // 集めた結果
-  return [...found];
+  return found;
 }
 
 export function reachableCallNames(path: string): string[] {

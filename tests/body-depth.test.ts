@@ -119,10 +119,20 @@ describe('exceedsMaxDepth', () => {
     return parts.join('');
   }
 
+  // フィラーのキーに使う文字 (36 進。1 文字あたりの情報量がいちばん多い綴り)
+  const KEY_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+
+  // 深い値を置く番兵キー。**フィラーの文字集合の外から採る** — `"zz"` は `shortKey(925)` と
+  // 同じ綴りで、`JSON.parse` の重複キーは「値だけ後勝ち・位置は初出のまま」なので、
+  // 深い値が `Object.keys` の 1,015 番目に落ちていた (意図は最後尾の 8,340 番目)。
+  // その結果 `Object.keys(record).slice(0, 8_000)` が 826 件すべて緑のまま通り、
+  // 65,532 バイト・深さ 28,579 の本文が `JSON.stringify` の RangeError (= 500) に戻せた (実測)
+  const DEEP_OBJECT_KEY = '~d';
+
   // 通し番号から**いちばん短い**キーを作る (最密に詰めるため。攻撃者はこう書ける)
   function shortKey(index: number): string {
     // 使える文字 (36 進)
-    const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    const alphabet = KEY_ALPHABET;
     // 36 進に変換する
     let rest = index;
     let name = '';
@@ -137,20 +147,44 @@ describe('exceedsMaxDepth', () => {
   // 1 段ぶん外側に包まれるので、この鎖自体は上限を超えない)
   const denseFillerChain = `${'['.repeat(JSON_BODY_MAX_DEPTH - 1)}0${']'.repeat(JSON_BODY_MAX_DEPTH - 1)}`;
 
+  // 最密の短いキーで上限まで埋め、**最後のキー**に深い鎖を置いた本文
+  function buildDenseObject(): string {
+    // `{` ＋ `"~d":` ＋ `}` と鎖のぶんを先に確保してから、残りをフィラーで埋める
+    return `{${fillToLimit(
+      (i) => `"${shortKey(i)}":0,`,
+      overLimitChain.length + DEEP_OBJECT_KEY.length + 9,
+    )}"${DEEP_OBJECT_KEY}":${overLimitChain}}`;
+  }
+
+  it('最密オブジェクトのフィクスチャは深い値を本当に最後のキーへ置いている', () => {
+    // **フィクスチャの意図と実体がずれていても、深さの判定だけを見ていては気付けない** —
+    // 番兵キーがフィラーと衝突していた版は「最後のキー」のつもりで 8 倍手前に落ちており、
+    // キー打ち切りの変異がその比のぶん緩く通った。位置そのものをここで固定する
+    const keys = Object.keys(JSON.parse(buildDenseObject()) as Record<string, unknown>);
+    expect(keys.at(-1), '深い値が最後のキーに無い (番兵がフィラーと衝突している)').toBe(
+      DEEP_OBJECT_KEY,
+    );
+  });
+
   it.each([
     [
       '配列の届きうる最後の位置 (先頭でも末尾でもない奇数添字)',
       () => `[${fillToLimit(() => '0,', overLimitChain.length + 6)}0,${overLimitChain},0]`,
     ],
-    [
-      'オブジェクトの届きうる最後のキー (最密の短いキーで埋める)',
-      () =>
-        `{${fillToLimit((i) => `"${shortKey(i)}":0,`, overLimitChain.length + 18)}"zz":${overLimitChain},"z":0}`,
-    ],
+    ['オブジェクトの届きうる最後のキー (最密の短いキーで埋める)', buildDenseObject],
     [
       '幅の広い枝をすべて辿り終えてから見る深い値 (最密の鎖で埋める)',
       () =>
         `[${overLimitChain}${fillToLimit(() => `,${denseFillerChain}`, overLimitChain.length + 2)}]`,
+    ],
+    [
+      '同時に積まれる枝がいちばん多い本文 (スタック長の予算)',
+      // `[],` は「積まれる子」を 3 バイトで作れる最密の形＝攻撃者は 21,800 本まで並べられる。
+      // 上の 3 つはフィラーが数値か 1 本の鎖なので、同時に積まれるのは最大 575 件しかなく、
+      // 実測で `if (stack.length > 2_000) return false;`（資源を守るつもりでいかにも
+      // 書かれうる 1 行）が 826 件すべて緑のまま通り、65,535 バイト・深さ 28,265 の本文が
+      // RangeError (= 500) に戻せた。予算は**しきい値の族**なので、天井まで詰めれば閉じる
+      () => `[${overLimitChain},${fillToLimit(() => '[],', overLimitChain.length + 4)}0]`,
     ],
   ])('本文の上限いっぱいに広げても深い値を数える: %s', (_label, build) => {
     // **位置や個数を定数で試すだけでは「打ち切り」という族は閉じない。** `slice(0, 100)` を

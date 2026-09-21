@@ -25,7 +25,7 @@
 // 書き換えないので「意図的に迂回した形」には見えず、レビューを通りやすいため。
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { forEachNode, parseSourceFiles } from './lib/source-files';
 
 // 形を決める唯一の関数の名前
@@ -49,6 +49,23 @@ const SAFE_SUBSTITUTIONS: Record<string, string> = {
 
 // 走査結果はモジュール評価時に 1 度だけ作る
 const SOURCES = parseSourceFiles();
+
+/**
+ * モジュール指定子を実ファイルの絶対パスへ解決する。
+ * **綴りで照合しない** — 取り込み元を名前の末尾一致で見ていた版は、同じ名前のファイルを
+ * 別ディレクトリに置くだけで所有モジュールごと差し替えられた（実測）。
+ * @param from 取り込む側のファイルの絶対パス
+ * @param specifier `import … from '<ここ>'` の綴り
+ * @returns 解決した絶対パス（`.ts` 付き）
+ */
+function resolveModule(from: string, specifier: string): string {
+  // `@/` はパスエイリアス（tsconfig の `@/*` → `src/*`）
+  const base = specifier.startsWith('@/')
+    ? join(process.cwd(), 'src', specifier.slice('@/'.length))
+    : resolve(dirname(from), specifier);
+  // 拡張子が無ければ `.ts` を補う
+  return /\.[cm]?tsx?$/.test(base) ? base : `${base}.ts`;
+}
 
 // 括弧と `.call` / `.apply` / `.bind` を剥がして、元の呼び先まで辿る
 function unwrapCallee(expression: ts.Expression): ts.Expression {
@@ -233,6 +250,13 @@ describe('エラーのログ出力', () => {
       SOURCES.some(({ path }) => path === owner),
       `${DESCRIBE_ERROR} の所有モジュールが無い`,
     ).toBe(true);
+    // **同じ名前のファイルが 2 つ以上あれば落とす** — 取り込み元の判定を 1 つ漏らしても、
+    // この独立な手がかりが囮モジュールの存在自体を捉える (fail-closed)
+    const sameNamed = SOURCES.filter(({ path }) => basename(path) === basename(owner));
+    expect(
+      sameNamed.map(({ path }) => path.slice(process.cwd().length + 1)),
+      '所有モジュールと同じ名前のファイルが複数ある',
+    ).toEqual([owner.slice(process.cwd().length + 1)]);
     // 規約を破っている箇所
     const offenders: string[] = [];
     for (const { path, source } of SOURCES) {
@@ -252,11 +276,18 @@ describe('エラーのログ出力', () => {
           // `as` で名前を付け替えていないこと（別物を describeError と名乗らせない）
           node.propertyName === undefined
         ) {
-          // 取り込み元
+          // 取り込み元。**綴りの末尾一致で見ない** — 実測で、`describe-error` という名前の
+          // ファイルを別ディレクトリに置いて `export { x as describeError } from './x'` の
+          // 1 行にするだけで、tsc・eslint・このガード 3/3 が緑のまま所有モジュールごと
+          // 差し替えられ、メールアドレスと接続文字列を含む生の Error が console.error へ届いた
           const from = node.parent.parent.parent.moduleSpecifier;
-          if (ts.isStringLiteralLike(from) && /(^|\/)describe-error$/.test(from.text))
+          if (ts.isStringLiteralLike(from) && resolveModule(path, from.text) === owner)
             imported = true;
         }
+        // **再公開も禁止** — `export { x as describeError } from './x'` は束縛の検出にも
+        // 取り込み元の検出にも引っかからないまま、所有モジュールの名前を名乗れる
+        if (!isOwner && ts.isExportSpecifier(node) && node.name.text === DESCRIBE_ERROR)
+          shadowed = true;
         // **import 以外の束縛**（`const` / `function` / 仮引数）は所有モジュール以外では禁止
         if (
           !isOwner &&
@@ -264,6 +295,17 @@ describe('エラーのログ出力', () => {
             ts.isFunctionDeclaration(node) ||
             ts.isParameter(node)) &&
           node.name !== undefined &&
+          ts.isIdentifier(node.name) &&
+          node.name.text === DESCRIBE_ERROR
+        )
+          shadowed = true;
+        // **分割代入で覆う形も禁止** — `const { describeError } = deps;` や
+        // `function f(e, { describeError }: Deps = DEFAULT)` は「テストのために診断の
+        // 作り方を注入できるようにする」というごく普通の DI の形に見えるのに、
+        // 実測で imported=true / shadowed=false のまま覆えた
+        if (
+          !isOwner &&
+          ts.isBindingElement(node) &&
           ts.isIdentifier(node.name) &&
           node.name.text === DESCRIBE_ERROR
         )

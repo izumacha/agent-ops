@@ -40,6 +40,23 @@ function describeShortLabel(value: unknown): string | { type: string } | undefin
 // ORM の検証エラーなどは message にクエリ引数 (= メールアドレス・名前といった利用者の入力) をそのまま埋め込むため、
 // message ごと出すと PII がログに流れる (§9 ログに残す前に個人情報をマスクする)
 export function describeError(error: unknown): Record<string, unknown> {
+  // **ログ整形器は絶対に throw しない。** `'cause' in error` はゲッターを起こさないが、
+  // 続くプロパティの読み出しは起こす。throw するゲッターを持つ値が来ると整形器自身が
+  // 例外を投げ、到達先ごとに壊れ方が違う: `route()` の catch の中なら統一された 500 応答を
+  // すり抜けてフレームワークへ抜け、`onPoolError` の中なら uncaught でプロセスが落ち、
+  // 上流の失敗の経路なら 502/504 が 500 に化けて UsageEvent の statusCode も 500 で記録される。
+  // `cause` を 1 段たどるようにしてゲッターの読み出しが 2 → 5 か所へ増えたので、包んで止める
+  try {
+    return describeErrorOrThrow(error);
+  } catch {
+    // **値は 1 バイトも出さない** — ここへ来るのは「読むと投げる」値なので、
+    // 読めなかったことだけを残す (§9 fail-closed)
+    return { type: typeof error, undescribable: true };
+  }
+}
+
+/** `describeError` の本体（読み出しで投げうるので、必ず上の包みを通して呼ぶ）。 */
+function describeErrorOrThrow(error: unknown): Record<string, unknown> {
   // Error でなければ型だけ
   if (!(error instanceof Error)) return { type: typeof error };
   // V8 の stack は「name: message」の見出しの後にフレームが続く。見出しは構築時の name / message で固定されるので、

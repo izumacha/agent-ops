@@ -97,6 +97,32 @@ describe('describeError', () => {
     expect(describeError(error)).toMatchObject({ frames: [], stackUnparsed: true });
   });
 
+  it.each(['cause', 'code', 'name'])('読むと投げる %s があっても throw しない', (property) => {
+    // **ログ整形器が throw すると到達先ごとに壊れ方が違う** — `route()` の catch の中なら
+    // 統一された 500 応答をすり抜け、`onPoolError` の中なら uncaught でプロセスが落ち、
+    // 上流の失敗の経路なら 502/504 が 500 に化けて台帳の statusCode まで変わる
+    const error = new Error('boom');
+    Object.defineProperty(error, property, {
+      get() {
+        throw new Error('読むと投げる');
+      },
+    });
+    // 投げずに「読めなかった」ことだけを返す
+    expect(describeError(error)).toEqual({ type: 'object', undescribable: true });
+  });
+
+  it('cause.name が読むと投げても throw しない', () => {
+    // 1 段たどった先のプロパティでも同じ
+    const inner = new Error('inner');
+    Object.defineProperty(inner, 'name', {
+      get() {
+        throw new Error('読むと投げる');
+      },
+    });
+    const outer = new Error('boom', { cause: inner });
+    expect(describeError(outer)).toEqual({ type: 'object', undescribable: true });
+  });
+
   it('cause は name / code だけを 1 段たどり、message は載せない', () => {
     // cause に PII 入りの message と、実在の形の code を持つ Error を繋ぐ
     const inner = Object.assign(new Error('email=tanaka@example.com'), { code: 'ECONNREFUSED' });

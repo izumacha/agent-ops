@@ -6,8 +6,12 @@ const STACK_FRAME_PATTERN = /^at .*(?::\d+:\d+\)?|<anonymous>\)?|native\)?)$/;
 
 // ラベル (name / code) に許す綴り。実在の値は `ECONNREFUSED` / `P2002` /
 // `ERR_INVALID_ARG_TYPE` / `PrismaClientKnownRequestError` のような短い識別子で、
-// 空白も区切り記号も持たない。上限は実在の最長 (29 文字) に余裕を持たせた値
-const SHORT_LABEL_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+// 空白も区切り記号も持たない。上限は実在の最長 (29 文字) に余裕を持たせた値。
+// **先頭に数字を許す** — PostgreSQL の SQLSTATE は `28P01` (パスワード不正) /
+// `23505` (一意制約違反) / `42P01` (テーブルが無い) のように数字で始まり、
+// 英字始まりに絞っていた版ではこれらの診断が丸ごと消えた (実測)。
+// 絞りすぎて診断が消えるのは、このリポジトリが繰り返し避けている失敗
+const SHORT_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_]{0,63}$/;
 
 /**
  * name / code を「短い識別子」としてだけ載せる。

@@ -31,6 +31,11 @@ describe('describeError', () => {
       code: 'ECONNREFUSED',
     });
     expect(describeError(system)).toMatchObject({ name: 'Error', code: 'ECONNREFUSED' });
+    // **PostgreSQL の SQLSTATE は数字で始まる** — 英字始まりに絞ると診断が丸ごと消える
+    for (const code of ['28P01', '23505', '42P01', 'P2002', 'ERR_INVALID_ARG_TYPE']) {
+      const withCode = Object.assign(new Error('boom'), { code });
+      expect(describeError(withCode), `${code} の診断が消えている`).toMatchObject({ code });
+    }
     // 接続文字列を code に入れた形は中身を出さない
     const dsn = Object.assign(new Error('boom'), { code: 'postgres://app:secret-pw@db' });
     expect(describeError(dsn)).toMatchObject({ code: { type: 'string' } });

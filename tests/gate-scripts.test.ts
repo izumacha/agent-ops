@@ -13,7 +13,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
@@ -51,12 +51,38 @@ import {
   importSharedModule,
   foreignModuleSpecifiers,
   processUses,
+  sharedModuleNames,
+  topLevelCallArgumentKinds,
   topLevelCallNames,
   topLevelInitializerEffects,
   topLevelStatementKinds,
   importedSharedNames,
   reachableCallNames,
 } from './lib/script-files';
+
+// 共有モジュールを**素の Node**で import し、その先へ到達できたかを返す。
+// **vitest の印 (`VITEST`) を外して起動する** — 付いたままだと
+// `if (process.env.VITEST === undefined) process.exit(0);` のような「テストのときだけ通す」
+// 1 行を見逃す (実測でこの形が 773 件すべて緑のまま、ベンチを無出力の exit 0 にできた)
+function importsWithoutExiting(modulePath: string): string {
+  // import → 到達印 の順に並べる
+  const code = [
+    `await import(${JSON.stringify(pathToFileURL(modulePath).href)});`,
+    `console.log('REACHED_END');`,
+  ].join('\n');
+  // vitest 由来の環境変数を落とした env を組み立てる
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('VITEST')) delete env[key];
+  // 実行する
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env,
+    timeout: 60_000,
+  });
+  // 標準出力 (到達印が出ていれば import の先へ進めている)
+  return result.stdout;
+}
 
 // 子プロセスでヘルパーを 1 つ呼び、終了コードと「その後に到達したか」を返す。
 // **なぜ子プロセスなのか**: process.exit の有無は戻り値に現れないので、同じプロセス内では確かめられない
@@ -492,83 +518,114 @@ const BENCH_PAYLOADS: Readonly<
 
 describe('benchOutputProblems', () => {
   // ベンチが実際に出す形 (npm 自身の行が前後に混ざる)
-  const stdout = ['', '> agent-ops@0.1.0 bench:usage', '', '%s', ''].join('\n');
-  // 基準を満たした 1 回ぶんの出力
-  const ok = stdout.replace(
-    '%s',
-    JSON.stringify({ bench: 'usage-aggregate', slowestMs: 13, limitMs: 1000, passed: true }),
-  );
-  // 判定に渡す共通の引数
-  const fields = { valueField: 'slowestMs', limitField: 'limitMs' } as const;
+  const withLines = (json: string): string =>
+    ['', '> agent-ops@0.1.0 bench:usage', '', json, ''].join('\n');
+  // 基準を満たした 1 回ぶんの結果
+  const okJson = JSON.stringify({
+    bench: 'usage-aggregate',
+    slowestMs: 13,
+    limitMs: 1000,
+    passed: true,
+  });
+  // 判定に渡す共通の引数 (**上限は正本から渡す** — ベンチの出力から読むと独立な検証にならない)
+  const fields = { valueField: 'slowestMs', limitField: 'limitMs', limit: 1000 } as const;
+  // 1 回ぶんの判定を短く書くための包み
+  const problemsFor = (stdout: string, status = 0): string[] =>
+    benchOutputProblems({ label: 'usage-aggregate', status, stdout, ...fields });
 
   it('基準を満たした出力なら問題なし', () => {
-    // 終了コード 0・ラベル一致・passed: true・実測値が上限以内
-    expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: ok, ...fields }),
-    ).toEqual([]);
+    // 終了コード 0・ラベル一致・passed: true・実測値が上限以内・上限が正本と一致
+    expect(problemsFor(withLines(okJson))).toEqual([]);
   });
 
   it('終了コードが 0 でなければ落とす', () => {
     // ベンチ自身が理由を出しているので、ここでは事実だけを残す
-    expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 1, stdout: ok, ...fields }),
-    ).toHaveLength(1);
+    expect(problemsFor(withLines(okJson), 1)).toHaveLength(1);
   });
 
   it('結果の JSON が無ければ落とす', () => {
     // **これがゲートの要点** — 「何も出さずに exit 0」を緑にしない (fail-closed)
-    expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: '', ...fields }),
-    ).toEqual(['ベンチ usage-aggregate が結果の JSON を出していません']);
+    expect(problemsFor('')).toEqual(['ベンチ usage-aggregate が結果の JSON を出していません']);
   });
 
-  it('別のベンチの結果なら落とす', () => {
+  it('別のベンチの結果しか無ければ落とす', () => {
     // ラベルの取り違え (片方のベンチを 2 回流す形) を落とす
-    const other = stdout.replace(
-      '%s',
-      JSON.stringify({ bench: 'proxy-latency', slowestMs: 13, limitMs: 1000, passed: true }),
+    const other = JSON.stringify({
+      bench: 'proxy-latency',
+      slowestMs: 13,
+      limitMs: 1000,
+      passed: true,
+    });
+    expect(problemsFor(withLines(other))).toContain(
+      'ベンチ usage-aggregate の結果のラベルが "proxy-latency" です',
     );
-    expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: other, ...fields }).length,
-    ).toBeGreaterThan(0);
+  });
+
+  it('同じラベルの結果が 2 本あれば落とす', () => {
+    // **「読めた最後の行を採る」形だと、本物の失敗行のあとに嘘の合格行を足すだけで後勝ちした** (実測)
+    const lying = JSON.stringify({
+      bench: 'usage-aggregate',
+      slowestMs: 9999,
+      limitMs: 1000,
+      passed: false,
+    });
+    expect(problemsFor([lying, okJson].join('\n'))).toEqual([
+      'ベンチ usage-aggregate の結果の JSON が 2 本あります',
+    ]);
   });
 
   it('passed が true でなければ落とす', () => {
     // ベンチ側の判定をそのまま尊重する
-    const failed = ok.replace('"passed":true', '"passed":false');
-    expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: failed, ...fields }),
-    ).toContain('ベンチ usage-aggregate が受け入れ基準を満たしていません');
+    expect(problemsFor(withLines(okJson.replace('"passed":true', '"passed":false')))).toContain(
+      'ベンチ usage-aggregate が受け入れ基準を満たしていません',
+    );
   });
 
   it('passed が true でも実測値が上限を超えていれば落とす', () => {
     // **`passed` の写しにしない** — passed だけを見ると「true を出すだけ」の変異が素通りする
-    const lying = stdout.replace(
-      '%s',
-      JSON.stringify({ bench: 'usage-aggregate', slowestMs: 1001, limitMs: 1000, passed: true }),
+    const lying = JSON.stringify({
+      bench: 'usage-aggregate',
+      slowestMs: 1001,
+      limitMs: 1000,
+      passed: true,
+    });
+    expect(problemsFor(withLines(lying))).toContain(
+      'ベンチ usage-aggregate の slowestMs が上限を超えています (1001 > 1000)',
     );
-    expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: lying, ...fields }),
-    ).toContain('ベンチ usage-aggregate の slowestMs が上限を超えています (1001 > 1000)');
   });
 
-  it('実測値か上限が数値でなければ落とす', () => {
+  it('出力の上限が正本と違えば落とす', () => {
+    // **上限をベンチの出力から読むと比較の両辺が同じ出力に由来する** — 実測で、ベンチ側の
+    // limitMs を 100 倍にするだけで全件緑のまま基準が 100 倍に緩んだ
+    const inflated = JSON.stringify({
+      bench: 'usage-aggregate',
+      slowestMs: 13,
+      limitMs: 100_000,
+      passed: true,
+    });
+    expect(problemsFor(withLines(inflated))).toContain(
+      'ベンチ usage-aggregate の limitMs が受け入れ基準と違います (100000 ≠ 1000)',
+    );
+  });
+
+  it('実測値が数値でなければ落とす', () => {
     // 項目を消すだけで比較を飛ばせないようにする (fail-closed)
-    const missing = stdout.replace(
-      '%s',
-      JSON.stringify({ bench: 'usage-aggregate', limitMs: 1000, passed: true }),
+    const missing = JSON.stringify({ bench: 'usage-aggregate', limitMs: 1000, passed: true });
+    expect(problemsFor(withLines(missing))).toContain(
+      'ベンチ usage-aggregate の結果に数値の slowestMs がありません',
     );
-    expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: missing, ...fields }),
-    ).toContain('ベンチ usage-aggregate の結果に数値の slowestMs / limitMs がありません');
   });
 
-  it('壊れた JSON の行があっても最後の正しい結果を読む', () => {
-    // 進捗の出力に `{` で始まる行が混ざっても落ちない
-    const noisy = ['{ これは JSON ではない', ok].join('\n');
+  it('比較の材料が指定されていなければ落とす', () => {
+    // 呼び出し側で 1 つ省くだけで比較が無音で消えないようにする
     expect(
-      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: noisy, ...fields }),
-    ).toEqual([]);
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: withLines(okJson) }),
+    ).toContain('ベンチ usage-aggregate の検査に実測値・上限の指定がありません');
+  });
+
+  it('無関係な JSON の行が混ざっていても正しい結果を読む', () => {
+    // 進捗の出力に `{` で始まる行が混ざっても、ラベルで選ぶので誤って赤にならない
+    expect(problemsFor(['{ これは JSON ではない', '{}', okJson].join('\n'))).toEqual([]);
   });
 });
 
@@ -602,6 +659,17 @@ describe('benchCriteriaFields', () => {
   it('基準ごとの読み取り項目を返す', () => {
     // 集計ベンチは slowestMs 1 つだけを読む
     expect(benchCriteriaFields('usage-aggregate')).toEqual([{ fields: ['slowestMs'] }]);
+    // **プロキシ側も期待値を書く** — 自己整合 (表と payload を同時に直す) だけだと、
+    // 基準を無害な項目へ差し替えても整合したまま通る
+    expect(benchCriteriaFields('proxy-latency')).toEqual([
+      { fields: ['warmupRequests', 'warmupDirectRequests'] },
+      { fields: ['warmupRequests', 'warmupProxiedRequests'] },
+      { fields: ['warmupSlowestMs'] },
+      { fields: ['non2xx'] },
+      { fields: ['directRequests'] },
+      { fields: ['proxiedRequests'] },
+      { fields: ['addedMs'] },
+    ]);
   });
 
   it('未知のラベルは落とす', () => {
@@ -715,6 +783,17 @@ describe('runBench', () => {
     expect(run.errors.join('\n')).toContain(`[bench:${label}]`);
     // そのうえで非 0 で終わる (ゲートは終了コードしか見ない)
     expect(run.exitCode).toBe(1);
+  });
+
+  it('計測結果が名乗るラベルと passed は上書きする', async () => {
+    // **payload 側が同じ項目を持っていても、ゲートが読む値はこちらが決める**
+    const run = await captureBenchRun('usage-aggregate', async () => ({
+      ...BENCH_PAYLOADS['usage-aggregate'].ok,
+      bench: 'proxy-latency',
+      passed: false,
+    }));
+    // 名乗るラベルは呼び出し時のもの、passed は判定から導いたもの
+    expect(JSON.parse(run.printed[0])).toMatchObject({ bench: 'usage-aggregate', passed: true });
   });
 
   it('計測そのものが失敗したら理由を出して非 0 終了', async () => {
@@ -992,11 +1071,28 @@ describe('判定の結線', () => {
   // `Object.defineProperty(process, …)`) は「許可リストに無い」という 1 つの理由で落ちる
   const ALLOWED_PROCESS_USES = new Set(['process.env', 'process.cwd', 'process.execPath']);
 
-  // ベンチのトップレベルの変数初期化子で呼んでよいもの。**定数を組み立てるだけの純粋な呼び出し**に限る。
+  // ベンチが取り込んでよい相対でない指定子。**`node:*` をまとめて許さない** —
+  // 実測で `import { exit } from 'node:process'` は `processUses` に 1 件も現れず、
+  // 偽の結果 JSON を出してから `exit(0)` するだけでゲートが緑になった (773 件すべて緑)。
+  // **エントリを足す差分は、その依存が import の副作用や終了経路を持たないかをレビューで確認する**
+  const ALLOWED_BENCH_PACKAGES = new Set([
+    'dotenv/config',
+    'autocannon',
+    'node:child_process',
+    'node:fs',
+    'node:https',
+    'node:net',
+    'node:os',
+    'node:path',
+  ]);
+
+  // ベンチのトップレベルの変数初期化子で呼んでよいもの。**定数を組み立てるだけの純粋な呼び出し**に限り、
+  // **このファイルで宣言した関数は載せない** — 呼び出し先の本体は `topLevelInitializerEffects` の
+  // 視界の外なので、ローカルの薄い包みを許すとその本体へ副作用を書けてしまう (実測: 許可リストに
+  // 載っていた `intFromEnv` の本体に 1 行足すと、専用 DB のガードより前に 3 回走った)。
   // **エントリを足す差分は、その呼び出しが副作用を持たないかをレビューで必ず確認する**
-  // (この表が緩むと、専用 DB のガードより前に何でも走らせられる)
   const ALLOWED_TOP_LEVEL_INITIALIZER_CALLS = new Set([
-    'intFromEnv',
+    'intFromEnvValue',
     'join',
     'process.cwd',
     'JSON.stringify',
@@ -1048,6 +1144,15 @@ describe('判定の結線', () => {
           ALLOWED_TOP_LEVEL_KINDS.has(kind),
           `${bench} のトップレベルに ${kind} がある (受け入れ基準の実行を条件付きにできる)`,
         ).toBe(true);
+      // **トップレベルの実引数はリテラルか素の識別子だけ。** 実引数は呼び出しより先に評価されるので、
+      // `requireContractDatabase(副作用のある関数())` と書けば専用 DB のガードより前に必ず走る
+      // (実測で 773 件すべて緑のまま、ガードより先に同期のファイル書き込みが実行された)
+      for (const call of topLevelCallArgumentKinds(path))
+        for (const kind of call.kinds)
+          expect(
+            kind === 'literal' || kind === 'identifier',
+            `${bench} の ${call.name} にリテラルでも識別子でもない実引数がある`,
+          ).toBe(true);
       // `process` は純粋な読み取りだけ。**禁じたい綴りを並べない** — 実測で
       // `process['exit'](0)` も `const { exit } = process;` も `process.on('exit', …)` も
       // 全件緑のまま素通りし、受け入れ基準を 1 つも掛けずに exit 0 にできた
@@ -1069,11 +1174,19 @@ describe('判定の結線', () => {
       // `import './preflight.mjs';` を 1 行足すと、全件緑のまま出力ゼロで exit 0 になった
       // (ESM は import した側のどのトップレベル文よりも先に評価される)
       for (const specifier of foreignModuleSpecifiers(path)) {
-        // 相対パスでなければ node: か npm パッケージ (副作用は package.json 側の関心事)
-        if (!specifier.startsWith('.')) continue;
+        // 相対でない指定子は許可リストで絞る。**「相対でなければ許す」では足りない** —
+        // 実測で `package.json` の `imports` を使った `#warmup` が素通りし、その先に置いた
+        // `process.exit(0)` でガードもベンチも走らないまま exit 0 になった (773 件すべて緑)
+        if (!specifier.startsWith('.')) {
+          expect(
+            ALLOWED_BENCH_PACKAGES.has(specifier),
+            `${bench} が ${specifier} を取り込んでいる (import の副作用や終了経路を持ち込める)`,
+          ).toBe(true);
+          continue;
+        }
         // 解決先がアプリ本体の中なら許す (ベンチは本番のアダプタと結線を使う)
         expect(
-          resolve(SCRIPTS_DIR, specifier).startsWith(join(SCRIPTS_DIR, '..', 'src') + sep),
+          resolve(dirname(path), specifier).startsWith(join(SCRIPTS_DIR, '..', 'src') + sep),
           `${bench} が ${specifier} を取り込んでいる (import の副作用で判定を飛ばせる)`,
         ).toBe(true);
       }
@@ -1092,6 +1205,17 @@ describe('判定の結線', () => {
     }
   });
 
+  // bench-criteria が export する関数のうち、**受け入れ基準の判定ではない**もの。
+  // 判定は残らず BENCH_CRITERIA のどれかで使われていなければならず、外すには export ごと消すしかない
+  const JUDGE_EXCLUSIONS: Readonly<Record<string, string>> = {
+    intFromEnvValue: '環境変数の読み取り (基準ではなく入力の検証)',
+    isBenchLabel: 'ラベルが表にあるかの問い合わせ',
+    benchCriteriaFields: '基準の読み取り項目を検査へ渡すための導出',
+    benchCriteriaJudges: 'この検査そのものが使う導出',
+    judgeBenchPayload: '基準を掛ける側 (判定を呼ぶ人)',
+    runBench: '計測・出力・終了コードの入口',
+  };
+
   it('bench-criteria の判定はすべてどれかの基準で使われている', async () => {
     // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した判定が黙って外れる)
     const criteria = await importSharedModule('bench-criteria.mjs');
@@ -1099,18 +1223,86 @@ describe('判定の結線', () => {
     const used = benchCriteriaJudges();
     // 1 つも読めなければ導出が壊れている (fail-closed)
     expect(used.size, '基準に使われている判定が 0 件').toBeGreaterThan(0);
-    // 判定の命名規約 (`*Problem`) で export を絞り、すべてが使われていることを求める。
-    // **これが無いと、基準を表から削り挙動の表の行も同時に削るだけで全件緑になり、
-    // 痕跡はテスト件数の減少だけだった** (実測)。外すには export ごと消すしかなくする
+    // **命名 (`*Problem`) で絞らない** — 実測で、判定を `non2xxGuard` へ改名して基準の行と
+    // 挙動の表の行を同時に削ると、赤 0 件・痕跡は it.each の 2 件減だけで通った。
+    // 判定でないものは理由付きの除外表に登録する (1 行増える差分がレビューに出る)
     const judgements = Object.entries(criteria).filter(
       (entry): entry is [string, (...args: never[]) => unknown] =>
-        typeof entry[1] === 'function' && entry[0].endsWith('Problem'),
+        typeof entry[1] === 'function' && JUDGE_EXCLUSIONS[entry[0]] === undefined,
     );
     // 1 つも無ければ導出が壊れている (fail-closed)
     expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
     for (const [name, judge] of judgements)
       expect(used.has(judge), `${name} はどの基準にも使われていない`).toBe(true);
+    // 除外表の中身も確かめる (実在しない名前で表を膨らませない / 理由の無い登録を許さない)
+    for (const [name, reason] of Object.entries(JUDGE_EXCLUSIONS)) {
+      expect(typeof criteria[name], `除外表の ${name} は実在しない`).toBe('function');
+      expect(reason.trim().length, `除外表の ${name} に理由が無い`).toBeGreaterThan(0);
+    }
   });
+
+  it('ゲートはベンチごとに結果の JSON を検査する', () => {
+    // 最新 Step のゲート (ベンチを流すのはここだけ)
+    const gate = join(SCRIPTS_DIR, 'gate-step2.mjs');
+    // 0 本なら空振りで緑になる (fail-closed)
+    expect(Object.keys(BENCH_LABELS).length, 'ベンチが 1 本も無い').toBeGreaterThan(0);
+    for (const label of Object.values(BENCH_LABELS)) {
+      // **新しい最終防衛線も、他の結線と同じ強さで見張る** — ここが無いと、ゲートから
+      // `benchOutputProblems` の呼び出しを丸ごと外して終了コードだけを見る形へ戻しても
+      // 赤が 1 件も出なかった (実測で 773 件すべて緑・件数も不変)
+      expect(
+        callsFunction(gate, 'exitIfFailures', {
+          atTopLevel: true,
+          importedFrom: 'run-npm-steps.mjs',
+          argument: {
+            index: 1,
+            callOf: ['benchOutputProblems'],
+            importedFrom: 'gate-report.mjs',
+            // ラベルはそのベンチのもので、上限との独立比較に要る 3 項目が揃っていること
+            objectArgument: {
+              index: 0,
+              literals: { label },
+              keys: ['label', 'valueField', 'limitField', 'limit'],
+            },
+          },
+        }),
+        `gate-step2.mjs が ${label} の結果を benchOutputProblems で検査していない`,
+      ).toBe(true);
+    }
+  });
+
+  it('共有モジュールは import しただけでプロセスを終わらせない', () => {
+    // 共有モジュールの一覧 (0 本なら導出が壊れている)
+    const modules = sharedModuleNames();
+    expect(modules.length, '共有モジュールが 1 つも無い').toBeGreaterThan(0);
+    for (const name of modules) {
+      // **子プロセスで import する。** ベンチ側の許可リストはベンチ 1 ファイルしか見ないので、
+      // 共有モジュールの先頭に `if (process.env.VITEST === undefined) process.exit(0);` を
+      // 1 行足すだけで、ベンチが何も出さずに exit 0 になった (実測で 773 件すべて緑)。
+      // vitest の中では `VITEST` が立っているので、同じプロセスでは気付けない
+      const stdout = importsWithoutExiting(join(SCRIPTS_DIR, 'lib', name));
+      // import の先へ進めていること (途中で exit していれば印が出ない)
+      expect(stdout, `${name} が import の時点でプロセスを終わらせる`).toContain('REACHED_END');
+    }
+  });
+
+  // そのベンチを起動する npm スクリプト名を package.json から引く (ラベルの写しを作らない)
+  const benchNpmScriptOf = (bench: string): string => {
+    // package.json の scripts
+    const scripts = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts as Record<
+      string,
+      string
+    >;
+    // そのファイルを起動している bench: スクリプトを探す
+    const found = Object.entries(scripts).find(
+      ([name, command]) =>
+        name.startsWith('bench:') &&
+        new RegExp(`(?:^|\\s)scripts/${bench.replace('.', '\\.')}(?:\\s|$)`).test(command),
+    );
+    // 見つからなければ導出が壊れている (fail-closed)
+    expect(found, `${bench} を起動する npm スクリプトが無い`).toBeDefined();
+    return found?.[0] ?? '';
+  };
 
   it('ベンチは専用 DB のガードをトップレベルで呼ぶ', () => {
     // ベンチは全テーブルを TRUNCATE するので、開発 DB を指していないかのガードを飛ばせない。
@@ -1121,12 +1313,16 @@ describe('判定の結線', () => {
     // 0 本なら空振りで緑になる (fail-closed)
     expect(benchScriptNames().length, 'ベンチが 1 本も無い').toBeGreaterThan(0);
     for (const bench of benchScriptNames()) {
+      // そのベンチを起動する npm スクリプト名 (ガードの文言に出るラベルの正本)
+      const script = benchNpmScriptOf(bench);
       expect(
         callsFunction(join(SCRIPTS_DIR, bench), 'requireContractDatabase', {
           atTopLevel: true,
           importedFrom: REQUIRED_BENCH_MODULE,
+          // **ラベルを文字列リテラルで固定する** — 式を渡せると、その式がガードより先に走る
+          literalArgument: { index: 0, value: script },
         }),
-        `${bench} が専用 DB のガードをトップレベルで呼んでいない`,
+        `${bench} が requireContractDatabase('${script}') をトップレベルで呼んでいない`,
       ).toBe(true);
     }
   });

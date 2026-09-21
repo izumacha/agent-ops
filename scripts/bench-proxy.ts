@@ -27,16 +27,11 @@ import { PROXY_ADDED_LATENCY_P95_MAX_MS } from './lib/step2-criteria.mjs';
 import { intFromEnvValue, runBench } from './lib/bench-criteria.mjs';
 import { createPrismaClient } from '../src/lib/prisma-client';
 import { displayPrefix, hashSecret, issueSecret } from '../src/lib/tokens';
+import { upstreamEnvNames } from '../src/lib/proxy/upstream';
 import { Plan, Provider } from '../src/domain/types';
 
-// 環境変数を 0 以上の整数として読む (判定は scripts/lib/bench-criteria.mjs が持つ)
-function intFromEnv(name: string, fallback: number, minimum: number): number {
-  // 生の値を渡して判定させる (読めなければ例外)
-  return intFromEnvValue(name, process.env[name], fallback, minimum);
-}
-
 // 負荷を掛ける秒数 (1 本あたり)
-const DURATION_SECONDS = intFromEnv('BENCH_DURATION', 10, 1);
+const DURATION_SECONDS = intFromEnvValue('BENCH_DURATION', process.env.BENCH_DURATION, 10, 1);
 // **同時接続は 1 本にして逐次で測る。** 受け入れ基準が見たいのは「中継したぶん 1 件あたり
 // 何ミリ秒増えるか」で、待ち行列の長さではない。実測で 3 通り試した結果がこの選択の理由:
 //   - 10 接続・無制限: 追加 72ms。autocannon は常に 10 件を飛ばし続けるので必ず飽和し、
@@ -45,11 +40,11 @@ const DURATION_SECONDS = intFromEnv('BENCH_DURATION', 10, 1);
 //     autocannon 自身のペース配分 (1 秒ごとにまとめて発射する) の待ち時間が混ざる
 //   - 1 接続・無制限 (これ): 追加 11ms。待ち行列もペース配分も無いので、増えた時間だけが出る
 // 同時実行時の振る舞いは Step7 の負荷試験 (同時 100 リクエストでエラー率 < 1%) が見る
-const CONNECTIONS = intFromEnv('BENCH_CONNECTIONS', 1, 1);
+const CONNECTIONS = intFromEnvValue('BENCH_CONNECTIONS', process.env.BENCH_CONNECTIONS, 1, 1);
 // 計測の前に捨てて回す**件数** (**判定には使わない**。理由は下の measureLatency のコメント)。
 // 秒ではなく件数で決めるのは、吸収したい初回コストが「最初の数十件」という**件数の現象**だから。
 // 秒で決めると遅い機械ほど捨てられる件数が減り、いちばん必要な場所で効かなくなる
-const WARMUP_REQUESTS = intFromEnv('BENCH_WARMUP', 200, 0);
+const WARMUP_REQUESTS = intFromEnvValue('BENCH_WARMUP', process.env.BENCH_WARMUP, 200, 0);
 // 中継するモデル (料金表にある値)
 const MODEL = 'claude-sonnet-4-6';
 // アプリの起動を待つ上限 (ミリ秒)
@@ -178,6 +173,18 @@ async function seedApiKey(): Promise<string> {
 }
 
 // アプリ (本番ビルド) を起動して、応答するようになるまで待つ
+// 上流の接続先と資格情報を、全プロバイダぶんローカルのスタブへ向ける
+function stubUpstreamEnv(upstreamPort: number): Record<string, string> {
+  // 結線表から導いた名前に、スタブの URL か固定のダミーキーを入れる
+  return Object.fromEntries(
+    upstreamEnvNames().map((name) => [
+      name,
+      // 名前が接続先なら URL、そうでなければ資格情報なのでダミー
+      name.endsWith('_BASE_URL') ? `https://127.0.0.1:${upstreamPort}` : 'bench-upstream-key',
+    ]),
+  );
+}
+
 async function startApp(port: number, upstreamPort: number, caPath: string): Promise<ChildProcess> {
   // 本番ビルドが無ければ測れない
   if (!existsSync(STANDALONE_SERVER)) {
@@ -189,12 +196,11 @@ async function startApp(port: number, upstreamPort: number, caPath: string): Pro
       ...process.env,
       PORT: String(port),
       HOSTNAME: '127.0.0.1',
-      // 上流はローカルのスタブ (https)。**測らない側のプロバイダも必ず上書きする** —
-      // 素通しにすると、OpenAI 経路を測るベンチを足した人が開発機の実キーで本物を叩いて課金する
-      ANTHROPIC_BASE_URL: `https://127.0.0.1:${upstreamPort}`,
-      ANTHROPIC_API_KEY: 'bench-upstream-key',
-      OPENAI_BASE_URL: `https://127.0.0.1:${upstreamPort}`,
-      OPENAI_API_KEY: 'bench-upstream-key',
+      // 上流はローカルのスタブ (https)。**全プロバイダぶんを結線表から導いて上書きする** —
+      // 一覧を書き写すと、プロバイダを足した人が上書きを書き忘れ、開発機の実キーで本物を叩いて課金する
+      ...stubUpstreamEnv(upstreamPort),
+      // 計測はテナント管理 API を使わないので、開発機の .env にある値を子へ渡さない (最小権限)
+      PLATFORM_ADMIN_TOKEN: '',
       // スタブの自己署名証明書を信頼させる (この 1 枚だけ)
       NODE_EXTRA_CA_CERTS: caPath,
     },

@@ -162,52 +162,75 @@ export function evaluateStep2Report({
  * 結果の JSON を読めば、静的解析が捉えられなかった形もまとめて落ちる。
  * **判定そのものはベンチ側 (`passed`) を信用せず、上限との比較もここで独立に行う** —
  * `passed` だけを見ると、`passed: true` を出すだけの変異が素通りする。
- * @param {{ label: string, status: number, stdout: string, limitField?: string, valueField?: string }} input
+ * **上限は呼び出し側 (受け入れ基準の正本 scripts/lib/step2-criteria.mjs) から受け取る** —
+ * ベンチの出力から読むと比較の両辺が同じ信頼できない出力に由来し、独立な検証にならない。
+ * 出力にも載っている上限は、正本と一致することまで確かめる (食い違いを落とす)。
+ * @param {{ label: string, status: number, stdout: string, valueField?: string, limitField?: string, limit?: number }} input
  *   label = 期待するベンチのラベル / status = 終了コード / stdout = 標準出力 /
- *   valueField・limitField = 突き合わせる実測値と上限の項目名 (省略時は比較しない)
+ *   valueField = 突き合わせる実測値の項目名 / limitField = 出力に載る上限の項目名 /
+ *   limit = 正本の上限 (3 つ揃ったときだけ比較する)
  * @returns {string[]} 満たしていない基準の文言 (すべて満たしていれば空配列)
  */
-export function benchOutputProblems({ label, status, stdout, valueField, limitField }) {
+export function benchOutputProblems({ label, status, stdout, valueField, limitField, limit }) {
   // 見つかった問題
   const failures = [];
   // 終了コードが 0 でなければ、理由はベンチ自身がエラー出力へ出している
   if (status !== 0) failures.push(`ベンチ ${label} が失敗しました (終了コード ${status})`);
-  // 標準出力の行のうち、JSON のオブジェクトとして読めた最後のものを結果とみなす
-  let result = null;
+  // **比較の材料が揃っていなければ落とす** (呼び出し側で 1 つ省くだけで比較が無音で消えないように)
+  if (typeof valueField !== 'string' || typeof limitField !== 'string' || typeof limit !== 'number')
+    failures.push(`ベンチ ${label} の検査に実測値・上限の指定がありません`);
+  // 標準出力の行のうち、JSON のオブジェクトとして読めたものを集める
+  const parsed = [];
   for (const line of stdout.split('\n')) {
     // 空行や npm 自身の出力は飛ばす
     const trimmed = line.trim();
     if (!trimmed.startsWith('{')) continue;
     // JSON として読めたものだけを覚える (読めない行は結果ではない)
     try {
-      const parsed = JSON.parse(trimmed);
-      if (typeof parsed === 'object' && parsed !== null) result = parsed;
+      const value = JSON.parse(trimmed);
+      if (typeof value === 'object' && value !== null) parsed.push(value);
     } catch {
       // 結果ではない行なので無視する (理由を残す必要は無い)
       continue;
     }
   }
-  // 1 行も出ていなければ、ベンチが計測せずに終わっている (fail-closed)
-  if (result === null) {
-    failures.push(`ベンチ ${label} が結果の JSON を出していません`);
+  // **そのベンチのラベルを名乗る行だけを結果の候補にする。**
+  // 「読めた最後の行を採る」形だと、本物の失敗行のあとに嘘の合格行を 1 行足すだけで
+  // 後勝ちして通り、逆に無関係な `{}` が 1 行混ざるだけで理由の読めない赤になった (実測)
+  const candidates = parsed.filter((value) => value.bench === label);
+  // 1 本も無ければ、計測せずに終わっているか別のベンチの結果を出している (fail-closed)
+  if (candidates.length === 0) {
+    failures.push(
+      parsed.length === 0
+        ? `ベンチ ${label} が結果の JSON を出していません`
+        : `ベンチ ${label} の結果のラベルが ${JSON.stringify(parsed[parsed.length - 1].bench)} です`,
+    );
     return failures;
   }
-  // 出した結果が別のベンチのものなら取り違えている
-  if (result.bench !== label)
-    failures.push(`ベンチ ${label} の結果のラベルが ${JSON.stringify(result.bench)} です`);
+  // 2 本以上あるのは、嘘の結果を重ね書きしている形なので通さない
+  if (candidates.length > 1) {
+    failures.push(`ベンチ ${label} の結果の JSON が ${candidates.length} 本あります`);
+    return failures;
+  }
+  // 唯一の結果
+  const result = candidates[0];
   // ベンチ自身の判定
   if (result.passed !== true) failures.push(`ベンチ ${label} が受け入れ基準を満たしていません`);
-  // **上限との比較をゲート側でも独立に行う** (`passed` の写しではなく、出た数字そのものを見る)
-  if (valueField !== undefined && limitField !== undefined) {
-    // 実測値と上限
-    const value = result[valueField];
-    const limit = result[limitField];
-    // どちらも数値として読めなければ判定できない (黙って飛ばさない)
-    if (typeof value !== 'number' || typeof limit !== 'number')
-      failures.push(`ベンチ ${label} の結果に数値の ${valueField} / ${limitField} がありません`);
-    else if (value > limit)
-      failures.push(`ベンチ ${label} の ${valueField} が上限を超えています (${value} > ${limit})`);
-  }
+  // 材料が揃っていなければここまで (理由は上で積んである)
+  if (typeof valueField !== 'string' || typeof limitField !== 'string' || typeof limit !== 'number')
+    return failures;
+  // 実測した値
+  const value = result[valueField];
+  // 数値として読めなければ判定できない (黙って飛ばさない)
+  if (typeof value !== 'number')
+    failures.push(`ベンチ ${label} の結果に数値の ${valueField} がありません`);
+  else if (value > limit)
+    failures.push(`ベンチ ${label} の ${valueField} が上限を超えています (${value} > ${limit})`);
+  // 出力に載っている上限が正本と食い違っていれば、どちらかが古い
+  if (result[limitField] !== limit)
+    failures.push(
+      `ベンチ ${label} の ${limitField} が受け入れ基準と違います (${JSON.stringify(result[limitField])} ≠ ${limit})`,
+    );
   // 判定結果
   return failures;
 }

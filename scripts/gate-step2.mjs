@@ -28,7 +28,11 @@ import {
 // 受け入れ基準の判定 (純粋関数。挙動は tests/gate-scripts.test.ts が固定する)
 import { benchOutputProblems, evaluateStep2Report } from './lib/gate-report.mjs';
 // しきい値とテスト名の接頭辞 (ベンチと共有する唯一の定義)
-import { PRICE_TEST_PREFIX } from './lib/step2-criteria.mjs';
+import {
+  PRICE_TEST_PREFIX,
+  PROXY_ADDED_LATENCY_P95_MAX_MS,
+  USAGE_AGGREGATE_MAX_MS,
+} from './lib/step2-criteria.mjs';
 // Step1 の基準 (件数・RBAC 行列) を引き継ぐ。値を書き写さず、同じ定義を読む
 import {
   ACTIONS,
@@ -147,6 +151,7 @@ exitIfFailures(
     ...runNpmCapturingStdout(['run', 'bench:usage']),
     valueField: 'slowestMs',
     limitField: 'limitMs',
+    limit: USAGE_AGGREGATE_MAX_MS,
   }),
 );
 banner('ベンチ: プロキシの追加遅延');
@@ -157,6 +162,7 @@ exitIfFailures(
     ...runNpmCapturingStdout(['run', 'bench:proxy']),
     valueField: 'addedMs',
     limitField: 'limitMs',
+    limit: PROXY_ADDED_LATENCY_P95_MAX_MS,
   }),
 );
 

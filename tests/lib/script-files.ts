@@ -265,6 +265,37 @@ export function topLevelCallNames(path: string): string[] {
 }
 
 /**
+ * モジュールのトップレベルに**式文として**置かれた呼び出しの、実引数の形を返す。
+ * 形は `literal`（文字列・数値などのリテラル）/ `identifier`（素の識別子）/ `other`（それ以外）。
+ * **なぜ要るか**: 実引数は呼び出しより先に評価されるので、`requireContractDatabase(f())` の
+ * ように式を置けば、fail-closed のガードより前に必ず任意のコードが走る。実測で、同期に
+ * ファイルを書く関数を実引数に置いた変異は 773 件すべて緑のまま、ガードより前に実行された
+ * @param path 対象ファイルの絶対パス
+ * @returns 呼び出しごとの名前と実引数の形 (現れる順)
+ */
+export function topLevelCallArgumentKinds(path: string): { name: string; kinds: string[] }[] {
+  // トップレベルの式文の呼び出しを順に見る
+  return topLevelStatementCalls(parseScript(path)).map((call) => ({
+    name: call.name,
+    // 実引数の形を判定する
+    kinds: call.args.map((argument) => {
+      // 文字列・数値・真偽値などのリテラル
+      if (
+        ts.isStringLiteral(argument) ||
+        ts.isNumericLiteral(argument) ||
+        argument.kind === ts.SyntaxKind.TrueKeyword ||
+        argument.kind === ts.SyntaxKind.FalseKeyword
+      )
+        return 'literal';
+      // 素の識別子 (関数を渡す形)
+      if (ts.isIdentifier(argument)) return 'identifier';
+      // それ以外 (呼び出し・三項・テンプレート…) は実行を伴いうる
+      return 'other';
+    }),
+  }));
+}
+
+/**
  * モジュールのトップレベルに並ぶ文の種類を、現れる順に返す (構文木の種類名)。
  * **なぜ要るか**: 「トップレベルの式文として呼んでいる」だけを見ていると、その**手前**に
  * `if (!process.env.BENCH_STRICT) process.exit(0);` を 1 行足すだけで、呼び出しは残したまま
@@ -314,8 +345,15 @@ export function processUses(path: string): string[] {
   const visit = (node: ts.Node): void => {
     // `process` という識別子への参照だけを見る
     if (ts.isIdentifier(node) && node.text === 'process') {
-      // 親が `process.<名前>` の形で、自分がその受け手なら、その名前まで含めて覚える
+      // 親の節点 (どう使われているかを知るため)
       const parent = node.parent;
+      // **「名前として書かれただけ」は参照ではない** — `x.process` のプロパティ名や
+      // `{ process: 'x' }` のキーまで数えると、無関係な項目名で直しようのない赤になる
+      const isName =
+        parent !== undefined &&
+        ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+          (ts.isPropertyAssignment(parent) && parent.name === node));
+      // 親が `process.<名前>` の形で、自分がその受け手なら、その名前まで含めて覚える
       if (
         parent !== undefined &&
         ts.isPropertyAccessExpression(parent) &&
@@ -323,7 +361,7 @@ export function processUses(path: string): string[] {
       )
         found.add(`process.${parent.name.text}`);
       // それ以外の形 (要素アクセス・別名束縛・引数渡し) は素の `process` として覚える
-      else found.add('process');
+      else if (!isName) found.add('process');
     }
     // 子を辿る
     ts.forEachChild(node, visit);
@@ -354,6 +392,11 @@ export function topLevelInitializerEffects(path: string): string[] {
   const found = new Set<string>();
   // 初期化子の中を辿る
   const visit = (node: ts.Node): void => {
+    // **関数の本体へは降りない** — 宣言しただけでは実行されないので、降りると普通のヘルパーを
+    // 置くたびに許可リストへの追加を強いられ、その名前が「本当のトップレベルの副作用」としても
+    // 許される (許可リストが緩む圧力になる)。呼ばれる側の本体は残る境界として受け入れる
+    if (ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isFunctionDeclaration(node))
+      return;
     // 呼び出しは呼び出し先の名前で覚える (読めない形は `<other>` として落とす)
     if (ts.isCallExpression(node)) {
       // 素の識別子か、受け手が識別子のメンバ式だけ名前として読める
@@ -563,7 +606,9 @@ export function describedNamesWithTests(path: string): string[] {
  *   `importedFrom` 由来であることを求める。`literalArgument` はその位置の実引数が指定した
  *   文字列リテラルそのものであることを求める (どのベンチがどの基準に掛かるかを取り違えさせない)。
  *   `identifierArgument` はその位置の実引数が指定した**素の識別子そのもの**であることを求める
- *   (本物を呼んでから値を丸める関数へ差し替える形を落とす)
+ *   (本物を呼んでから値を丸める関数へ差し替える形を落とす)。`argument.objectArgument` はその判定へ
+ *   渡すオブジェクトリテラルが、指定した項目を持ち (`keys`)、指定した項目が指定の文字列リテラルで
+ *   あること (`literals`) まで求める (どのベンチの結線かを取り違えさせない)
  * @returns 条件を満たす呼び出しがあれば true
  */
 export function callsFunction(
@@ -576,6 +621,11 @@ export function callsFunction(
       index: number;
       callOf: readonly string[];
       importedFrom: string;
+      objectArgument?: {
+        index: number;
+        literals: Readonly<Record<string, string>>;
+        keys: readonly string[];
+      };
     };
     literalArgument?: { index: number; value: string };
     identifierArgument?: { index: number; value: string };
@@ -634,6 +684,39 @@ export function callsFunction(
       !comesFromSharedModule(path, source, options.argument.importedFrom, argument.expression.text)
     )
       continue;
+    // 判定へ渡すオブジェクトの中身まで見るなら、その位置の実引数を読む
+    if (options.argument.objectArgument !== undefined) {
+      // 判定の呼び出しの、指定した位置の実引数
+      const target = argument.arguments[options.argument.objectArgument.index];
+      // オブジェクトリテラルでなければ中身を確かめられない
+      if (target === undefined || !ts.isObjectLiteralExpression(target)) continue;
+      // 書かれている項目の名前 (素の識別子か文字列のキーだけ読む)
+      const written = new Map<string, ts.Expression>();
+      for (const property of target.properties) {
+        // `名前: 値` の形だけを読む (短縮形・スプレッドは名前しか分からないので値を null にする)
+        if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name))
+          written.set(property.name.text, property.initializer);
+        else if (ts.isShorthandPropertyAssignment(property))
+          written.set(property.name.text, property.name);
+      }
+      // 求めた項目がすべて書かれていること
+      if (!options.argument.objectArgument.keys.every((key) => written.has(key))) continue;
+      // 文字列リテラルを求めた項目は、値まで一致すること
+      const literals = Object.entries(options.argument.objectArgument.literals);
+      if (
+        !literals.every(([key, value]) => {
+          // その項目の値
+          const written_value = written.get(key);
+          // 文字列リテラルで、中身まで一致すること
+          return (
+            written_value !== undefined &&
+            ts.isStringLiteral(written_value) &&
+            written_value.text === value
+          );
+        })
+      )
+        continue;
+    }
     // すべて満たした
     return true;
   }

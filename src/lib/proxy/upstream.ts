@@ -43,6 +43,17 @@ const UPSTREAMS: Readonly<Record<Provider, UpstreamConfig>> = {
   },
 };
 
+/**
+ * 上流の接続先と資格情報を決める環境変数の名前を、**全プロバイダぶん**返す。
+ * ベンチはここから名前を導いてローカルのスタブへ差し替える —— 一覧を書き写すと、
+ * プロバイダを足した人が上書きを書き忘れ、開発機の実キーで本物のベンダーを叩いて課金する。
+ * @returns 環境変数名の一覧 (接続先・資格情報の順で並ぶ)
+ */
+export function upstreamEnvNames(): string[] {
+  // 結線表からそのまま導く (写しを作らない)
+  return Object.values(UPSTREAMS).flatMap((config) => [config.baseUrlEnv, config.apiKeyEnv]);
+}
+
 // ループバック (自分自身) を指すホスト名。**非本番でだけ** http を許す相手
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
 

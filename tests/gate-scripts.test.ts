@@ -430,6 +430,24 @@ describe('判定の結線', () => {
     }
   });
 
+  it('判定を持つ Step のゲートは除外できない', async () => {
+    // **除外表に 1 行足せば、判定を「書き写す」のではなく「丸ごと消す」ことができた** (実測で
+    // 717 件緑・赤ゼロ。痕跡は件数が 1 減るだけ)。判定を消せば「判定を持たない」という除外理由も
+    // 構造の検査も文字どおり成り立ってしまうので、**その Step の判定が存在するかどうか**で切る
+    const judgements = await judgementNames();
+    // 1 つも無ければ導出が壊れている (fail-closed)
+    expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
+    for (const name of Object.keys(GATE_EXIT_EXCLUSIONS)) {
+      // そのゲートが本来使うべき判定
+      const own = ownJudgementOf(name);
+      // それが gate-report.mjs にあるなら、判定を持つ Step なので除外できない
+      expect(
+        own !== null && judgements.includes(own),
+        `${name} には ${own ?? '対応する'} 判定があるので除外できない`,
+      ).toBe(false);
+    }
+  });
+
   it('除外したゲートは判定を 1 つも持たない (理由が構造としても成り立っている)', async () => {
     // **理由の文字列だけでは裏打ちにならない。** もっともらしい理由を 1 行足すだけで、
     // そのゲートの結線の検査が黙って消える (実測: `gate-step2.mjs` を除外して
@@ -477,6 +495,18 @@ describe('判定の結線', () => {
     }
   });
 
+  // そのゲートが本来使うべき判定の名前 (`gate-step2.mjs` → `evaluateStep2Report`)。
+  // **判定を「どれか 1 つ」で済ませない** — `gate-step2.mjs` が `evaluateStep1Report` を呼ぶよう
+  // 差し替えると、Step2 固有の基準 (料金表の全モデル分のテストが存在し pass すること) が
+  // 丸ごと消えるのに、全件緑・件数も不変で通った (実測)。ロードマップのゲート運用ルール 2
+  // 「後 Step は前 Step の基準を引き継いだうえで自分の基準を足す」の後半が消える形
+  const ownJudgementOf = (gateName: string): string | null => {
+    // ファイル名から Step 番号を取り出す
+    const step = /^gate-step(\d+)\.mjs$/.exec(gateName)?.[1];
+    // 取り出せなければ対応する判定は決められない
+    return step === undefined ? null : `evaluateStep${step}Report`;
+  };
+
   // 判定 (gate-report.mjs が公開する関数) の名前。**一覧を手書きしない** — 足した判定が黙って外れる
   const judgementNames = async (): Promise<string[]> => {
     // モジュールの実体を読む
@@ -502,14 +532,20 @@ describe('判定の結線', () => {
       //   (c) import をやめ、**同名のローカル no-op** をその場で宣言する
       //   (d) 一度も呼ばれない関数の中へ移す
       // そこで 4 つまとめて要求する: **トップレベルの式文**として (b)(d)、
-      // **共有モジュールから取り込んだ名前**で (c)、**判定の戻り値で束縛された引数**を渡して (a)
+      // **共有モジュールから取り込んだ名前**で (c)、**判定の呼び出しそのもの**を渡して (a)。
+      // 渡してよい判定は**その Step のもの 1 つに絞る** — 判定が存在しない Step
+      // (まだ書かれていない) のときだけ、全判定のどれかを許す (新しい Step の判定を
+      // 足し忘れたら自動でこの緩い側へ落ちるので、検査が行き止まりにならない)
+      const own = ownJudgementOf(name);
+      // その Step の判定が実在するなら、それだけを許す
+      const allowed = own !== null && judgements.includes(own) ? [own] : judgements;
       expect(
         callsFunction(join(SCRIPTS_DIR, name), 'exitIfFailures', {
           atTopLevel: true,
           importedFrom: 'run-npm-steps.mjs',
-          argument: { index: 1, callOf: judgements, importedFrom: 'gate-report.mjs' },
+          argument: { index: 1, callOf: allowed, importedFrom: 'gate-report.mjs' },
         }),
-        `${name} が exitIfFailures を判定結果そのもので呼んでいない`,
+        `${name} が ${allowed.join(' / ')} の結果そのもので exitIfFailures を呼んでいない`,
       ).toBe(true);
     },
   );
@@ -550,7 +586,7 @@ describe('判定の結線', () => {
     expect(checked, '判定を 1 つも検査していない').toBeGreaterThan(0);
   });
 
-  it('ベンチは bench-criteria の判定を全部呼ぶ (取り込みごと消す形も落とす)', async () => {
+  it('bench-criteria の判定はどれかのベンチが必ず呼ぶ (取り込みごと消す形も落とす)', async () => {
     // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した関数が黙って外れる)
     const criteria = await importSharedModule('bench-criteria.mjs');
     // 関数として公開されているものが判定 (定数は除く)
@@ -564,14 +600,14 @@ describe('判定の結線', () => {
     );
     // 1 本も無ければ導出が壊れている
     expect(benches.length, '判定を使うベンチが 1 本も無い').toBeGreaterThan(0);
-    for (const bench of benches) {
-      for (const name of judgements) {
-        // 呼び出しの形で現れていること (取り込みごと消して判定を飛ばす形もここで落ちる)
-        expect(
-          callsFunction(join(SCRIPTS_DIR, bench), name),
-          `${bench} が ${name} を呼んでいない`,
-        ).toBe(true);
-      }
+    for (const name of judgements) {
+      // **「どれかのベンチが呼ぶ」で見る。** 受け入れ基準の判定はベンチごとに違う
+      // (追加遅延はプロキシ、集計時間は日次集計) ので、全ベンチに全判定を求めると
+      // 成り立たない。一方「どのベンチからも呼ばれない判定」は結線が外れた印なので落とす
+      expect(
+        benches.some((bench) => callsFunction(join(SCRIPTS_DIR, bench), name)),
+        `${name} をどのベンチも呼んでいない`,
+      ).toBe(true);
     }
   });
 

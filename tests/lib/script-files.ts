@@ -125,6 +125,8 @@ interface CallSite {
   name: string;
   // 実引数の並び
   args: readonly ts.Expression[];
+  // 呼び出し式そのもの (置かれ方を見るため)
+  node: ts.CallExpression;
 }
 
 /**
@@ -156,7 +158,7 @@ function collectCallsByScope(source: ts.SourceFile): Map<string, CallSite[]> {
           ? `${node.expression.expression.text}.${node.expression.name.text}`
           : null;
       // 読めた呼び出しだけを覚える
-      if (called !== null) byScope.get(scope)?.push({ name: called, args: node.arguments });
+      if (called !== null) byScope.get(scope)?.push({ name: called, args: node.arguments, node });
     }
     // 子を辿る
     ts.forEachChild(node, (child) => visit(child, inner));
@@ -215,8 +217,14 @@ function comesFromSharedModule(
 ): boolean {
   // その共有モジュールから取り込んだ名前
   const imported = importedSharedNames(path).get(moduleName) ?? [];
-  // 手元の名前として使われていなければ、指しているのは別物
-  if (!imported.some((entry) => entry.local === localName)) return false;
+  // **別名での取り込みを許さない。** 手元の名前だけを見ていたときは
+  // `import { evaluateStep1Report as evaluateStep2Report }` と 1 行書き換えるだけで
+  // 「共有モジュール由来」と判定され、中身が別物でも綴りだけで通った (実測で 722 件すべて緑・
+  // 件数も不変)。同じ手口で `banner as exitIfFailures` はゲートの非 0 終了を消し、
+  // `contractDatabaseProblem as requireContractDatabase` はベンチの専用 DB ガードを
+  // no-op にできた (どちらも実測)。export 側の名前と手元の名前が一致することまで求める
+  if (!imported.some((entry) => entry.local === localName && entry.exported === localName))
+    return false;
   // 同名のローカル宣言で覆われていれば、指しているのはそちら
   return !locallyDeclaredNames(source).has(localName);
 }
@@ -240,10 +248,47 @@ function topLevelStatementCalls(source: ts.SourceFile): CallSite[] {
     const expression = statement.expression;
     if (!ts.isCallExpression(expression) || !ts.isIdentifier(expression.expression)) continue;
     // 名前と実引数を覚える
-    calls.push({ name: expression.expression.text, args: expression.arguments });
+    calls.push({
+      name: expression.expression.text,
+      args: expression.arguments,
+      node: expression,
+    });
   }
   // 集めた結果
   return calls;
+}
+
+/**
+ * その呼び出しが「条件に囲まれていない文」として置かれているか。
+ * **なぜ要るか**: `if (process.env.BENCH_STRICT === '1') requireNoProblem(problem);` のように
+ * 条件を 1 つ足すだけで、呼び出しは残したまま強制が外れる (実測で全件緑)。関数の中に置く
+ * 必要がある判定 (実測値を引数に取るので トップレベルには置けない) に対して、この形を落とす。
+ * `try { … } finally { … }` の中は許す (後始末のために囲むのは正当で、条件ではない)
+ * @param node 呼び出し式の節点
+ * @returns 条件に囲まれていなければ true
+ */
+function isUnconditionalStatement(node: ts.Node): boolean {
+  // 呼び出しの直上が式文でなければ、値として使われている (代入の右辺など)
+  if (node.parent === undefined || !ts.isExpressionStatement(node.parent)) return false;
+  // 文から上へ辿り、関数かファイルの本体に着くまでに条件・繰り返しが挟まっていないかを見る
+  for (let current: ts.Node | undefined = node.parent.parent; current; current = current.parent) {
+    // ファイルの本体に着いたら条件に囲まれていない
+    if (ts.isSourceFile(current)) return true;
+    // 関数の本体に着いても同じ (その関数が呼ばれれば必ず実行される)
+    if (
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isArrowFunction(current) ||
+      ts.isMethodDeclaration(current)
+    )
+      return true;
+    // ブロック・try / finally は素通し (後始末のための囲みは条件ではない)
+    if (ts.isBlock(current) || ts.isTryStatement(current)) continue;
+    // それ以外 (if / for / while / switch / &&) は条件付き
+    return false;
+  }
+  // 辿り切れなければ安全側 (条件付き扱い)
+  return false;
 }
 
 /**
@@ -349,6 +394,8 @@ export function reachableCallNames(path: string): string[] {
  * 名前空間経由 (`lib.f()`)、変数へ入れてからの呼び出し (`const f2 = f; f2()`)、
  * メソッドとして保持された関数。いずれも「呼び出し先が素の識別子」という手がかりから外れる。
  * これらは**呼んでいるのに false になる**側 (＝赤くなる側) なので、静かに緩む向きには倒れない。
+ * **ただし別名で取り込んだ呼び出しは「緑側」に倒れうる** — 綴りだけ一致させて中身を別物へ
+ * すり替えられるため。`importedFrom` はそれを閉じるので、結線を見張る用途では必ず渡すこと。
  *
  * **逆向きの境界もある**: 名前が一致すれば「呼んでいる」と数えるので、取り込みをやめて
  * **同名のローカル関数**を宣言すれば綴りだけ満たせる (実測で 705 件すべて緑・件数も不変)。
@@ -359,7 +406,8 @@ export function reachableCallNames(path: string): string[] {
  * @param path 対象ファイルの絶対パス
  * @param functionName 呼び出し先の識別子
  * @param options 絞り込み。`atTopLevel` はモジュールのトップレベルに**式文として**置かれた
- *   呼び出しだけを数える (条件で囲む形を落とす)。`importedFrom` はその名前が
+ *   呼び出しだけを数える (条件で囲む形を落とす)。`unconditional` は関数の中でもよいが
+ *   **条件・繰り返しに囲まれていない文**として置かれていることを求める。`importedFrom` はその名前が
  *   `scripts/lib/<その名前>` から取り込まれ、かつ同名のローカル宣言で覆われていないことを求める
  *   (同名の no-op をその場で宣言して差し替える形を落とす)。`argument` はその位置の実引数が
  *   `callOf` に挙げた関数の**呼び出しそのもの**で、その関数もまた `importedFrom` 由来であることを求める
@@ -370,6 +418,7 @@ export function callsFunction(
   functionName: string,
   options: {
     atTopLevel?: boolean;
+    unconditional?: boolean;
     importedFrom?: string;
     argument?: { index: number; callOf: readonly string[]; importedFrom: string };
   } = {},
@@ -394,6 +443,8 @@ export function callsFunction(
   for (const call of candidates) {
     // 名前が違えば関係ない
     if (call.name !== functionName) continue;
+    // 条件に囲まれていない文であることを求めるなら、置かれ方を見る
+    if (options.unconditional === true && !isUnconditionalStatement(call.node)) continue;
     // 引数の形を問わないならここで成立
     if (options.argument === undefined) return true;
     // 指定した位置の実引数

@@ -291,34 +291,91 @@ export function topLevelStatementKinds(path: string): string[] {
 }
 
 /**
- * そのファイルが `process.exit` / `process.abort` / `process.exitCode` に触れている箇所を返す。
- * **なぜ要るか**: 終了コードの決定を共有モジュールへ集約した意味は、本体側がそれを
- * 上書きできないことに懸かっている (`process.exit(0)` を 1 行置けば基準違反でも exit 0 になる)。
+ * そのファイルが `process` をどう使っているかを列挙する。
+ * 素直な `process.<名前>` は `process.<名前>`、それ以外の形 (要素アクセス `process['exitCode']`・
+ * 別名への束縛 `const p = process`・引数として渡す `Object.defineProperty(process, …)`) は
+ * まとめて `process` として返す。**呼び出し側は「許してよい形」の許可リストで判定する。**
+ *
+ * **なぜ禁じたい名前を並べないか**: 以前は `exit` / `abort` / `exitCode` の 3 つだけを見ていたが、
+ * これは綴りを追う形なので抜け道が残った。実測で、ベンチのトップレベルに
+ * `const EXIT_HOOK = process.on('exit', () => { const runtime = process; runtime['exitCode'] = 0; });`
+ * を 1 行足すと、**受け入れ基準を満たさなくても exit 0** になるのに検出網は全件緑
+ * (749 passed・件数も不変・lint 0・tsc 0) だった。ゲートは終了コードしか見ないので Step2 が緑で通る。
+ * 許す側を列挙すれば、`on` も要素アクセスも別名束縛も「許可リストに無い」という 1 つの理由で落ちる
  * @param path 対象ファイルの絶対パス
- * @returns 触れている名前 (`process.exit` の形。重複なし)
+ * @returns 使い方の一覧 (重複なし)
  */
-export function processControlUses(path: string): string[] {
+export function processUses(path: string): string[] {
   // 構文木にする
   const source = parseScript(path);
-  // 終了コードに関わる項目名 (process.env などは対象外)
-  const controls = new Set(['exit', 'abort', 'exitCode']);
-  // 見つかった名前
+  // 見つかった使い方
   const found = new Set<string>();
   // すべての節点を辿る
   const visit = (node: ts.Node): void => {
-    // `process.<名前>` の形で、名前が上の 3 つなら覚える
-    if (
-      ts.isPropertyAccessExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === 'process' &&
-      controls.has(node.name.text)
-    )
-      found.add(`process.${node.name.text}`);
+    // `process` という識別子への参照だけを見る
+    if (ts.isIdentifier(node) && node.text === 'process') {
+      // 親が `process.<名前>` の形で、自分がその受け手なら、その名前まで含めて覚える
+      const parent = node.parent;
+      if (
+        parent !== undefined &&
+        ts.isPropertyAccessExpression(parent) &&
+        parent.expression === node
+      )
+        found.add(`process.${parent.name.text}`);
+      // それ以外の形 (要素アクセス・別名束縛・引数渡し) は素の `process` として覚える
+      else found.add('process');
+    }
     // 子を辿る
     ts.forEachChild(node, visit);
   };
   // 根から辿る
   ts.forEachChild(source, visit);
+  // 集めた結果
+  return [...found];
+}
+
+/**
+ * モジュールのトップレベルの**変数宣言の初期化子**が起こしうる作用を列挙する。
+ * 呼び出しは名前 (`f` / `a.b`)、`await` は `'await'` として返す。
+ *
+ * **なぜ要るか**: トップレベルの文の種類だけを許可リストで縛っても、`VariableStatement` は
+ * 宣言のために許すしかなく、その**初期化子の中は視界の外**だった。実測で、ベンチの
+ * トップレベルに `const CLEARED = await CLIENT.$executeRaw\`TRUNCATE TABLE "Tenant" CASCADE\`;`
+ * を専用 DB のガードより前へ置くと、検出網は全件緑 (749 passed・件数も不変) のまま、
+ * ガードが約束している「1 件も書かずに止める」が破れて**開発 DB を空にしてから**落ちた。
+ * 初期化子で計算してよいのは定数だけなので、呼び出し先を許可リストで縛る
+ * @param path 対象ファイルの絶対パス
+ * @returns 呼び出し先の名前と `'await'` (重複なし)
+ */
+export function topLevelInitializerEffects(path: string): string[] {
+  // 構文木にする
+  const source = parseScript(path);
+  // 見つかった作用
+  const found = new Set<string>();
+  // 初期化子の中を辿る
+  const visit = (node: ts.Node): void => {
+    // 呼び出しは呼び出し先の名前で覚える (読めない形は `<other>` として落とす)
+    if (ts.isCallExpression(node)) {
+      // 素の識別子か、受け手が識別子のメンバ式だけ名前として読める
+      found.add(
+        ts.isIdentifier(node.expression)
+          ? node.expression.text
+          : ts.isPropertyAccessExpression(node.expression) &&
+              ts.isIdentifier(node.expression.expression)
+            ? `${node.expression.expression.text}.${node.expression.name.text}`
+            : '<other>',
+      );
+    }
+    // トップレベル await は「何でも起こせる」ので独立した作用として覚える
+    if (ts.isAwaitExpression(node)) found.add('await');
+    // タグ付きテンプレート (生 SQL がこの形) も呼び出しとして覚える
+    if (ts.isTaggedTemplateExpression(node)) found.add('<tagged-template>');
+    // 子を辿る
+    ts.forEachChild(node, visit);
+  };
+  // トップレベルの変数宣言だけを対象にする
+  for (const statement of source.statements)
+    if (ts.isVariableStatement(statement)) ts.forEachChild(statement, visit);
   // 集めた結果
   return [...found];
 }
@@ -504,7 +561,9 @@ export function describedNamesWithTests(path: string): string[] {
  *   覆われていないことを求める (同名の no-op をその場で宣言して差し替える形を落とす)。
  *   `argument` はその位置の実引数が `callOf` に挙げた関数の**呼び出しそのもの**で、その関数もまた
  *   `importedFrom` 由来であることを求める。`literalArgument` はその位置の実引数が指定した
- *   文字列リテラルそのものであることを求める (どのベンチがどの基準に掛かるかを取り違えさせない)
+ *   文字列リテラルそのものであることを求める (どのベンチがどの基準に掛かるかを取り違えさせない)。
+ *   `identifierArgument` はその位置の実引数が指定した**素の識別子そのもの**であることを求める
+ *   (本物を呼んでから値を丸める関数へ差し替える形を落とす)
  * @returns 条件を満たす呼び出しがあれば true
  */
 export function callsFunction(
@@ -519,6 +578,7 @@ export function callsFunction(
       importedFrom: string;
     };
     literalArgument?: { index: number; value: string };
+    identifierArgument?: { index: number; value: string };
   } = {},
 ): boolean {
   // 構文木にする
@@ -548,6 +608,14 @@ export function callsFunction(
       // 文字列リテラルで、値まで一致すること (変数経由の差し替えを許さない)
       if (literal === undefined || !ts.isStringLiteral(literal)) continue;
       if (literal.text !== options.literalArgument.value) continue;
+    }
+    // 素の識別子の実引数を求めるなら、その位置を見る
+    if (options.identifierArgument !== undefined) {
+      // 指定した位置の実引数
+      const named = call.args[options.identifierArgument.index];
+      // 素の識別子で、名前まで一致すること (包み直した関数への差し替えを許さない)
+      if (named === undefined || !ts.isIdentifier(named)) continue;
+      if (named.text !== options.identifierArgument.value) continue;
     }
     // 引数の形を問わないならここで成立
     if (options.argument === undefined) return true;

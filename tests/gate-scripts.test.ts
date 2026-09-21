@@ -13,9 +13,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  benchOutputProblems,
   evaluateStep1Report,
   evaluateStep2Report,
   missingMatrixCases,
@@ -23,13 +24,17 @@ import {
 } from '../scripts/lib/gate-report.mjs';
 import { PRICE_TEST_PREFIX } from '../scripts/lib/step2-criteria.mjs';
 import {
+  MIN_MEASURED_REQUESTS,
   WARMUP_MAX_MS,
   addedLatencyProblem,
   aggregateLatencyProblem,
   benchCriteriaFields,
+  benchCriteriaJudges,
   intFromEnvValue,
   isBenchLabel,
   judgeBenchPayload,
+  measuredRequestsProblem,
+  non2xxProblem,
   runBench,
   warmupCountProblem,
   warmupLatencyProblem,
@@ -45,8 +50,9 @@ import {
   gateScriptNames,
   importSharedModule,
   foreignModuleSpecifiers,
-  processControlUses,
+  processUses,
   topLevelCallNames,
+  topLevelInitializerEffects,
   topLevelStatementKinds,
   importedSharedNames,
   reachableCallNames,
@@ -385,6 +391,33 @@ describe('warmupLatencyProblem', () => {
   });
 });
 
+describe('non2xxProblem', () => {
+  it('1 件も無ければ問題なし', () => {
+    // 失敗が混ざっていなければ計測は成立している
+    expect(non2xxProblem(0)).toBeNull();
+  });
+
+  it('1 件でもあれば理由を返す', () => {
+    // 失敗した要求は速く返るので、混ざると追加遅延が実力より良く出る
+    expect(non2xxProblem(1)).toContain('2xx 以外の応答がありました');
+  });
+});
+
+describe('measuredRequestsProblem', () => {
+  it.each([
+    ['最小ちょうど', MIN_MEASURED_REQUESTS],
+    ['最小より多い', MIN_MEASURED_REQUESTS + 1],
+  ])('最小件数以上なら問題なし: %s', (_label, requests) => {
+    // 計測として成立しているので null
+    expect(measuredRequestsProblem(requests)).toBeNull();
+  });
+
+  it('最小件数を下回れば理由を返す', () => {
+    // 1 件だけ成功して p97.5 が 0ms、のような結果を通さない
+    expect(measuredRequestsProblem(MIN_MEASURED_REQUESTS - 1)).toContain('件しか流せていません');
+  });
+});
+
 describe('addedLatencyProblem', () => {
   // **受け入れ基準そのものの判定なので、上下両側を固定する。** 結線の検査は「その名前を
   // 呼んでいるか」しか見ないので、比較式を緩めたり本体を空にしたりしても全件緑だった (実測)。
@@ -426,17 +459,26 @@ const BENCH_PAYLOADS: Readonly<
   Record<string, { ok: Record<string, number>; breaks: readonly Record<string, number>[] }>
 > = {
   'proxy-latency': {
-    // 3 つの基準をすべて満たす計測結果
+    // すべての基準を満たす計測結果
     ok: {
       warmupRequests: 200,
-      warmupActualRequests: 200,
+      warmupDirectRequests: 200,
+      warmupProxiedRequests: 200,
       warmupSlowestMs: WARMUP_MAX_MS,
+      non2xx: 0,
+      directRequests: MIN_MEASURED_REQUESTS,
+      proxiedRequests: MIN_MEASURED_REQUESTS,
       addedMs: PROXY_ADDED_LATENCY_P95_MAX_MS,
     },
-    // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)
+    // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)。
+    // **捨て玉の件数は「増える」向きで破る** — まとめ方が片側の増加を隠していた形を固定するため
     breaks: [
-      { warmupActualRequests: 37 },
+      { warmupDirectRequests: 2_500 },
+      { warmupProxiedRequests: 37 },
       { warmupSlowestMs: WARMUP_MAX_MS + 1 },
+      { non2xx: 1 },
+      { directRequests: MIN_MEASURED_REQUESTS - 1 },
+      { proxiedRequests: MIN_MEASURED_REQUESTS - 1 },
       { addedMs: PROXY_ADDED_LATENCY_P95_MAX_MS + 1 },
     ],
   },
@@ -448,6 +490,88 @@ const BENCH_PAYLOADS: Readonly<
   },
 };
 
+describe('benchOutputProblems', () => {
+  // ベンチが実際に出す形 (npm 自身の行が前後に混ざる)
+  const stdout = ['', '> agent-ops@0.1.0 bench:usage', '', '%s', ''].join('\n');
+  // 基準を満たした 1 回ぶんの出力
+  const ok = stdout.replace(
+    '%s',
+    JSON.stringify({ bench: 'usage-aggregate', slowestMs: 13, limitMs: 1000, passed: true }),
+  );
+  // 判定に渡す共通の引数
+  const fields = { valueField: 'slowestMs', limitField: 'limitMs' } as const;
+
+  it('基準を満たした出力なら問題なし', () => {
+    // 終了コード 0・ラベル一致・passed: true・実測値が上限以内
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: ok, ...fields }),
+    ).toEqual([]);
+  });
+
+  it('終了コードが 0 でなければ落とす', () => {
+    // ベンチ自身が理由を出しているので、ここでは事実だけを残す
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 1, stdout: ok, ...fields }),
+    ).toHaveLength(1);
+  });
+
+  it('結果の JSON が無ければ落とす', () => {
+    // **これがゲートの要点** — 「何も出さずに exit 0」を緑にしない (fail-closed)
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: '', ...fields }),
+    ).toEqual(['ベンチ usage-aggregate が結果の JSON を出していません']);
+  });
+
+  it('別のベンチの結果なら落とす', () => {
+    // ラベルの取り違え (片方のベンチを 2 回流す形) を落とす
+    const other = stdout.replace(
+      '%s',
+      JSON.stringify({ bench: 'proxy-latency', slowestMs: 13, limitMs: 1000, passed: true }),
+    );
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: other, ...fields }).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('passed が true でなければ落とす', () => {
+    // ベンチ側の判定をそのまま尊重する
+    const failed = ok.replace('"passed":true', '"passed":false');
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: failed, ...fields }),
+    ).toContain('ベンチ usage-aggregate が受け入れ基準を満たしていません');
+  });
+
+  it('passed が true でも実測値が上限を超えていれば落とす', () => {
+    // **`passed` の写しにしない** — passed だけを見ると「true を出すだけ」の変異が素通りする
+    const lying = stdout.replace(
+      '%s',
+      JSON.stringify({ bench: 'usage-aggregate', slowestMs: 1001, limitMs: 1000, passed: true }),
+    );
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: lying, ...fields }),
+    ).toContain('ベンチ usage-aggregate の slowestMs が上限を超えています (1001 > 1000)');
+  });
+
+  it('実測値か上限が数値でなければ落とす', () => {
+    // 項目を消すだけで比較を飛ばせないようにする (fail-closed)
+    const missing = stdout.replace(
+      '%s',
+      JSON.stringify({ bench: 'usage-aggregate', limitMs: 1000, passed: true }),
+    );
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: missing, ...fields }),
+    ).toContain('ベンチ usage-aggregate の結果に数値の slowestMs / limitMs がありません');
+  });
+
+  it('壊れた JSON の行があっても最後の正しい結果を読む', () => {
+    // 進捗の出力に `{` で始まる行が混ざっても落ちない
+    const noisy = ['{ これは JSON ではない', ok].join('\n');
+    expect(
+      benchOutputProblems({ label: 'usage-aggregate', status: 0, stdout: noisy, ...fields }),
+    ).toEqual([]);
+  });
+});
+
 describe('isBenchLabel', () => {
   it('表にあるラベルだけを認める', () => {
     // 実在するラベル
@@ -455,6 +579,22 @@ describe('isBenchLabel', () => {
     // 打ち間違い・プロトタイプ由来の名前は認めない (fail-closed)
     expect(isBenchLabel('usage_aggregate')).toBe(false);
     expect(isBenchLabel('toString')).toBe(false);
+  });
+});
+
+describe('benchCriteriaJudges', () => {
+  it('表で実際に使われている判定を同一性で返す', () => {
+    // 使われている判定
+    const used = benchCriteriaJudges();
+    // 集計ベンチの唯一の基準はこの判定 (名前ではなく関数そのもので持つ)
+    expect(used.has(aggregateLatencyProblem)).toBe(true);
+    // プロキシ側の基準も含まれる
+    expect(used.has(addedLatencyProblem)).toBe(true);
+  });
+
+  it('表に無い関数は含まない', () => {
+    // 判定ではないものを「使われている」と数えない (fail-closed の突き合わせが空振りしないように)
+    expect(benchCriteriaJudges().has(intFromEnvValue)).toBe(false);
   });
 });
 
@@ -505,6 +645,12 @@ describe('judgeBenchPayload', () => {
   });
 });
 
+// 標準出力/エラー出力を黙らせて覗く (呼び出し 2 か所で型をそろえるため関数にする)
+function spyOnConsole(method: 'log' | 'error') {
+  // その出力を呼び出しごと記録し、実際には出さない
+  return vi.spyOn(console, method).mockImplementation(() => undefined);
+}
+
 // runBench を 1 回動かし、出力・エラー出力・終了コードを取る。
 // **process.exitCode は必ず元へ戻す** — 戻さないと vitest 自身が非 0 で終わる
 async function captureBenchRun(
@@ -513,10 +659,13 @@ async function captureBenchRun(
 ): Promise<{ printed: string[]; errors: string[]; exitCode: typeof process.exitCode }> {
   // 走らせる前の終了コード
   const before = process.exitCode;
-  // 標準出力・エラー出力を覗く
-  const printed = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  // 覗きの設置も try の中で行う (2 本目の設置が失敗したとき 1 本目を戻せるように)
+  let printed: ReturnType<typeof spyOnConsole> | undefined;
+  let errors: ReturnType<typeof spyOnConsole> | undefined;
   try {
+    // 標準出力・エラー出力を覗く
+    printed = spyOnConsole('log');
+    errors = spyOnConsole('error');
     // 実行する (throw せず process.exitCode で伝える契約)
     await runBench(label, measure);
     // 取れたものを返す
@@ -527,8 +676,8 @@ async function captureBenchRun(
     };
   } finally {
     // 覗きを戻し、終了コードも元へ戻す
-    printed.mockRestore();
-    errors.mockRestore();
+    printed?.mockRestore();
+    errors?.mockRestore();
     process.exitCode = before;
   }
 }
@@ -838,6 +987,21 @@ describe('判定の結線', () => {
     'bench-usage-aggregate.ts': 'usage-aggregate',
   };
 
+  // ベンチが `process` に触れてよい形。**すべて純粋な読み取りだけ**で、
+  // ここに無い形 (`process.exit` / 要素アクセス / 別名束縛 / `process.on('exit', …)` /
+  // `Object.defineProperty(process, …)`) は「許可リストに無い」という 1 つの理由で落ちる
+  const ALLOWED_PROCESS_USES = new Set(['process.env', 'process.cwd', 'process.execPath']);
+
+  // ベンチのトップレベルの変数初期化子で呼んでよいもの。**定数を組み立てるだけの純粋な呼び出し**に限る。
+  // **エントリを足す差分は、その呼び出しが副作用を持たないかをレビューで必ず確認する**
+  // (この表が緩むと、専用 DB のガードより前に何でも走らせられる)
+  const ALLOWED_TOP_LEVEL_INITIALIZER_CALLS = new Set([
+    'intFromEnv',
+    'join',
+    'process.cwd',
+    'JSON.stringify',
+  ]);
+
   // ベンチのトップレベルに置いてよい文の種類。**許す側を列挙する** —
   // 禁じたい形 (条件・繰り返し・try・ラベル文) を綴りで並べると 1 つ漏らすたびに静かな穴になる
   const ALLOWED_TOP_LEVEL_KINDS = new Set([
@@ -871,8 +1035,9 @@ describe('判定の結線', () => {
           atTopLevel: true,
           importedFrom: 'bench-criteria.mjs',
           literalArgument: { index: 0, value: label },
+          identifierArgument: { index: 1, value: 'main' },
         }),
-        `${bench} が runBench('${label}', …) をトップレベルの式文として呼んでいない`,
+        `${bench} が runBench('${label}', main) をトップレベルの式文として呼んでいない`,
       ).toBe(true);
       // トップレベルに条件・繰り返し・try を置けないこと。
       // **「呼んでいるか」だけでは足りない** — 実測で、呼び出しの**手前**に
@@ -883,11 +1048,35 @@ describe('判定の結線', () => {
           ALLOWED_TOP_LEVEL_KINDS.has(kind),
           `${bench} のトップレベルに ${kind} がある (受け入れ基準の実行を条件付きにできる)`,
         ).toBe(true);
-      // 終了コードに触らないこと。共有モジュールへ集約した意味は、本体が上書きできないことに懸かる
-      expect(
-        processControlUses(path),
-        `${bench} が終了コードに触れている (判定より先に exit できる)`,
-      ).toEqual([]);
+      // `process` は純粋な読み取りだけ。**禁じたい綴りを並べない** — 実測で
+      // `process['exit'](0)` も `const { exit } = process;` も `process.on('exit', …)` も
+      // 全件緑のまま素通りし、受け入れ基準を 1 つも掛けずに exit 0 にできた
+      for (const use of processUses(path))
+        expect(
+          ALLOWED_PROCESS_USES.has(use),
+          `${bench} の ${use} は許していない (判定より先に終了コードを決められる)`,
+        ).toBe(true);
+      // トップレベルの変数初期化子は定数を組み立てるだけ。**ここが視界の外だった** — 実測で
+      // `const CLEARED = await CLIENT.$executeRaw\`TRUNCATE …\`;` を専用 DB のガードより前へ
+      // 置くと全件緑のまま、ガードが約束する「1 件も書かずに止める」が破れた
+      for (const effect of topLevelInitializerEffects(path))
+        expect(
+          ALLOWED_TOP_LEVEL_INITIALIZER_CALLS.has(effect),
+          `${bench} のトップレベルの初期化子が ${effect} を起こす`,
+        ).toBe(true);
+      // 相対 import の先は共有モジュール (scripts/lib) かアプリ本体 (src) だけ。
+      // **ここも視界の外だった** — 実測で `scripts/preflight.mjs` に `process.exit(0)` を置いて
+      // `import './preflight.mjs';` を 1 行足すと、全件緑のまま出力ゼロで exit 0 になった
+      // (ESM は import した側のどのトップレベル文よりも先に評価される)
+      for (const specifier of foreignModuleSpecifiers(path)) {
+        // 相対パスでなければ node: か npm パッケージ (副作用は package.json 側の関心事)
+        if (!specifier.startsWith('.')) continue;
+        // 解決先がアプリ本体の中なら許す (ベンチは本番のアダプタと結線を使う)
+        expect(
+          resolve(SCRIPTS_DIR, specifier).startsWith(join(SCRIPTS_DIR, '..', 'src') + sep),
+          `${bench} が ${specifier} を取り込んでいる (import の副作用で判定を飛ばせる)`,
+        ).toBe(true);
+      }
       // **トップレベルで実行するのはこの 2 つだけ、この順で。** 専用 DB のガードが先で、
       // 受け入れ基準の実行が後 (順番が入れ替わると開発 DB を TRUNCATE してから止まる)。
       // 余計な実行を足せないので、判定より先に何かを走らせる形もここで落ちる
@@ -901,6 +1090,26 @@ describe('判定の結線', () => {
         `${bench} のトップレベルに呼び出し以外の式文がある`,
       ).toBe(2);
     }
+  });
+
+  it('bench-criteria の判定はすべてどれかの基準で使われている', async () => {
+    // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した判定が黙って外れる)
+    const criteria = await importSharedModule('bench-criteria.mjs');
+    // 表のどれかで実際に使われている判定 (関数の同一性で持つ)
+    const used = benchCriteriaJudges();
+    // 1 つも読めなければ導出が壊れている (fail-closed)
+    expect(used.size, '基準に使われている判定が 0 件').toBeGreaterThan(0);
+    // 判定の命名規約 (`*Problem`) で export を絞り、すべてが使われていることを求める。
+    // **これが無いと、基準を表から削り挙動の表の行も同時に削るだけで全件緑になり、
+    // 痕跡はテスト件数の減少だけだった** (実測)。外すには export ごと消すしかなくする
+    const judgements = Object.entries(criteria).filter(
+      (entry): entry is [string, (...args: never[]) => unknown] =>
+        typeof entry[1] === 'function' && entry[0].endsWith('Problem'),
+    );
+    // 1 つも無ければ導出が壊れている (fail-closed)
+    expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
+    for (const [name, judge] of judgements)
+      expect(used.has(judge), `${name} はどの基準にも使われていない`).toBe(true);
   });
 
   it('ベンチは専用 DB のガードをトップレベルで呼ぶ', () => {

@@ -1,4 +1,6 @@
-// ベンチ (scripts/bench-*.ts) の判定そのもの。**スクリプト本体には数値判定を置かない。**
+// ベンチ (scripts/bench-*.ts) の判定そのもの。**スクリプト本体には数値判定を置かない** —
+// 計測が成立したかを見る門番 (2xx 以外の件数・最小件数・捨て玉) も含めてすべてここが持つ。
+// 本体に残すと、その 1 行を消しても検出網に映らない (実測で全件緑・件数も不変だった)。
 //
 // なぜ分けるか: ベンチのガードはスクリプトの中にあるため vitest の対象外で、**丸ごと消しても
 // typecheck も lint も全テストも緑のまま**だった (実測。eslint は未使用の定数を warning にするが
@@ -85,6 +87,36 @@ export function warmupLatencyProblem(maxMs) {
   return `初回コストが大きすぎます: 捨て玉の最大 ${maxMs}ms (上限 ${WARMUP_MAX_MS}ms)`;
 }
 
+// 本計測として成立する最小の件数 (これを下回る = ほとんど流せていないので数字を信用しない)。
+// **受け入れ基準の値ではない** — 計測そのものが成立したかを見る門番なので、上の WARMUP_MAX_MS と同じ扱い
+export const MIN_MEASURED_REQUESTS = 100;
+
+/**
+ * 2xx 以外の応答が 1 件も無かったかを判定する。
+ * 失敗した要求は速く返るので、混ざると追加遅延が実力より良く出る (認証の取り違え等が黙って通る)
+ * @param {number} non2xx 2xx 以外・エラー・タイムアウトの合計
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function non2xxProblem(non2xx) {
+  // 1 件も無ければ問題なし
+  if (non2xx === 0) return null;
+  // あれば計測として成立していない
+  return `2xx 以外の応答がありました (${non2xx} 件)。上流やキーの設定を確認してください`;
+}
+
+/**
+ * 本計測が最低限の件数を流せたかを判定する。
+ * 1 件だけ成功して p97.5 が 0ms、のような結果を通さない
+ * @param {number} requests 流せた件数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function measuredRequestsProblem(requests) {
+  // 最小件数以上なら問題なし
+  if (requests >= MIN_MEASURED_REQUESTS) return null;
+  // 下回れば計測として成立していない
+  return `計測が ${requests} 件しか流せていません (最低 ${MIN_MEASURED_REQUESTS} 件)`;
+}
+
 /**
  * 受け入れ基準「プロキシ経由の追加遅延 ≦ 上限」を判定する。
  *
@@ -127,10 +159,18 @@ export function aggregateLatencyProblem(slowestMs) {
 const BENCH_CRITERIA = {
   // プロキシの追加遅延ベンチ (scripts/bench-proxy.ts)
   'proxy-latency': [
-    // 捨て玉が指定どおりの件数で止まったか (autocannon が amount を無視する版への変化を捕まえる)
-    { fields: ['warmupRequests', 'warmupActualRequests'], judge: warmupCountProblem },
-    // 初回コストが桁で悪化していないか
+    // 捨て玉が指定どおりの件数で止まったか (autocannon が amount を無視する版への変化を捕まえる)。
+    // **計測ごとに別の基準にする** — 2 本を 1 つの数にまとめると、まとめ方 (最小値) が
+    // 「件数が増える」向きの壊れ方を隠してしまい、片側だけが amount を無視した状態が黙って通る
+    { fields: ['warmupRequests', 'warmupDirectRequests'], judge: warmupCountProblem },
+    { fields: ['warmupRequests', 'warmupProxiedRequests'], judge: warmupCountProblem },
+    // 初回コストが桁で悪化していないか (絶対遅延なので 2 本のうち遅いほうを見る)
     { fields: ['warmupSlowestMs'], judge: warmupLatencyProblem },
+    // 失敗した要求が混ざっていないか (速く返るので追加遅延が実力より良く出る)
+    { fields: ['non2xx'], judge: non2xxProblem },
+    // 本計測が成立する件数を流せたか (計測ごとに見る)
+    { fields: ['directRequests'], judge: measuredRequestsProblem },
+    { fields: ['proxiedRequests'], judge: measuredRequestsProblem },
     // 受け入れ基準そのもの (追加遅延 ≦ 上限)
     { fields: ['addedMs'], judge: addedLatencyProblem },
   ],
@@ -149,6 +189,18 @@ const BENCH_CRITERIA = {
 export function isBenchLabel(label) {
   // 表のキーとして存在するか (プロトタイプ由来の名前を拾わないよう自前の項目だけを見る)
   return Object.hasOwn(BENCH_CRITERIA, label);
+}
+
+/**
+ * 表のどれかの基準で実際に使われている判定を、**関数の同一性**で返す。
+ * **なぜ要るか**: 基準を表から削り、挙動を固定する表の行も同時に削ると、判定は export も
+ * describe も残ったまま「誰も掛けない判定」になり、痕跡はテスト件数の減少だけだった (実測)。
+ * export されている判定がすべてここに現れることを検査すれば、外すには export ごと消すしかない
+ * @returns {Set<Function>} 使われている判定
+ */
+export function benchCriteriaJudges() {
+  // すべてのラベルの基準から判定を集める
+  return new Set(Object.values(BENCH_CRITERIA).flatMap((list) => list.map(({ judge }) => judge)));
 }
 
 /**
@@ -182,8 +234,9 @@ export function judgeBenchPayload(label, payload) {
   for (const { fields, judge } of BENCH_CRITERIA[label]) {
     // 判定へ渡す実測値を payload から読む
     const values = fields.map((field) => {
-      // その項目の値
-      const value = payload[field];
+      // **自前の項目だけを読む** — 継承した項目を許すと、`Object.create({ slowestMs: 0 })` の形で
+      // 判定には 0 を読ませ、出力の `{ ...payload }` には載せない (own しか写らない) ことができた
+      const value = Object.hasOwn(payload, field) ? payload[field] : undefined;
       // 数値として読めなければ判定できない (黙って飛ばさず落とす)
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw new Error(`${label} の計測結果に数値の ${field} がありません`);
@@ -218,12 +271,22 @@ export function judgeBenchPayload(label, payload) {
 export async function runBench(label, measure) {
   // 計測そのものの失敗も受け入れ基準の未達も、同じ「非 0 で終わる」へ寄せる
   try {
-    // 計測する (後始末は呼び出し側の finally が持つ)
-    const payload = await measure();
+    // 計測し、**自前の項目だけをその場で 1 回写し取る**。
+    // **ここが「判定に渡す値＝出力に載る値」の要**: 写さずに元のオブジェクトを使うと、判定と
+    // 出力で同じ項目を 2 回読むことになり、getter を仕込めば 1 回目 (判定) と 2 回目 (出力) で
+    // 別の値を返せた (実測: 上限 1000ms に対し 999999ms を出しながら passed: true・exit 0)
+    const payload = { ...(await measure()) };
     // 受け入れ基準に掛ける
     const problems = judgeBenchPayload(label, payload);
-    // 人にもゲートにも読める形で出す (判定の結果から passed を導く)
-    console.log(JSON.stringify({ bench: label, ...payload, passed: problems.length === 0 }));
+    // 人にもゲートにも読める形へ組み立てる (ラベルを先頭・passed を末尾にして読みやすくする)
+    const output = { bench: label, ...payload };
+    // **ラベルと passed は写し取ったあとに上書きする** — 並びだけで守ると payload 側の
+    // 同名の項目に勝たれる (JS のオブジェクトは「位置は最初・値は最後」で決まる)
+    output.bench = label;
+    // 判定の結果から passed を導く (比較式の写しを作らない)
+    output.passed = problems.length === 0;
+    // 1 行の JSON として出す (ゲートがこの行を読む)
+    console.log(JSON.stringify(output));
     // 満たしていない基準を 1 件ずつ理由として出す
     for (const problem of problems) console.error(`[bench:${label}]`, problem);
     // 1 件でもあれば非 0 で終わる

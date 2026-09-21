@@ -18,9 +18,15 @@ import { join } from 'node:path';
 // Step0 の検証コマンド一覧 (写しを持たず再利用する)
 import { STEP0_STEPS } from './lib/step0-steps.mjs';
 // 共通の実行ヘルパー
-import { banner, exitIfFailures, runNpm, runSteps } from './lib/run-npm-steps.mjs';
+import {
+  banner,
+  exitIfFailures,
+  runNpm,
+  runNpmCapturingStdout,
+  runSteps,
+} from './lib/run-npm-steps.mjs';
 // 受け入れ基準の判定 (純粋関数。挙動は tests/gate-scripts.test.ts が固定する)
-import { evaluateStep2Report } from './lib/gate-report.mjs';
+import { benchOutputProblems, evaluateStep2Report } from './lib/gate-report.mjs';
 // しきい値とテスト名の接頭辞 (ベンチと共有する唯一の定義)
 import { PRICE_TEST_PREFIX } from './lib/step2-criteria.mjs';
 // Step1 の基準 (件数・RBAC 行列) を引き継ぐ。値を書き写さず、同じ定義を読む
@@ -127,12 +133,32 @@ if (runNpm(['audit', '--audit-level=high']) !== 0) {
   process.exit(1);
 }
 
-// 5. + 6. 本番ビルドとベンチ (ビルドの成果物をプロキシのベンチが使うので順番を入れ替えない)
-runSteps('gate:step2', [
-  { name: '本番ビルド', args: ['run', 'build'] },
-  { name: 'ベンチ: 日次集計 (1 万件)', args: ['run', 'bench:usage'] },
-  { name: 'ベンチ: プロキシの追加遅延', args: ['run', 'bench:proxy'] },
-]);
+// 5. 本番ビルド (成果物をプロキシのベンチが使うので、ベンチより先に置く)
+runSteps('gate:step2', [{ name: '本番ビルド', args: ['run', 'build'] }]);
+
+// 6. ベンチ 2 本。**終了コードだけでなく結果の JSON まで見る** — ベンチの中で基準を強制していても、
+// 「何も出さずに exit 0」にできればゲートは緑だった (実測で 3 通りの書き方が全件緑で通った)。
+// 実測値と上限の比較もここで独立に行い、ベンチ側の `passed` の写しにしない
+banner('ベンチ: 日次集計 (1 万件)');
+exitIfFailures(
+  'gate:step2',
+  benchOutputProblems({
+    label: 'usage-aggregate',
+    ...runNpmCapturingStdout(['run', 'bench:usage']),
+    valueField: 'slowestMs',
+    limitField: 'limitMs',
+  }),
+);
+banner('ベンチ: プロキシの追加遅延');
+exitIfFailures(
+  'gate:step2',
+  benchOutputProblems({
+    label: 'proxy-latency',
+    ...runNpmCapturingStdout(['run', 'bench:proxy']),
+    valueField: 'addedMs',
+    limitField: 'limitMs',
+  }),
+);
 
 // すべて通った
 banner('gate:step2 緑');

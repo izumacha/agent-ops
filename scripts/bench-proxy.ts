@@ -50,8 +50,6 @@ const CONNECTIONS = intFromEnv('BENCH_CONNECTIONS', 1, 1);
 // 秒ではなく件数で決めるのは、吸収したい初回コストが「最初の数十件」という**件数の現象**だから。
 // 秒で決めると遅い機械ほど捨てられる件数が減り、いちばん必要な場所で効かなくなる
 const WARMUP_REQUESTS = intFromEnv('BENCH_WARMUP', 200, 0);
-// 計測として成立する最小の件数 (これを下回る = ほとんど流せていないので判定しない)
-const MIN_REQUESTS = 100;
 // 中継するモデル (料金表にある値)
 const MODEL = 'claude-sonnet-4-6';
 // アプリの起動を待つ上限 (ミリ秒)
@@ -191,9 +189,12 @@ async function startApp(port: number, upstreamPort: number, caPath: string): Pro
       ...process.env,
       PORT: String(port),
       HOSTNAME: '127.0.0.1',
-      // 上流はローカルのスタブ (https)
+      // 上流はローカルのスタブ (https)。**測らない側のプロバイダも必ず上書きする** —
+      // 素通しにすると、OpenAI 経路を測るベンチを足した人が開発機の実キーで本物を叩いて課金する
       ANTHROPIC_BASE_URL: `https://127.0.0.1:${upstreamPort}`,
       ANTHROPIC_API_KEY: 'bench-upstream-key',
+      OPENAI_BASE_URL: `https://127.0.0.1:${upstreamPort}`,
+      OPENAI_API_KEY: 'bench-upstream-key',
       // スタブの自己署名証明書を信頼させる (この 1 枚だけ)
       NODE_EXTRA_CA_CERTS: caPath,
     },
@@ -295,7 +296,7 @@ async function measureLatency(options: { url: string; headers: Record<string, st
   // 本計測 (窓の長さは捨て玉に関わらず一定)
   const measured = await runLoad({ ...options, durationSeconds: DURATION_SECONDS });
   // 捨て玉そのものも 2 つの観点で確かめる (判定は runBench が結果の JSON から読んで掛ける。
-  // 捨て玉を切っているときは「指定 0 件・実際 0 件・最大 0ms」になり、どちらの基準も通る):
+  // 捨て玉を切っているときは「指定 0 件・実際 0 件・最大 0ms」になり、どの基準も通る):
   //   1. 指定どおりの件数で止まったか。autocannon が `amount` より `duration` を優先する版へ
   //      変わると捨て玉が秒で回って初回コストを吸収しきれなくなるが、**判定結果には現れない**
   //      (本計測はそのまま緑になる) ので、受け入れ基準と同じ扱いで落とす (fail-closed)
@@ -361,47 +362,28 @@ async function main(): Promise<Record<string, unknown>> {
       url: `http://127.0.0.1:${appPort}/api/v1/proxy/anthropic/messages`,
       headers: { authorization: `Bearer ${apiKey}` },
     });
-    // 失敗した要求があると遅延が実力より良く出るので、そのまま通さない
-    if (direct.non2xx > 0 || proxied.non2xx > 0) {
-      throw new Error(
-        `2xx 以外の応答がありました (直接: ${direct.non2xx} 件 / プロキシ: ${proxied.non2xx} 件)`,
-      );
-    }
-    // 件数が少なすぎる計測は判定に使わない (1 件だけ成功して p97.5 が 0ms、のような結果を通さない)
-    for (const [label, measured] of [
-      ['直接', direct],
-      ['プロキシ', proxied],
-    ] as const) {
-      // 最低限の件数が無ければ測定として成立しない
-      if (measured.requests < MIN_REQUESTS) {
-        throw new Error(
-          `${label}の計測が ${measured.requests} 件しか流せていません (最低 ${MIN_REQUESTS} 件)`,
-        );
-      }
-    }
     // 追加遅延 (この定義がこのファイルの要点)
     const addedMs = Math.round((proxied.latencyMs - direct.latencyMs) * 100) / 100;
-    // 捨て玉の判定に使う 2 つの実測値。**2 本の計測のうち悪いほうを採る** —
-    // 片方だけが壊れている状態 (プロキシ側の捨て玉だけが 401 で早く終わる等) を見逃さないため
-    const warmupActualRequests = Math.min(
-      direct.warmup?.requests ?? 0,
-      proxied.warmup?.requests ?? 0,
-    );
-    // 初回コストも遅いほうを採る
+    // 初回コストは絶対遅延なので、2 本のうち遅いほうを採る (捨て玉の**件数**は計測ごとに返す —
+    // まとめると「件数が増える」向きの壊れ方を隠すため。理由は scripts/lib/bench-criteria.mjs)
     const warmupSlowestMs = Math.max(direct.warmup?.maxMs ?? 0, proxied.warmup?.maxMs ?? 0);
-    // 計測結果を返す (受け入れ基準は runBench がこの項目を読んで掛ける)
+    // 計測結果を返す (受け入れ基準も計測が成立したかの門番も、runBench がこの項目を読んで掛ける)
     return {
       connections: CONNECTIONS,
       durationSeconds: DURATION_SECONDS,
       percentile: 'p97.5 (p95 は autocannon が出さないため、より厳しい側で測る)',
       warmupRequests: WARMUP_REQUESTS,
-      warmupActualRequests,
+      warmupDirectRequests: direct.warmup?.requests ?? 0,
+      warmupProxiedRequests: proxied.warmup?.requests ?? 0,
       warmupSlowestMs,
       directMs: direct.latencyMs,
       proxiedMs: proxied.latencyMs,
       addedMs,
       limitMs: PROXY_ADDED_LATENCY_P95_MAX_MS,
-      requests: { direct: direct.requests, proxied: proxied.requests },
+      // 2xx 以外は 2 本ぶんを合算して 1 つの基準で見る (どちらで起きても計測は成立しない)
+      non2xx: direct.non2xx + proxied.non2xx,
+      directRequests: direct.requests,
+      proxiedRequests: proxied.requests,
       // 判定には使わないが、裾の伸びを読めるように残す (上の measureLatency のコメント)
       distribution: { direct: distributionOf(direct), proxied: distributionOf(proxied) },
     };

@@ -30,6 +30,35 @@ export function runNpm(args) {
 }
 
 /**
+ * npm を引数付きで実行し、**標準出力を捕まえたうえでそのまま流す**。
+ *
+ * **なぜ要るか**: ゲートはこれまでベンチの終了コードしか見ていなかった。そのため、ベンチを
+ * 「何も出さずに exit 0」にする変異はどれもゲートを緑のまま通した (実測で 3 通り:
+ * `process['exit'](0)` / `const { exit } = process;` / 副作用を持つモジュールの import)。
+ * 結果の JSON を読めば、静的解析が捉えられなかった形もまとめて落ちる (§11 実行で確かめる)
+ * @param {string[]} args npm へ渡す引数
+ * @returns {{ status: number, stdout: string }} 終了コードと標準出力
+ */
+export function runNpmCapturingStdout(args) {
+  // Windows の事情は runNpm と同じ
+  const shellArgs = IS_WINDOWS ? args.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)) : args;
+  const result = spawnSync(IS_WINDOWS ? 'npm.cmd' : 'npm', shellArgs, {
+    cwd: process.cwd(),
+    // 標準出力だけ捕まえ、エラー出力は そのまま流す (進捗と失敗理由は人が読めるままにする)
+    stdio: ['inherit', 'pipe', 'inherit'],
+    encoding: 'utf8',
+    shell: IS_WINDOWS,
+  });
+  // 起動できなかったときは原因を残す (§6 エラーを握り潰さない)
+  if (result.error) console.error(`[gate] npm を起動できません: ${result.error.message}`);
+  // 捕まえた標準出力を人にも見せる (捕まえたぶん黙ってしまわないように)
+  const stdout = result.stdout ?? '';
+  if (stdout.length > 0) process.stdout.write(stdout);
+  // 終了コードと出力
+  return { status: result.status ?? 1, stdout };
+}
+
+/**
  * 満たしていない基準が 1 つでもあれば、理由をすべて表示して非 0 終了する (ゲートの最後の 1 歩)。
  *
  * **process.exit はこのファイルに集める。** 判定結果を捨てる形はスクリプト本体に書くと 1 行消すだけで

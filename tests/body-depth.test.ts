@@ -54,13 +54,20 @@ describe('exceedsMaxDepth', () => {
 });
 
 describe('JSON_BODY_MAX_DEPTH', () => {
-  it('stringify が落ちる深さより十分に小さい', () => {
-    // **上限がここを跨ぐと、縛ったつもりで RangeError に戻る。** 閾値は呼び出し時点のスタック
-    // 残量で動く (実測 3,297〜4,164) ので、いちばん厳しい実測値のさらに下に余裕を取る
-    expect(JSON_BODY_MAX_DEPTH).toBeLessThan(3_000);
-    // 実在のベンダー本文 (messages[].content[].source 等) は 5〜8 段なので、正当な本文は通る
+  it('上限の値そのものを縛る (コスト側と RangeError 側の両方)', () => {
+    // **コスト側を固定するのがここの主目的。** RangeError の余裕だけを見ていた版
+    // (`toBeLessThan(3_000)`) では、上限を 2,999 に上げても 807 件すべて緑・件数も不変のまま、
+    // 上限ちょうどの本文の重さがこの上限を入れる動機だった値より悪化した。実測 (いずれも
+    // 64 KiB の本文の `JSON.stringify`): 平坦 0.19ms ／ 深さ 64 の櫛 1.37ms ／ 128 で 2.27ms ／
+    // 256 で 3.70ms ／ 512 で 6.16ms ／ 2,999 で 33.4ms。**上限は「上限ちょうどの本文 1 通が
+    // どれだけ焼けるか」をそのまま決める**ので、深さの上限はここで押さえる。
+    // **この上限を上げる差分は、上の実測を取り直して理由を確認すること**
+    expect(JSON_BODY_MAX_DEPTH).toBeLessThanOrEqual(128);
+    // 実在のベンダー本文 (messages[].content[].source 等) は 5〜8 段、いちばん深い形でも
+    // tools[].input_schema の JSON Schema で 30 段 (実測: 31 段で 422) なので、正当な本文は通る
     expect(JSON_BODY_MAX_DEPTH).toBeGreaterThanOrEqual(16);
-    // 上限ちょうどの深さは実際に stringify できること (縛った値が安全側にあることの実測)
+    // 上限ちょうどの深さは実際に stringify できること (縛った値が RangeError の手前にあることの実測。
+    // 閾値は呼び出し時点のスタック残量で動く = 実測 3,297〜4,164 ので、値ではなく挙動で固定する)
     expect(() => JSON.stringify(nestedArray(JSON_BODY_MAX_DEPTH))).not.toThrow();
   });
 });

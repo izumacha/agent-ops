@@ -443,22 +443,27 @@ describe('中継しない呼び出し', () => {
     expect(recordedEvents()).toHaveLength(0);
   });
 
-  it('上限ちょうどの深さの本文は中継する (深さの上限で正当な本文を落とさない)', async () => {
-    // 上流は成功を返す
+  it.each([
+    ['上限ちょうどは中継する', JSON_BODY_MAX_DEPTH, 200, 1],
+    ['1 段超えたら 422', JSON_BODY_MAX_DEPTH + 1, 422, 0],
+  ])('HTTP 経路の深さの境界: %s', async (_label, totalDepth, expected, upstreamCalls) => {
+    // 上流は成功を返す (422 の側では呼ばれないことを確かめる)
     stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
-    // 上限ちょうどの深さ (本文全体で JSON_BODY_MAX_DEPTH 段)。**通る側も固定する** —
-    // 片側だけだと「常に落とす」実装でも緑にできる
-    const depth = JSON_BODY_MAX_DEPTH - 1;
-    const rawBody = `{"model":${JSON.stringify(ANTHROPIC_MODEL)},"deep":${'['.repeat(depth - 1)}1${']'.repeat(depth - 1)}}`;
+    // **本文全体の深さをちょうど totalDepth にする** — 外側のオブジェクトが 1 段なので、
+    // 角括弧は残りの段数だけ書く。以前は括弧を 2 段少なく書いていて、「上限ちょうど」と
+    // 書いてある本文が実際には 63 段で、境界を 1 つ手前で試していた
+    const brackets = totalDepth - 1;
+    const rawBody = `{"model":${JSON.stringify(ANTHROPIC_MODEL)},"deep":${'['.repeat(brackets)}1${']'.repeat(brackets)}}`;
     const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
     const result = await call(proxyAnthropic, {
       token: key.secret,
       rawBody,
+      // 生の本文を渡すときはヘルパーが Content-Type を付けないので自分で付ける
       headers: { 'content-type': 'application/json' },
     });
-    // 中継されること
-    expect(result.status).toBe(200);
-    expect(fetchCalls).toHaveLength(1);
+    // **両側を固定する** — 通る側だけだと「常に落とす」、落とす側だけだと「常に通す」で緑にできる
+    expect(result.status).toBe(expected);
+    expect(fetchCalls).toHaveLength(upstreamCalls);
   });
 
   it('model が無い本文は 422', async () => {

@@ -23,7 +23,24 @@ export function gateScriptNames(): string[] {
 }
 
 /**
- * `scripts/` 配下の ESM の絶対パスをすべて返す（直下と `lib/`）。
+ * そのディレクトリ配下の ESM を、**入れ子も含めて**相対パスで返す。
+ * **1 段だけ読むと、許可の範囲より走査の範囲が狭くなる** — import の許可は
+ * `scripts/lib/` の**前方一致**なので `./lib/sub/preflight.mjs` を通すのに、
+ * 走査が直下 1 段だとそのファイルを 1 度も見なかった。実測で、そこへ `process.exit(0)` を
+ * 置いて `require-contract-env.mjs` から取り込むと、ガードが 1 件も検証せず exit 0 になり
+ * 807 件すべて緑 (件数も不変) だった
+ * @param directory 走査するディレクトリの絶対パス
+ * @returns ディレクトリからの相対パス (重複なし)
+ */
+function esmNamesUnder(directory: string): string[] {
+  // 入れ子まで辿って ESM だけを残す
+  return readdirSync(directory, { recursive: true })
+    .map((entry) => String(entry))
+    .filter((name) => name.endsWith('.mjs'));
+}
+
+/**
+ * `scripts/` 配下の ESM の絶対パスをすべて返す（入れ子も含む）。
  * **綴りで対象を絞らない** — ゲート (`gate-step<数字>.mjs`) と共有モジュール (`lib/`) だけを
  * 見ていたときは、`require-contract-env.mjs`（契約テストの入口ガード）がどの許可リストの
  * 対象にもならず、先頭に `process.exit(0)` を足すだけで「1 件も検証していないのに緑」に
@@ -31,20 +48,14 @@ export function gateScriptNames(): string[] {
  * @returns ESM の絶対パス（重複なし）
  */
 export function scriptModulePaths(): string[] {
-  // 直下の .mjs
-  const own = readdirSync(SCRIPTS_DIR)
-    .filter((name) => name.endsWith('.mjs'))
-    .map((name) => join(SCRIPTS_DIR, name));
-  // lib 配下の .mjs
-  const shared = sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name));
-  // まとめて返す
-  return [...own, ...shared];
+  // 入れ子まで含めた .mjs を絶対パスにする
+  return esmNamesUnder(SCRIPTS_DIR).map((name) => join(SCRIPTS_DIR, name));
 }
 
-// scripts/lib 配下の共有モジュールの名前
+// scripts/lib 配下の共有モジュールの名前 (入れ子も含む。理由は esmNamesUnder のコメント)
 export function sharedModuleNames(): string[] {
   // ESM だけを対象にする
-  return readdirSync(join(SCRIPTS_DIR, 'lib')).filter((name) => name.endsWith('.mjs'));
+  return esmNamesUnder(join(SCRIPTS_DIR, 'lib'));
 }
 
 /**
@@ -287,20 +298,71 @@ export function topLevelCallNames(path: string): string[] {
 const GLOBAL_OBJECT_NAMES = new Set(['globalThis', 'global']);
 
 /**
- * その式が `process` オブジェクトを指しているか (素の `process` か `globalThis.process`)。
+ * その式が `process` オブジェクトを指しているか (素の `process`・`globalThis.process`・
+ * `globalThis['process']`)。
  * **前置きを 1 か所で剥がすのが要点** — 素の識別子だけを見ていたときは `globalThis.` を
  * 足すだけで `processUses` からも `processExitArguments` からも同時に消え、ゲート全体を
- * 無言の no-op にできた (実測で 798 件すべて緑・件数も不変)
+ * 無言の no-op にできた (実測で 798 件すべて緑・件数も不変)。
+ *
+ * **ただしここは綴りを並べる側なので、これだけでは閉じない** — 実測で
+ * `globalThis['process'].exit(0)` は要素アクセスを見ていなかったため、
+ * `const g = globalThis; g.process.exit(0)` は前置きの識別子を 2 語に決め打ちしていたため、
+ * どちらも 807 件すべて緑のまま (件数も不変) ゲートを無言の no-op にできた。前者はここで
+ * 綴りを 1 つ足して閉じるが、後者のような**次の変種は綴りを増やしても追いつかない**ので、
+ * `processUses` 側が「グローバルオブジェクトが土台以外に現れたこと」自体を使い方として数える
  */
 function isProcessObject(node: ts.Expression): boolean {
   // 素の `process`
   if (ts.isIdentifier(node) && node.text === 'process') return true;
   // `globalThis.process` / `global.process`
-  return (
+  if (
     ts.isPropertyAccessExpression(node) &&
     ts.isIdentifier(node.expression) &&
     GLOBAL_OBJECT_NAMES.has(node.expression.text) &&
     node.name.text === 'process'
+  )
+    return true;
+  // `globalThis['process']` / `global['process']` (添字が文字列リテラルの形)
+  return (
+    ts.isElementAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    GLOBAL_OBJECT_NAMES.has(node.expression.text) &&
+    ts.isStringLiteralLike(node.argumentExpression) &&
+    node.argumentExpression.text === 'process'
+  );
+}
+
+/**
+ * その識別子が「値ではなく名前」として書かれているか
+ * (`x.foo` のプロパティ名・`{ foo: 1 }` のキー)。
+ * **参照ではないので使い方に数えない** — 数えると無関係な項目名で直しようのない赤になる
+ */
+function isWrittenAsName(node: ts.Identifier): boolean {
+  // 親の節点
+  const parent = node.parent;
+  // 親が無ければ名前ではない
+  if (parent === undefined) return false;
+  // `x.foo` の `foo` か `{ foo: 1 }` の `foo` か
+  return (
+    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+    (ts.isPropertyAssignment(parent) && parent.name === node)
+  );
+}
+
+/**
+ * その識別子が「プロパティを取り出す土台」として書かれているか
+ * (`globalThis.process` / `globalThis['process']` の `globalThis` の位置)。
+ * 土台以外に現れたグローバルオブジェクトは、そこから先を静的に追えない
+ */
+function isAccessBase(node: ts.Identifier): boolean {
+  // 親の節点
+  const parent = node.parent;
+  // 親が無ければ土台ではない
+  if (parent === undefined) return false;
+  // `<node>.x` か `<node>[...]` の左側にいるか
+  return (
+    (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+    parent.expression === node
   );
 }
 
@@ -421,6 +483,19 @@ export function processUses(path: string): string[] {
   const found = new Set<string>();
   // すべての節点を辿る
   const visit = (node: ts.Node): void => {
+    // **グローバルオブジェクトが「土台」以外に現れたら、そこから先は静的に追えない** —
+    // `const g = globalThis; g.process.exit(0)` は前置きを剥がす判定をすり抜けるうえ、
+    // `g.process` の中の `process` は下の「名前として書かれただけ」に吸い込まれるので、
+    // 実測で 807 件すべて緑 (件数も不変) のままゲートを無言の no-op にできた。
+    // 綴りを 1 つずつ潰しても次の変種 (`Reflect.get(globalThis, 'process')` 等) が出るだけなので、
+    // **土台以外に現れたこと自体**を使い方として数え、許可リストに無い名前として落とす
+    if (
+      ts.isIdentifier(node) &&
+      GLOBAL_OBJECT_NAMES.has(node.text) &&
+      !isAccessBase(node) &&
+      !isWrittenAsName(node)
+    )
+      found.add('globalThis');
     // `process` オブジェクトを指す式だけを見る (素の `process` と `globalThis.process`)
     if (ts.isExpression(node) && isProcessObject(node)) {
       // 親の節点 (どう使われているかを知るため)
@@ -431,11 +506,7 @@ export function processUses(path: string): string[] {
         return;
       // **「名前として書かれただけ」は参照ではない** — `x.process` のプロパティ名や
       // `{ process: 'x' }` のキーまで数えると、無関係な項目名で直しようのない赤になる
-      const isName =
-        ts.isIdentifier(node) &&
-        parent !== undefined &&
-        ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
-          (ts.isPropertyAssignment(parent) && parent.name === node));
+      const isName = ts.isIdentifier(node) && isWrittenAsName(node);
       // 親が `<process>.<名前>` の形で、自分がその受け手なら、その名前まで含めて覚える
       if (
         parent !== undefined &&

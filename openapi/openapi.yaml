@@ -605,6 +605,7 @@ paths:
         ストリーミング (stream: true) は Step2 の範囲外で 422。
         本文の入れ子が深すぎる場合も 422（上限は src/lib/body-limits.ts の JSON_BODY_MAX_DEPTH。
         サイズだけでは資源の消費を縛れないため、深さにも明示の上限を置いている）。
+        **この深さの上限は本文を取るすべての操作に等しく効く**（判定は本文を読む共通の入口にある）。
 
         上流の応答の扱い: 2xx はそのまま返す。**ステータスを保って中継する 4xx は 400 / 413 / 422 だけ**
         (「送り主自身の要求についての診断」と言い切れるもの。許可リストなので、それ以外の 4xx —
@@ -660,8 +661,8 @@ paths:
       operationId: proxyOpenAiChatCompletions
       summary: OpenAI Chat Completions API への中継 (API キー認証。トークン・料金を UsageEvent に記録する)
       description: |
-        Anthropic 向けの中継と同じ規律 (認証・未対応モデル・ストリーミング・上流エラーの扱い・
-        本文の JSON 正規化) で、OpenAI の Chat Completions API へ中継する。
+        Anthropic 向けの中継と同じ規律 (認証・未対応モデル・ストリーミング・本文の入れ子の深さ・
+        上流エラーの扱い・本文の JSON 正規化) で、OpenAI の Chat Completions API へ中継する。
       requestBody:
         required: true
         content:

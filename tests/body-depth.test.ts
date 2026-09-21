@@ -60,11 +60,28 @@ describe('exceedsMaxDepth', () => {
   it.each([
     ['配列の末尾', (deep: unknown) => [0, 1, deep]],
     ['オブジェクトの 2 番目のキー', (deep: unknown) => ({ a: 1, b: deep })],
-  ])('先頭以外に置かれた深い値も数える: %s', (_label, wrap) => {
+    ['配列の 5,000 番目', (deep: unknown) => [...Array.from({ length: 5_000 }, () => 0), deep]],
+    [
+      'オブジェクトの 5,000 番目のキー',
+      (deep: unknown) => ({
+        ...Object.fromEntries(Array.from({ length: 5_000 }, (_v, i) => [`k${i}`, 0])),
+        z: deep,
+      }),
+    ],
+    [
+      '幅の広い枝を辿ったあとに見る深い値',
+      (deep: unknown) => [deep, ...Array.from({ length: 20_000 }, () => [])],
+    ],
+  ])('先頭以外・幅の後ろに置かれた深い値も数える: %s', (_label, wrap) => {
     // **既存のケースは深い値が「配列の 0 番目・最初のキー」にしかなかった** — 実測で、
     // 子を辿るループを `current.node.slice(0, 1)` / `Object.keys(record).slice(0, 1)` に
-    // 絞る変異はどちらも 811 件すべて緑のまま通り、深い値を 2 番目以降に置いた本文が
-    // 上限をすり抜けて `JSON.stringify` の RangeError（＝ 500）に戻った
+    // 絞る変異はどちらも全件緑のまま通り、深い値を 2 番目以降に置いた本文が
+    // 上限をすり抜けて `JSON.stringify` の RangeError（＝ 500）に戻った。
+    // **位置を 2 つ試すだけでは「打ち切り」という形は塞げない** — `slice(0, 100)` や
+    // 「訪問回数の予算」「キーが多すぎるオブジェクトは飛ばす」といった、いかにも性能対策として
+    // 書かれそうな変異はどれも全件緑で通った（実測で 4 形）。そこで**桁の違う位置**と、
+    // **幅の広い枝を辿り終えてから深い値に届く形**（辿る順は後入れ先出しなので、
+    // 深い枝を先頭に置くと最後に見ることになる）も入れる
     let deep: unknown = 1;
     for (let level = 0; level < JSON_BODY_MAX_DEPTH; level += 1) deep = [deep];
     expect(exceedsMaxDepth(wrap(deep), JSON_BODY_MAX_DEPTH)).toBe(true);

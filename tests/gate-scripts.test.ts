@@ -22,7 +22,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
@@ -84,7 +84,11 @@ function cleanChildEnv(): NodeJS.ProcessEnv {
 }
 
 // **素の Node** で runBench を 1 回動かし、その標準出力と終了コードを返す。
-// 静的検査は「その綴りがあるか」しか見ないので、基準が本当に強制されているかはこれで確かめる
+// 静的検査は「その綴りがあるか」しか見ないので、基準が本当に強制されているかはこれで確かめる。
+// **残る境界**: 渡すのは合成した計測結果なので、**ベンチ本体が何を測って `slowestMs` /
+// `addedMs` に入れたか**はここでも静的検査でも見ていない (`Math.max` を `Math.min` にする
+// 変異は全件緑で通る)。ベンチ本体は DB と本番ビルドを要するので検査の費用が高く、
+// **計測式が変わる差分はレビューで確認する**という扱いにしている (除外表と同じ)
 function runBenchInCleanChild(label: string, payload: Record<string, number>): string {
   // 共有モジュールの場所
   const moduleUrl = pathToFileURL(join(SCRIPTS_DIR, 'lib', 'bench-criteria.mjs')).href;
@@ -171,33 +175,71 @@ const NPM_SHIM_MARKER = 'NPM_SHIM_INVOKED';
  * @param name ゲートのファイル名 (`gate-step<N>.mjs`)
  * @returns 終了コードと標準出力・標準エラー
  */
-function runGateWithFailingNpm(name: string): {
-  status: number | null;
-  output: string;
-} {
+function withNpmShimOnPath<T>(
+  options: { exitCode: number; writeReport: boolean },
+  run: (env: NodeJS.ProcessEnv) => T,
+): T {
   // シムを置く一時ディレクトリ
-  const shimDir = mkdtempSync(join(tmpdir(), 'agent-ops-gate-shim-'));
+  const shimDir = mkdtempSync(join(tmpdir(), 'agent-ops-npm-shim-'));
   try {
-    // POSIX 用のシム (印を出して失敗する)
+    // シムの中身は Node で書く (OS ごとに書き分けるのは起動の 1 行だけにする)
+    const shimJs = join(shimDir, 'npm-shim.mjs');
+    writeFileSync(
+      shimJs,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        // 呼ばれたことを知らせる印
+        `console.log(${JSON.stringify(NPM_SHIM_MARKER)});`,
+        // `--outputFile=` があれば、1 件も pass していないレポートを書く
+        // (判定まで到達させるための最小の贋物。**判定は必ず落ちる**のでゲートは非 0 で終わるはず)
+        `if (${String(options.writeReport)})`,
+        `  for (const arg of process.argv.slice(2))`,
+        `    if (arg.startsWith('--outputFile='))`,
+        `      writeFileSync(`,
+        `        arg.slice('--outputFile='.length),`,
+        `        JSON.stringify({ numPassedTests: 0, numFailedTests: 0, numPendingTests: 0, testResults: [] }),`,
+        `      );`,
+        `process.exit(${String(options.exitCode)});`,
+      ].join('\n'),
+    );
+    // POSIX 用の起動 (Node の絶対パスでシムを呼ぶ)
     writeFileSync(
       join(shimDir, 'npm'),
       `#!/bin/sh
-echo ${NPM_SHIM_MARKER}
-exit 1
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(shimJs)} "$@"
 `,
     );
     // 実行できるようにする
     chmodSync(join(shimDir, 'npm'), 0o755);
-    // Windows 用のシム (npm.cmd が探される)
+    // Windows 用の起動 (npm.cmd が探される)
     writeFileSync(
       join(shimDir, 'npm.cmd'),
-      `@echo ${NPM_SHIM_MARKER}
-@exit /b 1
-`,
+      `@${JSON.stringify(process.execPath)} ${JSON.stringify(shimJs)} %*\r\n`,
     );
-    // vitest の印を落とした env に、シムを先頭に置いた PATH を渡す
+    // vitest の印を落とした env を作る
     const env = cleanChildEnv();
-    env.PATH = `${shimDir}${delimiter}${env.PATH ?? ''}`;
+    // **PATH は置き換える (先頭に足さない)** — 足すだけだと、シムを起動できない環境
+    // (`tmpdir` が noexec・Windows の `Path` と `PATH` が並ぶ等) で探索が本物の npm へ落ち、
+    // 入れ子の本物の検証が走って上限まで止まる。置き換えれば ENOENT で即座に赤くなる。
+    // ゲート自身は `process.execPath` (絶対パス) で起動するので PATH には依存しない
+    env.PATH = shimDir;
+    // 呼び出し側に使わせる
+    return run(env);
+  } finally {
+    // 一時ディレクトリを片付ける (§8 リソースを確実に解放する)
+    rmSync(shimDir, { recursive: true, force: true });
+  }
+}
+
+// ゲートをシムの下で実行する (シムの作り方は withNpmShimOnPath の説明)
+function runGateWithNpmShim(
+  name: string,
+  options: { exitCode: number; writeReport: boolean },
+): {
+  status: number | null;
+  output: string;
+} {
+  return withNpmShimOnPath(options, (env) => {
     // ゲートを素の Node で実行する
     const result = spawnSync(process.execPath, [join(SCRIPTS_DIR, name)], {
       cwd: ROOT,
@@ -207,10 +249,46 @@ exit 1
     });
     // 終了コードと、標準出力・標準エラーを合わせたもの
     return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
-  } finally {
-    // 一時ディレクトリを片付ける (§8 リソースを確実に解放する)
-    rmSync(shimDir, { recursive: true, force: true });
-  }
+  });
+}
+
+/**
+ * `runNpmCapturingStdout` を「必ず失敗する npm」の下で**実際に呼び**、その戻り値を返す。
+ *
+ * **なぜ要るか**: ゲート本体は静的検査によって「このヘルパーの戻り値を展開して
+ * `benchOutputProblems` へ渡す」形を強制されているが、**ヘルパー自身が本当に `npm` を
+ * 起動するかは誰も実行して確かめていなかった**。引数を見て合格の JSON を組み立てて返す分岐を
+ * 足すと、ベンチを 1 本も起動しないまま「ベンチ 2 本合格」と判定されて `gate:step2 緑` が出た
+ * （実測で 819 件すべて緑・件数も不変）。受け入れ基準が一度も測られずに次 Step へ進める形なので、
+ * ここだけは挙動で見る
+ * @returns 終了コードと標準出力
+ */
+function captureHelperWithFailingNpm(): { status: number; stdout: string } {
+  // ヘルパーの場所 (子プロセスから import する)
+  const lib = pathToFileURL(join(ROOT, 'scripts', 'lib', 'run-npm-steps.mjs')).href;
+  // import → 呼び出し → 結果を JSON で出す
+  const code = [
+    `const { runNpmCapturingStdout } = await import(${JSON.stringify(lib)});`,
+    `const result = runNpmCapturingStdout(['run', 'bench:usage']);`,
+    `console.log('RESULT=' + JSON.stringify({ status: result.status, stdout: result.stdout }));`,
+  ].join('\n');
+  // 失敗する npm を PATH に置いて実行する
+  const output = withNpmShimOnPath(
+    { exitCode: 1, writeReport: false },
+    (env) =>
+      spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env,
+        timeout: 120_000,
+      }).stdout ?? '',
+  );
+  // 結果の行を取り出す (1 行も無ければ空として返す = fail-closed)
+  const line = output.split('\n').find((text) => text.startsWith('RESULT='));
+  // 見つからなければ「起動していない」と同じ扱いにする
+  if (line === undefined) return { status: 0, stdout: '' };
+  // JSON を読む
+  return JSON.parse(line.slice('RESULT='.length)) as { status: number; stdout: string };
 }
 // 判定に渡す役割・操作・接頭辞 (ゲート本体と同じ形。ここでは合成入力なので値は何でもよい)
 const MATRIX = {
@@ -1500,7 +1578,10 @@ describe('判定の結線', () => {
       benchScriptNames().flatMap((bench) =>
         foreignModuleSpecifiers(join(SCRIPTS_DIR, bench))
           .filter((specifier) => specifier.startsWith('.'))
-          .map((specifier) => resolve(SCRIPTS_DIR, specifier)),
+          // **解決の基点は前向きの検査と同じ「そのファイルのディレクトリ」にする** —
+          // `SCRIPTS_DIR` 固定だと、ベンチをサブディレクトリへ移した瞬間に逆向きだけが
+          // 別の場所を指して「誰も取り込んでいない」と誤検出する
+          .map((specifier) => resolve(dirname(join(SCRIPTS_DIR, bench)), specifier)),
       ),
     );
     for (const modulePath of ALLOWED_BENCH_SRC_MODULES) {
@@ -1542,7 +1623,8 @@ describe('判定の結線', () => {
       for (const use of processUses(path))
         expect(
           ALLOWED_GATE_PROCESS_USES.has(use),
-          `${path} の ${use} は許していない (要素アクセス・別名束縛で終了経路を隠せる)`,
+          `${path} の ${use} は許していない (要素アクセス・別名束縛で終了経路を隠せる)。` +
+            `constructor は不透明なホップとして数えている — 例外の型名が要るなら error.name を使う`,
         ).toBe(true);
   });
 
@@ -1592,18 +1674,53 @@ describe('判定の結線', () => {
   });
 
   it.each(gateScriptNames())(
-    '%s は検証が失敗すれば非 0 で終わる (綴りに依存しない実行での確認)',
+    '%s は検証コマンドが失敗すれば非 0 で終わる (綴りに依存しない実行での確認)',
     (name) => {
-      // 必ず失敗する npm を PATH の先頭に置いて実行する
-      const { status, output } = runGateWithFailingNpm(name);
+      // 必ず失敗する npm を置いて実行する
+      const { status, output } = runGateWithNpmShim(name, { exitCode: 1, writeReport: false });
       // **そもそも検証を始めていること** — 何も検査せずに落ちる形もここで落とす
       expect(output, `${name} が npm を 1 度も呼んでいない`).toContain(NPM_SHIM_MARKER);
-      // **検証が失敗しているのに 0 で終わらないこと。** 静的検査が捉えられない書き方
-      // (`function(){}.constructor('process.exit(0)')()` など) もこの 1 つの理由で落ちる
-      expect(status, `${name} が検証の失敗を無視して成功終了した`).not.toBe(0);
+      // **検証が失敗しているのに 0 で終わらないこと。** `status` が数値であることまで見る
+      // (spawnSync は時間切れで `null` を返すので、`not.toBe(0)` だけだとハングでも通る)
+      expect(
+        typeof status === 'number' && status !== 0,
+        `${name} が検証の失敗を無視して成功終了した (終了コード ${String(status)})`,
+      ).toBe(true);
     },
     180_000,
   );
+
+  it.each(gateScriptNames().filter((name) => GATE_EXIT_EXCLUSIONS[name] === undefined))(
+    '%s は判定が落ちれば非 0 で終わる (検証コマンドより後ろまで見る)',
+    (name) => {
+      // **1 本目だけでは射程が足りない** — 必ず失敗する npm では最初の検証コマンドで
+      // 終わるので、そこから後ろ (レポートの判定・網羅の検査・ベンチ) は視界に入らない。
+      // 実測で、反射的なアクセス (`Reflect.get(f,'constructor')(…)` / `'con'+'structor'` /
+      // `Object.getOwnPropertyDescriptor(…,'constructor').value`) を検証コマンドより後ろへ
+      // 置くと、819 件すべて緑・tsc 0・eslint 0 のままゲートが無言で exit 0 になった。
+      // そこで**成功するが中身の無いレポートを書くシム**で 2 本目を回す — 1 件も pass して
+      // いないレポートは判定が必ず落とすので、正しいゲートはここでも非 0 で終わる
+      const { status, output } = runGateWithNpmShim(name, { exitCode: 0, writeReport: true });
+      // 検証を始めていること
+      expect(output, `${name} が npm を 1 度も呼んでいない`).toContain(NPM_SHIM_MARKER);
+      // 判定が落ちるはずの入力なのに 0 で終わっていないこと
+      expect(
+        typeof status === 'number' && status !== 0,
+        `${name} が判定を通さずに成功終了した (終了コード ${String(status)})`,
+      ).toBe(true);
+    },
+    180_000,
+  );
+
+  it('runNpmCapturingStdout は実際に npm を起動する', () => {
+    // 失敗する npm の下で実際に呼ぶ
+    const { status, stdout } = captureHelperWithFailingNpm();
+    // **起動していること** — 引数を見て結果を組み立てて返す形だと、ベンチを 1 本も走らせないまま
+    // 「ベンチ合格」と判定されて gate:step2 が緑になる (実測で 819 件すべて緑・件数も不変)
+    expect(stdout, 'npm を起動していない').toContain(NPM_SHIM_MARKER);
+    // **失敗をそのまま返すこと** (終了コードを握り潰していない)
+    expect(status, 'npm の失敗を成功として返している').not.toBe(0);
+  }, 180_000);
 
   it('共有モジュールは import しただけでプロセスを終わらせない', () => {
     // 共有モジュールの一覧 (0 本なら導出が壊れている)

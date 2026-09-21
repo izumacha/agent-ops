@@ -318,8 +318,6 @@ function isDeclarationName(node: ts.Identifier): boolean {
     parent.name === node
   )
     return true;
-  // catch が束縛する変数 (`catch (Function) { … }`)
-  if (ts.isCatchClause(parent)) return parent.variableDeclaration?.name === node;
   // 分割代入の要素 (`const { eval: x } = o` の `eval` はプロパティ名、`x` は束縛する名前)
   if (ts.isBindingElement(parent)) return parent.name === node || parent.propertyName === node;
   // import で束縛する名前
@@ -569,8 +567,11 @@ export function processUses(path: string): string[] {
     // `new Function('return process')().exit(0)` は名前としては見えるのに中身を追えない。
     // **残る境界**: 同名のローカル束縛への参照 (`catch (Function) { return Function; }`) も
     // ここでは数える (宣言そのものは除くが、参照までは区別しない)。現在そう書いた箇所は無く、
-    // 出たときは名前を変えれば済む。**名前に一切現れない形** (`function(){}.constructor('…')`)
-    // は原理的に捉えられないので、ゲートの挙動検査 (子プロセスで実際に走らせる) が受け持つ
+    // 出たときは名前を変えれば済む。**綴りが静的に現れない形は原理的に捉えられない** —
+    // 実測した例: `Reflect.get(function(){}, 'constructor')('…')()` /
+    // `[]['con' + 'structor']['con' + 'structor']('…')()` /
+    // `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(()=>{}), 'constructor').value('…')()`。
+    // **この系統はゲートの挙動検査 (子プロセスで実際に走らせる 2 本) が受け持つ**
     if (
       ts.isIdentifier(node) &&
       OPAQUE_GLOBAL_NAMES.has(node.text) &&
@@ -762,6 +763,10 @@ export function foreignModuleSpecifiers(path: string): string[] {
  * @returns 呼び出し先の名前 (重複なし)
  */
 export function reachableCallNames(path: string): string[] {
+  // **名前の取れない呼び出しは一覧に現れない** — callee が計算式のとき
+  // (`[]['con' + 'structor'](…)`) は名前が無いので丸ごと落ちる。呼び出し名の許可リストを
+  // 掛ける側は、**件数**も併せて見ないと同じ穴がそこに開く (ベンチはトップレベルの
+  // 式文の件数を固定しているのでそこは塞がっている)
   // 構文木にする
   const source = parseScript(path);
   // スコープごとの呼び出し

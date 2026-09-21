@@ -47,6 +47,26 @@ describe('exceedsMaxDepth', () => {
     expect(exceedsMaxDepth(wide, JSON_BODY_MAX_DEPTH)).toBe(false);
   });
 
+  it('配列の中のオブジェクトも数える (交互の入れ子)', () => {
+    // **配列の枝とオブジェクトの枝を別々に書いたので、片方から他方へ辿り損ねる形が書ける** —
+    // 実測で、配列の枝の条件を `typeof child === 'object'` から `Array.isArray(child)` へ
+    // 取り違えると 808 件すべて緑（件数も不変）のまま `[{"a":[{"a":…}]}]` が素通りし、
+    // 2,400 段の本文で `JSON.stringify` が RangeError → 500 になった
+    let value: unknown = 1;
+    for (let level = 0; level < JSON_BODY_MAX_DEPTH; level += 1) value = [{ a: value }];
+    expect(exceedsMaxDepth(value, JSON_BODY_MAX_DEPTH)).toBe(true);
+  });
+
+  it('__proto__ をキーにした入れ子も数える', () => {
+    // `JSON.parse` は `__proto__` を**自分のキー**として作る（プロトタイプは差し替わらない）ので、
+    // 辿る側も普通のキーとして扱う。**実測で、オブジェクトの枝に
+    // `if (key === '__proto__') continue;`（汚染対策としていかにも書かれそうな 1 行）を足すと
+    // 808 件すべて緑・件数も不変のまま、この形だけが上限をすり抜けて 4,000 段が中継され、
+    // 4,600 段は 500 になった**
+    const inner = `${'{"__proto__":'.repeat(JSON_BODY_MAX_DEPTH)}1${'}'.repeat(JSON_BODY_MAX_DEPTH)}`;
+    expect(exceedsMaxDepth(JSON.parse(`{"x":${inner}}`), JSON_BODY_MAX_DEPTH)).toBe(true);
+  });
+
   it('判定そのものは深い入力でも落ちない (再帰で書いていない)', () => {
     // **`JSON.stringify` が RangeError になる深さ**を与えても、判定は落ちずに true を返す
     expect(exceedsMaxDepth(nestedArray(20_000), JSON_BODY_MAX_DEPTH)).toBe(true);
@@ -63,9 +83,11 @@ describe('JSON_BODY_MAX_DEPTH', () => {
     // どれだけ焼けるか」をそのまま決める**ので、深さの上限はここで押さえる。
     // **この上限を上げる差分は、上の実測を取り直して理由を確認すること**
     expect(JSON_BODY_MAX_DEPTH).toBeLessThanOrEqual(128);
-    // 実在のベンダー本文 (messages[].content[].source 等) は 5〜8 段、いちばん深い形でも
-    // tools[].input_schema の JSON Schema で 30 段 (実測: 31 段で 422) なので、正当な本文は通る
-    expect(JSON_BODY_MAX_DEPTH).toBeGreaterThanOrEqual(16);
+    // **下限も縛る。** 実在のベンダー本文は画像つき `messages` で 6〜8 段、`tools` や
+    // `response_format` を含む形で 11〜12 段。上限を下げる差分は「安全側だから」と通りやすいが、
+    // 下げすぎると正当な本文を 422 にする（実測で 16 まで下げても 808 件すべて緑で、
+    // そのとき通るツール定義の JSON Schema は 6 段まで落ちた）。実在の最深に 4 倍の余裕を残す
+    expect(JSON_BODY_MAX_DEPTH).toBeGreaterThanOrEqual(48);
     // 上限ちょうどの深さは実際に stringify できること (縛った値が RangeError の手前にあることの実測。
     // 閾値は呼び出し時点のスタック残量で動く = 実測 3,297〜4,164 ので、値ではなく挙動で固定する)
     expect(() => JSON.stringify(nestedArray(JSON_BODY_MAX_DEPTH))).not.toThrow();

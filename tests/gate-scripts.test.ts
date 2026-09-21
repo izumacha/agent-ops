@@ -12,8 +12,8 @@
 // (実測で `eslint . --max-warnings=0` が 1 を返す)。`package.json` の lint からその指定を外さないこと
 import { describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve, sep } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
@@ -1137,6 +1137,32 @@ describe('判定の結線', () => {
     'node:path',
   ]);
 
+  // ベンチがアプリ本体から取り込んでよいモジュール (絶対パス)。**「`src/` の下なら許す」に
+  // してはいけない** — `src/` はゲートの静的検査の走査対象ではないので、偽の合格 payload を
+  // `console.log` してから `process.exit(0)` するモジュールを新設して 1 行 import するだけで、
+  // ベンチが DB にも上流にも触れないまま Step2 の受け入れ基準を通せた (実測で 808 件すべて緑・
+  // 件数も不変)。**エントリを足す差分は、その結線が import の副作用や終了経路を持たないかを
+  // レビューで確認する**（除外表と同じ扱いのエスケープハッチ）。
+  // **残る境界**: 見るのは直接の import 先だけで、その先が推移的に取り込むものは追わない。
+  // ただしここに並ぶのはアプリ本体が実行時に使う結線なので、そこへ終了経路を足せば
+  // アプリのテストが落ちる（新設した誰も使わないモジュールに隠す、という形は塞がる）
+  // (指定子は拡張子を書かないので、解決結果と同じ「拡張子なしの絶対パス」で持つ)
+  const ALLOWED_BENCH_SRC_MODULES = new Set(
+    [
+      'lib/prisma-client',
+      'lib/tokens',
+      'lib/proxy/upstream',
+      'domain/types',
+      'data/adapters/prisma',
+    ].map((name) => join(SCRIPTS_DIR, '..', 'src', name)),
+  );
+
+  // ゲートと共有モジュールが相対 import してよい先 (絶対パス)。**走査している集合そのもの**から
+  // 導く（前方一致で許すと、走査が拡張子で絞っているぶんだけ許可のほうが広くなる）
+  const scannedSharedModulePaths = new Set(
+    sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name)),
+  );
+
   // ベンチのトップレベルの変数初期化子で呼んでよいもの。**定数を組み立てるだけの純粋な呼び出し**に限り、
   // **このファイルで宣言した関数は載せない** — 呼び出し先の本体は `topLevelInitializerEffects` の
   // 視界の外なので、ローカルの薄い包みを許すとその本体へ副作用を書けてしまう (実測: 許可リストに
@@ -1248,9 +1274,12 @@ describe('判定の結線', () => {
           ).toBe(true);
           continue;
         }
-        // 解決先がアプリ本体の中なら許す (ベンチは本番のアダプタと結線を使う)
+        // 解決先はアプリ本体の**許可した結線だけ**。**「`src/` の下なら許す」では足りない** —
+        // `src/` は `process` の走査対象ではないので、そこへ偽の合格 payload を出して
+        // `process.exit(0)` するモジュールを新設し 1 行 import すると、ベンチが DB にも上流にも
+        // 触れないまま受け入れ基準を通せた (実測で 808 件すべて緑・件数も不変)
         expect(
-          resolve(dirname(path), specifier).startsWith(join(SCRIPTS_DIR, '..', 'src') + sep),
+          ALLOWED_BENCH_SRC_MODULES.has(resolve(dirname(path), specifier)),
           `${bench} が ${specifier} を取り込んでいる (import の副作用で判定を飛ばせる)`,
         ).toBe(true);
       }
@@ -1392,6 +1421,18 @@ describe('判定の結線', () => {
     );
   });
 
+  it('ベンチが取り込んでよいアプリ本体のモジュールは実在する', () => {
+    // 0 本なら空振りで緑になる (fail-closed)
+    expect(ALLOWED_BENCH_SRC_MODULES.size, '許可リストが空').toBeGreaterThan(0);
+    for (const modulePath of ALLOWED_BENCH_SRC_MODULES)
+      // 指定子は拡張子を書かないので、ファイルかディレクトリの index かを見る。
+      // **実在しないエントリを放置すると、綴り違いのまま許可だけが広がる**
+      expect(
+        existsSync(`${modulePath}.ts`) || existsSync(join(modulePath, 'index.ts')),
+        `${modulePath} は実在しない (許可リストの綴りが古い)`,
+      ).toBe(true);
+  });
+
   // ゲートと共有モジュールが `process` に触れてよい形 (実測した現在の使用がそのまま入る)。
   // **ベンチと同じく「許す側」を列挙する** — 綴りを並べる形に戻すと、実測で
   // `process['exit'](0)` を 1 行足すだけでゲート全体が無言の no-op になり全件緑だった
@@ -1437,10 +1478,16 @@ describe('判定の結線', () => {
           ).toBe(true);
           continue;
         }
-        // 相対 import の先は共有モジュールだけ。**実測で、`scripts/preflight.mjs` に
-        // `process.exit(0)` を置いて 1 行 import するだけでゲートが無言の no-op になった**
+        // 相対 import の先は**走査している共有モジュールそのもの**だけ。**実測で、
+        // `scripts/preflight.mjs` に `process.exit(0)` を置いて 1 行 import するだけで
+        // ゲートが無言の no-op になった**。**前方一致で許してはいけない** — 走査は拡張子
+        // `.mjs` で絞るのに許可はパスの前置詞だけを見ていたため、`scripts/lib/preflight.js`
+        // (`package.json` に `type` が無いので CJS) を置いて取り込むと、そのファイルは
+        // どの許可リストの対象にもならないまま評価され、808 件すべて緑・件数も不変のまま
+        // ゲートが無言で exit 0 になった (実測)。**許可は走査済みの集合から導く**ので、
+        // 見ていないものは原理的に取り込めない (拡張子でも深さでも同じ不等号が生まれない)
         expect(
-          resolve(dirname(path), specifier).startsWith(join(SCRIPTS_DIR, 'lib') + sep),
+          scannedSharedModulePaths.has(resolve(dirname(path), specifier)),
           `${path} が ${specifier} を取り込んでいる (import の副作用で判定を飛ばせる)`,
         ).toBe(true);
       }

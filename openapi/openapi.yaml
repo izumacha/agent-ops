@@ -603,9 +603,7 @@ paths:
         エージェントに紐づいていないキー・停止中のエージェントのキーは 403。
         料金表 (src/domain/pricing/vendor-prices.json) に無いモデルは計測できないので中継せず 422。
         ストリーミング (stream: true) は Step2 の範囲外で 422。
-        本文の入れ子が深すぎる場合も 422（上限は src/lib/body-limits.ts の JSON_BODY_MAX_DEPTH。
-        サイズだけでは資源の消費を縛れないため、深さにも明示の上限を置いている）。
-        **この深さの上限は本文を取るすべての操作に等しく効く**（判定は本文を読む共通の入口にある）。
+        本文の入れ子が深すぎる場合も 422（規則は 422 応答の説明を参照。全操作に共通）。
 
         上流の応答の扱い: 2xx はそのまま返す。**ステータスを保って中継する 4xx は 400 / 413 / 422 だけ**
         (「送り主自身の要求についての診断」と言い切れるもの。許可リストなので、それ以外の 4xx —
@@ -896,7 +894,11 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     ValidationError:
-      description: 入力検証エラー
+      description: >-
+        入力検証エラー。スキーマに合わない本文のほか、**本文の入れ子が深すぎる場合**も含む
+        (上限は src/lib/body-limits.ts の JSON_BODY_MAX_DEPTH。サイズだけでは資源の消費を
+        縛れないため深さにも明示の上限を置いており、判定は本文を読む共通の入口にあるので
+        本文を取るすべての操作に等しく効く)
       content:
         application/json:
           schema:

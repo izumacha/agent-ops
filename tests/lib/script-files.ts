@@ -297,6 +297,30 @@ export function topLevelCallNames(path: string): string[] {
 // グローバルオブジェクトを指す識別子 (この経由でも `process` へ届く)
 const GLOBAL_OBJECT_NAMES = new Set(['globalThis', 'global']);
 
+// 中身を静的に追えない組み込み (文字列からコードを作るので、名前だけでは何をするか分からない)
+const OPAQUE_GLOBAL_NAMES = new Set(['eval', 'Function']);
+
+/**
+ * その識別子が「宣言している名前」か (`function eval() {}` / `const Function = …` / 引数名)。
+ * **宣言は参照ではない** — 数えると、無関係な名前を宣言しただけで直しようのない赤になる
+ */
+function isDeclarationName(node: ts.Identifier): boolean {
+  // 親の節点
+  const parent = node.parent;
+  // 親が無ければ宣言ではない
+  if (parent === undefined) return false;
+  // 宣言の名前の位置にいるか (変数・関数・引数・クラス)
+  return (
+    ((ts.isVariableDeclaration(parent) ||
+      ts.isFunctionDeclaration(parent) ||
+      ts.isParameter(parent) ||
+      ts.isClassDeclaration(parent)) &&
+      parent.name === node) ||
+    ts.isImportSpecifier(parent) ||
+    ts.isImportClause(parent)
+  );
+}
+
 /**
  * その式が `process` オブジェクトを指しているか (素の `process`・`globalThis.process`・
  * `globalThis['process']`)。
@@ -350,19 +374,42 @@ function isWrittenAsName(node: ts.Identifier): boolean {
 }
 
 /**
- * その識別子が「プロパティを取り出す土台」として書かれているか
- * (`globalThis.process` / `globalThis['process']` の `globalThis` の位置)。
- * 土台以外に現れたグローバルオブジェクトは、そこから先を静的に追えない
+ * その識別子から先を**静的に追えるか**（追えるなら、そこ自体は使い方に数えなくてよい）。
+ *
+ * **「プロパティを取り出す土台なら追える」は誤り。** 追えるのは `<globalThis>.process` の
+ * **1 ホップだけ**なので、土台であることを無条件に免除すると次の 2 系統が誰にも見えなくなる
+ * （どちらも実測で 808 件すべて緑・件数も不変のままゲートを無言の no-op にできた）:
+ * - `globalThis.globalThis.process.exit(0)` — `globalThis.globalThis === globalThis` なので動く。
+ *   先頭は「土台」、2 つ目と `process` は「名前」、外側の式は `isProcessObject` が読めない。
+ * - `const k = 'process'; globalThis[k].exit(0)` — 添字が静的に読めない。
+ *
+ * そこで**免除する条件を「その先が読めたこと」に変える**: その access が `process` として
+ * 読めるか、あるいは**そこで行き止まり**（さらに辿ったり呼んだりしていない）なら免除し、
+ * それ以外は「追えなくなった地点」として呼び出し側が数える。
+ * 行き止まりを免除に含めるのは `globalThis[MARKER] = true`（印を立てる書き込み。
+ * `scripts/lib/contract-database.mjs`）のためで、書き込みからは `process` へ手が伸びない
  */
-function isAccessBase(node: ts.Identifier): boolean {
+function isStaticallyFollowedGlobal(node: ts.Identifier): boolean {
   // 親の節点
   const parent = node.parent;
-  // 親が無ければ土台ではない
+  // 親が無ければ追う先も無い
   if (parent === undefined) return false;
-  // `<node>.x` か `<node>[...]` の左側にいるか
-  return (
-    (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
-    parent.expression === node
+  // `<node>.x` か `<node>[...]` の左側でなければ、値として使われている (追えない)
+  if (
+    !(ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) ||
+    parent.expression !== node
+  )
+    return false;
+  // その access が `process` として読めるなら、外側の判定が拾う
+  if (isProcessObject(parent)) return true;
+  // 読めなかった access の外側 (さらに辿る・呼ぶ形なら、その先は追えない)
+  const outer = parent.parent;
+  // 行き止まり (代入の左辺など) なら免除、手繰っているなら免除しない
+  return !(
+    outer !== undefined &&
+    ((ts.isPropertyAccessExpression(outer) && outer.expression === parent) ||
+      (ts.isElementAccessExpression(outer) && outer.expression === parent) ||
+      (ts.isCallExpression(outer) && outer.expression === parent))
   );
 }
 
@@ -483,19 +530,28 @@ export function processUses(path: string): string[] {
   const found = new Set<string>();
   // すべての節点を辿る
   const visit = (node: ts.Node): void => {
-    // **グローバルオブジェクトが「土台」以外に現れたら、そこから先は静的に追えない** —
-    // `const g = globalThis; g.process.exit(0)` は前置きを剥がす判定をすり抜けるうえ、
-    // `g.process` の中の `process` は下の「名前として書かれただけ」に吸い込まれるので、
-    // 実測で 807 件すべて緑 (件数も不変) のままゲートを無言の no-op にできた。
-    // 綴りを 1 つずつ潰しても次の変種 (`Reflect.get(globalThis, 'process')` 等) が出るだけなので、
-    // **土台以外に現れたこと自体**を使い方として数え、許可リストに無い名前として落とす
+    // **グローバルオブジェクトから先を静的に追えなくなったら、その地点自体を使い方に数える** —
+    // 綴りを 1 つずつ潰す形では追いつかない (`const g = globalThis; g.process.exit(0)` /
+    // `globalThis.globalThis.process.exit(0)` / `const k = 'process'; globalThis[k].exit(0)` は
+    // いずれも実測で全件緑・件数も不変のままゲートを無言の no-op にできた)。
+    // 「追えたか」の判定は `isStaticallyFollowedGlobal` が持つ。**追えない形は許可リストに
+    // 無い名前として落ちる**ので、次の変種が出ても同じ 1 つの理由で止まる
     if (
       ts.isIdentifier(node) &&
       GLOBAL_OBJECT_NAMES.has(node.text) &&
-      !isAccessBase(node) &&
+      !isStaticallyFollowedGlobal(node) &&
       !isWrittenAsName(node)
     )
       found.add('globalThis');
+    // **静的解析がそこで途切れる組み込みも同じ扱い** — `eval('process.exit(0)')` や
+    // `new Function('return process')().exit(0)` は名前としては見えるのに中身を追えない
+    if (
+      ts.isIdentifier(node) &&
+      OPAQUE_GLOBAL_NAMES.has(node.text) &&
+      !isWrittenAsName(node) &&
+      !isDeclarationName(node)
+    )
+      found.add(node.text);
     // `process` オブジェクトを指す式だけを見る (素の `process` と `globalThis.process`)
     if (ts.isExpression(node) && isProcessObject(node)) {
       // 親の節点 (どう使われているかを知るため)
@@ -512,8 +568,22 @@ export function processUses(path: string): string[] {
         parent !== undefined &&
         ts.isPropertyAccessExpression(parent) &&
         parent.expression === node
-      )
-        found.add(`process.${parent.name.text}`);
+      ) {
+        // 取り出している名前
+        const member = parent.name.text;
+        // その場で呼んでいるか (`<process>.<名前>(…)` の callee の位置にいるか)
+        const calledHere =
+          parent.parent !== undefined &&
+          ts.isCallExpression(parent.parent) &&
+          parent.parent.expression === parent;
+        // **`process.exit` を取り出しただけの形は実引数が見えない** — 実引数を非 0 に縛る
+        // `processExitArguments` は「その場で呼ぶ」形しか読まないので、`process.exit.call(null, 0)` /
+        // `.apply` / `.bind(null,0)()` / `Reflect.apply(process.exit, …)` / `const e = process.exit`
+        // はどれも `process.exit`（許可済み）に見えたまま実引数の検査を素通りした
+        // (実測で 808 件すべて緑・件数も不変のままゲートが無言で exit 0 になった)。
+        // 呼ばずに取り出した時点を別の使い方として数え、許可リストに無い名前として落とす
+        found.add(member === 'exit' && !calledHere ? 'process.exit<間接>' : `process.${member}`);
+      }
       // それ以外の形 (要素アクセス・別名束縛・引数渡し) は素の `process` として覚える
       else if (!isName) found.add('process');
     }

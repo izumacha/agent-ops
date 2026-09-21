@@ -16,6 +16,7 @@ import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/
 import { AgentStatus, Provider } from '@/domain/types';
 import * as pricing from '@/domain/pricing';
 import {
+  API_MESSAGES,
   JSON_BODY_MAX_BYTES,
   JSON_BODY_MAX_DEPTH,
   UPSTREAM_MAX_RESPONSE_BYTES,
@@ -464,6 +465,8 @@ describe('中継しない呼び出し', () => {
     // **両側を固定する** — 通る側だけだと「常に落とす」、落とす側だけだと「常に通す」で緑にできる
     expect(result.status).toBe(expected);
     expect(fetchCalls).toHaveLength(upstreamCalls);
+    // 422 は**深さが理由**であること (スキーマ検証の 422 と取り違えない)
+    if (expected === 422) expect(result.json).toMatchObject({ message: API_MESSAGES.bodyTooDeep });
   });
 
   it('model が無い本文は 422', async () => {

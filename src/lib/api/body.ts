@@ -159,7 +159,10 @@ export function exceedsMaxDepth(value: unknown, limit: number): boolean {
         // 入れ子になりうるものだけ積む
         if (child !== null && typeof child === 'object') stack.push({ node: child, depth });
     } else {
-      // オブジェクトは自分のキーだけを辿る (値の配列を作らない)
+      // オブジェクトは自分のキーだけを辿る (値の配列を作らない)。
+      // **`__proto__` も普通のキーとして辿る** — `JSON.parse` はこれを**自分のキー**として作る
+      // ので（プロトタイプは差し替わらない）、汚染対策のつもりで読み飛ばすと、その形だけが
+      // 上限をすり抜ける（`tests/body-depth.test.ts` が固定する）
       const record = current.node as Record<string, unknown>;
       for (const key of Object.keys(record)) {
         // そのキーの値

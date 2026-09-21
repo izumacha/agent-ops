@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   evaluateStep1Report,
   evaluateStep2Report,
@@ -24,10 +24,17 @@ import {
 import { PRICE_TEST_PREFIX } from '../scripts/lib/step2-criteria.mjs';
 import {
   WARMUP_MAX_MS,
+  addedLatencyProblem,
+  aggregateLatencyProblem,
   intFromEnvValue,
+  requireNoProblem,
   warmupCountProblem,
   warmupLatencyProblem,
 } from '../scripts/lib/bench-criteria.mjs';
+import {
+  PROXY_ADDED_LATENCY_P95_MAX_MS,
+  USAGE_AGGREGATE_MAX_MS,
+} from '../scripts/lib/step2-criteria.mjs';
 import {
   SCRIPTS_DIR,
   callsFunction,
@@ -373,6 +380,53 @@ describe('warmupLatencyProblem', () => {
   });
 });
 
+describe('addedLatencyProblem', () => {
+  // **受け入れ基準そのものの判定なので、上下両側を固定する。** 結線の検査は「その名前を
+  // 呼んでいるか」しか見ないので、比較式を緩めたり本体を空にしたりしても全件緑だった (実測)。
+  // 片側だけだと「常に問題ありと返す」実装でも緑にできるので、通す側も見る
+  it.each([
+    ['上限より小さい', PROXY_ADDED_LATENCY_P95_MAX_MS - 1],
+    ['上限ちょうど', PROXY_ADDED_LATENCY_P95_MAX_MS],
+  ])('上限以内なら問題なし: %s', (_label, addedMs) => {
+    // 基準を満たしているので null
+    expect(addedLatencyProblem(addedMs)).toBeNull();
+  });
+
+  it('上限を 1 超えたら理由を返す', () => {
+    // 基準を満たしていないので文言を返す (別の理由の文言と取り違えないよう中身も見る)
+    expect(addedLatencyProblem(PROXY_ADDED_LATENCY_P95_MAX_MS + 1)).toContain(
+      '追加遅延が大きすぎます',
+    );
+  });
+});
+
+describe('aggregateLatencyProblem', () => {
+  it.each([
+    ['上限より小さい', USAGE_AGGREGATE_MAX_MS - 1],
+    ['上限ちょうど', USAGE_AGGREGATE_MAX_MS],
+  ])('上限以内なら問題なし: %s', (_label, slowestMs) => {
+    // 基準を満たしているので null
+    expect(aggregateLatencyProblem(slowestMs)).toBeNull();
+  });
+
+  it('上限を 1 超えたら理由を返す', () => {
+    // 基準を満たしていないので文言を返す
+    expect(aggregateLatencyProblem(USAGE_AGGREGATE_MAX_MS + 1)).toContain('集計が遅すぎます');
+  });
+});
+
+describe('requireNoProblem', () => {
+  it('問題が無ければ通す', () => {
+    // null は「基準を満たしている」なので止めない
+    expect(() => requireNoProblem(null)).not.toThrow();
+  });
+
+  it('問題があればその文言で落とす', () => {
+    // 受け取った理由をそのまま例外にする (文言を作り直さない)
+    expect(() => requireNoProblem('集計が遅すぎます: 1234ms')).toThrow('集計が遅すぎます: 1234ms');
+  });
+});
+
 describe('判定の結線', () => {
   // **ゲートは全部 `exitIfFailures` を呼ぶ。** 呼ばないものは理由付きでここへ登録する。
   // 以前は「gate-report.mjs を読んでいるゲートだけ」を対象にしていたが、
@@ -385,6 +439,33 @@ describe('判定の結線', () => {
   const GATE_EXIT_EXCLUSIONS: Readonly<Record<string, string>> = {
     'gate-step0.mjs': '判定を持たず検証コマンドを順に流すだけ。失敗は runSteps がその場で落とす',
   };
+
+  // そのゲートが本来使うべき判定の名前 (`gate-step2.mjs` → `evaluateStep2Report`)。
+  // **判定を「どれか 1 つ」で済ませない** — `gate-step2.mjs` が `evaluateStep1Report` を呼ぶよう
+  // 差し替えると、Step2 固有の基準 (料金表の全モデル分のテストが存在し pass すること) が
+  // 丸ごと消えるのに、全件緑・件数も不変で通った (実測)。ロードマップのゲート運用ルール 2
+  // 「後 Step は前 Step の基準を引き継いだうえで自分の基準を足す」の後半が消える形
+  const ownJudgementOf = (gateName: string): string | null => {
+    // ファイル名から Step 番号を取り出す
+    const step = /^gate-step(\d+)\.mjs$/.exec(gateName)?.[1];
+    // 取り出せなければ対応する判定は決められない
+    return step === undefined ? null : `evaluateStep${step}Report`;
+  };
+
+  // 判定 (gate-report.mjs が公開する関数) の名前。**一覧を手書きしない** — 足した判定が黙って外れる
+  const judgementNames = async (): Promise<string[]> => {
+    // モジュールの実体を読む
+    const report = await importSharedModule('gate-report.mjs');
+    // 関数として公開されているものが判定 (定数は除く)
+    return Object.keys(report).filter((key) => typeof report[key] === 'function');
+  };
+
+  // 判定を持つ共有モジュールのうち、**ベンチが必ず通さなければならない**もの。
+  // ベンチは全テーブルを TRUNCATE するので、接続先が専用 DB かの判定は 1 本も飛ばせない
+  const REQUIRED_BENCH_MODULE = 'contract-database.mjs';
+  // ベンチスクリプトの一覧 (名前の付け方が手がかり)
+  const benchScriptNames = (): string[] =>
+    readdirSync(SCRIPTS_DIR).filter((name) => /^bench-.*\.ts$/.test(name));
 
   it('ゲートスクリプトを 1 本以上見つけられる', () => {
     // 0 本なら走査が壊れている (fail-closed)
@@ -495,26 +576,6 @@ describe('判定の結線', () => {
     }
   });
 
-  // そのゲートが本来使うべき判定の名前 (`gate-step2.mjs` → `evaluateStep2Report`)。
-  // **判定を「どれか 1 つ」で済ませない** — `gate-step2.mjs` が `evaluateStep1Report` を呼ぶよう
-  // 差し替えると、Step2 固有の基準 (料金表の全モデル分のテストが存在し pass すること) が
-  // 丸ごと消えるのに、全件緑・件数も不変で通った (実測)。ロードマップのゲート運用ルール 2
-  // 「後 Step は前 Step の基準を引き継いだうえで自分の基準を足す」の後半が消える形
-  const ownJudgementOf = (gateName: string): string | null => {
-    // ファイル名から Step 番号を取り出す
-    const step = /^gate-step(\d+)\.mjs$/.exec(gateName)?.[1];
-    // 取り出せなければ対応する判定は決められない
-    return step === undefined ? null : `evaluateStep${step}Report`;
-  };
-
-  // 判定 (gate-report.mjs が公開する関数) の名前。**一覧を手書きしない** — 足した判定が黙って外れる
-  const judgementNames = async (): Promise<string[]> => {
-    // モジュールの実体を読む
-    const report = await importSharedModule('gate-report.mjs');
-    // 関数として公開されているものが判定 (定数は除く)
-    return Object.keys(report).filter((key) => typeof report[key] === 'function');
-  };
-
   it.each(gateScriptNames().filter((name) => GATE_EXIT_EXCLUSIONS[name] === undefined))(
     '%s は判定結果で落とす (exitIfFailures を呼ぶ)',
     async (name) => {
@@ -550,13 +611,6 @@ describe('判定の結線', () => {
     },
   );
 
-  // 判定を持つ共有モジュールのうち、**ベンチが必ず通さなければならない**もの。
-  // ベンチは全テーブルを TRUNCATE するので、接続先が専用 DB かの判定は 1 本も飛ばせない
-  const REQUIRED_BENCH_MODULE = 'contract-database.mjs';
-  // ベンチスクリプトの一覧 (名前の付け方が手がかり)
-  const benchScriptNames = (): string[] =>
-    readdirSync(SCRIPTS_DIR).filter((name) => /^bench-.*\.ts$/.test(name));
-
   it('ベンチは scripts/lib から取り込んだ判定を全部呼ぶ', async () => {
     // ベンチが 1 本も無ければ導出が壊れている (fail-closed)
     const benches = benchScriptNames();
@@ -586,28 +640,80 @@ describe('判定の結線', () => {
     expect(checked, '判定を 1 つも検査していない').toBeGreaterThan(0);
   });
 
-  it('bench-criteria の判定はどれかのベンチが必ず呼ぶ (取り込みごと消す形も落とす)', async () => {
-    // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した関数が黙って外れる)
+  it('共有モジュールの判定はすべて挙動を固定している', async () => {
+    // **結線の検査だけでは中身が空でも緑になる。** 実測で `requireAddedLatencyWithinLimit` の
+    // `throw` 行を 1 行消すと、lint も tsc も全 722 件も緑のまま Step2 の追加遅延基準が
+    // 無効になった (結線の検査は「その名前を呼んでいるか」しか見ないため)。
+    // **一覧は手書きせず export から導く** — 次に判定を足した人が同じ穴を再生産しないように
+    const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    // 判定を持つ共有モジュール (この 2 つが受け入れ基準の判定を持つ)
+    for (const moduleName of ['bench-criteria.mjs', 'gate-report.mjs']) {
+      // そのモジュールの実体
+      const shared = await importSharedModule(moduleName);
+      // 関数として公開されているものが判定
+      const judgements = Object.keys(shared).filter((key) => typeof shared[key] === 'function');
+      // 1 つも無ければ導出が壊れている (fail-closed)
+      expect(judgements.length, `${moduleName} の判定を 1 つも読めない`).toBeGreaterThan(0);
+      for (const name of judgements) {
+        // このファイルに同名の describe があること (挙動を固定する場所の慣習)
+        expect(
+          source.includes(`describe('${name}'`),
+          `${name} の挙動を固定する describe がこのファイルに無い`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  // 判定 → それを強制すべきベンチ の対応表 (理由は各行のコメント)。
+  // **「どれかのベンチが呼んでいれば緑」では足りない** — 実測で、プロキシ側の追加遅延の判定を
+  // bench-proxy から消し、bench-usage-aggregate に `addedLatencyProblem(0)` を 1 行足すだけで
+  // 722 件すべて緑のまま「プロキシの追加遅延基準を誰も強制しない」状態になった。
+  // `unconditional` は「条件に囲まれていない文として呼ぶ」ことまで求める印
+  const BENCH_JUDGEMENT_OWNERS: Readonly<
+    Record<string, { benches: readonly string[]; unconditional?: boolean }>
+  > = {
+    // 環境変数から計測の設定を読むのはプロキシのベンチだけ
+    intFromEnvValue: { benches: ['bench-proxy.ts'] },
+    // 捨て玉を流すのもプロキシのベンチだけ
+    warmupCountProblem: { benches: ['bench-proxy.ts'] },
+    warmupLatencyProblem: { benches: ['bench-proxy.ts'] },
+    // 受け入れ基準「追加遅延 ≦ 上限」を測るのはプロキシのベンチ
+    addedLatencyProblem: { benches: ['bench-proxy.ts'] },
+    // 受け入れ基準「1 万件の集計 ≦ 上限」を測るのは集計のベンチ
+    aggregateLatencyProblem: { benches: ['bench-usage-aggregate.ts'] },
+    // 判定の結果で落とすのは両方。**条件で囲めないことまで求める** —
+    // `if (process.env.BENCH_STRICT === '1') requireNoProblem(problem);` と 1 つ足すだけで
+    // 受け入れ基準の強制が外れ、全件緑のまま通った (実測)
+    requireNoProblem: {
+      benches: ['bench-proxy.ts', 'bench-usage-aggregate.ts'],
+      unconditional: true,
+    },
+  };
+
+  it('bench-criteria の判定は担当のベンチが必ず呼ぶ', async () => {
+    // 判定の名前は**モジュールの export から導く** (一覧を手書きすると、足した判定が黙って外れる)
     const criteria = await importSharedModule('bench-criteria.mjs');
     // 関数として公開されているものが判定 (定数は除く)
     const judgements = Object.keys(criteria).filter((key) => typeof criteria[key] === 'function');
     // 1 つも無ければ導出が壊れている (fail-closed)
     expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
-    // 判定を使うベンチ (**取り込みの有無を構文木で見る**。以前は本文の文字列一致だったので、
-    // コメントに綴りが残っているだけのファイルも対象に入っていた)
-    const benches = benchScriptNames().filter((name) =>
-      importedSharedNames(join(SCRIPTS_DIR, name)).has('bench-criteria.mjs'),
+    // **対応表が judgements を過不足なく覆っていること** (足した判定の登録忘れを落とす)
+    expect(Object.keys(BENCH_JUDGEMENT_OWNERS).sort(), '対応表と判定が食い違う').toEqual(
+      judgements.sort(),
     );
-    // 1 本も無ければ導出が壊れている
-    expect(benches.length, '判定を使うベンチが 1 本も無い').toBeGreaterThan(0);
-    for (const name of judgements) {
-      // **「どれかのベンチが呼ぶ」で見る。** 受け入れ基準の判定はベンチごとに違う
-      // (追加遅延はプロキシ、集計時間は日次集計) ので、全ベンチに全判定を求めると
-      // 成り立たない。一方「どのベンチからも呼ばれない判定」は結線が外れた印なので落とす
-      expect(
-        benches.some((bench) => callsFunction(join(SCRIPTS_DIR, bench), name)),
-        `${name} をどのベンチも呼んでいない`,
-      ).toBe(true);
+    for (const [name, owner] of Object.entries(BENCH_JUDGEMENT_OWNERS)) {
+      for (const bench of owner.benches) {
+        // 担当のベンチが実在すること
+        expect(benchScriptNames(), `${bench} は実在しない`).toContain(bench);
+        // そのベンチが、共有モジュールから取り込んだ名前で呼んでいること
+        expect(
+          callsFunction(join(SCRIPTS_DIR, bench), name, {
+            importedFrom: 'bench-criteria.mjs',
+            unconditional: owner.unconditional,
+          }),
+          `${bench} が ${name} を呼んでいない (条件で囲んでいないかも確認)`,
+        ).toBe(true);
+      }
     }
   });
 

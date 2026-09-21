@@ -26,8 +26,9 @@ import { requireContractDatabase } from './lib/contract-database.mjs';
 import { PROXY_ADDED_LATENCY_P95_MAX_MS } from './lib/step2-criteria.mjs';
 import {
   WARMUP_MAX_MS,
+  addedLatencyProblem,
   intFromEnvValue,
-  requireAddedLatencyWithinLimit,
+  requireNoProblem,
   warmupCountProblem,
   warmupLatencyProblem,
 } from './lib/bench-criteria.mjs';
@@ -309,12 +310,12 @@ async function measureLatency(options: { url: string; headers: Record<string, st
   //      意図的にそうしてある: ここを判定 (50ms) へ近づけると、初回コストを判定から外すという
   //      捨て玉の目的と衝突する。値と根拠は scripts/lib/bench-criteria.mjs の WARMUP_MAX_MS
   if (warmup !== null) {
-    // 先に見つかった理由だけを出す
-    const problem =
+    // 先に見つかった理由だけを出し、引っ掛かればその理由で落とす
+    // (throw は共有モジュールが行う。本体に `if (…) throw` を書けると条件 1 つで外せるため)
+    requireNoProblem(
       warmupCountProblem(WARMUP_REQUESTS, warmup.requests) ??
-      warmupLatencyProblem(warmup.maxMs, WARMUP_MAX_MS);
-    // どちらかに引っ掛かれば、その理由で落とす
-    if (problem !== null) throw new Error(problem);
+        warmupLatencyProblem(warmup.maxMs, WARMUP_MAX_MS),
+    );
   }
   // 捨て玉で失敗していたら本計測の数字も信用できない (認証の取り違え等) ので、件数を合算して返す。
   // **この合算は load-bearing** — 外すと「捨て玉の窓だけ 401 になる」設定ミスが丸ごと消える
@@ -389,6 +390,9 @@ async function main(): Promise<void> {
     }
     // 追加遅延 (この定義がこのファイルの要点)
     const addedMs = Math.round((proxied.latencyMs - direct.latencyMs) * 100) / 100;
+    // 受け入れ基準の判定 (満たしていれば null)。**出力の passed もここから導く** —
+    // 比較式を JSON 側へ書き写すと、判定だけを緩めたときに「passed: false を出して exit 0」に割れる
+    const problem = addedLatencyProblem(addedMs);
     // 結果を出す
     console.log(
       JSON.stringify({
@@ -404,11 +408,11 @@ async function main(): Promise<void> {
         requests: { direct: direct.requests, proxied: proxied.requests },
         // 判定には使わないが、初回コストや裾の伸びを読めるように残す (上の measureLatency のコメント)
         distribution: { direct: distributionOf(direct), proxied: distributionOf(proxied) },
-        passed: addedMs <= PROXY_ADDED_LATENCY_P95_MAX_MS,
+        passed: problem === null,
       }),
     );
-    // 基準を超えていれば失敗 (判定は scripts/lib/bench-criteria.mjs が持つ)
-    requireAddedLatencyWithinLimit(addedMs, PROXY_ADDED_LATENCY_P95_MAX_MS);
+    // 基準を超えていれば失敗 (判定も throw も scripts/lib/bench-criteria.mjs が持つ)
+    requireNoProblem(problem);
   } finally {
     // アプリとスタブを止め、一時ファイルを消す (§8 リソースを確実に解放する)
     app?.kill('SIGKILL');

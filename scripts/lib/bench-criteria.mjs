@@ -11,6 +11,15 @@
 // (実測: 2 本の判定を消すと vitest 675 緑・tsc 0・`eslint .` も 0、`eslint . --max-warnings=0`
 // だけが 1 になった)。`package.json` の lint からその指定を外さないこと
 
+// 受け入れ基準のしきい値 (値の正本は scripts/lib/step2-criteria.mjs)。
+// **判定がここへ来る代わりに上限も自分で読む** — 呼び出し側から上限を受け取る形だと、
+// 実測値と上限を入れ替えるだけで判定が反転し、どちらも number なので型検査も通ってしまう (実測)
+import {
+  PROXY_ADDED_LATENCY_P95_MAX_MS,
+  USAGE_AGGREGATE_MAX_MS,
+  USAGE_AGGREGATE_ROW_COUNT,
+} from './step2-criteria.mjs';
+
 // 捨て玉 (ウォームアップ) の最大遅延に置く上限 (ミリ秒)。
 // **受け入れ基準の 50ms から導かない。** あちらは「プロキシ経由と直接の差」の予算で、こちらは
 // 起動直後の絶対遅延。導出にすると、受け入れ基準を動かしたときに無関係なこの上限まで連動する。
@@ -77,31 +86,46 @@ export function warmupLatencyProblem(maxMs, limitMs) {
 }
 
 /**
- * 受け入れ基準「プロキシ経由の追加遅延 ≦ 上限」を判定し、超えていればその場で throw する。
+ * 受け入れ基準「プロキシ経由の追加遅延 ≦ 上限」を判定する。
  *
- * **判定をベンチ本体に `if` で残さない。** 残していたときは `if (false && addedMs > 上限)` と
- * 書き換えるだけで受け入れ基準の判定が黙って外れ、718 件すべて緑・lint も 0 のまま
- * ベンチが常に成功した (実測)。共有モジュールへ出せば「取り込んだ判定を全部呼ぶ」検査が効く
+ * **上限を引数で受け取らない。** 受け取る形にしていたときは、呼び出し側で実測値と上限を
+ * 入れ替える (`addedLatencyProblem(上限, 実測値)`) だけで判定が反転し、どちらも number なので
+ * 型検査も通り、全件緑のまま「基準を超えたときにだけ通る」状態になった (実測)。
+ * 上限はこの関数が自分で読む
  * @param {number} addedMs 実測した追加遅延
- * @param {number} limitMs 上限
+ * @returns {string | null} 問題があれば文言、無ければ null
  */
-export function requireAddedLatencyWithinLimit(addedMs, limitMs) {
-  // 上限以内なら何もしない
-  if (addedMs <= limitMs) return;
+export function addedLatencyProblem(addedMs) {
+  // 上限以内なら問題なし
+  if (addedMs <= PROXY_ADDED_LATENCY_P95_MAX_MS) return null;
   // 超えていれば受け入れ基準を満たしていない
-  throw new Error(`追加遅延が大きすぎます: ${addedMs}ms (上限 ${limitMs}ms)`);
+  return `追加遅延が大きすぎます: ${addedMs}ms (上限 ${PROXY_ADDED_LATENCY_P95_MAX_MS}ms)`;
 }
 
 /**
- * 受け入れ基準「1 万件投入で日次集計 ≦ 上限」を判定し、超えていればその場で throw する。
- * 理由は上の `requireAddedLatencyWithinLimit` と同じ
+ * 受け入れ基準「1 万件投入で日次集計 ≦ 上限」を判定する。上限と件数の出どころは上と同じ理由
  * @param {number} slowestMs 実測した最遅の所要時間
- * @param {number} limitMs 上限
- * @param {number} rowCount 投入した行数 (文言に入れる)
+ * @returns {string | null} 問題があれば文言、無ければ null
  */
-export function requireAggregateLatencyWithinLimit(slowestMs, limitMs, rowCount) {
-  // 上限以内なら何もしない
-  if (slowestMs <= limitMs) return;
+export function aggregateLatencyProblem(slowestMs) {
+  // 上限以内なら問題なし
+  if (slowestMs <= USAGE_AGGREGATE_MAX_MS) return null;
   // 超えていれば受け入れ基準を満たしていない
-  throw new Error(`集計が遅すぎます: ${slowestMs}ms (上限 ${limitMs}ms、${rowCount} 件)`);
+  return `集計が遅すぎます: ${slowestMs}ms (上限 ${USAGE_AGGREGATE_MAX_MS}ms、${USAGE_AGGREGATE_ROW_COUNT} 件)`;
+}
+
+/**
+ * 判定の結果を受け取り、問題があればその場で throw する。
+ *
+ * **判定と throw を分けたうえで、throw をここへ集約するのが要点。** ベンチ本体に
+ * `if (problem !== null) throw new Error(problem)` と書けると、条件を 1 つ足すだけで
+ * 受け入れ基準の強制が外れ、全件緑のまま通る (実測)。ここに集めれば結線の検査が効く。
+ * 出力 JSON の `passed` も判定の戻り値から導けるので、比較式の写しも消える (§6 DRY)
+ * @param {string | null} problem 判定の結果 (問題が無ければ null)
+ */
+export function requireNoProblem(problem) {
+  // 問題が無ければ何もしない
+  if (problem === null) return;
+  // あれば受け入れ基準を満たしていないので止める
+  throw new Error(problem);
 }

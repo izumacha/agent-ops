@@ -58,13 +58,19 @@ describe('exceedsMaxDepth', () => {
   });
 
   it.each([
-    ['配列の末尾', (deep: unknown) => [0, 1, deep]],
+    ['配列の末尾 (偶数添字)', (deep: unknown) => [0, 1, deep]],
+    ['配列の奇数添字', (deep: unknown) => [0, deep]],
     ['オブジェクトの 2 番目のキー', (deep: unknown) => ({ a: 1, b: deep })],
+    ['オブジェクトの 3 番目のキー', (deep: unknown) => ({ a: 1, b: 2, c: deep })],
   ])('先頭以外に置かれた深い値も数える: %s', (_label, wrap) => {
     // **既存のケースは深い値が「配列の 0 番目・最初のキー」にしかなかった** — 実測で、
     // 子を辿るループを `current.node.slice(0, 1)` / `Object.keys(record).slice(0, 1)` に
     // 絞る変異はどちらも全件緑のまま通り、深い値を 2 番目以降に置いた本文が
     // 上限をすり抜けて `JSON.stringify` の RangeError（＝ 500）に戻った。
+    // **偶奇も試す** — 下の「上限いっぱい」の 3 つを入れた時点では深い値の位置がすべて
+    // 偶数添字だったので、`index += 2` と 1 文字書き換えるだけで 10 KB の本文が 500 を
+    // 起こせる状態が全件緑だった（実測）。位置の族は**しきい値ではない**ので、
+    // 天井まで詰めても閉じない — ここは「増えたことに気付く網」であって証明ではない。
     let deep: unknown = 1;
     for (let level = 0; level < JSON_BODY_MAX_DEPTH; level += 1) deep = [deep];
     expect(exceedsMaxDepth(wrap(deep), JSON_BODY_MAX_DEPTH)).toBe(true);
@@ -113,29 +119,51 @@ describe('exceedsMaxDepth', () => {
     return parts.join('');
   }
 
+  // 通し番号から**いちばん短い**キーを作る (最密に詰めるため。攻撃者はこう書ける)
+  function shortKey(index: number): string {
+    // 使える文字 (36 進)
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    // 36 進に変換する
+    let rest = index;
+    let name = '';
+    do {
+      name = alphabet[rest % alphabet.length] + name;
+      rest = Math.floor(rest / alphabet.length);
+    } while (rest > 0);
+    return name;
+  }
+
+  // 上限ちょうどの深さの鎖 (**節点あたりのバイト数がいちばん小さいフィラー**。
+  // 1 段ぶん外側に包まれるので、この鎖自体は上限を超えない)
+  const denseFillerChain = `${'['.repeat(JSON_BODY_MAX_DEPTH - 1)}0${']'.repeat(JSON_BODY_MAX_DEPTH - 1)}`;
+
   it.each([
     [
-      '配列の届きうる最後の位置 (先頭でも末尾でもない)',
-      () => `[${fillToLimit(() => '0,', overLimitChain.length + 4)}${overLimitChain},0]`,
+      '配列の届きうる最後の位置 (先頭でも末尾でもない奇数添字)',
+      () => `[${fillToLimit(() => '0,', overLimitChain.length + 6)}0,${overLimitChain},0]`,
     ],
     [
-      'オブジェクトの届きうる最後のキー (先頭でも末尾でもない)',
+      'オブジェクトの届きうる最後のキー (最密の短いキーで埋める)',
       () =>
-        `{${fillToLimit((i) => `"a${i}":0,`, overLimitChain.length + 18)}"deep":${overLimitChain},"z":0}`,
+        `{${fillToLimit((i) => `"${shortKey(i)}":0,`, overLimitChain.length + 18)}"zz":${overLimitChain},"z":0}`,
     ],
     [
-      '幅の広い枝をすべて辿り終えてから見る深い値',
-      () => `[${overLimitChain}${fillToLimit(() => ',[]', overLimitChain.length + 2)}]`,
+      '幅の広い枝をすべて辿り終えてから見る深い値 (最密の鎖で埋める)',
+      () =>
+        `[${overLimitChain}${fillToLimit(() => `,${denseFillerChain}`, overLimitChain.length + 2)}]`,
     ],
   ])('本文の上限いっぱいに広げても深い値を数える: %s', (_label, build) => {
     // **位置や個数を定数で試すだけでは「打ち切り」という族は閉じない。** `slice(0, 100)` を
     // 塞いでも `slice(0, 25_000)`、訪問回数の予算 10,000 を塞いでも 20,200、という具合に
     // しきい値を 1 つ動かすだけで復活し、どれも 64 KiB 以内の本文で上限を素通りできた（実測）。
-    // **しきい値の天井は「本文の上限に何個詰められるか」だけが決める**ので、そこまで届く
-    // フィクスチャを置けば族ごと閉じる — これより大きいしきい値は**定義上悪用できない**
-    // （本文をそこまで大きくできないため）。3 つの形はそれぞれ別の族を担当する:
-    // 位置の打ち切り（先頭でも末尾でもない最後の位置に置く）、キーの打ち切り、
-    // 訪問回数・スタック長の予算（辿る順は後入れ先出しなので、深い枝を先頭に置くと最後に見る）
+    // しきい値の天井は「本文の上限に何個詰められるか」で決まるので、**攻撃者と同じ密度**まで
+    // 詰めたフィクスチャを置く（疎なフィラーで詰めた版は、その比のぶんだけ窓が開いたままで、
+    // 訪問予算 26,000・キー数 7,000 の変異が実測で全件緑を通った）。3 つの形はそれぞれ別の
+    // 族を担当する: 位置の打ち切り、キーの打ち切り、訪問回数・スタック長の予算
+    // （辿る順は後入れ先出しなので、深い枝を先頭に置くと最後に見ることになる）。
+    // **残る境界**: これは「しきい値を上げる変異に気付く網」であって証明ではない。
+    // 位置の偶奇・部分集合・間引き（`index += 2` 等）は原理的に列挙できないので、
+    // そこは上の偶奇のケースと**レビュー**で受ける
     const text = build();
     // 実際に届く本文であること (上限を超えていたら攻撃に使えないので検査の意味が無い)
     expect(text.length).toBeLessThanOrEqual(JSON_BODY_MAX_BYTES);

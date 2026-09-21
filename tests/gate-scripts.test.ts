@@ -65,6 +65,7 @@ import {
   callsFunction,
   describedNamesWithTests,
   gateScriptNames,
+  latestGateScriptName,
   npmInvocationsInSource,
   importSharedModule,
   foreignModuleSpecifiers,
@@ -188,10 +189,11 @@ const ROOT = process.cwd();
  * コマンドまで」「判定まで」と伸ばすたびに、**同じ変異を数行うしろへ置き直すだけで復活した**。
  *
  * そこで**行列にする**: 他はすべて成功させ、**指定した 1 つの検証だけを失敗させて**、
- * ゲートが非 0 で終わることを見る。壊す対象は「何も壊さない」実行で実際に呼ばれた
- * `npm` のサブコマンドから導くので、表を持たない。あわせて**何も壊さなければ 0 で終わる**
- * ことも見る（positive control。これが検査自身の射程を固定する — 射程が縮めば
- * 「壊していないのに落ちる」か「壊したのに落ちない」のどちらかで必ず赤くなる）。
+ * ゲートが非 0 で終わることを見る。壊す対象は**ソース（流すと書いてある `npm` の引数）と
+ * `STEP0_STEPS`** から導くので表を持たず、しかも「途中で黙って終わる」変異で一緒に縮まない。
+ * あわせて**何も壊さなければ 0 で終わる**ことも見る（positive control。これが検査自身の
+ * 射程を固定する — 射程が縮めば「壊していないのに落ちる」か「壊したのに落ちない」の
+ * どちらかで必ず赤くなる）。
  * @param name ゲートのファイル名 (`gate-step<N>.mjs`)
  * @param target 失敗させる npm のサブコマンド (空文字なら何も壊さない)
  * @param report テストの JSON レポートとして書かせる中身
@@ -230,7 +232,9 @@ if (bench !== undefined) {
   }));
   process.exit(0);
 }
-if (key === 'test' && !broken)
+// **レポートは壊すときも書く** — 書かないとゲートは「レポートを読めません」で落ちてしまい、
+// テストの終了コードを見ているか (testStatus の結線) が一度も試されない
+if (key === 'test')
   for (const arg of argv)
     if (arg.startsWith('--outputFile=')) writeFileSync(arg.slice('--outputFile='.length), ${JSON.stringify(report)});
 process.exit(broken ? 1 : 0);
@@ -1465,8 +1469,9 @@ describe('判定の結線', () => {
   });
 
   it('ゲートはベンチごとに結果の JSON を検査する', () => {
-    // 最新 Step のゲート (ベンチを流すのはここだけ)
-    const gate = join(SCRIPTS_DIR, 'gate-step2.mjs');
+    // 最新 Step のゲート (ベンチを流すのはここだけ)。**綴りを固定しない** —
+    // 次の Step のゲートが増えた瞬間、この検査は古いゲートを見続けたまま緑になる
+    const gate = join(SCRIPTS_DIR, latestGateScriptName());
     // 0 本なら空振りで緑になる (fail-closed)
     expect(Object.keys(BENCH_LABELS).length, 'ベンチが 1 本も無い').toBeGreaterThan(0);
     for (const [bench, { label, valueField }] of Object.entries(BENCH_LABELS)) {
@@ -1662,19 +1667,23 @@ describe('判定の結線', () => {
   // 受け入れ基準を**すべて満たす**テストレポートを組み立てる (シムに書かせる中身)。
   // **名前の形はここで組み立てるが、組み立てた結果を判定に通して空を要求する**ので、
   // 形がずれたら「基準を満たすはずのレポートが落ちる」という形で必ず赤くなる (写しが腐らない)
-  function fullMarksReport(): string {
+  function fullMarksReport(dropLastPricedModel = false): string {
     // 料金表の正本 (ゲートが読むのと同じファイル)
     const models = (
       JSON.parse(
         readFileSync(join(ROOT, 'src', 'domain', 'pricing', 'vendor-prices.json'), 'utf8'),
       ) as { models: { provider: string; model: string }[] }
     ).models;
-    // 基準が名前で探すテスト (RBAC 行列 × 料金表の全モデル)
+    // 料金表のモデルごとのテスト名
+    const priced = models.map(({ provider, model }) => `${PRICE_TEST_PREFIX}${provider} ${model}`);
+    // 基準が名前で探すテスト (RBAC 行列 × 料金表の全モデル)。
+    // 落とすときは**最後の 1 件だけ**を外す (件数の下限は下の埋めで保たれるので、
+    // 「全モデルを見ているか」だけが試される)
     const named = [
       ...ROLES.flatMap((role) =>
         ACTIONS.map((action) => `${MATRIX_TEST_PREFIX}${role} × ${action}`),
       ),
-      ...models.map(({ provider, model }) => `${PRICE_TEST_PREFIX}${provider} ${model}`),
+      ...(dropLastPricedModel ? priced.slice(0, -1) : priced),
     ];
     // 件数の下限まで埋める
     const filler = Math.max(0, REQUIRED_PASSED_TESTS - named.length);
@@ -1689,20 +1698,27 @@ describe('判定の結線', () => {
       numPendingTests: 0,
       testResults: [{ assertionResults }],
     };
-    // **組み立てた結果が本当に基準を満たすことを、判定そのものに確かめさせる**
-    expect(
-      evaluateStep2Report({
-        testStatus: 0,
-        report,
-        requiredPassedTests: REQUIRED_PASSED_TESTS,
-        roles: ROLES,
-        actions: ACTIONS,
-        matrixPrefix: MATRIX_TEST_PREFIX,
-        models,
-        pricePrefix: PRICE_TEST_PREFIX,
-      }),
-      '満点のつもりのレポートが基準を満たしていない (組み立ての形が古い)',
-    ).toEqual([]);
+    // **組み立てた結果が意図どおりであることを、判定そのものに確かめさせる**
+    const failures = evaluateStep2Report({
+      testStatus: 0,
+      report,
+      requiredPassedTests: REQUIRED_PASSED_TESTS,
+      roles: ROLES,
+      actions: ACTIONS,
+      matrixPrefix: MATRIX_TEST_PREFIX,
+      models,
+      pricePrefix: PRICE_TEST_PREFIX,
+    });
+    // 落としたなら基準を満たさないこと、満点なら満たすこと
+    if (dropLastPricedModel)
+      expect(
+        failures.length,
+        '料金表の 1 件を落としたのに基準を満たしてしまう (組み立ての形が古い)',
+      ).toBeGreaterThan(0);
+    else
+      expect(failures, '満点のつもりのレポートが基準を満たしていない (組み立ての形が古い)').toEqual(
+        [],
+      );
     return JSON.stringify(report);
   }
 
@@ -1711,18 +1727,8 @@ describe('判定の結線', () => {
     (name) => {
       // 満点のレポート (シムに書かせる)
       const report = fullMarksReport();
-      // ベンチが出す JSON の材料 (npm スクリプト名ごと。ラベルの写しを作らない)
-      const benches = Object.fromEntries(
-        Object.entries(BENCH_LABELS).map(([file, { label, valueField }]) => [
-          benchNpmScriptOf(file),
-          {
-            label,
-            valueField,
-            limitField: BENCH_LIMIT_FIELD,
-            limit: BENCH_LIMIT_BY_LABEL[label] ?? Number.NaN,
-          },
-        ]),
-      );
+      // ベンチが出す JSON の材料 (npm スクリプト名ごと)
+      const benches = benchMaterials();
       // **positive control**: 何も壊さなければ 0 で終わる。これが検査自身の射程を固定する —
       // 射程が縮めば「壊していないのに落ちる」か「壊したのに落ちない」のどちらかで赤くなる
       const clean = runGateUnderShim(name, '', report, benches);
@@ -1742,6 +1748,11 @@ describe('判定の結線', () => {
       // **書いてあるものは実際に流していること** — 途中で黙って終わる形をここで落とす
       for (const script of required)
         expect(clean.invoked, `${name} が ${script} を流していない`).toContain(script);
+      // **逆向きも突き合わせる** — 導出（ソースの読み方）が黙って縮むと、実際には流している
+      // 検証が negative control の対象から外れて「壊しても落ちない」窓が開く。実行側にしか
+      // 現れない npm があればここで落ちる
+      for (const script of new Set(clean.invoked))
+        expect(required, `${name} が導出に無い ${script} を流している`).toContain(script);
       // **negative control**: 流すと書いてあるものを 1 つずつ壊す
       for (const target of required) {
         const broken = runGateUnderShim(name, target, report, benches);
@@ -1753,6 +1764,24 @@ describe('判定の結線', () => {
     },
     300_000,
   );
+
+  it('最新のゲートは料金表の 1 モデル分の欠落を見逃さない (レポート側の negative control)', () => {
+    // **npm はすべて成功させたまま、レポートの中身だけを 1 件欠かす。**
+    // 検証コマンドの成否を 1 つずつ壊す行列は「ゲートが何を流すか」しか見ないので、
+    // 「料金表の一部しか見ない」変異 (`readPricedModels().slice(0, 1)` など) は
+    // どの npm も失敗しないまま素通りする。欠落を見逃さないことはここで固定する
+    const short = runGateUnderShim(
+      latestGateScriptName(),
+      '',
+      fullMarksReport(true),
+      benchMaterials(),
+    );
+    // 非 0 で終わっていること (0 なら料金表の全モデルを見ていない)
+    expect(
+      typeof short.status === 'number' && short.status !== 0,
+      `料金表の 1 モデル分の欠落を見逃した (終了コード ${String(short.status)})`,
+    ).toBe(true);
+  }, 120_000);
 
   it('共有モジュールは import しただけでプロセスを終わらせない', () => {
     // 共有モジュールの一覧 (0 本なら導出が壊れている)
@@ -1768,6 +1797,25 @@ describe('判定の結線', () => {
       expect(stdout, `${name} が import の時点でプロセスを終わらせる`).toContain('REACHED_END');
     }
   });
+
+  // ベンチが出す JSON の材料を npm スクリプト名ごとに組み立てる (ラベル・上限の写しを作らない)
+  function benchMaterials(): Record<
+    string,
+    { label: string; valueField: string; limitField: string; limit: number }
+  > {
+    // ベンチ 1 本ごとに「どの npm が起動するか」と「どの項目を出すか」を対応づける
+    return Object.fromEntries(
+      Object.entries(BENCH_LABELS).map(([file, { label, valueField }]) => [
+        benchNpmScriptOf(file),
+        {
+          label,
+          valueField,
+          limitField: BENCH_LIMIT_FIELD,
+          limit: BENCH_LIMIT_BY_LABEL[label] ?? Number.NaN,
+        },
+      ]),
+    );
+  }
 
   // そのベンチを起動する npm スクリプト名を package.json から引く (ラベルの写しを作らない)
   const benchNpmScriptOf = (bench: string): string => {

@@ -69,12 +69,23 @@ jobs:
       - name: Run latest step gate (gate:step2)
         run: npm run gate:step2
 
-      # **ゲートと同じ検査をここでも 1 本だけ流す。** ゲートのステップを丸ごと削除する形は
-      # 検出網では捉えられない（「流すと書いてあるもの」をソースから導いているので、書くのを
-      # やめれば要求も消える）。依存の脆弱性検査はゲートが唯一の実行箇所だったため、
-      # 消されたことに CI が気付けなかった。**検出網を増やすより CI に 1 行置くほうが安い**
-      # （本番ビルドは migrate-and-build ジョブが別に流すので、同じ理由で二重化済み）
-      - name: npm audit (high 0) — ゲートから消えても気付けるように二重化する
+      # **ゲートと同じ検査をここでも流す。** ゲートのステップを丸ごと削除する形（`STEP0_STEPS`
+      # から 1 行消す・ゲート本体の呼び出しを消す）は検出網では捉えられない — 「流すと書いて
+      # あるもの」をソースから導いている以上、書くのをやめれば要求も一緒に消えるため。
+      # 実測で、`STEP0_STEPS` から Lint や Typecheck の行を 1 つ消しても全件緑だった。
+      # **検出網を増やすより CI に 1 行ずつ置くほうが安い**（`gen` / `db:generate` / `build` は
+      # migrate-and-build ジョブが、`test` はゲート本体のリテラルが、それぞれ二重化している）。
+      # ここが消されていないことは tests/deployment-invariants.test.ts が見張る
+      - name: Lint (ゲートから消えても気付けるように二重化する)
+        run: npm run lint
+
+      - name: Format check (同上)
+        run: npm run format:check
+
+      - name: Typecheck (同上)
+        run: npm run typecheck
+
+      - name: npm audit (high 0) (同上)
         run: npm audit --audit-level=high
 
   migrate-and-build:

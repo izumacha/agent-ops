@@ -275,12 +275,33 @@ describe('CI ワークフロー', () => {
     expect(numbers.length, 'scripts/ に gate-stepN.mjs が無い').toBeGreaterThan(0);
     // 最新のゲート名
     const latest = `gate:step${Math.max(...numbers)}`;
-    // **lint / format / typecheck / テスト件数 / RBAC 3×3 / npm audit を CI で回しているのはこの 1 コマンドだけ**。
+    // **テスト件数 / RBAC 3×3 / 料金表の網羅 / ベンチ 2 本を CI で回しているのはこの 1 コマンドだけ**。
     // 実測では、ci.yml から gate ジョブを丸ごと消しても他のジョブは緑のままで、何も鳴らなかった
     expect(
       steps.some((step) => step.run?.includes(latest)),
       `ci.yml が ${latest} を実行していない`,
     ).toBe(true);
+  });
+
+  it('ゲートが流す検証のうち、消されても気付けないものを二重化している', () => {
+    // ステップを 1 つも読めなければ走査が壊れている (fail-closed)
+    expect(steps.length).toBeGreaterThan(0);
+    // **ゲートからステップを丸ごと消す形は検出網では捉えられない** — ゲートの検査は
+    // 「流すと書いてあるもの」をソースから導くので、書くのをやめれば要求も消える。
+    // 実測で `STEP0_STEPS` から Lint / Typecheck の行を 1 つ消しても全件緑だった。
+    // そこで CI に別ステップとしても置く。**その保険が黙って外れないようにここで見張る**
+    // (`gen` / `db:generate` / `build` は migrate-and-build ジョブが、`test` はゲート本体の
+    // リテラルが二重化しているので、ここで求めるのは残りの 4 つ)
+    for (const command of [
+      'npm run lint',
+      'npm run format:check',
+      'npm run typecheck',
+      'npm audit',
+    ])
+      expect(
+        steps.some((step) => step.run?.includes(command)),
+        `ci.yml が ${command} を別ステップとして流していない (ゲートから消えても気付けない)`,
+      ).toBe(true);
   });
 
   it('契約テストを専用 DB で実際に実行している', () => {

@@ -762,6 +762,27 @@ export function foreignModuleSpecifiers(path: string): string[] {
  * @param path 対象ファイルの絶対パス
  * @returns 呼び出し先の名前 (重複なし)
  */
+// npm を起動する実行ヘルパーの名前 (この第 1 引数だけを「npm へ渡す引数」として読む)
+const NPM_RUNNER_NAMES = new Set(['runNpm', 'runNpmCapturingStdout']);
+
+/**
+ * `scripts/` にある `gate-step<N>.mjs` のうち、**N がいちばん大きいもの**の名前を返す。
+ * **綴りを固定しない** — 次の Step のゲートが増えた瞬間、綴り固定の検査は古いゲートを
+ * 見続けたまま緑になる（新しいゲートが何を流さなくても気付けない）
+ * @returns ゲートのファイル名
+ */
+export function latestGateScriptName(): string {
+  // ゲートの一覧から N を取り出す
+  const numbers = gateScriptNames()
+    .map((name) => /^gate-step(\d+)\.mjs$/.exec(name))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map((match) => Number(match[1]));
+  // 1 つも無ければ導出が壊れている (fail-closed)
+  if (numbers.length === 0) throw new Error('scripts/ に gate-stepN.mjs が無い');
+  // いちばん大きい N のゲート
+  return `gate-step${Math.max(...numbers)}.mjs`;
+}
+
 /**
  * そのファイルが **`npm` に渡している引数の配列**から、サブコマンド名を集める。
  * `['run', '<スクリプト>']` なら `<スクリプト>`、`['audit', …]` なら `'audit'`。
@@ -778,10 +799,32 @@ export function npmInvocationsInSource(path: string): string[] {
   const source = parseScript(path);
   // 見つかったサブコマンド
   const found = new Set<string>();
+  // その配列リテラルが「npm へ渡す引数」の位置にいるか
+  //  - `runNpm([...])` / `runNpmCapturingStdout([...])` の第 1 引数
+  //  - `{ name: '…', args: [...] }` の `args`
+  // **どこにある配列でも拾ってはいけない** — 実測で、無害な `const TITLES = ['日次集計', …];`
+  // を足すだけで「日次集計 を流していない」という読み取れない理由で赤くなった。
+  // 正当なコードを直しようの無い文言で落とす網は、いずれ緩められる (この repo が繰り返し避けてきた形)
+  const isNpmArgumentPosition = (node: ts.ArrayLiteralExpression): boolean => {
+    // 親の節点
+    const parent = node.parent;
+    // 親が無ければ引数ではない
+    if (parent === undefined) return false;
+    // `args: [...]` の値
+    if (ts.isPropertyAssignment(parent))
+      return ts.isIdentifier(parent.name) && parent.name.text === 'args';
+    // 実行ヘルパーの第 1 引数
+    return (
+      ts.isCallExpression(parent) &&
+      parent.arguments[0] === node &&
+      ts.isIdentifier(parent.expression) &&
+      NPM_RUNNER_NAMES.has(parent.expression.text)
+    );
+  };
   // すべての節点を辿る
   const visit = (node: ts.Node): void => {
-    // 文字列リテラルだけの配列を探す (npm へ渡す引数の形)
-    if (ts.isArrayLiteralExpression(node)) {
+    // npm へ渡す引数の位置にある配列だけを見る
+    if (ts.isArrayLiteralExpression(node) && isNpmArgumentPosition(node)) {
       // 先頭の要素
       const first = node.elements[0];
       // 先頭が文字列リテラルのときだけ見る

@@ -129,3 +129,21 @@ export function requireNoProblem(problem) {
   // あれば受け入れ基準を満たしていないので止める
   throw new Error(problem);
 }
+
+/**
+ * 計測結果を出力し、受け入れ基準を満たしていなければその場で throw する。
+ *
+ * **出力と強制を 1 つの関数にまとめるのが要点。** 分けていたときは、判定の結果を
+ * `requireNoProblem` へ渡さない (`requireNoProblem(null)`) だけで強制が消え、出力は
+ * `passed: false` のまま exit 0 になった (実測で全件緑)。`problem` を**実引数として
+ * 受け取る**形なら、結線の検査が「判定の呼び出しそのものを渡しているか」まで見られる。
+ * `passed` もここで導くので、比較式の写しも生まれない (§6 DRY)
+ * @param {Record<string, unknown>} payload 計測結果 (passed 以外の項目)
+ * @param {string | null} problem 受け入れ基準の判定 (満たしていれば null)
+ */
+export function reportBenchResult(payload, problem) {
+  // 人にもゲートにも読める形で出す (判定の結果から passed を導く)
+  console.log(JSON.stringify({ ...payload, passed: problem === null }));
+  // 基準を満たしていなければ落とす
+  requireNoProblem(problem);
+}

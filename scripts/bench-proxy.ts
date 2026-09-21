@@ -28,6 +28,7 @@ import {
   WARMUP_MAX_MS,
   addedLatencyProblem,
   intFromEnvValue,
+  reportBenchResult,
   requireNoProblem,
   warmupCountProblem,
   warmupLatencyProblem,
@@ -390,12 +391,10 @@ async function main(): Promise<void> {
     }
     // 追加遅延 (この定義がこのファイルの要点)
     const addedMs = Math.round((proxied.latencyMs - direct.latencyMs) * 100) / 100;
-    // 受け入れ基準の判定 (満たしていれば null)。**出力の passed もここから導く** —
-    // 比較式を JSON 側へ書き写すと、判定だけを緩めたときに「passed: false を出して exit 0」に割れる
-    const problem = addedLatencyProblem(addedMs);
-    // 結果を出す
-    console.log(
-      JSON.stringify({
+    // 結果を出し、受け入れ基準を満たしていなければ落とす。**出力と強制を分けない** —
+    // 分けると判定の結果を渡さないだけで強制が消え、「passed: false を出して exit 0」に割れる
+    reportBenchResult(
+      {
         bench: 'proxy-latency',
         connections: CONNECTIONS,
         durationSeconds: DURATION_SECONDS,
@@ -408,11 +407,9 @@ async function main(): Promise<void> {
         requests: { direct: direct.requests, proxied: proxied.requests },
         // 判定には使わないが、初回コストや裾の伸びを読めるように残す (上の measureLatency のコメント)
         distribution: { direct: distributionOf(direct), proxied: distributionOf(proxied) },
-        passed: problem === null,
-      }),
+      },
+      addedLatencyProblem(addedMs),
     );
-    // 基準を超えていれば失敗 (判定も throw も scripts/lib/bench-criteria.mjs が持つ)
-    requireNoProblem(problem);
   } finally {
     // アプリとスタブを止め、一時ファイルを消す (§8 リソースを確実に解放する)
     app?.kill('SIGKILL');

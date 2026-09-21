@@ -10,7 +10,7 @@
 // `exitIfFailures` へ集約して同じ子プロセス方式で固定した。
 // **呼び出し行ごと消す変異は eslint が捕まえる** — `exitIfFailures` と `failures` が未使用になるため
 // (実測で `eslint . --max-warnings=0` が 1 を返す)。`package.json` の lint からその指定を外さないこと
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,6 +27,7 @@ import {
   addedLatencyProblem,
   aggregateLatencyProblem,
   intFromEnvValue,
+  reportBenchResult,
   requireNoProblem,
   warmupCountProblem,
   warmupLatencyProblem,
@@ -38,6 +39,7 @@ import {
 import {
   SCRIPTS_DIR,
   callsFunction,
+  describedNamesWithTests,
   gateScriptNames,
   importSharedModule,
   foreignModuleSpecifiers,
@@ -427,6 +429,44 @@ describe('requireNoProblem', () => {
   });
 });
 
+describe('reportBenchResult', () => {
+  it('計測結果を出し、passed を判定の結果から導く', () => {
+    // 標準出力を覗く (JSON を 1 行だけ出す)
+    const printed = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    // 後始末を必ず行う
+    try {
+      // 基準を満たしている場合
+      reportBenchResult({ bench: 'x', slowestMs: 1 }, null);
+      // 出した JSON に passed: true が入る (比較式の写しを作らないための要点)
+      expect(JSON.parse(String(printed.mock.calls[0]?.[0]))).toEqual({
+        bench: 'x',
+        slowestMs: 1,
+        passed: true,
+      });
+    } finally {
+      printed.mockRestore();
+    }
+  });
+
+  it('基準を満たしていなければ、結果を出したうえで落とす', () => {
+    // 標準出力を覗く
+    const printed = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      // 判定の文言をそのまま例外にする
+      expect(() => reportBenchResult({ bench: 'x' }, '集計が遅すぎます: 9ms')).toThrow(
+        '集計が遅すぎます: 9ms',
+      );
+      // **落とす前に結果を出していること** (出力と強制を 1 か所にまとめた意味)
+      expect(JSON.parse(String(printed.mock.calls[0]?.[0]))).toEqual({
+        bench: 'x',
+        passed: false,
+      });
+    } finally {
+      printed.mockRestore();
+    }
+  });
+});
+
 describe('判定の結線', () => {
   // **ゲートは全部 `exitIfFailures` を呼ぶ。** 呼ばないものは理由付きでここへ登録する。
   // 以前は「gate-report.mjs を読んでいるゲートだけ」を対象にしていたが、
@@ -645,7 +685,9 @@ describe('判定の結線', () => {
     // `throw` 行を 1 行消すと、lint も tsc も全 722 件も緑のまま Step2 の追加遅延基準が
     // 無効になった (結線の検査は「その名前を呼んでいるか」しか見ないため)。
     // **一覧は手書きせず export から導く** — 次に判定を足した人が同じ穴を再生産しないように
-    const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    const described = describedNamesWithTests(fileURLToPath(import.meta.url));
+    // 1 つも読めなければ走査が壊れている (fail-closed)
+    expect(described.length, 'describe を 1 つも読めない').toBeGreaterThan(0);
     // 判定を持つ共有モジュール (この 2 つが受け入れ基準の判定を持つ)
     for (const moduleName of ['bench-criteria.mjs', 'gate-report.mjs']) {
       // そのモジュールの実体
@@ -655,39 +697,64 @@ describe('判定の結線', () => {
       // 1 つも無ければ導出が壊れている (fail-closed)
       expect(judgements.length, `${moduleName} の判定を 1 つも読めない`).toBeGreaterThan(0);
       for (const name of judgements) {
-        // このファイルに同名の describe があること (挙動を固定する場所の慣習)
+        // このファイルに同名の describe があり、中に it を持つこと。
+        // **文字列の部分一致で見ない** — コメントに綴りを残すだけで満たせてしまい、
+        // 判定の本体を `return null` にしても赤が 1 件も出なかった (実測)
         expect(
-          source.includes(`describe('${name}'`),
-          `${name} の挙動を固定する describe がこのファイルに無い`,
-        ).toBe(true);
+          described,
+          `${name} の挙動を固定する describe (中身つき) がこのファイルに無い`,
+        ).toContain(name);
       }
     }
   });
 
-  // 判定 → それを強制すべきベンチ の対応表 (理由は各行のコメント)。
-  // **「どれかのベンチが呼んでいれば緑」では足りない** — 実測で、プロキシ側の追加遅延の判定を
-  // bench-proxy から消し、bench-usage-aggregate に `addedLatencyProblem(0)` を 1 行足すだけで
-  // 722 件すべて緑のまま「プロキシの追加遅延基準を誰も強制しない」状態になった。
-  // `unconditional` は「条件に囲まれていない文として呼ぶ」ことまで求める印
-  const BENCH_JUDGEMENT_OWNERS: Readonly<
-    Record<string, { benches: readonly string[]; unconditional?: boolean }>
+  // ベンチごとに「必ず呼ぶ共有モジュールの判定」を並べた表。
+  // **「どれかのベンチが呼べばよい」では足りない** — 実測で、プロキシ側の判定を消して集計側へ
+  // 1 行足すだけで「追加遅延の基準を誰も強制しない」状態が全件緑のまま作れた。
+  // `unconditional` は条件に囲まれていない文として呼ぶこと、`argument` は指定した位置の実引数が
+  // **判定の呼び出しそのもの**であることまで求める印 (渡す値を差し替える形を落とす)
+  const BENCH_REQUIRED_CALLS: Readonly<
+    Record<
+      string,
+      readonly {
+        name: string;
+        reason: string;
+        unconditional?: boolean;
+        argument?: { index: number; callOf: readonly string[]; measuredArgument?: number };
+      }[]
+    >
   > = {
-    // 環境変数から計測の設定を読むのはプロキシのベンチだけ
-    intFromEnvValue: { benches: ['bench-proxy.ts'] },
-    // 捨て玉を流すのもプロキシのベンチだけ
-    warmupCountProblem: { benches: ['bench-proxy.ts'] },
-    warmupLatencyProblem: { benches: ['bench-proxy.ts'] },
-    // 受け入れ基準「追加遅延 ≦ 上限」を測るのはプロキシのベンチ
-    addedLatencyProblem: { benches: ['bench-proxy.ts'] },
-    // 受け入れ基準「1 万件の集計 ≦ 上限」を測るのは集計のベンチ
-    aggregateLatencyProblem: { benches: ['bench-usage-aggregate.ts'] },
-    // 判定の結果で落とすのは両方。**条件で囲めないことまで求める** —
-    // `if (process.env.BENCH_STRICT === '1') requireNoProblem(problem);` と 1 つ足すだけで
-    // 受け入れ基準の強制が外れ、全件緑のまま通った (実測)
-    requireNoProblem: {
-      benches: ['bench-proxy.ts', 'bench-usage-aggregate.ts'],
-      unconditional: true,
-    },
+    'bench-proxy.ts': [
+      { name: 'intFromEnvValue', reason: '計測の設定を環境変数から読むのはこのベンチだけ' },
+      { name: 'warmupCountProblem', reason: '捨て玉を流すのはこのベンチだけ' },
+      { name: 'warmupLatencyProblem', reason: '同上' },
+      {
+        name: 'addedLatencyProblem',
+        reason: '受け入れ基準「追加遅延 ≦ 上限」を測るのはこのベンチ',
+      },
+      {
+        name: 'requireNoProblem',
+        reason: '捨て玉の判定で落とすのに使う (本計測は reportBenchResult)',
+      },
+      {
+        name: 'reportBenchResult',
+        reason: '受け入れ基準の出力と強制。判定の結果を渡さない形を落とすため引数まで見る',
+        unconditional: true,
+        argument: { index: 1, callOf: ['addedLatencyProblem'], measuredArgument: 0 },
+      },
+    ],
+    'bench-usage-aggregate.ts': [
+      {
+        name: 'aggregateLatencyProblem',
+        reason: '受け入れ基準「1 万件の集計 ≦ 上限」を測るのはこのベンチ',
+      },
+      {
+        name: 'reportBenchResult',
+        reason: '同上。判定の結果を渡さない形を落とすため引数まで見る',
+        unconditional: true,
+        argument: { index: 1, callOf: ['aggregateLatencyProblem'], measuredArgument: 0 },
+      },
+    ],
   };
 
   it('bench-criteria の判定は担当のベンチが必ず呼ぶ', async () => {
@@ -697,21 +764,34 @@ describe('判定の結線', () => {
     const judgements = Object.keys(criteria).filter((key) => typeof criteria[key] === 'function');
     // 1 つも無ければ導出が壊れている (fail-closed)
     expect(judgements.length, '判定を 1 つも読めない').toBeGreaterThan(0);
-    // **対応表が judgements を過不足なく覆っていること** (足した判定の登録忘れを落とす)
-    expect(Object.keys(BENCH_JUDGEMENT_OWNERS).sort(), '対応表と判定が食い違う').toEqual(
+    // 表に載っているベンチが実在すること
+    for (const bench of Object.keys(BENCH_REQUIRED_CALLS))
+      expect(benchScriptNames(), `${bench} は実在しない`).toContain(bench);
+    // **表が判定を過不足なく覆っていること** (足した判定の登録忘れを落とす)
+    const required = Object.values(BENCH_REQUIRED_CALLS).flat();
+    expect([...new Set(required.map((entry) => entry.name))].sort(), '表と判定が食い違う').toEqual(
       judgements.sort(),
     );
-    for (const [name, owner] of Object.entries(BENCH_JUDGEMENT_OWNERS)) {
-      for (const bench of owner.benches) {
-        // 担当のベンチが実在すること
-        expect(benchScriptNames(), `${bench} は実在しない`).toContain(bench);
-        // そのベンチが、共有モジュールから取り込んだ名前で呼んでいること
+    for (const [bench, entries] of Object.entries(BENCH_REQUIRED_CALLS)) {
+      // 空の一覧は「このベンチは何も呼ばなくてよい」になるので許さない (fail-closed)
+      expect(entries.length, `${bench} の必須の呼び出しが 0 件`).toBeGreaterThan(0);
+      for (const entry of entries) {
+        // 理由の無い登録は「とりあえず通す」使い方になる
         expect(
-          callsFunction(join(SCRIPTS_DIR, bench), name, {
+          entry.reason.trim().length,
+          `${bench} の ${entry.name} に理由が無い`,
+        ).toBeGreaterThan(0);
+        // 共有モジュールから取り込んだ名前で、求めた形で呼んでいること
+        expect(
+          callsFunction(join(SCRIPTS_DIR, bench), entry.name, {
             importedFrom: 'bench-criteria.mjs',
-            unconditional: owner.unconditional,
+            unconditional: entry.unconditional,
+            argument:
+              entry.argument === undefined
+                ? undefined
+                : { ...entry.argument, importedFrom: 'bench-criteria.mjs' },
           }),
-          `${bench} が ${name} を呼んでいない (条件で囲んでいないかも確認)`,
+          `${bench} が ${entry.name} を求めた形で呼んでいない`,
         ).toBe(true);
       }
     }

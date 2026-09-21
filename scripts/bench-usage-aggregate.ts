@@ -3,7 +3,7 @@
 // **開発 DB では走らない** — 全テーブルを TRUNCATE してから投入するので、契約テストと同じ
 // 「専用 DB の名前 (末尾 _contract)」の判定を通らなければ 1 件も書かずに落ちる (fail-closed)
 import 'dotenv/config';
-import { aggregateLatencyProblem, requireNoProblem } from './lib/bench-criteria.mjs';
+import { aggregateLatencyProblem, reportBenchResult } from './lib/bench-criteria.mjs';
 import { requireContractDatabase } from './lib/contract-database.mjs';
 import { USAGE_AGGREGATE_MAX_MS, USAGE_AGGREGATE_ROW_COUNT } from './lib/step2-criteria.mjs';
 import { createPrismaRepos } from '../src/data/adapters/prisma';
@@ -90,23 +90,18 @@ async function main(): Promise<void> {
     }
     // 判定には最も遅い回を使う (たまたま速かった回で通さない)
     const slowestMs = Math.max(...durations);
-    // 受け入れ基準の判定 (満たしていれば null)。**出力の passed もここから導く** —
-    // 比較式を JSON 側へ書き写すと、判定だけを緩めたときに「passed: false を出して exit 0」に割れる
-    const problem = aggregateLatencyProblem(slowestMs);
-    // 結果を人にもゲートにも読める形で出す
-    console.log(
-      JSON.stringify({
+    // 結果を出し、受け入れ基準を満たしていなければ落とす (出力と強制を分けない。理由は共有モジュール)
+    reportBenchResult(
+      {
         bench: 'usage-aggregate',
         rows: USAGE_AGGREGATE_ROW_COUNT,
         insertMs,
         durationsMs: durations,
         slowestMs,
         limitMs: USAGE_AGGREGATE_MAX_MS,
-        passed: problem === null,
-      }),
+      },
+      aggregateLatencyProblem(slowestMs),
     );
-    // 基準を超えていれば失敗として終わる (判定も throw も scripts/lib/bench-criteria.mjs が持つ)
-    requireNoProblem(problem);
   } finally {
     // 接続を閉じる (§8 リソースを確実に解放する)
     await client.$disconnect();

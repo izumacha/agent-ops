@@ -270,25 +270,64 @@ function topLevelStatementCalls(source: ts.SourceFile): CallSite[] {
 function isUnconditionalStatement(node: ts.Node): boolean {
   // 呼び出しの直上が式文でなければ、値として使われている (代入の右辺など)
   if (node.parent === undefined || !ts.isExpressionStatement(node.parent)) return false;
+  // 上へ辿るときの「直前の節点」(ブロックの中で自分がどの文かを知るため)
+  let child: ts.Node = node.parent;
   // 文から上へ辿り、関数かファイルの本体に着くまでに条件・繰り返しが挟まっていないかを見る
   for (let current: ts.Node | undefined = node.parent.parent; current; current = current.parent) {
     // ファイルの本体に着いたら条件に囲まれていない
     if (ts.isSourceFile(current)) return true;
-    // 関数の本体に着いても同じ (その関数が呼ばれれば必ず実行される)
+    // **名前付き関数の本体に着いたら条件に囲まれていない** (その関数が呼ばれれば必ず実行される)。
+    // **無名関数 (コールバック) は true にしない** — 一度も実行されない配列の forEach へ移すだけで
+    // 「無条件」と判定され、全件緑のまま強制が外れた (実測)
+    if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current)) return true;
+    // ブロックは素通しするが、**自分より前の文に return が無いこと**まで見る —
+    // 直前に `if (!process.env.X) return;` を 1 行足すだけで強制が外れ、しかも出力 JSON は
+    // 1 文字も変わらないので結果を読んでも気付けない (実測で全件緑)
+    if (ts.isBlock(current)) {
+      // 自分より前に置かれた文
+      const before = current.statements.slice(0, current.statements.indexOf(child as ts.Statement));
+      // その中に return があれば、ここへ到達しない道がある
+      if (before.some((statement) => containsReturn(statement))) return false;
+      // 次の階層へ
+      child = current;
+      continue;
+    }
+    // **catch を持たない try だけ素通しする** — 後始末のための囲みは条件ではないが、
+    // `catch {}` は throw を握り潰せるので条件付きと同じ (実測で全件緑のまま強制が外れた)
+    if (ts.isTryStatement(current) && current.catchClause === undefined) {
+      child = current;
+      continue;
+    }
+    // それ以外 (if / for / while / switch / && / 無名関数 / catch 付き try) は条件付き
+    return false;
+  }
+  // 辿り切れなければ安全側 (条件付き扱い)
+  return false;
+}
+
+// その文 (と入れ子) に return があるか。関数の中の return は数えない (別の実行単位なので)
+function containsReturn(node: ts.Node): boolean {
+  // 見つかったか
+  let found = false;
+  // 辿る
+  const visit = (current: ts.Node): void => {
+    // 関数の境界で止める (中の return はこの実行単位の return ではない)
     if (
       ts.isFunctionDeclaration(current) ||
       ts.isFunctionExpression(current) ||
       ts.isArrowFunction(current) ||
       ts.isMethodDeclaration(current)
     )
-      return true;
-    // ブロック・try / finally は素通し (後始末のための囲みは条件ではない)
-    if (ts.isBlock(current) || ts.isTryStatement(current)) continue;
-    // それ以外 (if / for / while / switch / &&) は条件付き
-    return false;
-  }
-  // 辿り切れなければ安全側 (条件付き扱い)
-  return false;
+      return;
+    // return 文なら見つかった
+    if (ts.isReturnStatement(current)) found = true;
+    // 子を辿る
+    ts.forEachChild(current, visit);
+  };
+  // 根から辿る
+  visit(node);
+  // 結果
+  return found;
 }
 
 /**
@@ -386,6 +425,67 @@ export function reachableCallNames(path: string): string[] {
 }
 
 /**
+ * そのテストファイルが `describe('<名前>', …)` として宣言し、**中に it を 1 件以上持つ**名前を返す。
+ * **文字列の部分一致で見ない** — コメントに綴りを書き残すだけで満たせてしまい、
+ * 判定の本体を `return null` にしても赤が 1 件も出なかった (実測。痕跡は件数の減少だけ)。
+ * @param path 対象ファイルの絶対パス
+ * @returns 中身のある describe の名前
+ */
+export function describedNamesWithTests(path: string): string[] {
+  // 構文木にする
+  const source = parseScript(path);
+  // 見つかった名前
+  const names: string[] = [];
+  // その節点の下に it / it.each の呼び出しがあるか
+  const hasTest = (node: ts.Node): boolean => {
+    // 見つかったか
+    let found = false;
+    // 辿る
+    const look = (current: ts.Node): void => {
+      // 呼び出し式で、呼び出し先が `it` か `it.<何か>` なら該当
+      if (ts.isCallExpression(current)) {
+        // 素の `it(...)`
+        const direct = ts.isIdentifier(current.expression) && current.expression.text === 'it';
+        // `it.each(...)(...)` のような形 (受け手が it)
+        const member =
+          ts.isPropertyAccessExpression(current.expression) &&
+          ts.isIdentifier(current.expression.expression) &&
+          current.expression.expression.text === 'it';
+        // どちらかなら該当
+        if (direct || member) found = true;
+      }
+      // 子を辿る
+      ts.forEachChild(current, look);
+    };
+    // 根から辿る
+    look(node);
+    // 結果
+    return found;
+  };
+  // すべての節点から describe の呼び出しを探す
+  const visit = (node: ts.Node): void => {
+    // describe の呼び出しで、第 1 引数が文字列リテラルのものだけを見る
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'describe' &&
+      node.arguments[0] !== undefined &&
+      ts.isStringLiteral(node.arguments[0])
+    ) {
+      // 本体に it があるときだけ名前を数える (空の describe で満たせないように)
+      const body = node.arguments[1];
+      if (body !== undefined && hasTest(body)) names.push(node.arguments[0].text);
+    }
+    // 子を辿る
+    ts.forEachChild(node, visit);
+  };
+  // 根から辿る
+  ts.forEachChild(source, visit);
+  // 集めた結果
+  return names;
+}
+
+/**
  * そのファイルが、指定した名前の関数を**実際に呼んでいる**かを構文木で確かめる。
  * コメント・文字列リテラルの中の記述はトークンにならないので数えない。
  * **トップレベルから到達できる位置からの呼び出しだけを数える** (死んだコードの中の呼び出しは数えない)。
@@ -410,7 +510,9 @@ export function reachableCallNames(path: string): string[] {
  *   **条件・繰り返しに囲まれていない文**として置かれていることを求める。`importedFrom` はその名前が
  *   `scripts/lib/<その名前>` から取り込まれ、かつ同名のローカル宣言で覆われていないことを求める
  *   (同名の no-op をその場で宣言して差し替える形を落とす)。`argument` はその位置の実引数が
- *   `callOf` に挙げた関数の**呼び出しそのもの**で、その関数もまた `importedFrom` 由来であることを求める
+ *   `callOf` に挙げた関数の**呼び出しそのもの**で、その関数もまた `importedFrom` 由来であることを求める。
+ *   `measuredArgument` を渡すと、その判定の実引数 (指定した位置) が**素の識別子**であること
+ *   (＝定数ではなく実測値を渡していること) まで見る
  * @returns 条件を満たす呼び出しがあれば true
  */
 export function callsFunction(
@@ -420,7 +522,12 @@ export function callsFunction(
     atTopLevel?: boolean;
     unconditional?: boolean;
     importedFrom?: string;
-    argument?: { index: number; callOf: readonly string[]; importedFrom: string };
+    argument?: {
+      index: number;
+      callOf: readonly string[];
+      importedFrom: string;
+      measuredArgument?: number;
+    };
   } = {},
 ): boolean {
   // 構文木にする
@@ -462,6 +569,15 @@ export function callsFunction(
       !comesFromSharedModule(path, source, options.argument.importedFrom, argument.expression.text)
     )
       continue;
+    // **判定へ渡す値がリテラルでないことまで見る。** `addedLatencyProblem(0)` のように
+    // 実測値の代わりに定数を渡すと、判定は常に「問題なし」を返して基準が無言で常時合格になる
+    // (実測で全件緑・件数も不変)。実測値は必ず変数なので、素の識別子であることを求める
+    if (options.argument.measuredArgument !== undefined) {
+      // 判定の呼び出しの、指定した位置の実引数
+      const measured = argument.arguments[options.argument.measuredArgument];
+      // 素の識別子でなければ、実測値を渡していない
+      if (measured === undefined || !ts.isIdentifier(measured)) continue;
+    }
     // すべて満たした
     return true;
   }

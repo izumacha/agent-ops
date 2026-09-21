@@ -75,6 +75,20 @@ describe('describeError', () => {
     expect(frames.length).toBeGreaterThan(0);
   });
 
+  it('stack を固定した後で message を差し替えても、message 由来の行を載せない', () => {
+    // V8 は `error.stack` を初回アクセスで文字列に固定する
+    const error = new Error('boom\n    at MARKER_ONE:1:1');
+    void error.stack;
+    // そのあと message を差し替えると、`name: message` の見出し候補が外れる
+    error.message = 'sanitized';
+    // 素の `name` が前方一致して見出しに採用されると、残りは `": <元の message>…"` になり、
+    // message の中のフレームの形の行が frames に載っていた（実測）。
+    // 見出しの直後が改行であることまで求めれば、この形は fail-closed に倒れる
+    const described = describeError(error);
+    expect(described.frames).toEqual([]);
+    expect(described.stackUnparsed).toBe(true);
+  });
+
   it('見出しを読めなければフレームを 1 行も出さず、その事実を残す (fail-closed)', () => {
     // stack を差し替えて見出しと合わない形にする
     const error = new Error('boom');
@@ -83,12 +97,20 @@ describe('describeError', () => {
     expect(describeError(error)).toMatchObject({ frames: [], stackUnparsed: true });
   });
 
-  it('cause と AggregateError の中身は辿らない (連鎖で message が漏れない)', () => {
-    // cause に PII 入りの message を持つ Error を繋ぐ
-    const inner = new Error('email=tanaka@example.com');
-    const outer = new Error('boom', { cause: inner });
-    expect(JSON.stringify(describeError(outer))).not.toContain('tanaka@example.com');
-    // AggregateError の errors も同じ
+  it('cause は name / code だけを 1 段たどり、message は載せない', () => {
+    // cause に PII 入りの message と、実在の形の code を持つ Error を繋ぐ
+    const inner = Object.assign(new Error('email=tanaka@example.com'), { code: 'ECONNREFUSED' });
+    const outer = new Error('fetch failed', { cause: inner });
+    const described = describeError(outer);
+    // **message は 1 文字も出ない**
+    expect(JSON.stringify(described)).not.toContain('tanaka@example.com');
+    // **理由は残る** — undici は接続不能も証明書エラーも `TypeError: fetch failed` で包むので、
+    // 辿らないと実際の理由が消え、502 / 504 のログが「TypeError」だけになる
+    expect(described.cause).toEqual({ name: 'Error', code: 'ECONNREFUSED' });
+    // 2 段目は辿らない（連鎖をいくらでも辿ると規則が緩む）
+    const nested = new Error('outer', { cause: new Error('mid', { cause: inner }) });
+    expect(JSON.stringify(describeError(nested))).not.toContain('tanaka@example.com');
+    // AggregateError の errors は辿らない
     const aggregate = new AggregateError([inner], 'boom');
     expect(JSON.stringify(describeError(aggregate))).not.toContain('tanaka@example.com');
   });

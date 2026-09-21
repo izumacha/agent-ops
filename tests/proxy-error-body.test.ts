@@ -486,8 +486,11 @@ describe('上流のエラー本文の絞り込み', () => {
   // がそのまま中継される）。「空白に見えるが分類は Zs でない文字」は他にも
   // U+115F / U+1160 / U+FFA0 / U+2800 / U+17B4 …と続き、代表点を足す限り追いかけっこが終わらない。
   //
-  // **全符号位置を掃く。** 正規表現の判定だけなら 164ms、`sanitizeUpstreamErrorBody` を
-  // 3 項目ぶん実際に呼んでも約 2 秒で、この 1 ファイルの実行時間に上乗せして許容できる。
+  // **全符号位置を掃く（間引かない）。** `sanitizeUpstreamErrorBody` を実際に呼んでも
+  // 1 項目あたり約 0.4 秒、3 項目で約 1.3 秒で、この 1 ファイルの実行時間に上乗せして
+  // 許容できる。**BMP の外を間引いていた版は族を開けたままにしていた** — 面ごとの端と
+  // 代表点だけを見ていたので、`\u{1D400}-\u{1D7FF}`（数学用英数字＝人間に読める字形）を
+  // 足して `u` フラグを付ける 1 行の変異が実測で 851 件すべて緑を通った。
   // これで「掃いていない符号位置を 1 つだけ通す変異」という族がまるごと閉じる
   // （残るのは「複数符号位置の並びを許す代替パターンを足す」形で、1 行では書けない）
   function forbiddenCharacters(field: 'type' | 'code' | 'param'): string[] {
@@ -498,15 +501,43 @@ describe('上流のエラー本文の絞り込み', () => {
       const character = String.fromCharCode(code);
       if (!ALLOWED_CHARACTERS[field].includes(character)) forbidden.push(character);
     }
-    // BMP の外は**間引いて**回す（1,048,576 点を全部呼ぶと現実的な時間に収まらない）。
-    // 面ごとの端と代表点を取る — サロゲートペアの扱いが壊れていればここで落ちる
-    for (let plane = 1; plane <= 16; plane += 1) {
-      const base = plane * 0x10000;
-      for (const offset of [0, 1, 0x600, 0xfffe, 0xffff])
-        forbidden.push(String.fromCodePoint(base + offset));
-    }
     return forbidden;
   }
+
+  // BMP の外の符号位置をすべて挙げる（サロゲートペアの扱いが壊れていればここで落ちる）
+  function supplementaryCharacters(): string[] {
+    // 1 面から 16 面まで
+    const characters: string[] = [];
+    for (let code = 0x10000; code <= 0x10ffff; code += 1)
+      characters.push(String.fromCodePoint(code));
+    return characters;
+  }
+
+  it('BMP の外の符号位置も 1 点ずつ通さない', () => {
+    // **掃くのは `param` だけ**にして費用を 1/3 にする — 3 項目ぶん回すと
+    // この 1 ファイルだけで約 15 秒かかり、スイート全体の時間が倍になる。
+    // `type` / `code` の許可集合が `param` の部分集合であることを別に確かめれば、
+    // 「param が落とす文字は type / code も落とす」が導ける（写しではなく表から導く）
+    for (const field of ['type', 'code'] as const)
+      for (const character of ALLOWED_CHARACTERS[field])
+        expect(
+          ALLOWED_CHARACTERS.param.includes(character),
+          `${field} が param に無い文字「${character}」を許している (包含が崩れた)`,
+        ).toBe(true);
+    // BMP の外を 1 点ずつ当てる
+    const supplementary = supplementaryCharacters();
+    expect(supplementary.length, 'BMP の外を 1 点も読めない').toBeGreaterThan(0);
+    for (const character of supplementary) {
+      // 前後を許した文字で挟み、禁止文字 1 つだけが違いになるようにする
+      const safe = sanitizeUpstreamErrorBody({ error: { param: `abc${character}def` } }) as {
+        error: Record<string, unknown>;
+      };
+      expect(
+        safe.error.param,
+        `param が U+${character.codePointAt(0)?.toString(16).toUpperCase()} を含む値を通した`,
+      ).toBeUndefined();
+    }
+  });
 
   it.each(['type', 'code', 'param'] as const)(
     '%s は許していない ASCII 文字を 1 つでも含めば通さない (文字クラスの negative control)',
@@ -520,9 +551,8 @@ describe('上流のエラー本文の絞り込み', () => {
       // 実測で `[A-Za-z0-9]` → `[A-Za-z0-9 ]` と空白を 1 文字足すだけで 116 件すべて緑になり、
       // `'Your credit balance is too low'` が type / code / param の 3 項目すべてに載った
       // (`:` `=` `,` `/` `$` も同じ。ハイフンだけは既存のケースが単独で落としていた)。
-      // **残る境界**: BMP は全符号位置を掃くが、BMP の外は面ごとの端と代表点だけ
-      // （全部呼ぶと現実的な時間に収まらない）。掃いていない補助面の符号位置を
-      // 1 つだけ通す変異は捉えられない
+      // **この族はここで閉じる** — 全 1,114,112 符号位置を 1 点ずつ当てるので、
+      // 「掃いていない符号位置を 1 つだけ通す」形は残らない
       for (const character of forbidden) {
         // 前後を許した文字で挟み、禁止文字 1 つだけが違いになるようにする
         const value = `abc${character}def`;

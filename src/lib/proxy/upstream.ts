@@ -9,6 +9,8 @@ import { API_MESSAGES, UPSTREAM_MAX_RESPONSE_BYTES, UPSTREAM_TIMEOUT_MS } from '
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
+// エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
+import { describeError } from '@/lib/describe-error';
 
 // 1 プロバイダ分の結線 (既定の接続先・上書き用の環境変数名・資格情報の環境変数名・叩くパス)
 interface UpstreamConfig {
@@ -229,6 +231,10 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> 
   } catch (error) {
     // 上で組み立てた ApiError (本文が大きすぎる等) はそのまま上げる
     if (error instanceof ApiError) throw error;
+    // **上流の失敗はサーバログに残す** — 利用者へ返すのは定型文なので、ここで残さないと
+    // 接続不能も時間切れも証明書エラーも運用者にはまったく見えない (実測で、502 / 504 を
+    // 返すテストを流しても関連するログは 1 行も出なかった)。形は describeError に任せる
+    console.error('[proxy] 上流の呼び出しに失敗しました:', describeError(error));
     // 時間切れは 504 (上流が応答しなかった)
     if (error instanceof Error && error.name === 'TimeoutError') {
       throw new ApiError(HTTP_STATUS.GATEWAY_TIMEOUT, API_MESSAGES.upstreamTimeout);

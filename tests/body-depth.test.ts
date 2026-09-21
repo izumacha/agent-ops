@@ -212,8 +212,11 @@ describe('exceedsMaxDepth', () => {
     // 位置の偶奇・部分集合・間引き（`index += 2` 等）は原理的に列挙できないので、
     // そこは上の偶奇のケースと**レビュー**で受ける
     const text = build();
-    // 実際に届く本文であること (上限を超えていたら攻撃に使えないので検査の意味が無い)
-    expect(text.length).toBeLessThanOrEqual(JSON_BODY_MAX_BYTES);
+    // 実際に届く本文であること (上限を超えていたら攻撃に使えないので検査の意味が無い)。
+    // **バイト数で見る** — 413 の判定 (`readStreamWithinByteLimit`) はバイト数なので、
+    // UTF-16 の長さで確かめていると、番兵やフィラーに多バイト文字を入れた瞬間に
+    // 「実際には 413 で弾かれて届かない本文」で検出網を張った状態が緑のまま作れる
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(JSON_BODY_MAX_BYTES);
     expect(exceedsMaxDepth(JSON.parse(text), JSON_BODY_MAX_DEPTH)).toBe(true);
   });
 

@@ -7,9 +7,12 @@ const STACK_FRAME_PATTERN = /^at .*(?::\d+:\d+\)?|<anonymous>\)?|native\)?)$/;
 // ラベル (name / code) に許す綴り。実在の値は `ECONNREFUSED` / `P2002` / `28P01` /
 // `ERR_INVALID_ARG_TYPE` / `PrismaClientKnownRequestError` (29 文字) / Bedrock の
 // `ProvisionedThroughputExceededException` (38 文字) のような短い識別子で、
-// 空白も区切り記号も持たない。**上限は実在の最長 (38) から導く** — 根拠の無い 64 にしていた
-// 版は、区切り記号を持たない秘密をそのまま載せた (実測: このリポジトリの API キーの形
-// `aop_k_` + 40 文字 = 46 文字、`sk_live_…` 32 文字、英数字 64 文字のトークンがいずれも素通し)。
+// 空白も区切り記号も持たない。**上限は実在の最長 (38) から導く**（＋2 の余裕は、同じ体系の
+// 名前が少し伸びても診断が消えないようにするため）— 根拠の無い 64 にしていた版は、区切り
+// 記号を持たない秘密をそのまま載せた (実測: このリポジトリの API キーの形 `aop_k_` + 40 文字
+// = 46 文字と、英数字 64 文字のトークンがいずれも素通し。どちらも 40 上限では型だけになる)。
+// **残る境界**: 40 文字以下で区切り記号を持たない秘密（外部サービスの鍵には 32 文字程度の
+// ものがある）は、実在の例外名と**形でも長さでも区別できない**ので通る。
 // **先頭に数字を許す** — PostgreSQL の SQLSTATE は `28P01` (パスワード不正) /
 // `23505` (一意制約違反) / `42P01` (テーブルが無い) のように数字で始まり、
 // 英字始まりに絞っていた版ではこれらの診断が丸ごと消えた (実測)。
@@ -57,8 +60,19 @@ export function describeError(error: unknown): Record<string, unknown> {
     typeof code === 'string' ? `${error.name} [${code}]: ${error.message}` : null,
     error.name,
   ].filter((candidate): candidate is string => candidate !== null);
-  // 実際の stack がどの見出しで始まるか
-  const header = headers.find((candidate) => stack.startsWith(candidate));
+  // 実際の stack がどの見出しで始まるか。**見出しの直後が改行（か文末）であることまで求める** —
+  // V8 は `error.stack` を初回アクセスで文字列に固定するので、その後に `message` を差し替えると
+  // `name: message` の候補が外れ、素の `name` が前方一致して見出しに採用される。すると残りは
+  // `": <元の message>\n…"` になり、message の中にフレームの形の行があればそれが frames に載る
+  // （実測で、元の message 由来の行が 1 行出た）。改行で始まることを求めればこの形は落ち、
+  // message が空の `Error\n    at …` は通る
+  const header = headers.find((candidate) => {
+    // 前方一致していなければ違う
+    if (!stack.startsWith(candidate)) return false;
+    // 見出しの直後の 1 文字（文末なら undefined）
+    const next = stack[candidate.length];
+    return next === undefined || next === '\n';
+  });
   // どれとも一致しなければ message の範囲を確定できないので、フレームは 1 行も出さない (fail-closed。
   // 「at …」の形だけで選ぶと、改行を含む利用者の入力由来の行がフレームとして紛れ込む)
   const frames =
@@ -72,8 +86,21 @@ export function describeError(error: unknown): Record<string, unknown> {
   // name も同じ規則で絞る (`error.name` は書き換えられるので、長い自由記述を入れられる)。
   // `error.name` は必ず文字列なので `describeShortLabel` は undefined を返さない
   const name = describeShortLabel(error.name);
+  // **`cause` は 1 段だけ、同じ規則で name / code を載せる** — undici の `fetch` は
+  // 接続不能も証明書エラーも `TypeError: fetch failed` で包むので、辿らないと実際の理由
+  // (`ECONNREFUSED` / `ENOTFOUND` など) が消える。message は載せないので規則は緩まない
+  const rawCause = 'cause' in error ? (error as { cause?: unknown }).cause : undefined;
+  const cause =
+    rawCause instanceof Error
+      ? {
+          name: describeShortLabel(rawCause.name),
+          code: describeShortLabel(
+            'code' in rawCause ? (rawCause as { code?: unknown }).code : undefined,
+          ),
+        }
+      : undefined;
   // 見出しを読めなかったことは残す (フレームが空の理由が分かるように)
   return header === undefined
-    ? { name, code, frames, stackUnparsed: true }
-    : { name, code, frames };
+    ? { name, code, cause, frames, stackUnparsed: true }
+    : { name, code, cause, frames };
 }

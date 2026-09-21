@@ -11,6 +11,8 @@ import { createPrismaRepos } from '../src/data/adapters/prisma';
 import { parseDecimalInteger } from '../src/domain/decimal-integer';
 // メールの正規化 (API と同じ規則で検索する)
 import { normalizeEmail } from '../src/domain/email';
+// エラーをログへ落とす形 (src/ と同じ唯一の経路を使う)
+import { describeError } from '../src/lib/describe-error';
 import { createPrismaClient } from '../src/lib/prisma-client';
 // CLI の既定の用途名と、API と同じ既定の有効期間
 import {
@@ -85,7 +87,9 @@ async function main(): Promise<void> {
 }
 
 // 実行し、失敗したら非 0 終了にする (エラーを握り潰さない)
-main().catch((error) => {
-  console.error('発行失敗:', error instanceof Error ? error.message : error);
+main().catch((error: unknown) => {
+  // **例外の message を素で出さない** — Prisma の検証エラーは message にクエリ引数
+  // (= メールアドレスなど利用者の入力) を埋め込むので、形は describeError に任せる
+  console.error('発行失敗:', describeError(error));
   process.exit(1);
 });

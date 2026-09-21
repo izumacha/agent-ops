@@ -2,6 +2,8 @@
 // 「接続先はコードと環境変数だけから決まる」ことを固定する。
 // 呼び出しそのもの (ヘッダ・タイムアウト・記録) は tests/api/proxy.test.ts が API 経路で見る
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { callUpstream, resolveUpstreamBaseUrl, upstreamEndpoint } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { ApiError } from '@/lib/api/errors';
@@ -353,6 +355,37 @@ describe('上流の応答からのトークン数の読み取り', () => {
   ])('%s ときは null (上流の申告値をそのまま信じない)', (_label, payload) => {
     // 読めなければ null (呼び出し側が「計測できなかった」として扱う)
     expect(readUpstreamUsage(Provider.anthropic, payload)).toBeNull();
+  });
+
+  it('受け入れ上限は UsageEvent の列の型から決まる値に一致する', () => {
+    // **2 つの境界の検査はどちらも定数を基準に書いてある**ので、定数を動かすと期待値も一緒に動く。
+    // 実測で `USAGE_TOKENS_MAX` を 2^40 にしても 10_000 にしても全件緑だった — 前者は
+    // このガードが塞いだ「記録が落ちて台帳に 1 行も残らない」を戻し、後者は正当な長文の呼び出しを
+    // ほぼ全部「計測できなかった」へ落とす (料金 0 の行だけが残る)。**独立な手がかり**として
+    // `prisma/schema.prisma` の列の型を読み、その型が保持できる最大値と突き合わせる
+    const schema = readFileSync(join(process.cwd(), 'prisma', 'schema.prisma'), 'utf8');
+    // UsageEvent の定義だけを切り出す
+    const model = /model UsageEvent \{([\s\S]*?)\n\}/.exec(schema)?.[1];
+    // 読めなければ照合にならない (fail-closed)
+    expect(model, 'UsageEvent の定義を読めない').toBeDefined();
+    // Prisma のスカラー型 → その型が保持できる最大の整数 (PostgreSQL の仕様)
+    const scalarMax: Readonly<Record<string, number>> = { Int: 2_147_483_647 };
+    // トークン数の 2 列を見る
+    for (const column of ['inputTokens', 'outputTokens']) {
+      // その列の型を読む
+      const declared = new RegExp(`\\n\\s*${column}\\s+(\\w+)`).exec(model ?? '')?.[1];
+      // 型が読めなければ照合にならない
+      expect(declared, `${column} の型を読めない`).toBeDefined();
+      // 知っている型であること (BigInt などへ変えたらこの表を増やす)
+      expect(
+        scalarMax[declared ?? ''],
+        `${column} の型 ${declared} に対応する上限を知らない (USAGE_TOKENS_MAX を見直すこと)`,
+      ).toBeDefined();
+      // 定数がその型の最大値と一致すること
+      expect(USAGE_TOKENS_MAX, `${column} の型 ${declared} と USAGE_TOKENS_MAX が食い違う`).toBe(
+        scalarMax[declared ?? ''],
+      );
+    }
   });
 
   it('列の範囲ちょうどは通す (絞りすぎて計測が消えていない)', () => {

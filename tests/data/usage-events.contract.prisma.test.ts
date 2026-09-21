@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createMemoryRepos } from '@/data/adapters/memory';
 import type { DailyUsageTotal, Repositories, UsageEventRecord } from '@/data/ports';
 import { Provider } from '@/domain/types';
+import { USAGE_TOKENS_MAX } from '@/lib/constants';
 import { userTokenExpiresAt } from '@/lib/tokens';
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
 
@@ -123,6 +124,36 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
     }
     // 他テナントのエージェントを指す記録は複合 FK が拒否する (null が返る)
     expect(await repos.usageEvents.record({ ...input, agentId: b.agent.id })).toBeNull();
+  });
+
+  it('トークン数の受け入れ上限は実 DB の列がちょうど保持できる値に一致する', async () => {
+    // **定数を縛るものが無いと、15 巡目に塞いだ回帰がそのまま戻る。** 実測で
+    // `USAGE_TOKENS_MAX` を 4_294_967_295 (uint32 上限。正解のちょうど 2 倍) にすると
+    // 718 件すべて緑のまま、3_000_000_000 トークンの申告が記録時に P2020 で落ち、
+    // 応答は 200 なのに `UsageEvent` が 0 行になった (＝上流の課金だけ発生する)。
+    // ユニット側は `prisma/schema.prisma` の列の型と突き合わせているが、**実 DB の列が
+    // 本当にその型か**は migration 次第なので、ここで実際に書いて確かめる
+    const a = await makeTenantWithAgent(repos, 'A');
+    // 上限ちょうどの記録に使う材料
+    const input = {
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      provider: Provider.anthropic,
+      model: MODEL,
+      inputTokens: USAGE_TOKENS_MAX,
+      outputTokens: USAGE_TOKENS_MAX,
+      costMicroUsd: 1n,
+      latencyMs: 1,
+      statusCode: 200,
+    };
+    // 上限ちょうどは保存できること (絞りすぎて正当な計測を落としていない)
+    const recorded = await repos.usageEvents.record(input);
+    expect(recorded?.inputTokens, '上限ちょうどを保存できない').toBe(USAGE_TOKENS_MAX);
+    // 1 大きい値は列に入らないこと (入るなら定数が実際の列より狭い＝計測を無駄に落としている)
+    await expect(
+      repos.usageEvents.record({ ...input, inputTokens: USAGE_TOKENS_MAX + 1 }),
+      '上限 +1 が保存できてしまう (USAGE_TOKENS_MAX が列より狭い)',
+    ).rejects.toThrow();
   });
 
   it('日次集計は UTC の日ごとで、他テナントの行を含まない', async () => {

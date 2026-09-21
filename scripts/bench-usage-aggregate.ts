@@ -3,7 +3,7 @@
 // **開発 DB では走らない** — 全テーブルを TRUNCATE してから投入するので、契約テストと同じ
 // 「専用 DB の名前 (末尾 _contract)」の判定を通らなければ 1 件も書かずに落ちる (fail-closed)
 import 'dotenv/config';
-import { aggregateLatencyProblem, reportBenchResult } from './lib/bench-criteria.mjs';
+import { runBench } from './lib/bench-criteria.mjs';
 import { requireContractDatabase } from './lib/contract-database.mjs';
 import { USAGE_AGGREGATE_MAX_MS, USAGE_AGGREGATE_ROW_COUNT } from './lib/step2-criteria.mjs';
 import { createPrismaRepos } from '../src/data/adapters/prisma';
@@ -21,8 +21,9 @@ const MEASURE_ROUNDS = 3;
 // 投入するイベントのモデル名 (料金表とは独立。集計は記録された値を足すだけ)
 const MODEL = 'claude-sonnet-4-6';
 
-// ベンチ本体
-async function main(): Promise<void> {
+// ベンチ本体。**判定も出力も終了コードもここには書かない** — 計測結果を返すだけにして、
+// 受け入れ基準の強制は scripts/lib/bench-criteria.mjs の runBench に集約する (理由はそちら)
+async function main(): Promise<Record<string, unknown>> {
   // 本番と同じ結線でクライアントを作る
   const client = createPrismaClient();
   // 本番と同じアダプタ (集計の SQL もここが持つ)
@@ -90,18 +91,14 @@ async function main(): Promise<void> {
     }
     // 判定には最も遅い回を使う (たまたま速かった回で通さない)
     const slowestMs = Math.max(...durations);
-    // 結果を出し、受け入れ基準を満たしていなければ落とす (出力と強制を分けない。理由は共有モジュール)
-    reportBenchResult(
-      {
-        bench: 'usage-aggregate',
-        rows: USAGE_AGGREGATE_ROW_COUNT,
-        insertMs,
-        durationsMs: durations,
-        slowestMs,
-        limitMs: USAGE_AGGREGATE_MAX_MS,
-      },
-      aggregateLatencyProblem(slowestMs),
-    );
+    // 計測結果を返す (受け入れ基準は runBench が slowestMs を読んで掛ける)
+    return {
+      rows: USAGE_AGGREGATE_ROW_COUNT,
+      insertMs,
+      durationsMs: durations,
+      slowestMs,
+      limitMs: USAGE_AGGREGATE_MAX_MS,
+    };
   } finally {
     // 接続を閉じる (§8 リソースを確実に解放する)
     await client.$disconnect();
@@ -114,9 +111,7 @@ async function main(): Promise<void> {
 // ガードが実質外れる (実測で 705 件すべて緑だった)。この形なら外すには呼び出しごと消すしかない
 requireContractDatabase('bench:usage');
 
-// 実行する (失敗は非 0 終了にする)
-main().catch((error: unknown) => {
-  // 理由を出して落ちる
-  console.error('[bench:usage]', error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+// 計測 → 判定 → 出力 → 終了コードを共有モジュールに任せて実行する。
+// **ここも同じくトップレベルの式文にする** — 条件で囲んだり関数で 1 ホップ包んだりできると、
+// 受け入れ基準の強制そのものが実行されなくなる (実測で全件緑のまま exit 0 になった)
+runBench('usage-aggregate', main);

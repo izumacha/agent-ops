@@ -74,15 +74,15 @@ export function warmupCountProblem(expected, actual) {
 
 /**
  * 初回コスト (捨て玉側の最大遅延) が桁で悪化していないかを判定する。
+ * 上限を引数で受け取らないのは下の addedLatencyProblem と同じ理由 (実測値と入れ替えられる)
  * @param {number} maxMs 捨て玉側の最大遅延
- * @param {number} limitMs 上限
  * @returns {string | null} 問題があれば文言、無ければ null
  */
-export function warmupLatencyProblem(maxMs, limitMs) {
+export function warmupLatencyProblem(maxMs) {
   // 上限以内なら問題なし
-  if (maxMs <= limitMs) return null;
+  if (maxMs <= WARMUP_MAX_MS) return null;
   // 上限を超えた = 初回コストが桁で悪化している
-  return `初回コストが大きすぎます: 捨て玉の最大 ${maxMs}ms (上限 ${limitMs}ms)`;
+  return `初回コストが大きすぎます: 捨て玉の最大 ${maxMs}ms (上限 ${WARMUP_MAX_MS}ms)`;
 }
 
 /**
@@ -114,36 +114,123 @@ export function aggregateLatencyProblem(slowestMs) {
   return `集計が遅すぎます: ${slowestMs}ms (上限 ${USAGE_AGGREGATE_MAX_MS}ms、${USAGE_AGGREGATE_ROW_COUNT} 件)`;
 }
 
+// ベンチごとの受け入れ基準の表。**「どの値を、どの判定に掛けるか」の唯一の定義。**
+//
+// **要点は「判定へ渡す値を、出力 JSON に載せる値そのものから読む」こと。** 以前はベンチ本体が
+// 判定を呼んで結果を渡す形だったため、渡す値を差し替えるだけで基準が無言の常時合格になった
+// (実測: `const alwaysFine = 0;` を 1 行足して `aggregateLatencyProblem(alwaysFine)` にすると、
+// 出力は本物の `slowestMs` を載せたまま `passed: true` になり、全件緑・件数も不変だった)。
+// 値を payload から読む形なら、判定を騙すには**出力に載せる数字そのものを偽る**しかなく、
+// そのときは結果の JSON を読めば分かる。
+//
+// 各項目の `fields` は payload から読む項目名 (判定の引数の順)、`judge` は判定そのもの
+const BENCH_CRITERIA = {
+  // プロキシの追加遅延ベンチ (scripts/bench-proxy.ts)
+  'proxy-latency': [
+    // 捨て玉が指定どおりの件数で止まったか (autocannon が amount を無視する版への変化を捕まえる)
+    { fields: ['warmupRequests', 'warmupActualRequests'], judge: warmupCountProblem },
+    // 初回コストが桁で悪化していないか
+    { fields: ['warmupSlowestMs'], judge: warmupLatencyProblem },
+    // 受け入れ基準そのもの (追加遅延 ≦ 上限)
+    { fields: ['addedMs'], judge: addedLatencyProblem },
+  ],
+  // 日次集計ベンチ (scripts/bench-usage-aggregate.ts)
+  'usage-aggregate': [
+    // 受け入れ基準そのもの (1 万件の集計 ≦ 上限)
+    { fields: ['slowestMs'], judge: aggregateLatencyProblem },
+  ],
+};
+
 /**
- * 判定の結果を受け取り、問題があればその場で throw する。
- *
- * **判定と throw を分けたうえで、throw をここへ集約するのが要点。** ベンチ本体に
- * `if (problem !== null) throw new Error(problem)` と書けると、条件を 1 つ足すだけで
- * 受け入れ基準の強制が外れ、全件緑のまま通る (実測)。ここに集めれば結線の検査が効く。
- * 出力 JSON の `passed` も判定の戻り値から導けるので、比較式の写しも消える (§6 DRY)
- * @param {string | null} problem 判定の結果 (問題が無ければ null)
+ * そのベンチのラベルが表に載っているか (載っていなければ設定ミス)。
+ * @param {string} label ベンチのラベル
+ * @returns {boolean} 表に載っていれば true
  */
-export function requireNoProblem(problem) {
-  // 問題が無ければ何もしない
-  if (problem === null) return;
-  // あれば受け入れ基準を満たしていないので止める
-  throw new Error(problem);
+export function isBenchLabel(label) {
+  // 表のキーとして存在するか (プロトタイプ由来の名前を拾わないよう自前の項目だけを見る)
+  return Object.hasOwn(BENCH_CRITERIA, label);
 }
 
 /**
- * 計測結果を出力し、受け入れ基準を満たしていなければその場で throw する。
- *
- * **出力と強制を 1 つの関数にまとめるのが要点。** 分けていたときは、判定の結果を
- * `requireNoProblem` へ渡さない (`requireNoProblem(null)`) だけで強制が消え、出力は
- * `passed: false` のまま exit 0 になった (実測で全件緑)。`problem` を**実引数として
- * 受け取る**形なら、結線の検査が「判定の呼び出しそのものを渡しているか」まで見られる。
- * `passed` もここで導くので、比較式の写しも生まれない (§6 DRY)
- * @param {Record<string, unknown>} payload 計測結果 (passed 以外の項目)
- * @param {string | null} problem 受け入れ基準の判定 (満たしていれば null)
+ * そのベンチのラベルに紐づく受け入れ基準の一覧を返す (検査が表を導出に使うため)。
+ * @param {string} label ベンチのラベル
+ * @returns {{ fields: readonly string[] }[]} 基準ごとの読み取り項目
  */
-export function reportBenchResult(payload, problem) {
-  // 人にもゲートにも読める形で出す (判定の結果から passed を導く)
-  console.log(JSON.stringify({ ...payload, passed: problem === null }));
-  // 基準を満たしていなければ落とす
-  requireNoProblem(problem);
+export function benchCriteriaFields(label) {
+  // 未知のラベルは設定ミス (fail-closed)
+  if (!isBenchLabel(label)) throw new Error(`未知のベンチです: ${label}`);
+  // 判定そのものは外へ出さず、読み取り項目だけを渡す
+  return BENCH_CRITERIA[label].map(({ fields }) => ({ fields }));
+}
+
+/**
+ * 計測結果 (payload) を、そのベンチの受け入れ基準すべてに掛けて問題の一覧を返す。
+ *
+ * **判定へ渡す値は payload からしか読まない** (上の BENCH_CRITERIA のコメント)。
+ * 項目が欠けていたり数値でなければ、基準を黙って飛ばさず例外にする (§9 fail-closed) —
+ * 項目名を打ち間違えたときに「基準を 1 つも満たさなくても緑」になるのを防ぐ
+ * @param {string} label ベンチのラベル
+ * @param {Record<string, unknown>} payload 計測結果
+ * @returns {string[]} 満たしていない基準の文言 (すべて満たしていれば空配列)
+ */
+export function judgeBenchPayload(label, payload) {
+  // 未知のラベルは設定ミス (fail-closed)
+  if (!isBenchLabel(label)) throw new Error(`未知のベンチです: ${label}`);
+  // 見つかった問題
+  const problems = [];
+  // 基準を順に掛ける
+  for (const { fields, judge } of BENCH_CRITERIA[label]) {
+    // 判定へ渡す実測値を payload から読む
+    const values = fields.map((field) => {
+      // その項目の値
+      const value = payload[field];
+      // 数値として読めなければ判定できない (黙って飛ばさず落とす)
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw new Error(`${label} の計測結果に数値の ${field} がありません`);
+      }
+      // 読めた値
+      return value;
+    });
+    // 判定を掛ける
+    const problem = judge(...values);
+    // 問題があれば覚える
+    if (problem !== null) problems.push(problem);
+  }
+  // すべての問題
+  return problems;
+}
+
+/**
+ * ベンチを 1 本実行する。**計測・出力・判定・終了コードをここへ集約する。**
+ *
+ * ベンチ本体は「計測して payload を返す」だけにし、判定も出力も終了コードもここが持つ。
+ * 分けていたときは、どの継ぎ目も 1 行で外せた (いずれも実測で全件緑・件数も不変):
+ *   - 本体が判定を呼んで結果を渡す形にして、その結果を渡さない (`…(payload, null)`)
+ *   - 実測値ではなく定数を入れた変数を渡す (`aggregateLatencyProblem(alwaysFine)`)
+ *   - `process.exitCode = 1` を書いていた `main().catch(…)` からその 1 行を消す
+ *     (`passed: false` を出したまま exit 0 になり、ゲートは終了コードしか見ないので緑)
+ * ここに集めたことで、**基準を満たさない実測値を与えたら非 0 で終わる**ことを
+ * tests/gate-scripts.test.ts が実際に呼んで固定できる (結線の綴りではなく挙動で押さえる)
+ * @param {string} label ベンチのラベル (BENCH_CRITERIA のキー)
+ * @param {() => Promise<Record<string, unknown>>} measure 計測して結果を返す関数
+ * @returns {Promise<void>} 完了 (失敗しても throw せず process.exitCode で伝える)
+ */
+export async function runBench(label, measure) {
+  // 計測そのものの失敗も受け入れ基準の未達も、同じ「非 0 で終わる」へ寄せる
+  try {
+    // 計測する (後始末は呼び出し側の finally が持つ)
+    const payload = await measure();
+    // 受け入れ基準に掛ける
+    const problems = judgeBenchPayload(label, payload);
+    // 人にもゲートにも読める形で出す (判定の結果から passed を導く)
+    console.log(JSON.stringify({ bench: label, ...payload, passed: problems.length === 0 }));
+    // 満たしていない基準を 1 件ずつ理由として出す
+    for (const problem of problems) console.error(`[bench:${label}]`, problem);
+    // 1 件でもあれば非 0 で終わる
+    if (problems.length > 0) process.exitCode = 1;
+  } catch (error) {
+    // 計測中の失敗は理由を出して非 0 で終わる
+    console.error(`[bench:${label}]`, error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 }

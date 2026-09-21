@@ -125,8 +125,6 @@ interface CallSite {
   name: string;
   // 実引数の並び
   args: readonly ts.Expression[];
-  // 呼び出し式そのもの (置かれ方を見るため)
-  node: ts.CallExpression;
 }
 
 /**
@@ -158,7 +156,7 @@ function collectCallsByScope(source: ts.SourceFile): Map<string, CallSite[]> {
           ? `${node.expression.expression.text}.${node.expression.name.text}`
           : null;
       // 読めた呼び出しだけを覚える
-      if (called !== null) byScope.get(scope)?.push({ name: called, args: node.arguments, node });
+      if (called !== null) byScope.get(scope)?.push({ name: called, args: node.arguments });
     }
     // 子を辿る
     ts.forEachChild(node, (child) => visit(child, inner));
@@ -248,86 +246,81 @@ function topLevelStatementCalls(source: ts.SourceFile): CallSite[] {
     const expression = statement.expression;
     if (!ts.isCallExpression(expression) || !ts.isIdentifier(expression.expression)) continue;
     // 名前と実引数を覚える
-    calls.push({
-      name: expression.expression.text,
-      args: expression.arguments,
-      node: expression,
-    });
+    calls.push({ name: expression.expression.text, args: expression.arguments });
   }
   // 集めた結果
   return calls;
 }
 
 /**
- * その呼び出しが「条件に囲まれていない文」として置かれているか。
- * **なぜ要るか**: `if (process.env.BENCH_STRICT === '1') requireNoProblem(problem);` のように
- * 条件を 1 つ足すだけで、呼び出しは残したまま強制が外れる (実測で全件緑)。関数の中に置く
- * 必要がある判定 (実測値を引数に取るので トップレベルには置けない) に対して、この形を落とす。
- * `try { … } finally { … }` の中は許す (後始末のために囲むのは正当で、条件ではない)
- * @param node 呼び出し式の節点
- * @returns 条件に囲まれていなければ true
+ * モジュールのトップレベルに**式文として**置かれた呼び出しの名前を、現れる順に返す。
+ * 「何を、どの順で、いくつ実行しているか」をそのまま読めるので、呼び出しの有無だけでなく
+ * **順番** (専用 DB のガードが計測より前にあるか) や**余計な実行**の有無も突き合わせられる。
+ * @param path 対象ファイルの絶対パス
+ * @returns 呼び出し先の名前 (現れる順)
  */
-function isUnconditionalStatement(node: ts.Node): boolean {
-  // 呼び出しの直上が式文でなければ、値として使われている (代入の右辺など)
-  if (node.parent === undefined || !ts.isExpressionStatement(node.parent)) return false;
-  // 上へ辿るときの「直前の節点」(ブロックの中で自分がどの文かを知るため)
-  let child: ts.Node = node.parent;
-  // 文から上へ辿り、関数かファイルの本体に着くまでに条件・繰り返しが挟まっていないかを見る
-  for (let current: ts.Node | undefined = node.parent.parent; current; current = current.parent) {
-    // ファイルの本体に着いたら条件に囲まれていない
-    if (ts.isSourceFile(current)) return true;
-    // **名前付き関数の本体に着いたら条件に囲まれていない** (その関数が呼ばれれば必ず実行される)。
-    // **無名関数 (コールバック) は true にしない** — 一度も実行されない配列の forEach へ移すだけで
-    // 「無条件」と判定され、全件緑のまま強制が外れた (実測)
-    if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current)) return true;
-    // ブロックは素通しするが、**自分より前の文に return が無いこと**まで見る —
-    // 直前に `if (!process.env.X) return;` を 1 行足すだけで強制が外れ、しかも出力 JSON は
-    // 1 文字も変わらないので結果を読んでも気付けない (実測で全件緑)
-    if (ts.isBlock(current)) {
-      // 自分より前に置かれた文
-      const before = current.statements.slice(0, current.statements.indexOf(child as ts.Statement));
-      // その中に return があれば、ここへ到達しない道がある
-      if (before.some((statement) => containsReturn(statement))) return false;
-      // 次の階層へ
-      child = current;
-      continue;
-    }
-    // **catch を持たない try だけ素通しする** — 後始末のための囲みは条件ではないが、
-    // `catch {}` は throw を握り潰せるので条件付きと同じ (実測で全件緑のまま強制が外れた)
-    if (ts.isTryStatement(current) && current.catchClause === undefined) {
-      child = current;
-      continue;
-    }
-    // それ以外 (if / for / while / switch / && / 無名関数 / catch 付き try) は条件付き
-    return false;
-  }
-  // 辿り切れなければ安全側 (条件付き扱い)
-  return false;
+export function topLevelCallNames(path: string): string[] {
+  // トップレベルの式文の呼び出しから名前だけを取り出す
+  return topLevelStatementCalls(parseScript(path)).map((call) => call.name);
 }
 
-// その文 (と入れ子) に return があるか。関数の中の return は数えない (別の実行単位なので)
-function containsReturn(node: ts.Node): boolean {
-  // 見つかったか
-  let found = false;
-  // 辿る
-  const visit = (current: ts.Node): void => {
-    // 関数の境界で止める (中の return はこの実行単位の return ではない)
+/**
+ * モジュールのトップレベルに並ぶ文の種類を、現れる順に返す (構文木の種類名)。
+ * **なぜ要るか**: 「トップレベルの式文として呼んでいる」だけを見ていると、その**手前**に
+ * `if (!process.env.BENCH_STRICT) process.exit(0);` を 1 行足すだけで、呼び出しは残したまま
+ * 一度も実行されない状態が作れる (実測で全件緑・件数も不変・出力も無しで exit 0)。
+ * 個々の抜け道を綴りで追うと 1 つ漏らすたびに静かな穴になるので、**許す種類の側を列挙する**
+ * (条件・繰り返し・try・ラベル文はどれも「その種類ではない」という 1 つの理由で落ちる)。
+ * @param path 対象ファイルの絶対パス
+ * @returns トップレベルの文の種類名 (現れる順)
+ */
+export function topLevelStatementKinds(path: string): string[] {
+  // 構文木にして、根の直下の文の種類名を並べる
+  return parseScript(path).statements.map((statement) => {
+    // **`ts.SyntaxKind[kind]` の逆引きをそのまま使わない** — 同じ数値に複数の名前が割り当てられて
+    // いるため、変数宣言の文が `FirstStatement` という別名で返る (実測)。判定に使う名前は述語から取る
+    if (ts.isImportDeclaration(statement)) return 'ImportDeclaration';
+    if (ts.isVariableStatement(statement)) return 'VariableStatement';
+    if (ts.isFunctionDeclaration(statement)) return 'FunctionDeclaration';
+    if (ts.isInterfaceDeclaration(statement)) return 'InterfaceDeclaration';
+    if (ts.isTypeAliasDeclaration(statement)) return 'TypeAliasDeclaration';
+    if (ts.isExpressionStatement(statement)) return 'ExpressionStatement';
+    // 上に無い種類は逆引きの名前で返す (呼び出し側が許可リストで落とす)
+    return ts.SyntaxKind[statement.kind];
+  });
+}
+
+/**
+ * そのファイルが `process.exit` / `process.abort` / `process.exitCode` に触れている箇所を返す。
+ * **なぜ要るか**: 終了コードの決定を共有モジュールへ集約した意味は、本体側がそれを
+ * 上書きできないことに懸かっている (`process.exit(0)` を 1 行置けば基準違反でも exit 0 になる)。
+ * @param path 対象ファイルの絶対パス
+ * @returns 触れている名前 (`process.exit` の形。重複なし)
+ */
+export function processControlUses(path: string): string[] {
+  // 構文木にする
+  const source = parseScript(path);
+  // 終了コードに関わる項目名 (process.env などは対象外)
+  const controls = new Set(['exit', 'abort', 'exitCode']);
+  // 見つかった名前
+  const found = new Set<string>();
+  // すべての節点を辿る
+  const visit = (node: ts.Node): void => {
+    // `process.<名前>` の形で、名前が上の 3 つなら覚える
     if (
-      ts.isFunctionDeclaration(current) ||
-      ts.isFunctionExpression(current) ||
-      ts.isArrowFunction(current) ||
-      ts.isMethodDeclaration(current)
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'process' &&
+      controls.has(node.name.text)
     )
-      return;
-    // return 文なら見つかった
-    if (ts.isReturnStatement(current)) found = true;
+      found.add(`process.${node.name.text}`);
     // 子を辿る
-    ts.forEachChild(current, visit);
+    ts.forEachChild(node, visit);
   };
   // 根から辿る
-  visit(node);
-  // 結果
-  return found;
+  ts.forEachChild(source, visit);
+  // 集めた結果
+  return [...found];
 }
 
 /**
@@ -506,13 +499,12 @@ export function describedNamesWithTests(path: string): string[] {
  * @param path 対象ファイルの絶対パス
  * @param functionName 呼び出し先の識別子
  * @param options 絞り込み。`atTopLevel` はモジュールのトップレベルに**式文として**置かれた
- *   呼び出しだけを数える (条件で囲む形を落とす)。`unconditional` は関数の中でもよいが
- *   **条件・繰り返しに囲まれていない文**として置かれていることを求める。`importedFrom` はその名前が
- *   `scripts/lib/<その名前>` から取り込まれ、かつ同名のローカル宣言で覆われていないことを求める
- *   (同名の no-op をその場で宣言して差し替える形を落とす)。`argument` はその位置の実引数が
- *   `callOf` に挙げた関数の**呼び出しそのもの**で、その関数もまた `importedFrom` 由来であることを求める。
- *   `measuredArgument` を渡すと、その判定の実引数 (指定した位置) が**素の識別子**であること
- *   (＝定数ではなく実測値を渡していること) まで見る
+ *   呼び出しだけを数える (条件で囲む形・関数で 1 ホップ包んでから条件で呼ぶ形を落とす)。
+ *   `importedFrom` はその名前が `scripts/lib/<その名前>` から取り込まれ、かつ同名のローカル宣言で
+ *   覆われていないことを求める (同名の no-op をその場で宣言して差し替える形を落とす)。
+ *   `argument` はその位置の実引数が `callOf` に挙げた関数の**呼び出しそのもの**で、その関数もまた
+ *   `importedFrom` 由来であることを求める。`literalArgument` はその位置の実引数が指定した
+ *   文字列リテラルそのものであることを求める (どのベンチがどの基準に掛かるかを取り違えさせない)
  * @returns 条件を満たす呼び出しがあれば true
  */
 export function callsFunction(
@@ -520,14 +512,13 @@ export function callsFunction(
   functionName: string,
   options: {
     atTopLevel?: boolean;
-    unconditional?: boolean;
     importedFrom?: string;
     argument?: {
       index: number;
       callOf: readonly string[];
       importedFrom: string;
-      measuredArgument?: number;
     };
+    literalArgument?: { index: number; value: string };
   } = {},
 ): boolean {
   // 構文木にする
@@ -550,8 +541,14 @@ export function callsFunction(
   for (const call of candidates) {
     // 名前が違えば関係ない
     if (call.name !== functionName) continue;
-    // 条件に囲まれていない文であることを求めるなら、置かれ方を見る
-    if (options.unconditional === true && !isUnconditionalStatement(call.node)) continue;
+    // 文字列リテラルの実引数を求めるなら、その位置を見る
+    if (options.literalArgument !== undefined) {
+      // 指定した位置の実引数
+      const literal = call.args[options.literalArgument.index];
+      // 文字列リテラルで、値まで一致すること (変数経由の差し替えを許さない)
+      if (literal === undefined || !ts.isStringLiteral(literal)) continue;
+      if (literal.text !== options.literalArgument.value) continue;
+    }
     // 引数の形を問わないならここで成立
     if (options.argument === undefined) return true;
     // 指定した位置の実引数
@@ -569,15 +566,6 @@ export function callsFunction(
       !comesFromSharedModule(path, source, options.argument.importedFrom, argument.expression.text)
     )
       continue;
-    // **判定へ渡す値がリテラルでないことまで見る。** `addedLatencyProblem(0)` のように
-    // 実測値の代わりに定数を渡すと、判定は常に「問題なし」を返して基準が無言で常時合格になる
-    // (実測で全件緑・件数も不変)。実測値は必ず変数なので、素の識別子であることを求める
-    if (options.argument.measuredArgument !== undefined) {
-      // 判定の呼び出しの、指定した位置の実引数
-      const measured = argument.arguments[options.argument.measuredArgument];
-      // 素の識別子でなければ、実測値を渡していない
-      if (measured === undefined || !ts.isIdentifier(measured)) continue;
-    }
     // すべて満たした
     return true;
   }

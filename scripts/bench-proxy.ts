@@ -24,15 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requireContractDatabase } from './lib/contract-database.mjs';
 import { PROXY_ADDED_LATENCY_P95_MAX_MS } from './lib/step2-criteria.mjs';
-import {
-  WARMUP_MAX_MS,
-  addedLatencyProblem,
-  intFromEnvValue,
-  reportBenchResult,
-  requireNoProblem,
-  warmupCountProblem,
-  warmupLatencyProblem,
-} from './lib/bench-criteria.mjs';
+import { intFromEnvValue, runBench } from './lib/bench-criteria.mjs';
 import { createPrismaClient } from '../src/lib/prisma-client';
 import { displayPrefix, hashSecret, issueSecret } from '../src/lib/tokens';
 import { Plan, Provider } from '../src/domain/types';
@@ -302,22 +294,19 @@ async function measureLatency(options: { url: string; headers: Record<string, st
     WARMUP_REQUESTS > 0 ? await runLoad({ ...options, amount: WARMUP_REQUESTS }) : null;
   // 本計測 (窓の長さは捨て玉に関わらず一定)
   const measured = await runLoad({ ...options, durationSeconds: DURATION_SECONDS });
-  // 捨て玉そのものを 2 つの観点で確かめる (捨て玉を切っているときは対象が無いので飛ばす):
+  // 捨て玉そのものも 2 つの観点で確かめる (判定は runBench が結果の JSON から読んで掛ける。
+  // 捨て玉を切っているときは「指定 0 件・実際 0 件・最大 0ms」になり、どちらの基準も通る):
   //   1. 指定どおりの件数で止まったか。autocannon が `amount` より `duration` を優先する版へ
   //      変わると捨て玉が秒で回って初回コストを吸収しきれなくなるが、**判定結果には現れない**
-  //      (本計測はそのまま緑になる) ので、ここで落とす (fail-closed)
+  //      (本計測はそのまま緑になる) ので、受け入れ基準と同じ扱いで落とす (fail-closed)
   //   2. 初回コストそのものが桁で悪化していないか。**捕まえるのは桁の悪化だけ** —
   //      起動直後に +150ms 増える程度 (実測で捨て玉の最大が 127→266ms) はこの上限では落ちない。
   //      意図的にそうしてある: ここを判定 (50ms) へ近づけると、初回コストを判定から外すという
   //      捨て玉の目的と衝突する。値と根拠は scripts/lib/bench-criteria.mjs の WARMUP_MAX_MS
-  if (warmup !== null) {
-    // 先に見つかった理由だけを出し、引っ掛かればその理由で落とす
-    // (throw は共有モジュールが行う。本体に `if (…) throw` を書けると条件 1 つで外せるため)
-    requireNoProblem(
-      warmupCountProblem(WARMUP_REQUESTS, warmup.requests) ??
-        warmupLatencyProblem(warmup.maxMs, WARMUP_MAX_MS),
-    );
-  }
+  // **判定の時点が「捨て玉の直後」から「両方の計測を終えたあと」へ動いた**（結果の JSON に載る
+  // 値だけで判定する形にしたため）。落ちる条件は変えておらず、失敗が分かるのが数十秒遅くなる
+  // 代わりに、捨て玉・本計測・追加遅延の事実が 1 つの JSON に揃って出る
+  //
   // 捨て玉で失敗していたら本計測の数字も信用できない (認証の取り違え等) ので、件数を合算して返す。
   // **この合算は load-bearing** — 外すと「捨て玉の窓だけ 401 になる」設定ミスが丸ごと消える
   // (実測: 外した版は全件 2xx 扱いで `passed: true` を返した)
@@ -344,8 +333,9 @@ function distributionOf(measured: {
   return { p50: measured.p50Ms, p99: measured.p99Ms, max: measured.maxMs, warmup: measured.warmup };
 }
 
-// ベンチ本体
-async function main(): Promise<void> {
+// ベンチ本体。**判定も出力も終了コードもここには書かない** — 計測結果を返すだけにして、
+// 受け入れ基準の強制は scripts/lib/bench-criteria.mjs の runBench に集約する (理由はそちら)
+async function main(): Promise<Record<string, unknown>> {
   // 証明書や一時ファイルの置き場
   const workDir = mkdtempSync(join(tmpdir(), 'agent-ops-bench-'));
   // 起動したもの (後始末で止める)
@@ -391,25 +381,30 @@ async function main(): Promise<void> {
     }
     // 追加遅延 (この定義がこのファイルの要点)
     const addedMs = Math.round((proxied.latencyMs - direct.latencyMs) * 100) / 100;
-    // 結果を出し、受け入れ基準を満たしていなければ落とす。**出力と強制を分けない** —
-    // 分けると判定の結果を渡さないだけで強制が消え、「passed: false を出して exit 0」に割れる
-    reportBenchResult(
-      {
-        bench: 'proxy-latency',
-        connections: CONNECTIONS,
-        durationSeconds: DURATION_SECONDS,
-        percentile: 'p97.5 (p95 は autocannon が出さないため、より厳しい側で測る)',
-        warmupRequests: WARMUP_REQUESTS,
-        directMs: direct.latencyMs,
-        proxiedMs: proxied.latencyMs,
-        addedMs,
-        limitMs: PROXY_ADDED_LATENCY_P95_MAX_MS,
-        requests: { direct: direct.requests, proxied: proxied.requests },
-        // 判定には使わないが、初回コストや裾の伸びを読めるように残す (上の measureLatency のコメント)
-        distribution: { direct: distributionOf(direct), proxied: distributionOf(proxied) },
-      },
-      addedLatencyProblem(addedMs),
+    // 捨て玉の判定に使う 2 つの実測値。**2 本の計測のうち悪いほうを採る** —
+    // 片方だけが壊れている状態 (プロキシ側の捨て玉だけが 401 で早く終わる等) を見逃さないため
+    const warmupActualRequests = Math.min(
+      direct.warmup?.requests ?? 0,
+      proxied.warmup?.requests ?? 0,
     );
+    // 初回コストも遅いほうを採る
+    const warmupSlowestMs = Math.max(direct.warmup?.maxMs ?? 0, proxied.warmup?.maxMs ?? 0);
+    // 計測結果を返す (受け入れ基準は runBench がこの項目を読んで掛ける)
+    return {
+      connections: CONNECTIONS,
+      durationSeconds: DURATION_SECONDS,
+      percentile: 'p97.5 (p95 は autocannon が出さないため、より厳しい側で測る)',
+      warmupRequests: WARMUP_REQUESTS,
+      warmupActualRequests,
+      warmupSlowestMs,
+      directMs: direct.latencyMs,
+      proxiedMs: proxied.latencyMs,
+      addedMs,
+      limitMs: PROXY_ADDED_LATENCY_P95_MAX_MS,
+      requests: { direct: direct.requests, proxied: proxied.requests },
+      // 判定には使わないが、裾の伸びを読めるように残す (上の measureLatency のコメント)
+      distribution: { direct: distributionOf(direct), proxied: distributionOf(proxied) },
+    };
   } finally {
     // アプリとスタブを止め、一時ファイルを消す (§8 リソースを確実に解放する)
     app?.kill('SIGKILL');
@@ -424,9 +419,7 @@ async function main(): Promise<void> {
 // ガードが実質外れる (実測で 705 件すべて緑だった)。この形なら外すには呼び出しごと消すしかない
 requireContractDatabase('bench:proxy');
 
-// 実行する (失敗は非 0 終了にする)
-main().catch((error: unknown) => {
-  // 理由を出して落ちる
-  console.error('[bench:proxy]', error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+// 計測 → 判定 → 出力 → 終了コードを共有モジュールに任せて実行する。
+// **ここも同じくトップレベルの式文にする** — 条件で囲んだり関数で 1 ホップ包んだりできると、
+// 受け入れ基準の強制そのものが実行されなくなる (実測で全件緑のまま exit 0 になった)
+runBench('proxy-latency', main);

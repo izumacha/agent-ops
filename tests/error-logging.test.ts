@@ -11,6 +11,7 @@
 //   - 分割代入で先に取り出す形: `const { message } = error; console.error('…', message)`
 //   - `console` 以外の出力: `process.stderr.write(...)`、ログライブラリ
 //   - レシーバを変数へ入れる形: `const c = console; c.error('…', error)`
+//   - 計算した添字: `const m = 'error'; console[m]('…', error)`
 // これらは規約とレビューで守る。**網の射程を「唯一の経路であることの証明」と読み替えない。**
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
@@ -30,13 +31,26 @@ const SOURCES = parseSourceFiles();
 function isConsoleLog(node: ts.Node): node is ts.CallExpression {
   // 呼び出しでなければ違う
   if (!ts.isCallExpression(node)) return false;
-  // `console.<メソッド>` の形（レシーバの綴りは問わない: `globalThis.console.error` も拾う）
+  // 呼び出す先
   const callee = node.expression;
-  return (
-    ts.isPropertyAccessExpression(callee) &&
-    CONSOLE_METHODS.has(callee.name.text) &&
-    callee.expression.getText().endsWith('console')
-  );
+  // レシーバが console であること（綴りは問わない: `globalThis.console.error` も拾う）
+  const isConsoleReceiver = (receiver: ts.Expression): boolean =>
+    receiver.getText().endsWith('console');
+  // `console.<メソッド>` の形
+  if (ts.isPropertyAccessExpression(callee))
+    return CONSOLE_METHODS.has(callee.name.text) && isConsoleReceiver(callee.expression);
+  // **`console['error']` の形も拾う** — 実測で、要素アクセスにするだけで素通りした。
+  // 「レシーバの綴りは問わない」という設計の意図からして、ここは取りこぼしであって境界ではない
+  if (ts.isElementAccessExpression(callee)) {
+    // 添字が文字列リテラルのときだけ読める（`console[m]` は原理的に追えない）
+    const index = callee.argumentExpression;
+    return (
+      ts.isStringLiteralLike(index) &&
+      CONSOLE_METHODS.has(index.text) &&
+      isConsoleReceiver(callee.expression)
+    );
+  }
+  return false;
 }
 
 /**
@@ -65,6 +79,32 @@ function errorBindingNames(source: ts.SourceFile): Set<string> {
       // 型注釈の綴り
       const annotation = node.type?.getText() ?? '';
       if (/(^|\W)\w*Error$/.test(annotation)) names.add(node.name.text);
+    }
+    // (c) `p.catch((x) => …)` の x。**型注釈に頼らない** — 実測で、`src/lib/stream-bytes.ts` は
+    // `.catch((error: unknown) => …)` しか持たないため (a)(b) だけでは束縛が 1 つも集まらず、
+    // そのファイルの console.error は 1 引数も検査されていなかった（生の `error` を足す変異が
+    // 850 件すべて緑を通った）。`unknown` は TS で最も普通の catch 引数の綴りなので、
+    // 注釈ではなく**「catch へ渡したコールバックの第 1 仮引数」という位置**で拾う
+    if (ts.isCallExpression(node)) {
+      // `x.catch(...)` の形か
+      const callee = node.expression;
+      const isCatchCall =
+        ts.isPropertyAccessExpression(callee) && callee.name.text === 'catch'
+          ? true
+          : ts.isElementAccessExpression(callee) &&
+            ts.isStringLiteralLike(callee.argumentExpression) &&
+            callee.argumentExpression.text === 'catch';
+      // 第 1 引数が関数なら、その第 1 仮引数が例外を受け取る
+      const handler = node.arguments[0];
+      if (
+        isCatchCall &&
+        handler !== undefined &&
+        (ts.isArrowFunction(handler) || ts.isFunctionExpression(handler))
+      ) {
+        // 受け取る仮引数
+        const bound = handler.parameters[0]?.name;
+        if (bound !== undefined && ts.isIdentifier(bound)) names.add(bound.text);
+      }
     }
   });
   return names;

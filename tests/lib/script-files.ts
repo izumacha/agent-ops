@@ -762,6 +762,47 @@ export function foreignModuleSpecifiers(path: string): string[] {
  * @param path 対象ファイルの絶対パス
  * @returns 呼び出し先の名前 (重複なし)
  */
+/**
+ * そのファイルが **`npm` に渡している引数の配列**から、サブコマンド名を集める。
+ * `['run', '<スクリプト>']` なら `<スクリプト>`、`['audit', …]` なら `'audit'`。
+ *
+ * **なぜ要るか**: ゲートを実際に走らせて「呼ばれた npm」を数えるだけでは、**呼ばれなかった
+ * ことを検出できない** — 途中で黙って終わる変異は呼び出しの一覧ごと縮むので、その一覧から
+ * 検査対象を導くと検査も一緒に縮む（実測で、判定の直後に終了を置く変異が全件緑で通った）。
+ * ソースから「流すと書いてあるもの」を別に導いて、実際に流したものと突き合わせる
+ * @param path 対象ファイルの絶対パス
+ * @returns サブコマンド名 (重複なし・書かれた順)
+ */
+export function npmInvocationsInSource(path: string): string[] {
+  // 構文木にする
+  const source = parseScript(path);
+  // 見つかったサブコマンド
+  const found = new Set<string>();
+  // すべての節点を辿る
+  const visit = (node: ts.Node): void => {
+    // 文字列リテラルだけの配列を探す (npm へ渡す引数の形)
+    if (ts.isArrayLiteralExpression(node)) {
+      // 先頭の要素
+      const first = node.elements[0];
+      // 先頭が文字列リテラルのときだけ見る
+      if (first !== undefined && ts.isStringLiteralLike(first)) {
+        // `['run', '<スクリプト>']` の形
+        const second = node.elements[1];
+        if (first.text === 'run' && second !== undefined && ts.isStringLiteralLike(second))
+          found.add(second.text);
+        // `['audit', …]` のように run 以外を直接渡す形
+        else if (first.text !== 'run') found.add(first.text);
+      }
+    }
+    // 子を辿る
+    ts.forEachChild(node, visit);
+  };
+  // 根から辿る
+  ts.forEachChild(source, visit);
+  // 集めた結果
+  return [...found];
+}
+
 export function reachableCallNames(path: string): string[] {
   // **名前の取れない呼び出しは一覧に現れない** — callee が計算式のとき
   // (`[]['con' + 'structor'](…)`) は名前が無いので丸ごと落ちる。呼び出し名の許可リストを

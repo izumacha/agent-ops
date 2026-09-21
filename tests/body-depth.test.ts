@@ -7,7 +7,7 @@
 // 判定そのものが深い入力でスタックを食っては意味が無いので、実装は再帰ではなく明示のスタック
 import { describe, expect, it } from 'vitest';
 import { exceedsMaxDepth } from '@/lib/api/body';
-import { JSON_BODY_MAX_DEPTH } from '@/lib/constants';
+import { JSON_BODY_MAX_BYTES, JSON_BODY_MAX_DEPTH } from '@/lib/constants';
 
 // 指定した段数だけ配列で包んだ値を作る (深さ = 入れ子になっている配列/オブジェクトの段数)
 function nestedArray(depth: number): unknown {
@@ -60,28 +60,11 @@ describe('exceedsMaxDepth', () => {
   it.each([
     ['配列の末尾', (deep: unknown) => [0, 1, deep]],
     ['オブジェクトの 2 番目のキー', (deep: unknown) => ({ a: 1, b: deep })],
-    ['配列の 5,000 番目', (deep: unknown) => [...Array.from({ length: 5_000 }, () => 0), deep]],
-    [
-      'オブジェクトの 5,000 番目のキー',
-      (deep: unknown) => ({
-        ...Object.fromEntries(Array.from({ length: 5_000 }, (_v, i) => [`k${i}`, 0])),
-        z: deep,
-      }),
-    ],
-    [
-      '幅の広い枝を辿ったあとに見る深い値',
-      (deep: unknown) => [deep, ...Array.from({ length: 20_000 }, () => [])],
-    ],
-  ])('先頭以外・幅の後ろに置かれた深い値も数える: %s', (_label, wrap) => {
+  ])('先頭以外に置かれた深い値も数える: %s', (_label, wrap) => {
     // **既存のケースは深い値が「配列の 0 番目・最初のキー」にしかなかった** — 実測で、
     // 子を辿るループを `current.node.slice(0, 1)` / `Object.keys(record).slice(0, 1)` に
     // 絞る変異はどちらも全件緑のまま通り、深い値を 2 番目以降に置いた本文が
     // 上限をすり抜けて `JSON.stringify` の RangeError（＝ 500）に戻った。
-    // **位置を 2 つ試すだけでは「打ち切り」という形は塞げない** — `slice(0, 100)` や
-    // 「訪問回数の予算」「キーが多すぎるオブジェクトは飛ばす」といった、いかにも性能対策として
-    // 書かれそうな変異はどれも全件緑で通った（実測で 4 形）。そこで**桁の違う位置**と、
-    // **幅の広い枝を辿り終えてから深い値に届く形**（辿る順は後入れ先出しなので、
-    // 深い枝を先頭に置くと最後に見ることになる）も入れる
     let deep: unknown = 1;
     for (let level = 0; level < JSON_BODY_MAX_DEPTH; level += 1) deep = [deep];
     expect(exceedsMaxDepth(wrap(deep), JSON_BODY_MAX_DEPTH)).toBe(true);
@@ -101,6 +84,63 @@ describe('exceedsMaxDepth', () => {
       expect(exceedsMaxDepth(JSON.parse(`{"x":${inner}}`), JSON_BODY_MAX_DEPTH)).toBe(true);
     },
   );
+
+  // 上限を 1 段超える深さの鎖 (これを本文のどこに置いても true になるはず)
+  const overLimitChain = `${'['.repeat(JSON_BODY_MAX_DEPTH + 1)}1${']'.repeat(JSON_BODY_MAX_DEPTH + 1)}`;
+
+  /**
+   * 本文の上限 (`JSON_BODY_MAX_BYTES`) いっぱいまで同じ断片を並べる。
+   * **個数を定数で書かない** — 攻撃者が届く上限はバイト数だけが決めるので、そこから導く
+   * @param piece 並べる断片を作る関数 (通し番号を受け取る)
+   * @param reserved 断片以外に使うバイト数
+   * @returns 並べた断片
+   */
+  function fillToLimit(piece: (index: number) => string, reserved: number): string {
+    // 並べた断片
+    const parts: string[] = [];
+    // ここまでに使ったバイト数
+    let used = reserved;
+    // 上限を超える手前まで足し続ける
+    for (let index = 0; ; index += 1) {
+      // 次の断片
+      const next = piece(index);
+      // 入らなくなったら終わり
+      if (used + next.length > JSON_BODY_MAX_BYTES) break;
+      parts.push(next);
+      used += next.length;
+    }
+    // つなげて返す
+    return parts.join('');
+  }
+
+  it.each([
+    [
+      '配列の届きうる最後の位置 (先頭でも末尾でもない)',
+      () => `[${fillToLimit(() => '0,', overLimitChain.length + 4)}${overLimitChain},0]`,
+    ],
+    [
+      'オブジェクトの届きうる最後のキー (先頭でも末尾でもない)',
+      () =>
+        `{${fillToLimit((i) => `"a${i}":0,`, overLimitChain.length + 18)}"deep":${overLimitChain},"z":0}`,
+    ],
+    [
+      '幅の広い枝をすべて辿り終えてから見る深い値',
+      () => `[${overLimitChain}${fillToLimit(() => ',[]', overLimitChain.length + 2)}]`,
+    ],
+  ])('本文の上限いっぱいに広げても深い値を数える: %s', (_label, build) => {
+    // **位置や個数を定数で試すだけでは「打ち切り」という族は閉じない。** `slice(0, 100)` を
+    // 塞いでも `slice(0, 25_000)`、訪問回数の予算 10,000 を塞いでも 20,200、という具合に
+    // しきい値を 1 つ動かすだけで復活し、どれも 64 KiB 以内の本文で上限を素通りできた（実測）。
+    // **しきい値の天井は「本文の上限に何個詰められるか」だけが決める**ので、そこまで届く
+    // フィクスチャを置けば族ごと閉じる — これより大きいしきい値は**定義上悪用できない**
+    // （本文をそこまで大きくできないため）。3 つの形はそれぞれ別の族を担当する:
+    // 位置の打ち切り（先頭でも末尾でもない最後の位置に置く）、キーの打ち切り、
+    // 訪問回数・スタック長の予算（辿る順は後入れ先出しなので、深い枝を先頭に置くと最後に見る）
+    const text = build();
+    // 実際に届く本文であること (上限を超えていたら攻撃に使えないので検査の意味が無い)
+    expect(text.length).toBeLessThanOrEqual(JSON_BODY_MAX_BYTES);
+    expect(exceedsMaxDepth(JSON.parse(text), JSON_BODY_MAX_DEPTH)).toBe(true);
+  });
 
   it('判定そのものは深い入力でも落ちない (再帰で書いていない)', () => {
     // **`JSON.stringify` が RangeError になる深さ**を与えても、判定は落ちずに true を返す

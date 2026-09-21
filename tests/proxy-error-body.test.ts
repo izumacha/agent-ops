@@ -516,6 +516,9 @@ describe('上流のエラー本文の絞り込み', () => {
   it('BMP の外の符号位置も 1 点ずつ通さない', () => {
     // **掃くのは `param` だけ**にして費用を 1/3 にする — 3 項目ぶん回すと
     // この 1 ファイルだけで約 15 秒かかり、スイート全体の時間が倍になる。
+    // **それでも 1,048,576 点を回すので 4〜5 秒かかる。** vitest の既定のタイムアウト
+    // (5 秒) では余裕が 1 割しかなく、CI のランナーで実際に超えて落ちたので明示的に延ばす
+    // (実測: 開発機 4,482ms / CI で 5 秒超過)。
     // `type` / `code` の許可集合が `param` の部分集合であることを別に確かめれば、
     // 「param が落とす文字は type / code も落とす」が導ける（写しではなく表から導く）
     for (const field of ['type', 'code'] as const)
@@ -537,7 +540,7 @@ describe('上流のエラー本文の絞り込み', () => {
         `param が U+${character.codePointAt(0)?.toString(16).toUpperCase()} を含む値を通した`,
       ).toBeUndefined();
     }
-  });
+  }, 60_000);
 
   it.each(['type', 'code', 'param'] as const)(
     '%s は許していない ASCII 文字を 1 つでも含めば通さない (文字クラスの negative control)',

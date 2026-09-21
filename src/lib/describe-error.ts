@@ -4,14 +4,17 @@
 // V8 のスタックフレームの形 (末尾が「:行:列)」「:行:列」「<anonymous>)」「native)」のいずれか)
 const STACK_FRAME_PATTERN = /^at .*(?::\d+:\d+\)?|<anonymous>\)?|native\)?)$/;
 
-// ラベル (name / code) に許す綴り。実在の値は `ECONNREFUSED` / `P2002` /
-// `ERR_INVALID_ARG_TYPE` / `PrismaClientKnownRequestError` のような短い識別子で、
-// 空白も区切り記号も持たない。上限は実在の最長 (29 文字) に余裕を持たせた値。
+// ラベル (name / code) に許す綴り。実在の値は `ECONNREFUSED` / `P2002` / `28P01` /
+// `ERR_INVALID_ARG_TYPE` / `PrismaClientKnownRequestError` (29 文字) / Bedrock の
+// `ProvisionedThroughputExceededException` (38 文字) のような短い識別子で、
+// 空白も区切り記号も持たない。**上限は実在の最長 (38) から導く** — 根拠の無い 64 にしていた
+// 版は、区切り記号を持たない秘密をそのまま載せた (実測: このリポジトリの API キーの形
+// `aop_k_` + 40 文字 = 46 文字、`sk_live_…` 32 文字、英数字 64 文字のトークンがいずれも素通し)。
 // **先頭に数字を許す** — PostgreSQL の SQLSTATE は `28P01` (パスワード不正) /
 // `23505` (一意制約違反) / `42P01` (テーブルが無い) のように数字で始まり、
 // 英字始まりに絞っていた版ではこれらの診断が丸ごと消えた (実測)。
 // 絞りすぎて診断が消えるのは、このリポジトリが繰り返し避けている失敗
-const SHORT_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_]{0,63}$/;
+const SHORT_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_]{0,39}$/;
 
 /**
  * name / code を「短い識別子」としてだけ載せる。
@@ -66,8 +69,9 @@ export function describeError(error: unknown): Record<string, unknown> {
           .split('\n')
           .map((line) => line.trim())
           .filter((line) => STACK_FRAME_PATTERN.test(line));
-  // name も同じ規則で絞る (`error.name` は書き換えられるので、長い自由記述を入れられる)
-  const name = describeShortLabel(error.name) ?? { type: typeof error.name };
+  // name も同じ規則で絞る (`error.name` は書き換えられるので、長い自由記述を入れられる)。
+  // `error.name` は必ず文字列なので `describeShortLabel` は undefined を返さない
+  const name = describeShortLabel(error.name);
   // 見出しを読めなかったことは残す (フレームが空の理由が分かるように)
   return header === undefined
     ? { name, code, frames, stackUnparsed: true }

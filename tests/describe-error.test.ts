@@ -36,6 +36,21 @@ describe('describeError', () => {
       const withCode = Object.assign(new Error('boom'), { code });
       expect(describeError(withCode), `${code} の診断が消えている`).toMatchObject({ code });
     }
+    // **区切り記号を持たない秘密は長さで落とす** — 上限を根拠の無い 64 にしていた版は、
+    // このリポジトリの API キーの形（`aop_k_` + 40 文字 = 46 文字）もそのまま載せた（実測）。
+    // **残る境界**: 実在の例外名の最長は 38 文字（Bedrock の
+    // `ProvisionedThroughputExceededException`）なので、それ以下の長さで区切り記号を
+    // 持たない秘密（決済サービスの本番キーのような、接頭辞つき 32 文字程度のもの）は
+    // **形でも長さでも区別できない**。ここを締めると実在の診断が消えるので締めない
+    // （絞りすぎて診断が消えるのは、このリポジトリが繰り返し避けている失敗）。
+    // **秘密に見える綴りをコミットに置かない**ので、ここでは実例を書かず形だけを述べる
+    // （架空の値でも GitHub の push protection が実在の鍵として弾く。§9）
+    for (const secret of [`aop_k_${'a'.repeat(40)}`, 'A'.repeat(64)]) {
+      const withSecret = Object.assign(new Error('boom'), { code: secret });
+      expect(describeError(withSecret), `${secret.slice(0, 12)}… が載っている`).toMatchObject({
+        code: { type: 'string' },
+      });
+    }
     // 接続文字列を code に入れた形は中身を出さない
     const dsn = Object.assign(new Error('boom'), { code: 'postgres://app:secret-pw@db' });
     expect(describeError(dsn)).toMatchObject({ code: { type: 'string' } });

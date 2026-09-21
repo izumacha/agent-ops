@@ -119,12 +119,12 @@ describe('exceedsMaxDepth', () => {
     return parts.join('');
   }
 
-  // フィラーのキーに使う文字。**JSON のキーは任意の文字列**なので、攻撃者は `"` と `\\` を除く
-  // 印字 ASCII 93 文字すべてを使える。英数字 36 文字に絞っていた版は 3 文字キーが早く必要になり、
-  // 同じ 64 KiB で 8,341 キーしか詰められなかった (攻撃者は 9,268 キー)。その約 10% の差のぶん
-  // 窓が開いたままで、実測で `Object.keys(record).slice(0, 8_500)` が全件緑を通り、
-  // 8,502 キー・深さ 3,057 の本文が `JSON.stringify` に 5.45ms を焼いた (平坦な本文の 8〜28 倍)
-  const KEY_ALPHABET = Array.from({ length: 0x7f - 0x20 }, (_v, offset) =>
+  // フィラーのキーに使う文字。**JSON のキーは任意の文字列**なので、攻撃者は `"` と `\\` を
+  // 除く 0x20〜0x7F の **94 文字**すべてを使える（DEL(U+007F) もキーに置ける。エスケープが
+  // 要るのは U+0000〜U+001F と `"` `\\` だけ）。英数字 36 文字に絞っていた版は 8,341 キー、
+  // 印字 ASCII 93 文字（DEL を番兵に取られた版）でも 9,268 キーしか詰められず、
+  // 実測で `Object.keys(record).slice(0, 9_290)` が全件緑を通った
+  const KEY_ALPHABET = Array.from({ length: 0x80 - 0x20 }, (_v, offset) =>
     String.fromCharCode(0x20 + offset),
   )
     .filter((character) => character !== '"' && character !== '\\')
@@ -132,24 +132,27 @@ describe('exceedsMaxDepth', () => {
 
   // 深い値を置く番兵キー。**フィラーの文字集合の外から採る** — `"zz"` は 36 進の `shortKey(925)` と
   // 同じ綴りで、`JSON.parse` の重複キーは「値だけ後勝ち・位置は初出のまま」なので、
-  // 深い値が `Object.keys` の 1,015 番目に落ちていた (意図は最後尾の 8,340 番目)。
-  // その結果 `Object.keys(record).slice(0, 8_000)` が 826 件すべて緑のまま通り、
-  // 65,532 バイト・深さ 28,579 の本文が `JSON.stringify` の RangeError (= 500) に戻せた (実測)
-  // DEL (U+007F) は印字 ASCII の外なのでフィラーと衝突せず、JSON の文字列には
-  // **そのまま置ける** (エスケープが要るのは U+0000〜U+001F と `"` `\\` だけ)
-  const DEEP_OBJECT_KEY = '\u007f';
+  // 深い値が `Object.keys` の 1,015 番目に落ちていた (意図は最後尾)。その結果
+  // `Object.keys(record).slice(0, 8_000)` が 826 件すべて緑のまま通り、65,532 バイト・
+  // 深さ 28,579 の本文が `JSON.stringify` の RangeError (= 500) に戻せた (実測)。
+  // 字母が ASCII を使い切ったので、番兵は非 ASCII から採る（1 文字ぶんの予算差は誤差）
+  const DEEP_OBJECT_KEY = '\u00ff';
 
-  // 通し番号から**いちばん短い**キーを作る (最密に詰めるため。攻撃者はこう書ける)
+  // 通し番号から**いちばん短い**キーを作る (最密に詰めるため。攻撃者はこう書ける)。
+  // **全単射の N 進（bijective base-N）にする** — 素の N 進は「先頭が字母の 0 番目」に
+  // なる 2 文字キー（94 通り）を一度も作らないので、同じ字母でも攻撃者より密度が落ちる
   function shortKey(index: number): string {
-    // 使える文字 (36 進)
+    // 使える文字
     const alphabet = KEY_ALPHABET;
-    // 36 進に変換する
-    let rest = index;
+    // 1 始まりへ寄せてから変換する（これで短い順に 1 つも飛ばさず並ぶ）
+    let rest = index + 1;
     let name = '';
-    do {
+    while (rest > 0) {
+      // 1 つ戻してから桁を取り出す（全単射にするための 1 行）
+      rest -= 1;
       name = alphabet[rest % alphabet.length] + name;
       rest = Math.floor(rest / alphabet.length);
-    } while (rest > 0);
+    }
     return name;
   }
 

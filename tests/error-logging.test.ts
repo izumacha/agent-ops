@@ -2,17 +2,24 @@
 // `src/lib/describe-error.ts` の `describeError` が**唯一の経路**で、ここを通さずに
 // 例外オブジェクトや `error.message` を出すと、ORM の検証エラー（message にクエリ引数＝
 // メールアドレス・名前が埋め込まれる）や pg のプールエラー（接続情報）がそのままログへ流れる。
-// 実測で、`proxy-route.ts` の記録失敗ログを `error.name` から `error` に変える変異は
-// 864 件すべて緑・件数も不変のまま通った（§9 ログに機密・PII を漏らさない）。
 //
-// **これは証明ではなく「増えたことに気付く網」。残る境界（すべて実測で素通りを確認）**:
-//   - 1 段の間接化: `const detail = error; console.error('…', detail)`
-//     （値は任意の式の文脈から外へ出られるので、署名からは追えない）
-//   - 分割代入で先に取り出す形: `const { message } = error; console.error('…', message)`
-//   - `console` 以外の出力: `process.stderr.write(...)`、ログライブラリ
-//   - レシーバを変数へ入れる形: `const c = console; c.error('…', error)`
-//   - 計算した添字: `const m = 'error'; console[m]('…', error)`
-// これらは規約とレビューで守る。**網の射程を「唯一の経路であることの証明」と読み替えない。**
+// **「例外を指す束縛を同定する」のをやめ、実引数の許可リストにしている（高度の話）。**
+// 束縛を同定する形は、綴りを 1 つ塞ぐたびに次の形が出た（いずれも実測で全件緑）:
+//   `error` の決め打ち → `catch (err)` / `(poolError: Error) => …`
+//   → `.catch((error: unknown) => …)`（そのファイルは 1 引数も検査されなかった）
+//   → **`: Error` の注釈を外すだけ**（型は文脈から決まるので注釈は省略でき、`tsc` も緑）。
+// 最後の形が決定的で、**網が成立する条件が「書き手が自由に省略できる構文」**になっていた
+// （冗長な注釈を消すのはレビューが通しやすい向きの編集なので、向きが逆の設計）。
+//
+// そこで問いを裏返す: 「その実引数は例外か？」ではなく**「ログに出してよい形か？」**。
+// 出してよいのは (1) 文字列リテラル (2) 置換の無いテンプレート (3) `describeError(...)`
+// (4) 許可表に登録した安全な識別子だけを置換に持つテンプレート の 4 つで、それ以外は落とす。
+// これで束縛の同定という問題そのものが消え、注釈・`unknown`・union・分割代入・
+// 文脈型付けがすべて同じ 1 本の規則で閉じる（fail-closed）。
+//
+// **残る境界**: `console` 以外の出力（`process.stderr.write`・ログライブラリ）、
+// レシーバを変数へ入れる形（`const c = console`）、計算した添字（`console[m]`）は
+// 署名から追えないので規約とレビューで守る。
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 import { forEachNode, parseSourceFiles } from './lib/source-files';
@@ -23,6 +30,14 @@ const DESCRIBE_ERROR = 'describeError';
 // ログを吐く console のメソッド。**`error` だけを見ない** — 実測で `console.warn('…', error)` は
 // 素通りした。出力先が stderr か stdout かは問題ではなく、message が残ることが問題
 const CONSOLE_METHODS = new Set(['error', 'warn', 'log', 'info', 'debug', 'trace']);
+
+// テンプレートの置換に置いてよい識別子と、その理由。
+// **例外にも利用者の入力にも由来しない値だけ**を登録する。エントリが増える差分は
+// 理由の妥当性をレビューで確認する（この repo の他の除外表と同じ扱い）
+const SAFE_SUBSTITUTIONS: Record<string, string> = {
+  PLATFORM_ADMIN_TOKEN_MIN_LENGTH:
+    '設定の下限値を表す定数。例外にも利用者の入力にも由来せず、値は公開しても差し支えない',
+};
 
 // 走査結果はモジュール評価時に 1 度だけ作る
 const SOURCES = parseSourceFiles();
@@ -39,8 +54,7 @@ function isConsoleLog(node: ts.Node): node is ts.CallExpression {
   // `console.<メソッド>` の形
   if (ts.isPropertyAccessExpression(callee))
     return CONSOLE_METHODS.has(callee.name.text) && isConsoleReceiver(callee.expression);
-  // **`console['error']` の形も拾う** — 実測で、要素アクセスにするだけで素通りした。
-  // 「レシーバの綴りは問わない」という設計の意図からして、ここは取りこぼしであって境界ではない
+  // **`console['error']` の形も拾う** — 実測で、要素アクセスにするだけで素通りした
   if (ts.isElementAccessExpression(callee)) {
     // 添字が文字列リテラルのときだけ読める（`console[m]` は原理的に追えない）
     const index = callee.argumentExpression;
@@ -53,118 +67,70 @@ function isConsoleLog(node: ts.Node): node is ts.CallExpression {
   return false;
 }
 
-/**
- * そのファイルで「例外を受け取っている束縛」の名前を**構文から**集める。
- *
- * **綴り `error` を決め打ちしない** — 実測で `catch (e)` / `catch (err)` や
- * `(poolError: Error) => …` はどれも素通りし、後者は「`error.message` を素で出す経路を
- * 閉じた」と述べたまさにその 2 行を 1 語のリネームで検出網の外へ出せた。
- * 集めるのは (a) `catch` 節が束縛した名前、(b) 型注釈が `Error` の仮引数。
- * @param source 1 ファイル分の構文木
- * @returns 例外を指す識別子の名前
- */
-function errorBindingNames(source: ts.SourceFile): Set<string> {
-  // 集めた名前
-  const names = new Set<string>();
-  // 構文木をすべて辿る
-  forEachNode(source, (node) => {
-    // (a) `catch (x)` の x
-    if (ts.isCatchClause(node)) {
-      // 束縛名（`catch {}` のように省略できるので undefined を許す）
-      const bound = node.variableDeclaration?.name;
-      if (bound !== undefined && ts.isIdentifier(bound)) names.add(bound.text);
-    }
-    // (b) `(x: Error) => …` の x（型注釈が Error / *Error で終わる仮引数）
-    if (ts.isParameter(node) && ts.isIdentifier(node.name)) {
-      // 型注釈の綴り
-      const annotation = node.type?.getText() ?? '';
-      if (/(^|\W)\w*Error$/.test(annotation)) names.add(node.name.text);
-    }
-    // (c) `p.catch((x) => …)` の x。**型注釈に頼らない** — 実測で、`src/lib/stream-bytes.ts` は
-    // `.catch((error: unknown) => …)` しか持たないため (a)(b) だけでは束縛が 1 つも集まらず、
-    // そのファイルの console.error は 1 引数も検査されていなかった（生の `error` を足す変異が
-    // 850 件すべて緑を通った）。`unknown` は TS で最も普通の catch 引数の綴りなので、
-    // 注釈ではなく**「catch へ渡したコールバックの第 1 仮引数」という位置**で拾う
-    if (ts.isCallExpression(node)) {
-      // `x.catch(...)` の形か
-      const callee = node.expression;
-      const isCatchCall =
-        ts.isPropertyAccessExpression(callee) && callee.name.text === 'catch'
-          ? true
-          : ts.isElementAccessExpression(callee) &&
-            ts.isStringLiteralLike(callee.argumentExpression) &&
-            callee.argumentExpression.text === 'catch';
-      // 第 1 引数が関数なら、その第 1 仮引数が例外を受け取る
-      const handler = node.arguments[0];
-      if (
-        isCatchCall &&
-        handler !== undefined &&
-        (ts.isArrowFunction(handler) || ts.isFunctionExpression(handler))
-      ) {
-        // 受け取る仮引数
-        const bound = handler.parameters[0]?.name;
-        if (bound !== undefined && ts.isIdentifier(bound)) names.add(bound.text);
-      }
-    }
-  });
-  return names;
-}
-
-// その式が、例外を指す束縛のどれかに触れているか（`e` / `err.message` / 三項など）
-function mentionsErrorBinding(node: ts.Node, bindings: Set<string>): boolean {
-  // 見つけた印
-  let found = false;
-  // 部分式をすべて見る
-  forEachNode(node, (child) => {
-    // 例外を指す識別子そのもの
-    if (ts.isIdentifier(child) && bindings.has(child.text)) {
-      // `x.err` の `err` はプロパティ名なので数えない
-      const parent = child.parent as ts.Node | undefined;
-      const isPropertyName =
-        parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.name === child;
-      if (!isPropertyName) found = true;
-    }
-  });
-  return found;
+// その実引数はログに出してよい形か
+function isAllowedLogArgument(argument: ts.Expression): boolean {
+  // (1) 文字列リテラル
+  if (ts.isStringLiteralLike(argument)) return true;
+  // (3) `describeError(...)` の呼び出し
+  if (
+    ts.isCallExpression(argument) &&
+    ts.isIdentifier(argument.expression) &&
+    argument.expression.text === DESCRIBE_ERROR
+  )
+    return true;
+  // (2)(4) テンプレート: 置換がすべて許可表の識別子であること（置換なしもここで通る）
+  if (ts.isTemplateExpression(argument))
+    return argument.templateSpans.every(
+      (span) => ts.isIdentifier(span.expression) && span.expression.text in SAFE_SUBSTITUTIONS,
+    );
+  // それ以外は通さない (fail-closed)
+  return false;
 }
 
 describe('エラーのログ出力', () => {
-  it('console のログの実引数で例外に触れるものは describeError を通している', () => {
+  it('console のログの実引数は「出してよい形」だけ', () => {
     // 1 ファイルも読めなければ走査が壊れている (fail-closed)
     expect(SOURCES.length, 'src 配下の TypeScript を 1 つも読めない').toBeGreaterThan(0);
     // 規約を破っている箇所
     const offenders: string[] = [];
     // 実際に見た console のログ呼び出しの件数（0 なら判定が空振りしている）
     let inspected = 0;
-    for (const { path, source } of SOURCES) {
-      // このファイルで例外を受け取っている束縛の名前（綴りを決め打ちしない）
-      const bindings = errorBindingNames(source);
+    for (const { path, source } of SOURCES)
       forEachNode(source, (node) => {
         // console のログ呼び出しだけを見る
         if (!isConsoleLog(node)) return;
         inspected += 1;
         for (const argument of node.arguments) {
-          // 例外に触れていない実引数（定型のメッセージなど）は対象外
-          if (!mentionsErrorBinding(argument, bindings)) continue;
-          // 触れているなら、その実引数まるごとが describeError(...) であること
-          const wrapped =
-            ts.isCallExpression(argument) &&
-            ts.isIdentifier(argument.expression) &&
-            argument.expression.text === DESCRIBE_ERROR;
-          if (!wrapped)
-            offenders.push(
-              `${path.slice(process.cwd().length + 1)}: ${argument.getText().replace(/\s+/g, ' ')}`,
-            );
+          // 出してよい形なら次へ
+          if (isAllowedLogArgument(argument)) continue;
+          // それ以外はそのまま失敗文言に出す
+          offenders.push(
+            `${path.slice(process.cwd().length + 1)}: ${argument.getText().replace(/\s+/g, ' ')}`,
+          );
         }
       });
-    }
     // 1 件も見ていなければ走査が壊れている (fail-closed)
     expect(inspected, 'console のログ呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
-    // 破っている箇所があれば、そのまま失敗文言に出す
+    // 破っている箇所があれば、直し方まで文言に書く
     expect(
       offenders,
-      `例外を ${DESCRIBE_ERROR}() を通さずにログへ出している (message に PII や接続情報が載る)`,
+      `ログに出してよいのは 文字列リテラル / 置換の無いテンプレート / ${DESCRIBE_ERROR}(...) / ` +
+        '許可表の識別子だけを置換に持つテンプレート だけ (例外の message には PII や接続情報が載る)',
     ).toEqual([]);
+  });
+
+  it('許可表の識別子は実在し、理由が空でない', () => {
+    // src 全体に現れる識別子の名前
+    const declared = new Set<string>();
+    for (const { source } of SOURCES)
+      forEachNode(source, (node) => {
+        if (ts.isIdentifier(node)) declared.add(node.text);
+      });
+    // 登録が古くなっていないこと
+    for (const [name, reason] of Object.entries(SAFE_SUBSTITUTIONS)) {
+      expect(declared.has(name), `${name} は src に存在しない (許可表が古い)`).toBe(true);
+      expect(reason.trim().length, `${name} の許可に理由が無い`).toBeGreaterThan(0);
+    }
   });
 
   it('describeError の定義は 1 か所だけ', () => {

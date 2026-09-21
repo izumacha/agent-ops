@@ -258,15 +258,26 @@ describe('Dockerfile', () => {
 
 // ゲートが流す検証のうち、**CI で二重化しないもの**と、その理由。
 // 表に無いものは CI にそのままの綴りのステップが要る (新しい検証を足した人は必ず一度、
-// 「二重化するか、なぜ要らないか」を決めることになる)。**エントリが増える差分は
-// 理由の妥当性をレビューで確認する** (この repo の他の除外表と同じ扱い)
-const NOT_DUPLICATED_IN_CI: Record<string, string> = {
-  'npm run test':
-    'ゲート本体が JSON レポート付きのリテラルで別に流すので、STEP0_STEPS から消えても残る',
-  'npm run bench:usage':
-    '受け入れ基準の計測そのもの。CI で二重に回すと所要時間が倍になるので、削除はレビューで見る',
-  'npm run bench:proxy': '同上 (プロキシの追加遅延の計測)',
-};
+// 「二重化するか、なぜ要らないか」を決めることになる)。
+//
+// **理由の型を分ける。** `byOtherInvocation` は「ゲート自身が別の呼び出しで同じものを流す」型で、
+// その別経路が実在することを機械で確かめられる。`byCost` は「CI で二重に回すと所要時間が倍になる」型で、
+// 妥当性は**レビューでしか見られない**。実測で、`'npm run lint'` をもっともらしい理由付きで
+// 1 行足すと ci.yml から Lint ステップを消しても全件緑になった — この表は**人が判断する
+// エスケープハッチ**なので、**エントリが増える差分は理由の妥当性をレビューで必ず確認する**
+// (この repo の他の除外表と同じ扱い)
+const NOT_DUPLICATED_IN_CI: Record<string, { kind: 'byOtherInvocation' | 'byCost'; why: string }> =
+  {
+    'npm run test': {
+      kind: 'byOtherInvocation',
+      why: 'ゲート本体が JSON レポート付きのリテラルで別に流すので、STEP0_STEPS から消えても残る',
+    },
+    'npm run bench:usage': {
+      kind: 'byCost',
+      why: '受け入れ基準の計測そのもの。CI で二重に回すと所要時間が倍になるので、削除はレビューで見る',
+    },
+    'npm run bench:proxy': { kind: 'byCost', why: '同上 (プロキシの追加遅延の計測)' },
+  };
 
 describe('CI ワークフロー', () => {
   // ci.yml のジョブ定義
@@ -323,11 +334,22 @@ describe('CI ワークフロー', () => {
         .map((argv) => ['npm', ...argv].join(' ')),
     );
     // 除外表のキーが実在すること (古い登録が黙って残らないように)
-    for (const [command, reason] of Object.entries(NOT_DUPLICATED_IN_CI)) {
+    for (const [command, { kind, why }] of Object.entries(NOT_DUPLICATED_IN_CI)) {
       expect(gateCommands.has(command), `${command} はゲートが流していない (除外表が古い)`).toBe(
         true,
       );
-      expect(reason.trim().length, `${command} の除外に理由が無い`).toBeGreaterThan(0);
+      expect(why.trim().length, `${command} の除外に理由が無い`).toBeGreaterThan(0);
+      // 「別の呼び出しで流している」型の理由は**その別経路の実在まで確かめる** —
+      // 理由が事実かどうかを機械で見られる唯一の型なので、レビュー任せにしない
+      if (kind === 'byOtherInvocation') {
+        // 同じキーで始まる argv が 2 本以上あること (1 本しか無ければ「別の呼び出し」は存在しない)
+        const key = command.replace(/^npm (run )?/, '');
+        const invocations = argvs.filter((argv) => (argv[0] === 'run' ? argv[1] : argv[0]) === key);
+        expect(
+          invocations.length,
+          `${command} の除外理由は「別の呼び出しで流す」だが、その呼び出しが 1 本しか無い`,
+        ).toBeGreaterThan(1);
+      }
     }
     // **ゲートからステップを丸ごと消す形は検出網では捉えられない** — ゲートの検査は
     // 「流すと書いてあるもの」をソースから導くので、書くのをやめれば要求も消える。

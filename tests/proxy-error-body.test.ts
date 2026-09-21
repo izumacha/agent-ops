@@ -478,12 +478,52 @@ describe('上流のエラー本文の絞り込み', () => {
     param: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.[]',
   };
 
-  // 印字できる ASCII のうち、その項目に許していない文字をすべて挙げる
+  // 非 ASCII の代表点。**ASCII だけを掃いても足りない** — 実測で、繰り返し部分の文字クラスへ
+  // 非 ASCII の BMP (`\u00a0-\ud7ff`) を足す 1 行の変異が 119 件すべて緑のまま通り、
+  // NBSP 区切りの `'Your credit balance is low'` が code と param にそのまま載った
+  // (多くのクライアントでは**ふつうの空白入りの英文として表示される**)。
+  // 全 Unicode は掃けないので、**語の区切りに使える形**を中心に代表点を置く
+  const NON_ASCII_SAMPLES = [
+    // 空白として見える／語を区切れるもの (端末やログビューアでは半角空白と区別が付かない)
+    '\u00a0', // NBSP
+    '\u1680', // OGHAM SPACE MARK
+    '\u2000', // EN QUAD
+    '\u200a', // HAIR SPACE
+    '\u202f', // NARROW NBSP
+    '\u205f', // MEDIUM MATHEMATICAL SPACE
+    '\u3000', // 全角空白
+    '\u2028', // LINE SEPARATOR
+    '\u2029', // PARAGRAPH SEPARATOR
+    // 幅を持たない／表示の向きを変えるもの (綴りを隠しながら区切れる)
+    '\u200b', // ZERO WIDTH SPACE
+    '\u200e', // LEFT-TO-RIGHT MARK
+    '\u202e', // RIGHT-TO-LEFT OVERRIDE
+    '\u2066', // LEFT-TO-RIGHT ISOLATE
+    '\ufeff', // ZERO WIDTH NO-BREAK SPACE (BOM)
+    '\u00ad', // SOFT HYPHEN
+    '\u0301', // COMBINING ACUTE ACCENT
+    // ASCII の同形異字・別の数字 (英数字に見えるが符号位置が違う)
+    '\uff21', // Ａ (全角英字)
+    '\uff10', // ０ (全角数字)
+    '\u0660', // ٠ (アラビア数字)
+    '\u0430', // а (キリル。ラテン a と同形)
+    '\u03bf', // ο (ギリシャ。ラテン o と同形)
+    // その他の代表点
+    '\u00e9', // é (ラテン拡張)
+    '\u4e00', // 一 (CJK)
+    '\ud83d\ude00', // 😀 (BMP 外。サロゲートペア)
+    '\ud800', // 孤立サロゲート
+  ];
+
+  // その項目に許していない文字をすべて挙げる (ASCII は全域、非 ASCII は代表点)
   function forbiddenCharacters(field: 'type' | 'code' | 'param'): string[] {
-    // 空白 (0x20) から `~` (0x7e) まで
-    return Array.from({ length: 0x7f - 0x20 }, (_v, offset) =>
-      String.fromCharCode(0x20 + offset),
-    ).filter((character) => !ALLOWED_CHARACTERS[field].includes(character));
+    // NUL (0x00) から DEL (0x7f) まで = 制御文字も含む ASCII の全域
+    const ascii = Array.from({ length: 0x80 }, (_v, code) => String.fromCharCode(code));
+    // 許可表に無いものだけを残し、非 ASCII の代表点を足す
+    return [
+      ...ascii.filter((character) => !ALLOWED_CHARACTERS[field].includes(character)),
+      ...NON_ASCII_SAMPLES,
+    ];
   }
 
   it.each(['type', 'code', 'param'] as const)(
@@ -497,7 +537,9 @@ describe('上流のエラー本文の絞り込み', () => {
       // どれか 1 つが漏れても他の文字が落としてしまい、**単独の抜けが見えなかった**。
       // 実測で `[A-Za-z0-9]` → `[A-Za-z0-9 ]` と空白を 1 文字足すだけで 116 件すべて緑になり、
       // `'Your credit balance is too low'` が type / code / param の 3 項目すべてに載った
-      // (`:` `=` `,` `/` `$` も同じ。ハイフンだけは既存のケースが単独で落としていた)
+      // (`:` `=` `,` `/` `$` も同じ。ハイフンだけは既存のケースが単独で落としていた)。
+      // **残る境界**: 全 Unicode は掃けないので、非 ASCII は代表点だけ。
+      // 掃いていない符号位置を 1 つだけ通す変異は原理的に捉えられない
       for (const character of forbidden) {
         // 前後を許した文字で挟み、禁止文字 1 つだけが違いになるようにする
         const value = `abc${character}def`;

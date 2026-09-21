@@ -119,15 +119,25 @@ describe('exceedsMaxDepth', () => {
     return parts.join('');
   }
 
-  // フィラーのキーに使う文字 (36 進。1 文字あたりの情報量がいちばん多い綴り)
-  const KEY_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  // フィラーのキーに使う文字。**JSON のキーは任意の文字列**なので、攻撃者は `"` と `\\` を除く
+  // 印字 ASCII 93 文字すべてを使える。英数字 36 文字に絞っていた版は 3 文字キーが早く必要になり、
+  // 同じ 64 KiB で 8,341 キーしか詰められなかった (攻撃者は 9,268 キー)。その約 10% の差のぶん
+  // 窓が開いたままで、実測で `Object.keys(record).slice(0, 8_500)` が全件緑を通り、
+  // 8,502 キー・深さ 3,057 の本文が `JSON.stringify` に 5.45ms を焼いた (平坦な本文の 8〜28 倍)
+  const KEY_ALPHABET = Array.from({ length: 0x7f - 0x20 }, (_v, offset) =>
+    String.fromCharCode(0x20 + offset),
+  )
+    .filter((character) => character !== '"' && character !== '\\')
+    .join('');
 
-  // 深い値を置く番兵キー。**フィラーの文字集合の外から採る** — `"zz"` は `shortKey(925)` と
+  // 深い値を置く番兵キー。**フィラーの文字集合の外から採る** — `"zz"` は 36 進の `shortKey(925)` と
   // 同じ綴りで、`JSON.parse` の重複キーは「値だけ後勝ち・位置は初出のまま」なので、
   // 深い値が `Object.keys` の 1,015 番目に落ちていた (意図は最後尾の 8,340 番目)。
   // その結果 `Object.keys(record).slice(0, 8_000)` が 826 件すべて緑のまま通り、
   // 65,532 バイト・深さ 28,579 の本文が `JSON.stringify` の RangeError (= 500) に戻せた (実測)
-  const DEEP_OBJECT_KEY = '~d';
+  // DEL (U+007F) は印字 ASCII の外なのでフィラーと衝突せず、JSON の文字列には
+  // **そのまま置ける** (エスケープが要るのは U+0000〜U+001F と `"` `\\` だけ)
+  const DEEP_OBJECT_KEY = '\u007f';
 
   // 通し番号から**いちばん短い**キーを作る (最密に詰めるため。攻撃者はこう書ける)
   function shortKey(index: number): string {

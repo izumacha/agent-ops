@@ -9,9 +9,10 @@ import { costMicroUsd, findModelPrice, listModelPrices } from '@/domain/pricing'
 import { MICRO_USD_MAX, parseUsdDecimalToMicro } from '@/domain/money';
 import { Provider } from '@/domain/types';
 import vendorPrices from '@/domain/pricing/vendor-prices.json';
+// gate:step2 が照合するテスト名の接頭辞 (**正本から読む**。写しを持つと、食い違ったとき
+// ゲートが赤くなるだけで原因が分かりにくい。§6 定数は単一の参照元に置く)
+import { PRICE_TEST_PREFIX } from '../scripts/lib/step2-criteria.mjs';
 
-// gate:step2 が照合するテスト名の接頭辞 (scripts/gate-step2.mjs と同じ文字列)
-const PRICE_TEST_PREFIX = '料金: ';
 // 単価の分母 (公表はすべて 100 万トークンあたり)
 const UNIT = 1_000_000n;
 

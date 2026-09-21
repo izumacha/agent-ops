@@ -448,6 +448,44 @@ describe('missingPriceCases', () => {
     ]);
   });
 
+  it('ドットで続く別モデルのテストでも代用されない', () => {
+    // **区切りの種類ごとに試す** — 実測で、境界の文字クラスからドットを外す変異
+    // (`/[A-Za-z0-9._-]/` → `/[A-Za-z0-9_-]/`) が 842 件すべて緑を通った。
+    // テストが使う対はどちらもハイフン境界で、ドットは誰にも見られていなかった
+    const models = [
+      { provider: 'openai', model: 'gpt-4' },
+      { provider: 'openai', model: 'gpt-4.1' },
+    ];
+    // 長い側のテストだけがある
+    const report = priceReport([{ provider: 'openai', model: 'gpt-4.1' }]);
+    expect(missingPriceCases(report, { models, pricePrefix: PRICE_TEST_PREFIX })).toEqual([
+      'openai gpt-4',
+    ]);
+  });
+
+  it('前の出現が境界を満たさなくても、後ろの出現で数える', () => {
+    // 1 つの名前の中に needle が 2 回現れ、**前は境界を満たさず後ろだけ満たす**形。
+    // 実測で、ループを「最初の出現だけ見る」に変えても 842 件すべて緑だった
+    // (誤る向きは fail-closed なので害は小さいが、分岐が無検証のまま残る)
+    const models = [{ provider: 'openai', model: 'gpt-5' }];
+    const report = {
+      numPassedTests: 1,
+      numFailedTests: 0,
+      numPendingTests: 0,
+      testResults: [
+        {
+          assertionResults: [
+            {
+              fullName: `${PRICE_TEST_PREFIX}openai gpt-5-mini と ${PRICE_TEST_PREFIX}openai gpt-5 を比べる`,
+              status: 'passed',
+            },
+          ],
+        },
+      ],
+    };
+    expect(missingPriceCases(report, { models, pricePrefix: PRICE_TEST_PREFIX })).toEqual([]);
+  });
+
   it('区切りが続く名前なら項目として数える (境界の判定が厳しすぎない)', () => {
     // 接頭辞の直後が空白なら、その項目のテストとして正しく当たること
     const models = [{ provider: 'openai', model: 'gpt-5' }];

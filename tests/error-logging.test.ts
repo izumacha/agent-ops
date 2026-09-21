@@ -17,12 +17,23 @@
 // これで束縛の同定という問題そのものが消え、注釈・`unknown`・union・分割代入・
 // 文脈型付けがすべて同じ 1 本の規則で閉じる（fail-closed）。
 //
+// **呼び先を分岐・転送する形も剥がして見る**: 括弧・カンマ式・`.call` / `.apply` / `.bind` /
+// `Reflect.apply(console.error, …)` / `cond ? console.error : console.warn` /
+// `console.error ?? console.warn`。これらは Prettier も ESLint も書き換えないので
+// 「意図的に迂回した形」には見えず、レビューを通りやすい（実測で全形が素通りした）。
+// **包みごとにログへ出る実引数の位置が違う**ので、剥がした種類に応じて取り出す
+// （`.call(this, …)` の先頭は this なのでログには出ない。一律に判定へ回していた版は
+// `console` という識別子を毎回「許していない形」として報告し、失敗文言が嘘になっていた）。
+//
 // **残る境界**（いずれも実測で素通りを確認）: `console` 以外の出力
 // （`process.stderr.write`・ログライブラリ）、レシーバを変数へ入れる形（`const c = console`）、
 // `console` からの分割代入（`const { error: logError } = console`）、計算した添字
 // （`console[m]`）。これらは署名から追えないので規約とレビューで守る。
-// **括弧・`.call` / `.apply` / `.bind` は剥がして見る** — これらは Prettier も ESLint も
-// 書き換えないので「意図的に迂回した形」には見えず、レビューを通りやすいため。
+// **走査範囲は `src/` だけ**（`parseSourceFiles`）。`scripts/` の開発用 CLI は運用者が
+// 手元で動かすもので、`scripts/issue-user-token.ts` は発行したトークンを**意図的に**
+// 標準出力へ書く（それがこの CLI の成果物）。同じ規則を掛けると理由付きの除外を
+// 足すことになり、除外表はこのリポジトリが繰り返し「静かに緩む口」として見てきた形なので、
+// 範囲を広げずに境界として記録する。
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -67,52 +78,87 @@ function resolveModule(from: string, specifier: string): string {
   return /\.[cm]?tsx?$/.test(base) ? base : `${base}.ts`;
 }
 
-// 括弧と `.call` / `.apply` / `.bind` を剥がして、元の呼び先まで辿る
-function unwrapCallee(expression: ts.Expression): ts.Expression {
-  // 括弧を剥がす（`(0, console.error)` のカンマ式は右端が呼び先）
-  let current: ts.Expression = expression;
-  for (;;) {
-    // `( … )`
-    if (ts.isParenthesizedExpression(current)) {
-      current = current.expression;
-      continue;
+// そのファイルが「モジュールスコープの `const` にリテラルを入れて」宣言している名前
+function literalConstantsIn(source: ts.SourceFile): Set<string> {
+  // 見つかった名前
+  const names = new Set<string>();
+  // **文のトップレベルだけを見る**（関数の中の const は含めない）
+  for (const statement of source.statements) {
+    // `const x = …;` の形か
+    if (!ts.isVariableStatement(statement)) continue;
+    if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      // 名前と初期化子
+      const initializer = declaration.initializer;
+      if (!ts.isIdentifier(declaration.name) || initializer === undefined) continue;
+      // `as const` などの注釈は剥がして中身を見る
+      const value = ts.isAsExpression(initializer) ? initializer.expression : initializer;
+      // リテラル（数値・文字列）で初期化されていること
+      if (ts.isNumericLiteral(value) || ts.isStringLiteralLike(value))
+        names.add(declaration.name.text);
     }
-    // `a, b` のカンマ式は右端
-    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
-      current = current.right;
-      continue;
-    }
-    // `f.call` / `f.apply` / `f.bind` は f まで戻る
-    if (
-      ts.isPropertyAccessExpression(current) &&
-      ['call', 'apply', 'bind'].includes(current.name.text)
-    ) {
-      current = current.expression;
-      continue;
-    }
-    // `f.bind(console)(…)` のように、剥がした先がさらに呼び出しなら中を見る
-    if (ts.isCallExpression(current)) {
-      // 呼び先が `f.bind` の形のときだけ辿る（無関係な呼び出しを巻き込まない）
-      const inner = current.expression;
-      if (ts.isPropertyAccessExpression(inner) && inner.name.text === 'bind') {
-        current = inner.expression;
-        continue;
-      }
-    }
-    return current;
   }
+  return names;
 }
 
-// console のログ呼び出しか
-function isConsoleLog(node: ts.Node): node is ts.CallExpression {
-  // 呼び出しでなければ違う
-  if (!ts.isCallExpression(node)) return false;
-  // 呼び出す先。**括弧と `.call` / `.apply` / `.bind` を剥がしてから見る** — 実測で
-  // `console.error.call(console, …)` / `.apply` / `.bind(console)(…)` /
-  // `(0, console.error)(…)` / `(console.error)(…)` の 5 形がどれも素通りした。
-  // `.call` / `.apply` は Prettier も ESLint も書き換えないので、`console[m]` と違って
-  // 「意図的に迂回した形」には見えない = レビューを通りやすい
-  const callee = unwrapCallee(node.expression);
+// ファイルごとの「リテラルのモジュール定数」の一覧
+const LITERAL_CONSTANTS = new Map<string, Set<string>>(
+  SOURCES.map(({ path, source }) => [path, literalConstantsIn(source)]),
+);
+
+// ファイルごとの「名前を変えずに named import した名前 → 取り込み元の絶対パス」
+function namedImportsIn(path: string, source: ts.SourceFile): Map<string, string> {
+  // 取り込んだ名前と、その出どころ
+  const imports = new Map<string, string>();
+  forEachNode(source, (node) => {
+    // `import { X } from '…'` の形だけ（`as` で付け替えたものは別物なので採らない）
+    if (!ts.isImportSpecifier(node) || node.propertyName !== undefined) return;
+    // 取り込み元の綴り
+    const from = node.parent.parent.parent.moduleSpecifier;
+    if (ts.isStringLiteralLike(from)) imports.set(node.name.text, resolveModule(path, from.text));
+  });
+  return imports;
+}
+
+// ファイルごとの named import
+const NAMED_IMPORTS = new Map<string, Map<string, string>>(
+  SOURCES.map(({ path, source }) => [path, namedImportsIn(path, source)]),
+);
+
+/**
+ * **その置き場所で**、その名前がリテラルのモジュール定数を指しているか。
+ * **「src のどこかに同名のリテラル定数がある」では足りない** — 一覧を全ファイルの和集合で
+ * 持っていた版は、無関係なファイルの `const message = 'x'` が許可表の裏打ちになり、
+ * 別のファイルで `${message}` に例外の message を入れられた（登録名と実際に埋まる値が
+ * 別のファイルなので、差分を見ても対応が分からない）。
+ * @param path その識別子が書かれているファイル
+ * @param name 識別子
+ */
+function resolvesToLiteralConstant(path: string, name: string): boolean {
+  // そのファイル自身が宣言している
+  if (LITERAL_CONSTANTS.get(path)?.has(name) === true) return true;
+  // 名前を変えずに取り込んでいて、取り込み元がリテラル定数として宣言している
+  const from = NAMED_IMPORTS.get(path)?.get(name);
+  return from !== undefined && LITERAL_CONSTANTS.get(from)?.has(name) === true;
+}
+
+// 呼び先が console のログメソッドを指しているか（分岐は「どれか 1 つでも」で見る = fail-closed）
+function isConsoleCallee(expression: ts.Expression): boolean {
+  // 括弧を剥がす
+  if (ts.isParenthesizedExpression(expression)) return isConsoleCallee(expression.expression);
+  // **`cond ? console.error : console.warn` / `console.error ?? console.warn`** のように
+  // 呼び先そのものを分岐させる形。どちらかが console なら検査の対象にする
+  if (ts.isConditionalExpression(expression))
+    return isConsoleCallee(expression.whenTrue) || isConsoleCallee(expression.whenFalse);
+  if (
+    ts.isBinaryExpression(expression) &&
+    [
+      ts.SyntaxKind.QuestionQuestionToken,
+      ts.SyntaxKind.BarBarToken,
+      ts.SyntaxKind.AmpersandAmpersandToken,
+    ].includes(expression.operatorToken.kind)
+  )
+    return isConsoleCallee(expression.left) || isConsoleCallee(expression.right);
   // レシーバが console であること。**綴りの末尾一致で見ない** — 実測で
   // `globalThis['console'].error('…', error)` が素通りした（メソッド側の
   // `console['error']` はわざわざ拾っているのに、レシーバ側の同じ形が抜けていた）
@@ -130,23 +176,118 @@ function isConsoleLog(node: ts.Node): node is ts.CallExpression {
     return false;
   };
   // `console.<メソッド>` の形
-  if (ts.isPropertyAccessExpression(callee))
-    return CONSOLE_METHODS.has(callee.name.text) && isConsoleReceiver(callee.expression);
+  if (ts.isPropertyAccessExpression(expression))
+    return CONSOLE_METHODS.has(expression.name.text) && isConsoleReceiver(expression.expression);
   // **`console['error']` の形も拾う** — 実測で、要素アクセスにするだけで素通りした
-  if (ts.isElementAccessExpression(callee)) {
+  if (ts.isElementAccessExpression(expression)) {
     // 添字が文字列リテラルのときだけ読める（`console[m]` は原理的に追えない）
-    const index = callee.argumentExpression;
+    const index = expression.argumentExpression;
     return (
       ts.isStringLiteralLike(index) &&
       CONSOLE_METHODS.has(index.text) &&
-      isConsoleReceiver(callee.expression)
+      isConsoleReceiver(expression.expression)
     );
   }
   return false;
 }
 
+// `f.apply(this, [引数])` / `Reflect.apply(f, this, [引数])` の第 3 引数を実引数へ開く
+function spreadArrayArgument(argument: ts.Expression | undefined): readonly ts.Expression[] {
+  // 引数が無ければログに出る値も無い
+  if (argument === undefined) return [];
+  // 配列リテラルなら中身がそのまま実引数（スプレッド要素はその式のまま判定させる）
+  if (ts.isArrayLiteralExpression(argument))
+    return argument.elements.map((element) =>
+      ts.isSpreadElement(element) ? element.expression : element,
+    );
+  // 配列リテラルでなければ中身を読めないので、その式自体を判定に回す (fail-closed)
+  return [argument];
+}
+
+// 包みを剥がしながら「元の呼び先」と「包みの種類」「`bind` で先渡しした引数」を取り出す
+function peelCallee(expression: ts.Expression): {
+  callee: ts.Expression;
+  wrapper: 'call' | 'apply' | 'bind' | null;
+  boundArguments: readonly ts.Expression[];
+} {
+  // 走査中の式と、いちばん外側の包み
+  let current: ts.Expression = expression;
+  let wrapper: 'call' | 'apply' | 'bind' | null = null;
+  const boundArguments: ts.Expression[] = [];
+  for (;;) {
+    // `( … )`
+    if (ts.isParenthesizedExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    // `a, b` のカンマ式は右端が呼び先
+    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      current = current.right;
+      continue;
+    }
+    // `f.call` / `f.apply` / `f.bind` は f まで戻る
+    if (
+      ts.isPropertyAccessExpression(current) &&
+      ['call', 'apply', 'bind'].includes(current.name.text)
+    ) {
+      // いちばん外側の包みだけを覚える（内側は this の付け替えなので実引数を動かさない）
+      wrapper ??= current.name.text as 'call' | 'apply' | 'bind';
+      current = current.expression;
+      continue;
+    }
+    // `f.bind(console)(…)` のように、剥がした先がさらに呼び出しなら中を見る
+    if (ts.isCallExpression(current)) {
+      // 呼び先が `f.bind` の形のときだけ辿る（無関係な呼び出しを巻き込まない）
+      const inner = current.expression;
+      if (ts.isPropertyAccessExpression(inner) && inner.name.text === 'bind') {
+        // `bind` の第 2 引数以降は呼び出し時に先頭へ渡される（ログに出る）
+        boundArguments.push(...current.arguments.slice(1));
+        current = inner.expression;
+        continue;
+      }
+    }
+    return { callee: current, wrapper, boundArguments };
+  }
+}
+
+/**
+ * console のログ呼び出しなら「実際にログへ出る実引数」を返す（違えば null）。
+ * **包みごとに実引数の位置が違う**ので、剥がした種類に応じて取り出す
+ * （`.call` / `.bind` の先頭は this なのでログには出ない。ここを一律に判定へ回していた
+ * 版は `console` という識別子を毎回「許していない形」として報告し、失敗文言が嘘になっていた）。
+ */
+function consoleLogArguments(node: ts.Node): readonly ts.Expression[] | null {
+  // 呼び出しでなければ違う
+  if (!ts.isCallExpression(node)) return null;
+  // **`Reflect.apply(console.error, this, [引数])`** — 包みを剥がす経路では届かない形
+  const direct = node.expression;
+  const isReflectApply =
+    ts.isPropertyAccessExpression(direct) &&
+    ts.isIdentifier(direct.expression) &&
+    direct.expression.text === 'Reflect' &&
+    direct.name.text === 'apply';
+  if (isReflectApply) {
+    // 第 1 引数が呼び先、第 3 引数が実引数の配列
+    const target = node.arguments[0];
+    if (target === undefined || !isConsoleCallee(target)) return null;
+    return spreadArrayArgument(node.arguments[2]);
+  }
+  // 括弧・カンマ式・`.call` / `.apply` / `.bind` を剥がしてから呼び先を見る — 実測で
+  // `console.error.call(console, …)` / `.apply` / `.bind(console)(…)` /
+  // `(0, console.error)(…)` / `(console.error)(…)` の 5 形がどれも素通りした。
+  // `.call` / `.apply` は Prettier も ESLint も書き換えないので、`console[m]` と違って
+  // 「意図的に迂回した形」には見えない = レビューを通りやすい
+  const peeled = peelCallee(direct);
+  if (!isConsoleCallee(peeled.callee)) return null;
+  // 包みの種類ごとに、ログへ出る実引数を取り出す
+  if (peeled.wrapper === 'call') return [...peeled.boundArguments, ...node.arguments.slice(1)];
+  if (peeled.wrapper === 'apply')
+    return [...peeled.boundArguments, ...spreadArrayArgument(node.arguments[1])];
+  return [...peeled.boundArguments, ...node.arguments];
+}
+
 // その実引数はログに出してよい形か
-function isAllowedLogArgument(argument: ts.Expression): boolean {
+function isAllowedLogArgument(argument: ts.Expression, path: string): boolean {
   // (1) 文字列リテラル
   if (ts.isStringLiteralLike(argument)) return true;
   // (3) `describeError(...)` の呼び出し
@@ -165,7 +306,9 @@ function isAllowedLogArgument(argument: ts.Expression): boolean {
         // `toString` / `constructor` / `valueOf` は**登録せずに許可されていた**（実測で
         // `const toString = error instanceof Error ? error.message : String(error);` が
         // 3 件緑を通った）。許可表を 1 文字も触らないので差分にも現れない
-        Object.hasOwn(SAFE_SUBSTITUTIONS, span.expression.text),
+        Object.hasOwn(SAFE_SUBSTITUTIONS, span.expression.text) &&
+        // **その置き場所で**リテラルのモジュール定数を指していること（他ファイルの同名は不可）
+        resolvesToLiteralConstant(path, span.expression.text),
     );
   // それ以外は通さない (fail-closed)
   return false;
@@ -181,12 +324,13 @@ describe('エラーのログ出力', () => {
     let inspected = 0;
     for (const { path, source } of SOURCES)
       forEachNode(source, (node) => {
-        // console のログ呼び出しだけを見る
-        if (!isConsoleLog(node)) return;
+        // console のログ呼び出しだけを見る（実際にログへ出る実引数を受け取る）
+        const args = consoleLogArguments(node);
+        if (args === null) return;
         inspected += 1;
-        for (const argument of node.arguments) {
+        for (const argument of args) {
           // 出してよい形なら次へ
-          if (isAllowedLogArgument(argument)) continue;
+          if (isAllowedLogArgument(argument, path)) continue;
           // それ以外はそのまま失敗文言に出す
           offenders.push(
             `${path.slice(process.cwd().length + 1)}: ${argument.getText().replace(/\s+/g, ' ')}`,
@@ -204,38 +348,19 @@ describe('エラーのログ出力', () => {
   });
 
   it('許可表に登録できるのはリテラルで初期化したモジュール定数だけ', () => {
-    // 「モジュールスコープの `const` で、数値か文字列のリテラルで初期化されている」名前
-    const literalConstants = new Set<string>();
-    for (const { source } of SOURCES)
-      // **文のトップレベルだけを見る**（関数の中の const は含めない）
-      for (const statement of source.statements) {
-        // `const x = …;` の形か
-        if (!ts.isVariableStatement(statement)) continue;
-        if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
-        for (const declaration of statement.declarationList.declarations) {
-          // 名前と初期化子
-          const initializer = declaration.initializer;
-          if (!ts.isIdentifier(declaration.name) || initializer === undefined) continue;
-          // リテラル（数値・文字列・置換の無いテンプレート）で初期化されていること
-          if (
-            ts.isNumericLiteral(initializer) ||
-            ts.isStringLiteralLike(initializer) ||
-            (ts.isAsExpression(initializer) &&
-              (ts.isNumericLiteral(initializer.expression) ||
-                ts.isStringLiteralLike(initializer.expression)))
-          )
-            literalConstants.add(declaration.name.text);
-        }
-      }
     // 手掛かりが 0 件なら走査が壊れている (fail-closed)
-    expect(literalConstants.size, 'リテラルのモジュール定数を 1 つも読めない').toBeGreaterThan(0);
+    const total = [...LITERAL_CONSTANTS.values()].reduce((sum, names) => sum + names.size, 0);
+    expect(total, 'リテラルのモジュール定数を 1 つも読めない').toBeGreaterThan(0);
     // 登録が条件を満たすこと
     for (const [name, reason] of Object.entries(SAFE_SUBSTITUTIONS)) {
       // **「src に識別子として現れる」だけでは足りない** — `error` / `err` / `message` の
       // ような、まさに塞ぎたい名前ほどその条件を自明に満たす（実測で `error` を
-      // 登録するだけで例外の message をテンプレートへ埋められた）
+      // 登録するだけで例外の message をテンプレートへ埋められた）。
+      // **和集合でも足りない** — 裏打ちと使用箇所が別ファイルでよいと、無関係なファイルの
+      // `const message = 'x'` が許可の根拠になる。実際の判定は使用箇所ごとに
+      // `resolvesToLiteralConstant` が行い、ここはその名前がどこかに実在することだけを見る
       expect(
-        literalConstants.has(name),
+        SOURCES.some(({ path }) => resolvesToLiteralConstant(path, name)),
         `${name} はリテラルで初期化したモジュール定数ではない (例外・引数・catch 束縛は登録できない)`,
       ).toBe(true);
       expect(reason.trim().length, `${name} の許可に理由が無い`).toBeGreaterThan(0);

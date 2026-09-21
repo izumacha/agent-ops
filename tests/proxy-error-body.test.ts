@@ -486,11 +486,10 @@ describe('上流のエラー本文の絞り込み', () => {
   // がそのまま中継される）。「空白に見えるが分類は Zs でない文字」は他にも
   // U+115F / U+1160 / U+FFA0 / U+2800 / U+17B4 …と続き、代表点を足す限り追いかけっこが終わらない。
   //
-  // **全符号位置を掃く（間引かない）。** `sanitizeUpstreamErrorBody` を実際に呼んでも
-  // 1 項目あたり約 0.4 秒、3 項目で約 1.3 秒で、この 1 ファイルの実行時間に上乗せして
-  // 許容できる。**BMP の外を間引いていた版は族を開けたままにしていた** — 面ごとの端と
-  // 代表点だけを見ていたので、`\u{1D400}-\u{1D7FF}`（数学用英数字＝人間に読める字形）を
-  // 足して `u` フラグを付ける 1 行の変異が実測で 851 件すべて緑を通った。
+  // **全符号位置を掃く（間引かない）。** BMP を間引いていた版は族を開けたままで、
+  // `\u{1D400}-\u{1D7FF}`（数学用英数字＝人間に読める字形）を足して `u` フラグを付ける
+  // 1 行の変異が実測で全件緑を通った。実測の費用は BMP（65,536 点 × 3 項目）が約 1.3 秒、
+  // 補助面（1,048,576 点 × 1 本文で 3 項目）が約 4.5 秒。
   // これで「掃いていない符号位置を 1 つだけ通す変異」という族がまるごと閉じる
   // （残るのは「複数符号位置の並びを許す代替パターンを足す」形で、1 行では書けない）
   function forbiddenCharacters(field: 'type' | 'code' | 'param'): string[] {
@@ -513,32 +512,52 @@ describe('上流のエラー本文の絞り込み', () => {
     return characters;
   }
 
+  // 1 つの符号位置につき試す値の形。**2 つ要る。**
+  //
+  // `abc<文字>def` は「許した文字で挟んだ中にその文字が混ざれるか」しか見ない。実測で、
+  // `SAFE_CODE_PATTERN` に `[\u{1D400}-\u{1D7FF}]{1,40}`（数学用英数字＝人間に読める字形）を
+  // **代替として足す** 1 行の変異が 120 件すべて緑を通り、`error.code` に
+  // `𝐘𝐨𝐮𝐫𝐂𝐫𝐞𝐝𝐢𝐭𝐁𝐚𝐥𝐚𝐧𝐜𝐞𝐈𝐬𝐓𝐨𝐨𝐋𝐨𝐰` が載った —— 挟んだ形は「ASCII と混在した値」なので
+  // その代替には一致せず、既存の綴りにも一致しないため、**両方の綴りが同時に落として**
+  // 変異の有無が出口に現れなかった。
+  //
+  // そこで「その文字だけを並べた値」も試す。代替パターンが**同質な並び**を許す形は、
+  // これで出口に現れる。
+  //
+  // **残る境界**: 代替が 4 文字以上の並びを要求する形（`{10,40}` 等）や、
+  // 特定の並び方を要求する形はこの 2 つでは踏めない。形の族としては開いたままなので
+  // 「閉じた」と書かない。
+  function probeValues(character: string): readonly string[] {
+    // 1 つ目: 許した文字で挟んで「トークンの内側に混ざれるか」を見る
+    // 2 つ目: その文字だけを並べて「丸ごと別の綴りとして通らないか」を見る
+    return [`abc${character}def`, character.repeat(3)];
+  }
+
   it('BMP の外の符号位置も 1 点ずつ通さない', () => {
-    // **掃くのは `param` だけ**にして費用を 1/3 にする — 3 項目ぶん回すと
-    // この 1 ファイルだけで約 15 秒かかり、スイート全体の時間が倍になる。
-    // **それでも 1,048,576 点を回すので 4〜5 秒かかる。** vitest の既定のタイムアウト
-    // (5 秒) では余裕が 1 割しかなく、CI のランナーで実際に超えて落ちたので明示的に延ばす
-    // (実測: 開発機 4,482ms / CI で 5 秒超過)。
-    // `type` / `code` の許可集合が `param` の部分集合であることを別に確かめれば、
-    // 「param が落とす文字は type / code も落とす」が導ける（写しではなく表から導く）
-    for (const field of ['type', 'code'] as const)
-      for (const character of ALLOWED_CHARACTERS[field])
-        expect(
-          ALLOWED_CHARACTERS.param.includes(character),
-          `${field} が param に無い文字「${character}」を許している (包含が崩れた)`,
-        ).toBe(true);
-    // BMP の外を 1 点ずつ当てる
+    // **1 符号位置につき 1 回の呼び出しで 3 項目を同時に見る。** `param` だけ掃いて
+    // 「type / code の許可集合は param の部分集合だから導ける」とした版は、
+    // **確かめているのがテストファイル側の手書きの表どうし**で、実装（`SAFE_CODE_PATTERN`）
+    // については何も言っていなかった。実測で `SAFE_CODE_PATTERN` にだけ数学用英数字を
+    // 足す 1 行の変異が 120 件すべて緑を通り、`𝐘𝐨𝐮𝐫𝐂𝐫𝐞𝐝𝐢𝐭𝐁𝐚𝐥𝐚𝐧𝐜𝐞𝐈𝐬𝐓𝐨𝐨𝐋𝐨𝐰` が
+    // `error.code` に載った（人間に読める字形なので、そのまま課金状態が伝わる）。
+    // 3 項目を 1 つの本文に入れれば、費用は param 単独と同じまま実装を直接確かめられる。
+    // **1,048,576 点を回すので 4〜5 秒かかる** — vitest の既定のタイムアウト (5 秒) では
+    // 余裕が 1 割しかなく、CI のランナーで実際に超えて落ちたので明示的に延ばす
     const supplementary = supplementaryCharacters();
     expect(supplementary.length, 'BMP の外を 1 点も読めない').toBeGreaterThan(0);
     for (const character of supplementary) {
-      // 前後を許した文字で挟み、禁止文字 1 つだけが違いになるようにする
-      const safe = sanitizeUpstreamErrorBody({ error: { param: `abc${character}def` } }) as {
-        error: Record<string, unknown>;
-      };
-      expect(
-        safe.error.param,
-        `param が U+${character.codePointAt(0)?.toString(16).toUpperCase()} を含む値を通した`,
-      ).toBeUndefined();
+      // 混在の形と同質な並びの形の両方を試す
+      for (const value of probeValues(character)) {
+        const safe = sanitizeUpstreamErrorBody({
+          error: { type: value, code: value, param: value },
+        }) as { error: Record<string, unknown> };
+        // どの項目にも載らないこと
+        for (const field of ['type', 'code', 'param'] as const)
+          expect(
+            safe.error[field],
+            `${field} が U+${character.codePointAt(0)?.toString(16).toUpperCase()} を含む値を通した`,
+          ).toBeUndefined();
+      }
     }
   }, 60_000);
 
@@ -557,15 +576,16 @@ describe('上流のエラー本文の絞り込み', () => {
       // **この族はここで閉じる** — 全 1,114,112 符号位置を 1 点ずつ当てるので、
       // 「掃いていない符号位置を 1 つだけ通す」形は残らない
       for (const character of forbidden) {
-        // 前後を許した文字で挟み、禁止文字 1 つだけが違いになるようにする
-        const value = `abc${character}def`;
-        const safe = sanitizeUpstreamErrorBody({ error: { [field]: value } }) as {
-          error: Record<string, unknown>;
-        };
-        expect(
-          safe.error[field],
-          `${field} が「${character}」(U+${character.charCodeAt(0).toString(16).padStart(4, '0')}) を含む値を通した`,
-        ).toBeUndefined();
+        // 混在の形と同質な並びの形の両方を試す
+        for (const value of probeValues(character)) {
+          const safe = sanitizeUpstreamErrorBody({ error: { [field]: value } }) as {
+            error: Record<string, unknown>;
+          };
+          expect(
+            safe.error[field],
+            `${field} が「${character}」(U+${character.charCodeAt(0).toString(16).padStart(4, '0')}) を含む値を通した`,
+          ).toBeUndefined();
+        }
       }
     },
   );

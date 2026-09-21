@@ -221,7 +221,19 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> 
     });
     // 上限超過・UTF-8 として壊れた本文は「上流の応答が使えなかった」として 502 にする
     // (中途半端に切り詰めた本文を JSON として解釈させない)
-    if (!read.ok) throw new ApiError(HTTP_STATUS.BAD_GATEWAY, API_MESSAGES.upstreamFailure);
+    if (!read.ok) {
+      // **ここもサーバログに残す** — 下の catch は ApiError を素通しするので、この経路だけ
+      // 記録が無く、運用者からは「502 が出たが理由が分からない」状態だった。
+      // 理由は閉じた語彙 (上限超過 / UTF-8 として壊れている) なので、分岐して定型文で出す
+      // (上流由来の文字列は 1 バイトも混ぜない)
+      if (read.reason === 'too_large') {
+        console.error('[proxy] 上流の応答が上限を超えたため打ち切りました');
+      } else {
+        console.error('[proxy] 上流の応答が UTF-8 として解釈できませんでした');
+      }
+      // 使えなかったので 502
+      throw new ApiError(HTTP_STATUS.BAD_GATEWAY, API_MESSAGES.upstreamFailure);
+    }
     // ステータス・本文・待ち時間の指示を返す
     return {
       status: response.status,

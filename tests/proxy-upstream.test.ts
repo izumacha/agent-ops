@@ -316,6 +316,105 @@ describe('上流の呼び出し (時間切れ・本文の上限)', () => {
   });
 });
 
+// 上流の失敗は利用者へ定型文しか返さないので、**残るのはサーバログだけ**。
+// 記録が無いと、接続不能も時間切れも証明書エラーも運用者からはまったく見えない
+// (この記録を足すまで、502 / 504 を返すテストを流しても関連するログは 1 行も出なかった)。
+// 同時に、**その記録に message が混ざらないこと**も固定する — 上流由来の文字列には
+// 組織名・残高・接続文字列が載りうるので、形は必ず describeError に任せる
+describe('上流の失敗の記録', () => {
+  // 差し替えた fetch と console を元へ戻す
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // 失敗する上流を立てて呼び、そのあいだに出た console.error の引数を返す
+  async function callAndCaptureLog(
+    fetchImpl: () => Promise<Response>,
+  ): Promise<{ status: number; calls: unknown[][] }> {
+    // 実際の出力は抑えつつ引数だけ記録する
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // 失敗する上流に差し替える
+    vi.stubGlobal('fetch', vi.fn(fetchImpl));
+    // 呼ぶ (必ず ApiError になる)
+    const failure = await callUpstream({
+      provider: Provider.anthropic,
+      target: { endpoint: new URL('https://api.anthropic.com/v1/messages'), apiKey: 'k' },
+      body: '{}',
+      timeoutMs: 20,
+      maxResponseBytes: 2 * 1024,
+    }).catch((error: unknown) => error);
+    // ApiError であること (そうでなければ以降の照合が意味を持たない)
+    expect(failure).toBeInstanceOf(ApiError);
+    // 記録された引数と、写った HTTP ステータス
+    return { status: (failure as ApiError).status, calls: logged.mock.calls };
+  }
+
+  it('接続不能を 502 として記録する (message は載せない)', async () => {
+    // undici が接続不能を包む形 (cause に実際の理由が入る)。message に接続文字列を仕込む
+    const cause = Object.assign(new Error('connect ECONNREFUSED 10.0.0.9:443'), {
+      code: 'ECONNREFUSED',
+    });
+    const { status, calls } = await callAndCaptureLog(() =>
+      Promise.reject(new TypeError('fetch failed: postgres://app:secret@db', { cause })),
+    );
+    // 502 へ写り、記録はちょうど 1 行
+    expect(status).toBe(HTTP_STATUS.BAD_GATEWAY);
+    expect(calls, '上流の失敗が 1 行も記録されていない').toHaveLength(1);
+    // 2 つ目の引数が describeError の形 (name と、cause を 1 段たどった code が残る)
+    expect(calls[0][1]).toMatchObject({ name: 'TypeError', cause: { code: 'ECONNREFUSED' } });
+    // **message は 1 バイトも出ない** (接続文字列が載っていた)
+    expect(JSON.stringify(calls[0])).not.toContain('postgres://');
+    expect(JSON.stringify(calls[0])).not.toContain('10.0.0.9');
+  });
+
+  it('時間切れを 504 として記録する', async () => {
+    // 合図が中断になったら TimeoutError で終わる上流 (本物の fetch と同じ振る舞い)
+    const { status, calls } = await callAndCaptureLog(
+      () =>
+        new Promise<Response>((_resolve, reject) => {
+          // 中断の合図を待つ
+          const timeout = Object.assign(new Error('The operation was aborted'), {
+            name: 'TimeoutError',
+          });
+          setTimeout(() => {
+            reject(timeout);
+          }, 30);
+        }),
+    );
+    // 504 へ写り、記録はちょうど 1 行
+    expect(status).toBe(HTTP_STATUS.GATEWAY_TIMEOUT);
+    expect(calls, '時間切れが 1 行も記録されていない').toHaveLength(1);
+    // 例外の種類は残る (これが無いと運用者は 504 の理由を切り分けられない)
+    expect(calls[0][1]).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('応答本文が上限を超えた 502 も記録する (ApiError は catch を素通りする)', async () => {
+    // 上限 (2 KiB) を必ず超える本文。**この経路は catch の手前で throw する**ので、
+    // 下の catch の記録には届かない — 記録が無いと 502 の理由が運用者に見えない
+    const chunk = new TextEncoder().encode('x'.repeat(1024));
+    const { status, calls } = await callAndCaptureLog(async () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              // 1 KiB のかたまりを 8 回流す
+              for (let i = 0; i < 8; i += 1) controller.enqueue(chunk);
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+    // 502 へ写り、記録はちょうど 1 行
+    expect(status).toBe(HTTP_STATUS.BAD_GATEWAY);
+    expect(calls, '上限超過が 1 行も記録されていない').toHaveLength(1);
+    // 理由が読み取れること (上流由来の文字列は混ぜない)
+    expect(String(calls[0][0])).toContain('上限');
+  });
+});
+
 describe('上流の応答からのトークン数の読み取り', () => {
   it('Anthropic の項目名を読む', () => {
     // input_tokens / output_tokens

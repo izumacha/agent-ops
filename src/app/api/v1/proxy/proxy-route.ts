@@ -153,30 +153,6 @@ async function recordUsage(
 }
 
 /**
- * 検証済みの本文を、上流へ送る JSON 文字列へ組み立て直す。
- *
- * **`JSON.stringify` は入れ子が深いと RangeError で落ちる。** ベンダーのペイロードを通すため
- * 本文のスキーマは `z.looseObject` なので、入れ子の深さは検証を素通りする。実測では
- * `JSON.parse` が深さ 3 万でも通るのに `JSON.stringify` は**約 4,164（本文 8.3 KB 程度）**で
- * 落ちるため、本文サイズの上限（64 KiB）の内側で起こる。
- * この行を try の外に置いていたときは `route()` の catch-all が拾って **500 とスタックのログ**になり、
- * 上流も呼ばれず記録も残らないので、有効なキー 1 本で 8.3 KB を投げ続けるだけで
- * 「障害の捏造」とログ汚染ができた（`src/proxy.ts` と `assertResourceIdParams` で既に 2 度塞いだのと同じ形）。
- * 送れない本文は送り主の責任なので 422 に倒す
- * @param body 検証済みの本文
- * @returns 上流へ送る JSON 文字列
- */
-function serializeUpstreamBody(body: unknown): string {
-  // 組み立て直す (失敗するのは入れ子が深すぎるときだけ)
-  try {
-    return JSON.stringify(body);
-  } catch {
-    // 深さは項目を特定できないので、本文全体に対する指摘として返す
-    throw validationError([{ path: '', message: API_MESSAGES.unserializableBody }]);
-  }
-}
-
-/**
  * 1 プロバイダ分のプロキシ Route Handler を組み立てる。
  * **認証は API キーだけ** (route の auth: 'apiKey')。ユーザートークンでは 401 になる
  */
@@ -198,7 +174,10 @@ export function proxyRoute(provider: Provider) {
       // (実測: 12345678901234567890 → 12345678901234567000)、`1e400` は null、`-0` は 0 になる。
       // 実害が出るのは `seed` に巨大な整数を渡すような限られた使い方だけなので受け入れ、
       // OpenAPI の説明にも同じ断りを書いている
-      const payload = serializeUpstreamBody(body);
+      // **`readJsonBody` が入れ子の深さを縛っているので、ここで RangeError は起きない** —
+      // 縛る前は深い本文で `JSON.stringify` が落ち、この行が try の外なので 500 とスタックの
+      // ログになった。深さの上限を消すならこの行の扱いも戻すこと (理由は body-limits.ts)
+      const payload = JSON.stringify(body);
       // 中継先と資格情報を先に決める。**記録の外側で決めるのが要点** — 設定が無くて 503 になる場合は
       // 上流へ 1 バイトも出ていないので、利用イベントを記録しない (記録するのは実際に出た呼び出しだけ)。
       // 記録の中で決めていたときは、上流未設定のあいだ有効なキー 1 本で DB 行だけを無制限に増やせた (実測)

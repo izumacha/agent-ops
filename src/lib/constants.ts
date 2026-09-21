@@ -1,5 +1,6 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
+import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
 import { AgentStatus, Role } from '@/domain/types';
 
 // アプリ名 (画面タイトル等で使う)
@@ -65,7 +66,7 @@ export const UPSTREAM_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const USAGE_TOKENS_MAX = 2_147_483_647;
 // JSON 本文の上限 (バイト) の再公開。値そのものは `src/lib/body-limits.ts` が持つ
 // (`next.config.ts` が import する都合で、あちらは `@/...` を含まない定数だけのファイルにしてある)
-export { JSON_BODY_MAX_BYTES } from '@/lib/body-limits';
+export { JSON_BODY_MAX_BYTES, JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
 
 // API が返す利用者向けの日本語メッセージ (内部詳細は含めない)
 export const API_MESSAGES = {
@@ -98,10 +99,8 @@ export const API_MESSAGES = {
   unsupportedModel:
     '料金表に無いモデルです。対応モデルを指定してください (計測できない呼び出しは中継しません)。',
   streamingNotSupported: 'ストリーミング (stream: true) には未対応です。',
-  // 入れ子が深すぎて組み立て直せない本文。**JSON として読めても書き出せるとは限らない** —
-  // `JSON.parse` は深さ 3 万でも通るが `JSON.stringify` は約 4,164 で RangeError になる (実測)
-  unserializableBody:
-    '本文の入れ子が深すぎます。ネストを浅くして再試行してください (中継できる深さを超えています)。',
+  // 入れ子が深すぎる本文。**サイズだけでは資源の消費を縛れない** (理由は body-limits.ts)
+  bodyTooDeep: `本文の入れ子が深すぎます (上限 ${JSON_BODY_MAX_DEPTH} 段)。ネストを浅くして再試行してください。`,
   upstreamFailure: '上流の LLM プロバイダへの呼び出しに失敗しました。',
   upstreamRateLimited: '上流の LLM プロバイダが混雑しています。時間をおいて再試行してください。',
   upstreamTimeout: '上流の LLM プロバイダが時間内に応答しませんでした。',

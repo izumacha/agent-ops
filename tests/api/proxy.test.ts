@@ -15,7 +15,11 @@ import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/ro
 import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
 import { AgentStatus, Provider } from '@/domain/types';
 import * as pricing from '@/domain/pricing';
-import { JSON_BODY_MAX_BYTES, UPSTREAM_MAX_RESPONSE_BYTES } from '@/lib/constants';
+import {
+  JSON_BODY_MAX_BYTES,
+  JSON_BODY_MAX_DEPTH,
+  UPSTREAM_MAX_RESPONSE_BYTES,
+} from '@/lib/constants';
 import { call, seedApiKey, seedEachTest } from './helpers';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
@@ -415,10 +419,11 @@ describe('中継しない呼び出し', () => {
   it('入れ子が深すぎる本文は 422 (500 とスタックのログにしない)', async () => {
     // 上流は呼ばれない
     stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
-    // **`JSON.parse` は通るが `JSON.stringify` が RangeError になる深さ**（実測で約 4,164）。
-    // 本文サイズの上限 (64 KiB) の内側なので入口の検証はすべて素通りする。
-    // 上流へ組み立て直す行を try の外に置いていたときは 500 とスタックのログになり、
-    // 有効なキー 1 本で 8.3 KB を投げ続けるだけで「障害の捏造」とログ汚染ができた (実測)
+    // **サイズの上限 (64 KiB) の内側で深さだけを深くする。** `JSON.parse` は深さ 10 万でも
+    // 通るので、深さの上限が無ければ入口の検証をすべて素通りする。上流へ組み立て直す行を
+    // try の外に置いていたときは 500 とスタックのログになり、しかも**落ちない深さでも
+    // stringify 自体が重い**（同じ 65 KiB で平坦の 13.6 倍。実測）ので、有効なキー 1 本で
+    // 1 リクエストあたり 7ms の CPU を焼けた（上流を呼ばないので利用イベントにも残らない）
     // **本文は文字列として組み立てる** — オブジェクトで渡すとテストのヘルパー側の
     // `JSON.stringify` が先に落ちて、ハンドラの挙動を試せない
     const depth = 5_000;
@@ -430,9 +435,30 @@ describe('中継しない呼び出し', () => {
       // 生の本文を渡すときはヘルパーが Content-Type を付けないので自分で付ける
       headers: { 'content-type': 'application/json' },
     });
-    // 422 で上流は呼ばない (記録も残さない)
+    // 422 で上流は呼ばない
     expect(result.status).toBe(422);
     expect(fetchCalls).toHaveLength(0);
+    // **記録も残さない。** 上流へ 1 バイトも出ていない呼び出しを記録すると、有効なキー 1 本で
+    // DB の行だけを無制限に増やせる (resolveUpstreamTarget について一度塞いだのと同じ形)
+    expect(recordedEvents()).toHaveLength(0);
+  });
+
+  it('上限ちょうどの深さの本文は中継する (深さの上限で正当な本文を落とさない)', async () => {
+    // 上流は成功を返す
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    // 上限ちょうどの深さ (本文全体で JSON_BODY_MAX_DEPTH 段)。**通る側も固定する** —
+    // 片側だけだと「常に落とす」実装でも緑にできる
+    const depth = JSON_BODY_MAX_DEPTH - 1;
+    const rawBody = `{"model":${JSON.stringify(ANTHROPIC_MODEL)},"deep":${'['.repeat(depth - 1)}1${']'.repeat(depth - 1)}}`;
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      rawBody,
+      headers: { 'content-type': 'application/json' },
+    });
+    // 中継されること
+    expect(result.status).toBe(200);
+    expect(fetchCalls).toHaveLength(1);
   });
 
   it('model が無い本文は 422', async () => {

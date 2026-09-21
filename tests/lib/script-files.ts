@@ -22,6 +22,25 @@ export function gateScriptNames(): string[] {
   return readdirSync(SCRIPTS_DIR).filter((name) => /^gate-step\d+\.mjs$/.test(name));
 }
 
+/**
+ * `scripts/` 配下の ESM の絶対パスをすべて返す（直下と `lib/`）。
+ * **綴りで対象を絞らない** — ゲート (`gate-step<数字>.mjs`) と共有モジュール (`lib/`) だけを
+ * 見ていたときは、`require-contract-env.mjs`（契約テストの入口ガード）がどの許可リストの
+ * 対象にもならず、先頭に `process.exit(0)` を足すだけで「1 件も検証していないのに緑」に
+ * できた（実測で 798 件すべて緑）。役割ではなく「そこにある実行されるファイル」で選ぶ
+ * @returns ESM の絶対パス（重複なし）
+ */
+export function scriptModulePaths(): string[] {
+  // 直下の .mjs
+  const own = readdirSync(SCRIPTS_DIR)
+    .filter((name) => name.endsWith('.mjs'))
+    .map((name) => join(SCRIPTS_DIR, name));
+  // lib 配下の .mjs
+  const shared = sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name));
+  // まとめて返す
+  return [...own, ...shared];
+}
+
 // scripts/lib 配下の共有モジュールの名前
 export function sharedModuleNames(): string[] {
   // ESM だけを対象にする
@@ -264,6 +283,27 @@ export function topLevelCallNames(path: string): string[] {
   return topLevelStatementCalls(parseScript(path)).map((call) => call.name);
 }
 
+// グローバルオブジェクトを指す識別子 (この経由でも `process` へ届く)
+const GLOBAL_OBJECT_NAMES = new Set(['globalThis', 'global']);
+
+/**
+ * その式が `process` オブジェクトを指しているか (素の `process` か `globalThis.process`)。
+ * **前置きを 1 か所で剥がすのが要点** — 素の識別子だけを見ていたときは `globalThis.` を
+ * 足すだけで `processUses` からも `processExitArguments` からも同時に消え、ゲート全体を
+ * 無言の no-op にできた (実測で 798 件すべて緑・件数も不変)
+ */
+function isProcessObject(node: ts.Expression): boolean {
+  // 素の `process`
+  if (ts.isIdentifier(node) && node.text === 'process') return true;
+  // `globalThis.process` / `global.process`
+  return (
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    GLOBAL_OBJECT_NAMES.has(node.expression.text) &&
+    node.name.text === 'process'
+  );
+}
+
 /**
  * そのファイルにある `process.exit(...)` の実引数を、書かれた順に返す。
  * 数値リテラルはその値、それ以外 (変数・式・省略) は `'<非リテラル>'`。
@@ -284,8 +324,7 @@ export function processExitArguments(path: string): string[] {
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === 'process' &&
+      isProcessObject(node.expression.expression) &&
       node.expression.name.text === 'exit'
     ) {
       // 第 1 引数 (省略されていれば 0 と同じ意味になる)
@@ -382,17 +421,22 @@ export function processUses(path: string): string[] {
   const found = new Set<string>();
   // すべての節点を辿る
   const visit = (node: ts.Node): void => {
-    // `process` という識別子への参照だけを見る
-    if (ts.isIdentifier(node) && node.text === 'process') {
+    // `process` オブジェクトを指す式だけを見る (素の `process` と `globalThis.process`)
+    if (ts.isExpression(node) && isProcessObject(node)) {
       // 親の節点 (どう使われているかを知るため)
       const parent = node.parent;
+      // **`globalThis.process` の中の `process` は「名前」なので、外側の式だけを数える**
+      // (内側まで数えると同じ 1 か所が 2 件に見える)
+      if (ts.isIdentifier(node) && parent !== undefined && isProcessObject(parent as ts.Expression))
+        return;
       // **「名前として書かれただけ」は参照ではない** — `x.process` のプロパティ名や
       // `{ process: 'x' }` のキーまで数えると、無関係な項目名で直しようのない赤になる
       const isName =
+        ts.isIdentifier(node) &&
         parent !== undefined &&
         ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
           (ts.isPropertyAssignment(parent) && parent.name === node));
-      // 親が `process.<名前>` の形で、自分がその受け手なら、その名前まで含めて覚える
+      // 親が `<process>.<名前>` の形で、自分がその受け手なら、その名前まで含めて覚える
       if (
         parent !== undefined &&
         ts.isPropertyAccessExpression(parent) &&
@@ -761,6 +805,10 @@ export function callsFunction(
         // `...runNpmCapturingStdout([…])` を `status: 0, stdout: '<偽の結果 JSON>'` へ
         // 差し替えるとベンチを 1 本も起動せずにゲートが緑になった (779 件すべて緑)
         else if (ts.isSpreadAssignment(property)) spreads.push(property.expression);
+        // **どれにも当てはまらない形 (get/set アクセサ・メソッド定義) は読めないので許さない** —
+        // 実測で `get status() { return 0; }` は `written` に入らず、直書きの禁止を素通りした
+        // うえ実行時には展開が運んだ本物の値を上書きし、798 件すべて緑のままゲートが緑になった
+        else unreadableKey = true;
       }
       // 名前を読めない項目があれば、この呼び出しは求めた形だと確かめられない
       if (unreadableKey) continue;

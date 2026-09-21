@@ -1,6 +1,6 @@
 // リクエスト本文の読み取りと検証 (Content-Type・サイズ上限・JSON 構文・Zod スキーマ)
 import type { ZodType } from 'zod';
-import { API_MESSAGES, JSON_BODY_MAX_BYTES } from '@/lib/constants';
+import { API_MESSAGES, JSON_BODY_MAX_BYTES, JSON_BODY_MAX_DEPTH } from '@/lib/constants';
 import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
 import { ApiError, validationError, type ApiIssue } from './errors';
 import { HTTP_STATUS } from './http-status';
@@ -113,6 +113,42 @@ export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Pro
   } catch {
     throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
   }
+  // **入れ子の深さを縛る** (超過は 422)。サイズだけでは資源の消費を縛れない — 理由と値は
+  // `src/lib/body-limits.ts` の `JSON_BODY_MAX_DEPTH`
+  if (exceedsMaxDepth(parsed, JSON_BODY_MAX_DEPTH)) {
+    throw new ApiError(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.bodyTooDeep);
+  }
   // スキーマで検証する (失敗は 422)
   return validateWith(schema, parsed);
+}
+
+/**
+ * 解釈した値の入れ子が上限を超えているか。
+ * **再帰で書かない** — 深い入力を数えるための処理自体がスタックを食っては意味が無い。
+ * 明示のスタックで辿り、上限を超えた時点で打ち切る (深い側から先に見るので早く止まる)
+ * @param value JSON として解釈した値
+ * @param limit 許す深さ
+ * @returns 超えていれば true
+ */
+export function exceedsMaxDepth(value: unknown, limit: number): boolean {
+  // 辿る対象と、その深さ
+  const stack: { node: unknown; depth: number }[] = [{ node: value, depth: 1 }];
+  // 空になるまで辿る
+  while (stack.length > 0) {
+    // 次に見るもの
+    const current = stack.pop();
+    // 取り出せなければ終わり (型のため)
+    if (current === undefined) break;
+    // オブジェクトでも配列でもなければ、それ以上深くならない
+    if (current.node === null || typeof current.node !== 'object') continue;
+    // この時点で上限を超えていれば打ち切る
+    if (current.depth > limit) return true;
+    // 子を 1 段深い位置として積む
+    for (const child of Array.isArray(current.node)
+      ? current.node
+      : Object.values(current.node as Record<string, unknown>))
+      stack.push({ node: child, depth: current.depth + 1 });
+  }
+  // 上限以内
+  return false;
 }

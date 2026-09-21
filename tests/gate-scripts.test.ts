@@ -53,6 +53,7 @@ import {
   foreignModuleSpecifiers,
   processExitArguments,
   processUses,
+  scriptModulePaths,
   sharedModuleNames,
   topLevelCallArgumentKinds,
   topLevelCallNames,
@@ -1406,12 +1407,11 @@ describe('判定の結線', () => {
   // ゲートと共有モジュールが取り込んでよい相対でない指定子
   const ALLOWED_GATE_PACKAGES = new Set(['node:child_process', 'node:fs', 'node:os', 'node:path']);
 
-  it('ゲートと共有モジュールの process の使い方は許可リストの形だけ', () => {
-    // 対象 (ゲート本体と共有モジュール)
-    const paths = [
-      ...gateScriptNames().map((name) => join(SCRIPTS_DIR, name)),
-      ...sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name)),
-    ];
+  it('scripts 配下の ESM の process の使い方は許可リストの形だけ', () => {
+    // **対象は `scripts/` 配下の ESM すべて** — 綴り (`gate-step<数字>.mjs`) で絞っていたときは、
+    // 契約テストの入口ガード `require-contract-env.mjs` がどの許可リストにも入らず、
+    // 先頭に `process.exit(0)` を足すだけで「1 件も検証していないのに緑」にできた (実測)
+    const paths = scriptModulePaths();
     // 0 本なら空振りで緑になる (fail-closed)
     expect(paths.length, '検査対象が 1 つも無い').toBeGreaterThan(0);
     for (const path of paths)
@@ -1422,12 +1422,9 @@ describe('判定の結線', () => {
         ).toBe(true);
   });
 
-  it('ゲートと共有モジュールの import 先は許可リストだけ', () => {
-    // 対象 (ゲート本体と共有モジュール)
-    const paths = [
-      ...gateScriptNames().map((name) => join(SCRIPTS_DIR, name)),
-      ...sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name)),
-    ];
+  it('scripts 配下の ESM の import 先は許可リストだけ', () => {
+    // 対象は `scripts/` 配下の ESM すべて (理由は上の検査と同じ)
+    const paths = scriptModulePaths();
     // 0 本なら空振りで緑になる (fail-closed)
     expect(paths.length, '検査対象が 1 つも無い').toBeGreaterThan(0);
     for (const path of paths)
@@ -1449,14 +1446,11 @@ describe('判定の結線', () => {
       }
   });
 
-  it('ゲートと共有モジュールの process.exit は非 0 だけ', () => {
+  it('scripts 配下の ESM の process.exit は非 0 だけ', () => {
     // ゲートは正当に process.exit(1) を使うので、使用そのものは禁じられない。
     // **`process.exit(0)` を 1 行足すだけでゲート全体が無言で成功終了した** (実測で全件緑・
     // CI の gate ジョブも緑のまま、Step0〜Step2 の全基準が一度も走らない)
-    const paths = [
-      ...gateScriptNames().map((name) => join(SCRIPTS_DIR, name)),
-      ...sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name)),
-    ];
+    const paths = scriptModulePaths();
     // 0 本なら空振りで緑になる (fail-closed)
     expect(paths.length, '検査対象が 1 つも無い').toBeGreaterThan(0);
     for (const path of paths)

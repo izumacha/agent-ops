@@ -740,9 +740,19 @@ export function callsFunction(
       const written = new Map<string, ts.Expression>();
       // 展開 (`...式`) の式
       const spreads: ts.Expression[] = [];
+      // 読めない書き方 (計算キー) があったか
+      let unreadableKey = false;
       for (const property of target.properties) {
-        // `名前: 値` の形
-        if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name))
+        // **計算キー (`['status']: 0`) は名前を静的に読めないので、そもそも許さない** (fail-closed)
+        if (ts.isPropertyAssignment(property) && ts.isComputedPropertyName(property.name))
+          unreadableKey = true;
+        // `名前: 値` の形。**文字列リテラルのキーも読む** — 識別子だけを読んでいたときは
+        // `'status': 0` と書くだけで直書きの禁止を素通りし、ゲートがベンチの結果を
+        // 偽の値で判定する状態が全件緑で作れた (実測)
+        if (
+          ts.isPropertyAssignment(property) &&
+          (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))
+        )
           written.set(property.name.text, property.initializer);
         // 短縮形 (`名前,`)
         else if (ts.isShorthandPropertyAssignment(property))
@@ -752,6 +762,8 @@ export function callsFunction(
         // 差し替えるとベンチを 1 本も起動せずにゲートが緑になった (779 件すべて緑)
         else if (ts.isSpreadAssignment(property)) spreads.push(property.expression);
       }
+      // 名前を読めない項目があれば、この呼び出しは求めた形だと確かめられない
+      if (unreadableKey) continue;
       // **直書きを禁じた項目が書かれていないこと** (展開で運ぶ材料を手で上書きさせない)
       const forbidden = options.argument.objectArgument.forbiddenKeys ?? [];
       if (forbidden.some((key) => written.has(key))) continue;
@@ -794,12 +806,12 @@ export function callsFunction(
       if (
         !literals.every(([key, value]) => {
           // その項目の値
-          const written_value = written.get(key);
+          const writtenValue = written.get(key);
           // 文字列リテラルで、中身まで一致すること
           return (
-            written_value !== undefined &&
-            ts.isStringLiteral(written_value) &&
-            written_value.text === value
+            writtenValue !== undefined &&
+            ts.isStringLiteral(writtenValue) &&
+            writtenValue.text === value
           );
         })
       )

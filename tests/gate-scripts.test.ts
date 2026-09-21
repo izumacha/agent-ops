@@ -1170,8 +1170,6 @@ describe('判定の結線', () => {
     expect(Object.keys(BENCH_LABELS).sort(), '表とベンチの一覧が食い違う').toEqual(
       benchScriptNames().sort(),
     );
-    // **ラベルは共有モジュール側の基準の表と過不足なく一致すること** —
-    // 片方にだけ足すと「誰も掛けない基準」か「基準の無いベンチ」が黙って生まれる
     const labels = Object.values(BENCH_LABELS).map((entry) => entry.label);
     // **基準の表のラベルと過不足なく一致すること** — 片方にだけ足すと「誰も掛けない基準」か
     // 「基準の無いベンチ」が黙って生まれる (実測: 表に 3 本目を足しても検査は 1 件も増えなかった)
@@ -1351,27 +1349,30 @@ describe('判定の結線', () => {
     }
   });
 
-  it.each(Object.keys(BENCH_PAYLOADS))(
-    '素の Node でも基準を破れば passed: false と非 0 終了: %s',
-    (label) => {
-      // **これが「基準が本当に強制されているか」の唯一の実行時の担保。**
-      // 静的検査はどれも「その綴りがあるか」しか見ないので、共有モジュールの中に
-      // `if (process.env.NODE_ENV !== 'test') payload.slowestMs = 0;` を 1 行入れるだけで
-      // 受け入れ基準が完全に無効化されるのに全件緑だった (実測)。**vitest の印と NODE_ENV を
-      // 落とした子プロセス**で、基準を破る実測値を実際に通して落ちることを確かめる
-      const broken = { ...BENCH_PAYLOADS[label].ok, ...BENCH_PAYLOADS[label].breaks[0] };
-      const run = runBenchInCleanChild(label, broken);
-      // 基準を満たしていないと出ること
-      expect(run, `${label} が素の Node で passed: false にならない`).toContain('"passed":false');
-      // **実測値がそのまま出ていること** (テストのときだけ本物を使う分岐を落とす)
-      for (const [field, value] of Object.entries(broken))
-        expect(run, `${label} の ${field} が書き換えられている`).toContain(
-          `${JSON.stringify(field)}:${JSON.stringify(value)}`,
-        );
-      // 非 0 で終わること (ゲートは終了コードも見る)
-      expect(run, `${label} が素の Node で非 0 終了しない`).toContain('EXIT_CODE=1');
-    },
-  );
+  it.each(
+    Object.entries(BENCH_PAYLOADS).flatMap(([label, entry]) =>
+      entry.breaks.map((patch, index) => [label, index, patch] as const),
+    ),
+  )('素の Node でも基準を破れば passed: false と非 0 終了: %s #%i', (label, _index, patch) => {
+    // **これが「基準が本当に強制されているか」の実行時の担保。全基準を 1 本ずつ破って回す** —
+    // 最初の 1 基準だけを破っていたときは、残りの判定に
+    // `if (process.env.NODE_ENV === 'production') return null;` を入れても全件緑だった (実測)。
+    // 静的検査はどれも「その綴りがあるか」しか見ないので、共有モジュールの中に
+    // `if (process.env.NODE_ENV !== 'test') payload.slowestMs = 0;` を 1 行入れるだけで
+    // 受け入れ基準が完全に無効化されるのに全件緑だった (実測)。**vitest の印と NODE_ENV を
+    // 落とした子プロセス**で、基準を破る実測値を実際に通して落ちることを確かめる
+    const broken = { ...BENCH_PAYLOADS[label].ok, ...patch };
+    const run = runBenchInCleanChild(label, broken);
+    // 基準を満たしていないと出ること
+    expect(run, `${label} が素の Node で passed: false にならない`).toContain('"passed":false');
+    // **実測値がそのまま出ていること** (テストのときだけ本物を使う分岐を落とす)
+    for (const [field, value] of Object.entries(broken))
+      expect(run, `${label} の ${field} が書き換えられている`).toContain(
+        `${JSON.stringify(field)}:${JSON.stringify(value)}`,
+      );
+    // 非 0 で終わること (ゲートは終了コードも見る)
+    expect(run, `${label} が素の Node で非 0 終了しない`).toContain('EXIT_CODE=1');
+  });
 
   it.each(Object.keys(BENCH_PAYLOADS))(
     '素の Node で基準を満たせば passed: true と終了コード据え置き: %s',
@@ -1388,6 +1389,64 @@ describe('判定の結線', () => {
     expect(Object.keys(BENCH_PAYLOADS).sort(), '挙動の表と基準の表が食い違う').toEqual(
       benchLabels().sort(),
     );
+  });
+
+  // ゲートと共有モジュールが `process` に触れてよい形 (実測した現在の使用がそのまま入る)。
+  // **ベンチと同じく「許す側」を列挙する** — 綴りを並べる形に戻すと、実測で
+  // `process['exit'](0)` を 1 行足すだけでゲート全体が無言の no-op になり全件緑だった
+  const ALLOWED_GATE_PROCESS_USES = new Set([
+    'process.env',
+    'process.cwd',
+    'process.exit',
+    'process.exitCode',
+    'process.platform',
+    'process.stdout',
+  ]);
+
+  // ゲートと共有モジュールが取り込んでよい相対でない指定子
+  const ALLOWED_GATE_PACKAGES = new Set(['node:child_process', 'node:fs', 'node:os', 'node:path']);
+
+  it('ゲートと共有モジュールの process の使い方は許可リストの形だけ', () => {
+    // 対象 (ゲート本体と共有モジュール)
+    const paths = [
+      ...gateScriptNames().map((name) => join(SCRIPTS_DIR, name)),
+      ...sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name)),
+    ];
+    // 0 本なら空振りで緑になる (fail-closed)
+    expect(paths.length, '検査対象が 1 つも無い').toBeGreaterThan(0);
+    for (const path of paths)
+      for (const use of processUses(path))
+        expect(
+          ALLOWED_GATE_PROCESS_USES.has(use),
+          `${path} の ${use} は許していない (要素アクセス・別名束縛で終了経路を隠せる)`,
+        ).toBe(true);
+  });
+
+  it('ゲートと共有モジュールの import 先は許可リストだけ', () => {
+    // 対象 (ゲート本体と共有モジュール)
+    const paths = [
+      ...gateScriptNames().map((name) => join(SCRIPTS_DIR, name)),
+      ...sharedModuleNames().map((name) => join(SCRIPTS_DIR, 'lib', name)),
+    ];
+    // 0 本なら空振りで緑になる (fail-closed)
+    expect(paths.length, '検査対象が 1 つも無い').toBeGreaterThan(0);
+    for (const path of paths)
+      for (const specifier of foreignModuleSpecifiers(path)) {
+        // 相対でない指定子は許可リストで絞る
+        if (!specifier.startsWith('.')) {
+          expect(
+            ALLOWED_GATE_PACKAGES.has(specifier),
+            `${path} が ${specifier} を取り込んでいる (import の副作用で判定を飛ばせる)`,
+          ).toBe(true);
+          continue;
+        }
+        // 相対 import の先は共有モジュールだけ。**実測で、`scripts/preflight.mjs` に
+        // `process.exit(0)` を置いて 1 行 import するだけでゲートが無言の no-op になった**
+        expect(
+          resolve(dirname(path), specifier).startsWith(join(SCRIPTS_DIR, 'lib') + sep),
+          `${path} が ${specifier} を取り込んでいる (import の副作用で判定を飛ばせる)`,
+        ).toBe(true);
+      }
   });
 
   it('ゲートと共有モジュールの process.exit は非 0 だけ', () => {

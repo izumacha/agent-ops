@@ -412,6 +412,29 @@ describe('中継しない呼び出し', () => {
     expect(fetchCalls).toHaveLength(0);
   });
 
+  it('入れ子が深すぎる本文は 422 (500 とスタックのログにしない)', async () => {
+    // 上流は呼ばれない
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    // **`JSON.parse` は通るが `JSON.stringify` が RangeError になる深さ**（実測で約 4,164）。
+    // 本文サイズの上限 (64 KiB) の内側なので入口の検証はすべて素通りする。
+    // 上流へ組み立て直す行を try の外に置いていたときは 500 とスタックのログになり、
+    // 有効なキー 1 本で 8.3 KB を投げ続けるだけで「障害の捏造」とログ汚染ができた (実測)
+    // **本文は文字列として組み立てる** — オブジェクトで渡すとテストのヘルパー側の
+    // `JSON.stringify` が先に落ちて、ハンドラの挙動を試せない
+    const depth = 5_000;
+    const rawBody = `{"model":${JSON.stringify(ANTHROPIC_MODEL)},"deep":${'['.repeat(depth)}1${']'.repeat(depth)}}`;
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const result = await call(proxyAnthropic, {
+      token: key.secret,
+      rawBody,
+      // 生の本文を渡すときはヘルパーが Content-Type を付けないので自分で付ける
+      headers: { 'content-type': 'application/json' },
+    });
+    // 422 で上流は呼ばない (記録も残さない)
+    expect(result.status).toBe(422);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
   it('model が無い本文は 422', async () => {
     // 上流は呼ばれない
     stubUpstream({ status: 200, body: anthropicResponse(1, 1) });

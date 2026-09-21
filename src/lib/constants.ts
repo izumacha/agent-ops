@@ -98,6 +98,10 @@ export const API_MESSAGES = {
   unsupportedModel:
     '料金表に無いモデルです。対応モデルを指定してください (計測できない呼び出しは中継しません)。',
   streamingNotSupported: 'ストリーミング (stream: true) には未対応です。',
+  // 入れ子が深すぎて組み立て直せない本文。**JSON として読めても書き出せるとは限らない** —
+  // `JSON.parse` は深さ 3 万でも通るが `JSON.stringify` は約 4,164 で RangeError になる (実測)
+  unserializableBody:
+    '本文の入れ子が深すぎます。ネストを浅くして再試行してください (中継できる深さを超えています)。',
   upstreamFailure: '上流の LLM プロバイダへの呼び出しに失敗しました。',
   upstreamRateLimited: '上流の LLM プロバイダが混雑しています。時間をおいて再試行してください。',
   upstreamTimeout: '上流の LLM プロバイダが時間内に応答しませんでした。',

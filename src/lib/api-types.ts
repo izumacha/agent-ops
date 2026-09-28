@@ -14,3 +14,4 @@ export type UserDto = ApiSchemas['User'];
 export type UserTokenDto = ApiSchemas['UserToken'];
 export type ApiErrorDto = ApiSchemas['Error'];
 export type HealthDto = ApiSchemas['Health'];
+export type DailyUsageDto = ApiSchemas['DailyUsage'];

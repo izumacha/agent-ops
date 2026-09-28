@@ -37,3 +37,6 @@ next-env.d.ts
 
 # Claude Code agent worktrees / scratch state (per-session, never commit)
 .claude/
+
+# lint の指定を挙動で確かめるテストが一時的に置くファイル (強制終了時の残骸対策)
+/scripts/lint-warning-probe.*.mjs

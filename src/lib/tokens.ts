@@ -126,6 +126,12 @@ export function isUserToken(secret: string): boolean {
   return secret.startsWith(USER_TOKEN_PREFIX);
 }
 
+/** API キー (プロキシ専用の資格情報) の形かどうか。DB を引く前の振り分けに使う */
+export function isApiKey(secret: string): boolean {
+  // 接頭辞で判定する
+  return secret.startsWith(API_KEY_PREFIX);
+}
+
 // 2 つの秘密文字列を定数時間で比較する (長さの違いを漏らさないよう、ハッシュしてから比べる)
 export function secretsEqual(a: string, b: string): boolean {
   // 両方をハッシュ化して同じ長さのバイト列にする

@@ -4,6 +4,7 @@ import type {
   AgentRecord,
   ApiKeyRecord,
   TenantRecord,
+  UsageEventRecord,
   UserRecord,
   UserTokenRecord,
 } from '@/data/ports';
@@ -23,8 +24,9 @@ export class MemoryStore {
   readonly agents = new Map<string, AgentRecord>();
   // API キー
   readonly apiKeys = new Map<string, ApiKeyRecord>();
-  // 「履歴を持つ」とみなすエージェント id (本番では UsageEvent 等の Restrict FK が担う判定を模す)
-  readonly agentIdsWithHistory = new Set<string>();
+  // 利用イベント (プロキシが中継した呼び出しの記録)。本番の Restrict FK と同じく、
+  // ここに行があるエージェントは削除できない (Step2 より前は Set の仮置きで模していた)
+  readonly usageEvents = new Map<string, UsageEventRecord>();
   // 採番用の連番 (cuid の代わり。テストで読みやすいよう接頭辞 + 連番にする)
   private sequence = 0;
 

@@ -660,8 +660,18 @@ describe('停止・復帰・削除', () => {
   });
 
   it('履歴を持つエージェントは削除できず 409 (stop を使う。docs/spec.md §3)', async () => {
-    // 履歴があることにする
-    seed.store.agentIdsWithHistory.add(seed.a.agent.id);
+    // 履歴 (利用イベント) を 1 件作る。本番では UsageEvent の Restrict FK が削除を拒む
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: seed.a.agent.id,
+      provider: seed.a.agent.provider,
+      model: seed.a.agent.model,
+      inputTokens: 10,
+      outputTokens: 20,
+      costMicroUsd: 123n,
+      latencyMs: 30,
+      statusCode: 200,
+    });
     const result = await call(deleteAgent, {
       token: seed.a.tokens.admin,
       method: 'DELETE',
@@ -684,5 +694,35 @@ describe('本文の上限はストリームで数える (Content-Length を偽�
       headers: { 'content-type': 'application/json', 'content-length': '10' },
     });
     expect(result.status).toBe(413);
+  });
+
+  it('413 を返すとき、本文のストリームは cancel しない (413 が届く前に接続を切らない)', async () => {
+    // **上流の応答側とは事情が正反対**。cancel すると Next.js が下層の IncomingMessage ごと破棄し、
+    // 送信済みの 413 が届く前に接続が切れる (クライアントには ECONNRESET に見える)。
+    // この非対称こそ readStreamWithinByteLimit に cancelOnOverflow を足した理由なので、
+    // 「リクエスト本文側は渡さない」ことをここで固定する
+    // (固定する前は、こちらにも { cancelOnOverflow: true } を渡す変異が全件緑で通った)
+    let cancelled = false;
+    // 止めるまで流し続ける本文 (上限を必ず超える)
+    const rawBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        // 1 かたまりずつ流す
+        controller.enqueue(new TextEncoder().encode('x'.repeat(64 * 1024)));
+      },
+      cancel() {
+        // 解放されたことを記録する
+        cancelled = true;
+      },
+    });
+    // 送る
+    const result = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      method: 'POST',
+      rawBody,
+      headers: { 'content-type': 'application/json' },
+    });
+    // 上限超過として 413 が返り、本文のストリームは解放していない
+    expect(result.status).toBe(413);
+    expect(cancelled).toBe(false);
   });
 });

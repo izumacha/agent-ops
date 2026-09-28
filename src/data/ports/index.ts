@@ -3,6 +3,7 @@ import type { AgentsPort } from './agents';
 import type { ApiKeysPort } from './api-keys';
 import type { TenantsPort } from './tenants';
 import type { UserTokensPort } from './user-tokens';
+import type { UsageEventsPort } from './usage-events';
 import type { UsersPort } from './users';
 
 // リポジトリの束
@@ -12,6 +13,7 @@ export interface Repositories {
   userTokens: UserTokensPort;
   agents: AgentsPort;
   apiKeys: ApiKeysPort;
+  usageEvents: UsageEventsPort;
 }
 
 // 各 Port の型と入力型をここから再公開する (利用側は個別ファイルのパスを知らなくてよい)
@@ -19,5 +21,6 @@ export type * from './agents';
 export type * from './api-keys';
 export type * from './tenants';
 export type * from './types';
+export type * from './usage-events';
 export type * from './user-tokens';
 export type * from './users';

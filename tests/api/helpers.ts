@@ -3,10 +3,10 @@
 import { afterEach, beforeEach } from 'vitest';
 import { setReposForTesting } from '@/data';
 import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
-import type { AgentRecord, UserRecord, UserTokenRecord } from '@/data';
+import type { AgentRecord, ApiKeyRecord, UserRecord, UserTokenRecord } from '@/data';
 import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
 import type { RouteContext } from '@/lib/api/handler';
-import { issueUserToken, userTokenCreateInput } from '@/lib/tokens';
+import { issueSecret, issueUserToken, userTokenCreateInput } from '@/lib/tokens';
 
 // テストで使うプラットフォーム管理者トークン (32 文字以上)
 export const PLATFORM_TOKEN = 'test-platform-admin-token-0123456789abcdef';
@@ -147,6 +147,41 @@ export function seedEachTest(): Seed {
   afterEach(teardownSeed);
   // 入れ物を返す
   return holder;
+}
+
+// 発行した API キー (平文と行)
+export interface SeededApiKey {
+  // 平文のキー (Authorization ヘッダに載せる。本番では発行時しか手に入らない)
+  secret: string;
+  // 保存されている行 (失効させたいテストが使う)
+  row: ApiKeyRecord;
+}
+
+/**
+ * テスト用に API キーを 1 本発行して表へ入れる (プロキシ経路のテストが使う)。
+ * 本番と同じ `issueSecret('apiKey')` で作るので、接頭辞・ハッシュの扱いも本番と同じ
+ */
+export function seedApiKey(
+  seed: Seed,
+  options: { tenantId: string; agentId: string | null; name?: string },
+): SeededApiKey {
+  // 平文・先頭・ハッシュの組を作る
+  const issued = issueSecret('apiKey');
+  // 保存する行
+  const row: ApiKeyRecord = {
+    id: seed.store.nextId('key'),
+    tenantId: options.tenantId,
+    agentId: options.agentId,
+    prefix: issued.prefix,
+    keyHash: issued.hash,
+    name: options.name ?? 'テスト用キー',
+    createdAt: seed.store.now(),
+    revokedAt: null,
+  };
+  // 表へ入れる
+  seed.store.apiKeys.set(row.id, row);
+  // 平文と行を返す
+  return { secret: issued.secret, row };
 }
 
 // Route Handler の関数型 (route() が返す形)

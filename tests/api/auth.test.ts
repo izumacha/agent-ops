@@ -5,7 +5,7 @@ import { GET as listTenants } from '@/app/api/v1/tenants/route';
 import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
 import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { generateSecret } from '@/lib/tokens';
-import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
+import { call, PLATFORM_TOKEN, seedApiKey, seedEachTest } from './helpers';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
 const seed = seedEachTest();
@@ -16,6 +16,21 @@ describe('認証 (401 の経路)', () => {
     const result = await call(getMe);
     expect(result.status).toBe(401);
     expect(result.headers.get('www-authenticate')).toBe('Bearer realm="agent-ops"');
+  });
+
+  it('有効な API キーをユーザー向け API へ出しても 401 (資格情報の系統を混ぜない)', async () => {
+    // エージェントに紐づいた有効な API キーを 1 本発行する
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // ユーザー向け API へ出す
+    const result = await call(getMe, { token: key.secret });
+    // **401 であること (403 ではない)** — `authenticate()` が API キーも受け付けるように
+    // なると、エージェント用の資格情報 (CI やエージェント実行環境に配るので流出しやすい) が
+    // ユーザー向け API の認証を通る。実測で、`authenticate()` に 1 行足して受理させると
+    // 864 件すべて緑・件数も不変のまま、`/me` が 403「テナントのユーザーとして認証した
+    // ときだけ…」を返すようになり、**キーが有効か・紐づくエージェントが停止中かを
+    // 答えるオラクル**がユーザー向け API 上に生えた (403 を許すとこのオラクルが残る)。
+    // 逆向き (API キー経路がユーザートークンを受け付ける) は既に 6 件が赤くなる
+    expect(result.status).toBe(401);
   });
 
   it('Bearer 以外の方式・トークン無し・余分な語は 401', async () => {
@@ -205,5 +220,17 @@ describe('GET /me', () => {
   it('プラットフォーム管理者には「自分」が無いので 403', async () => {
     // テナントの外側
     expect((await call(getMe, { token: PLATFORM_TOKEN })).status).toBe(403);
+  });
+
+  it('トークンと発行先ユーザーのテナントが食い違う行では認証できない (本番の複合 FK と同じ不変条件)', async () => {
+    // **本番では作れない組み合わせ**: トークン行のテナントだけを別テナントへ書き換える
+    // (UserToken の複合 FK (tenantId, userId) がこの行を作らせない)。memory の表は直接
+    // 触れるので、読み取り側 (findByHash) が素通しだと食い違う組で認証が通ってしまう
+    const row = seed.a.tokenRows.operator;
+    seed.store.userTokens.set(row.id, { ...row, tenantId: seed.b.id });
+    // そのトークンで呼ぶ
+    const result = await call(getMe, { token: seed.a.tokens.operator });
+    // 401 (食い違う行は「無い」ものとして扱う = fail-closed)
+    expect(result.status).toBe(401);
   });
 });

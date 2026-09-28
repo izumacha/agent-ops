@@ -22,6 +22,10 @@ tags:
     description: エージェント台帳 (Step1)
   - name: api-keys
     description: API キー発行 (Step1)
+  - name: proxy
+    description: LLM 呼び出しの中継とコスト計測 (Step2)
+  - name: usage
+    description: 利用量・コストの集計 (Step2)
 security:
   - bearerAuth: []
 paths:
@@ -588,6 +592,153 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /proxy/anthropic/messages:
+    post:
+      tags: [proxy]
+      operationId: proxyAnthropicMessages
+      summary: Anthropic Messages API への中継 (API キー認証。トークン・料金を UsageEvent に記録する)
+      description: |
+        本文をそのまま Anthropic の Messages API へ中継し、応答のトークン数から料金を計算して記録する。
+        **認証は API キー (aop_k_...) だけ**で、ユーザートークンでは 401 になる (docs/adr/0007-cost-proxy.md)。
+        エージェントに紐づいていないキー・停止中のエージェントのキーは 403。
+        料金表 (src/domain/pricing/vendor-prices.json) に無いモデルは計測できないので中継せず 422。
+        ストリーミング (stream: true) は Step2 の範囲外で 422。
+        本文の入れ子が深すぎる場合も 422（規則は ValidationError の説明を参照。全操作に共通）。
+
+        上流の応答の扱い: 2xx はそのまま返す。**ステータスを保って中継する 4xx は 400 / 413 / 422 だけ**
+        (「送り主自身の要求についての診断」と言い切れるもの。許可リストなので、それ以外の 4xx —
+        402 / 404 / 409 など — は 502 に写す。402 は番号そのものが上流アカウントの課金状態を語る)。
+        中継する場合も**本文は機械可読な項目 (`error.type` / `error.code` / `error.param` と
+        最上位の `type`) に絞る** — 自由記述の `message` には上流アカウントの残高・組織名・
+        契約ティアが載るため。401 / 403 は 502 に写し、429 は 429 のまま定型文へ差し替えて
+        Retry-After (整数の秒数のときだけ) を中継する。5xx は 502。
+        **上流の本文が JSON として読めない場合 (HTML のエラーページ、本文を持てない 204 / 304、
+        上限を超える大きさ) も 502** で、本文は返さない。
+
+        **本文は受け取ったバイト列をそのまま流さず、検証済みの値を JSON へ組み立て直して送る**。
+        そのため JSON の正規化が起きる: 2^53 を超える整数は丸められ、1e400 は null、-0 は 0 になる。
+        巨大な整数を seed などに渡す場合はこの点に注意する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProxyRequest'
+      responses:
+        '200':
+          description: 上流の応答 (本文の形はベンダーの仕様に従うためそのまま返す)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ProxyRelayedError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/ProxyRelayedError'
+        '413':
+          $ref: '#/components/responses/ProxyRelayedError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+  /proxy/openai/chat/completions:
+    post:
+      tags: [proxy]
+      operationId: proxyOpenAiChatCompletions
+      summary: OpenAI Chat Completions API への中継 (API キー認証。トークン・料金を UsageEvent に記録する)
+      description: |
+        Anthropic 向けの中継と同じ規律 (認証・未対応モデル・ストリーミング・本文の入れ子の深さ・
+        上流エラーの扱い・本文の JSON 正規化) で、OpenAI の Chat Completions API へ中継する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProxyRequest'
+      responses:
+        '200':
+          description: 上流の応答 (本文の形はベンダーの仕様に従うためそのまま返す)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ProxyRelayedError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/ProxyRelayedError'
+        '413':
+          $ref: '#/components/responses/ProxyRelayedError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+  /usage/daily:
+    get:
+      tags: [usage]
+      operationId: getDailyUsage
+      summary: 日次のコスト集計 (view 権限)
+      description: |
+        期間内の UsageEvent を **UTC の日ごと**に集計する。期間 (from / to) は必須で、どちらも含む。
+        日の境目は配備先のタイムゾーンに依存しない (docs/adr/0008-usage-pricing-and-aggregation.md)。
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: 集計の開始日 (YYYY-MM-DD、含む)
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          description: 集計の終了日 (YYYY-MM-DD、含む)
+          schema:
+            type: string
+            format: date
+        - name: agentId
+          in: query
+          description: エージェントで絞る (省略時はテナント全体)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 日ごとの集計 (イベントが無い日は含まれない)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyUsageList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 components:
   securitySchemes:
     bearerAuth:
@@ -690,6 +841,54 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    ProxyRelayedError:
+      description: |
+        プロキシ自身が要求を拒否した (本文が JSON でない・上限超過・未対応モデル・
+        **本文の入れ子が深すぎる** など。深さの規則は ValidationError の説明が正本で、
+        本文を取るすべての操作に等しく効く) か、
+        上流が拒否したかのどちらか。前者は API 共通のエラー形 ({status, message} / {status, message, issues})、
+        後者は上流の形を保った RelayedUpstreamError で、**本文は機械可読な項目だけに絞ってある**
+        (自由記述には上流アカウントの残高・組織名・契約ティアが載るため)。
+        **ステータスを保って中継するのは 400 / 413 / 422 だけ**で、それ以外の上流 4xx は 502 に写す
+        (402 のように番号そのものが上流アカウントの課金状態を語るため。許可リスト = fail-closed)
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/Error'
+              - $ref: '#/components/schemas/RelayedUpstreamError'
+    TooManyRequests:
+      description: |
+        上流の LLM プロバイダが混雑を返した。本文は定型文に差し替える (上流の本文には組織名や
+        クォータの状況が載るため) が、上流が Retry-After を返した場合はその値だけ中継する
+      headers:
+        Retry-After:
+          description: 再試行までの待ち時間 (上流が指示した場合のみ)
+          required: false
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadGateway:
+      description: 上流の LLM プロバイダの呼び出しに失敗した
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: このプロバイダへの中継が設定されていない
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    GatewayTimeout:
+      description: 上流の LLM プロバイダが時間内に応答しなかった
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     Conflict:
       description: 現在の状態では実行できない (履歴を持つ資源の削除など)
       content:
@@ -697,7 +896,11 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     ValidationError:
-      description: 入力検証エラー
+      description: |-
+        入力検証エラー。スキーマに合わない本文のほか、**本文の入れ子が深すぎる場合**も含む
+        (上限は src/lib/body-limits.ts の JSON_BODY_MAX_DEPTH。サイズだけでは資源の消費を縛れないため
+        深さにも明示の上限を置いており、判定は本文を読む共通の入口にあるので
+        本文を取るすべての操作に等しく効く)
       content:
         application/json:
           schema:
@@ -1050,3 +1253,83 @@ components:
             $ref: '#/components/schemas/ApiKey'
         nextCursor:
           type: string
+    ProxyRequest:
+      type: object
+      description: |
+        中継する本文。**ベンダーのペイロードそのもの**なので未知キーを許す (additionalProperties: true)。
+        計測に必要な model だけを必須とし、未対応の stream: true を拒む。この 1 件だけ
+        「未知キーを閉じる」原則の例外で、理由は tests/openapi.test.ts の除外表と ADR-0007 にある。
+      additionalProperties: true
+      required: [model]
+      properties:
+        model:
+          type: string
+          maxLength: 100
+          description: 使用するモデル名。料金表に無いモデルは中継せず 422
+        stream:
+          type: boolean
+          enum: [false]
+          description: ストリーミングは Step2 の範囲外。省略するか false を指定する
+    ProxyResponse:
+      type: object
+      description: 上流の応答をそのまま返す (項目はベンダーの仕様に従う)
+      additionalProperties: true
+    RelayedUpstreamError:
+      type: object
+      description: |
+        プロキシが中継する上流のエラー本文。ベンダーの形は保つが、通すのは機械可読な識別子だけで、
+        自由記述の message はプロキシの定型文に置き換わる (docs/adr/0007-cost-proxy.md 決定 7)。
+      properties:
+        type:
+          type: string
+          enum: [error]
+          description: |
+            上流が最上位に置いた種別。入る値は 'error' ただ 1 つ (Anthropic の慣習) なので
+            閉じた語彙で通す。それ以外の値は中継せず、この項目ごと落ちる
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+              description: プロキシの定型文 (上流の文章ではない)
+            type:
+              type: string
+              description: エラーの種別 (invalid_request_error など)
+            code:
+              type: string
+              description: 細かい理由コード (context_length_exceeded など)
+            param:
+              type: string
+              description: 問題のあった入力項目 (messages[0].content など)
+          required: [message]
+          additionalProperties: false
+      required: [error]
+      additionalProperties: false
+    DailyUsage:
+      type: object
+      required: [day, requests, inputTokens, outputTokens, costMicroUsd]
+      properties:
+        day:
+          type: string
+          format: date
+          description: UTC の日 (YYYY-MM-DD)
+        requests:
+          type: integer
+          description: その日の中継回数 (上流が失敗した呼び出しも含む)
+        inputTokens:
+          type: integer
+          description: 入力トークンの合計
+        outputTokens:
+          type: integer
+          description: 出力トークンの合計
+        costMicroUsd:
+          type: string
+          description: 料金の合計 (マイクロ USD の整数。浮動小数誤差を避けるため文字列で運ぶ)
+    DailyUsageList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DailyUsage'

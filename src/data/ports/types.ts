@@ -89,3 +89,21 @@ export interface ApiKeyRecord {
   // 失効日時 (null なら有効)
   revokedAt: Date | null;
 }
+
+// 利用イベント (プロキシが中継した LLM 呼び出し 1 回)
+export interface UsageEventRecord {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  provider: Provider;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  // 料金 (マイクロ USD)
+  costMicroUsd: bigint;
+  // 上流の応答までにかかった時間 (ミリ秒)
+  latencyMs: number;
+  // 上流の HTTP ステータス
+  statusCode: number;
+  createdAt: Date;
+}

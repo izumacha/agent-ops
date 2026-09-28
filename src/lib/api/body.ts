@@ -1,6 +1,7 @@
 // リクエスト本文の読み取りと検証 (Content-Type・サイズ上限・JSON 構文・Zod スキーマ)
 import type { ZodType } from 'zod';
-import { API_MESSAGES, JSON_BODY_MAX_BYTES } from '@/lib/constants';
+import { API_MESSAGES, JSON_BODY_MAX_BYTES, JSON_BODY_MAX_DEPTH } from '@/lib/constants';
+import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
 import { ApiError, validationError, type ApiIssue } from './errors';
 import { HTTP_STATUS } from './http-status';
 
@@ -53,37 +54,16 @@ export function validateWith<T>(schema: ZodType<T>, value: unknown): T {
 /**
  * 本文を上限バイトまでで読む。request.text() は全量をメモリへ載せてからしか大きさが分からないため、
  * Content-Length を偽る・省く (chunked) 要求に対して上限が効かない。ストリームを読みながら数え、
- * 超えた時点で読むのをやめて 413 にする
+ * 超えた時点で読むのをやめて 413 にする。
+ * **数えながら読む処理そのものは src/lib/stream-bytes.ts と共有する** (上流の応答も同じ読み方が要る)。
+ * ここが持つのは「その結果をどの HTTP エラーへ写すか」だけ
  */
 async function readBodyWithinByteLimit(request: Request, maxBytes: number): Promise<string> {
-  // 本文が無ければ空文字
-  if (!request.body) return '';
-  // ストリームを少しずつ読む
-  const reader = request.body.getReader();
-  // 読んだかたまりと合計バイト数
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  // 上限を超えたら残りを読まずに打ち切る
+  // 上限まで読む (読み取り自体の失敗は投げたまま上がってくる)
+  let result;
   try {
-    // 終端まで読む
-    for (;;) {
-      // 次のかたまり
-      const { done, value } = await reader.read();
-      // 終端なら抜ける
-      if (done) break;
-      // 合計を更新し、上限超過なら残りを読まずに 413。reader.cancel() は呼ばない —
-      // Next.js の本文ストリームは cancel を受けると下層の IncomingMessage ごと破棄し、送信済みの 413 が届く前に
-      // 接続が切れる (クライアントには ECONNRESET に見える)。読むのをやめて応答を返せば、残りは Node が捨てる
-      total += value.byteLength;
-      if (total > maxBytes) {
-        throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
-      }
-      // 上限内なら取っておく
-      chunks.push(value);
-    }
+    result = await readStreamWithinByteLimit(request.body, maxBytes);
   } catch (error) {
-    // 上限超過 (ApiError) はそのまま
-    if (error instanceof ApiError) throw error;
     // 送信の途中でクライアントが切断すると read() が Node の切断エラーで reject する。サーバの障害ではないので
     // 500 と障害ログ (handler.ts の console.error) にせず 400 で終える (日常の切断で本物の内部エラーが埋もれない)
     if (request.signal.aborted || isConnectionReset(error)) {
@@ -91,17 +71,16 @@ async function readBodyWithinByteLimit(request: Request, maxBytes: number): Prom
     }
     // それ以外の失敗は内部エラーとして上へ
     throw error;
-  } finally {
-    // 打ち切り・完了のどちらでもストリームを解放する (§8 リソースを確実に解放する)
-    reader.releaseLock();
   }
-  // UTF-8 として連結する。不正なバイト列は置換 (U+FFFD) せず失敗させる (JSON は UTF-8 必須 (RFC 8259 §8.1)。
-  // 黙って置換すると、送り主の意図と違う名前が保存されて一意判定もその文字列で行われる)
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
-  } catch {
-    throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
+  // 上限内で読めた本文
+  if (result.ok) return result.text;
+  // 上限超過は 413
+  if (result.reason === 'too_large') {
+    throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
   }
+  // UTF-8 として壊れたバイト列は 400 (JSON は UTF-8 必須 (RFC 8259 §8.1)。黙って置換 (U+FFFD) すると、
+  // 送り主の意図と違う名前が保存されて一意判定もその文字列で行われる)
+  throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
 }
 
 /**
@@ -134,6 +113,65 @@ export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Pro
   } catch {
     throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
   }
+  // **入れ子の深さを縛る** (超過は 422)。サイズだけでは資源の消費を縛れない — 理由と値は
+  // `src/lib/body-limits.ts` の `JSON_BODY_MAX_DEPTH`
+  if (exceedsMaxDepth(parsed, JSON_BODY_MAX_DEPTH)) {
+    throw new ApiError(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.bodyTooDeep);
+  }
   // スキーマで検証する (失敗は 422)
   return validateWith(schema, parsed);
+}
+
+/**
+ * 解釈した値の入れ子が上限を超えているか。
+ * **再帰で書かない** — 上限で打ち切る再帰なら段数は `limit + 1` で頭打ちになるので
+ * スタックは尽きないが、そうすると**判定の安全性が `limit` の値に依存する**ことになる
+ * （上限を大きくする差分が、同時に判定そのものを壊しうる）。明示のスタックなら
+ * 上限の値と無関係に成り立つ。上限を超えた時点で打ち切る (深い側から先に見るので早く止まる)。
+ *
+ * **入れ子になりうるものだけを積む。** 値の種類を見ずに積んでいた版は、結果は同じでも
+ * 64 KiB の `[0,0,…]`（要素 32,768）で 0.64ms・一時ヒープ約 3.9 MiB を使い、同じ本文の
+ * `JSON.parse`（0.55ms）より重かった。積む前にふるうと 0.015ms（41 倍速）になる。
+ * オブジェクトの子は `Object.values` ではなく `Object.keys` で辿る — 値の配列を作らない分、
+ * キーの多い本文（8,348 キー）で 2.01ms → 0.94ms になる（判定結果は全ケースで一致）
+ * @param value JSON として解釈した値
+ * @param limit 許す深さ
+ * @returns 超えていれば true
+ */
+export function exceedsMaxDepth(value: unknown, limit: number): boolean {
+  // 辿る対象と、その深さ (**積むのは入れ子になりうるものだけ**)
+  const stack: { node: object; depth: number }[] = [];
+  // 根がオブジェクトや配列でなければ、それ以上深くならない (積まずに終わる)
+  if (value !== null && typeof value === 'object') stack.push({ node: value, depth: 1 });
+  // 空になるまで辿る
+  while (stack.length > 0) {
+    // 次に見るもの
+    const current = stack.pop();
+    // 取り出せなければ終わり (型のため)
+    if (current === undefined) break;
+    // この時点で上限を超えていれば打ち切る
+    if (current.depth > limit) return true;
+    // 子はここより 1 段深い
+    const depth = current.depth + 1;
+    // 配列は要素をそのまま辿る
+    if (Array.isArray(current.node)) {
+      for (const child of current.node)
+        // 入れ子になりうるものだけ積む
+        if (child !== null && typeof child === 'object') stack.push({ node: child, depth });
+    } else {
+      // オブジェクトは自分のキーだけを辿る (値の配列を作らない)。
+      // **`__proto__` も普通のキーとして辿る** — `JSON.parse` はこれを**自分のキー**として作る
+      // ので（プロトタイプは差し替わらない）、汚染対策のつもりで読み飛ばすと、その形だけが
+      // 上限をすり抜ける（`tests/body-depth.test.ts` が固定する）
+      const record = current.node as Record<string, unknown>;
+      for (const key of Object.keys(record)) {
+        // そのキーの値
+        const child = record[key];
+        // 入れ子になりうるものだけ積む
+        if (child !== null && typeof child === 'object') stack.push({ node: child, depth });
+      }
+    }
+  }
+  // 上限以内
+  return false;
 }

@@ -3,6 +3,9 @@
 // 2 つのガードが同時に fail-open になり、開発 DB を指したまま TRUNCATE が走る。
 // 規則を 1 か所へ集めた代わりに、その 1 か所は必ず検査する (写しを見張る他の検出網と同じ役割)
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   CONTRACT_DATABASE_SUFFIX,
   CONTRACT_GUARD_MARKER,
@@ -106,5 +109,52 @@ describe('契約テスト専用 DB の判定', () => {
       if (savedUrl === undefined) delete env.DATABASE_URL;
       else env.DATABASE_URL = savedUrl;
     }
+  });
+});
+
+// ベンチのガードを子プロセスで 1 回呼び、終了コードと「その後へ到達したか」を返す。
+// **なぜ子プロセスなのか**: `process.exit` の有無は戻り値に現れないので同じプロセスでは確かめられない。
+// 相方の `exitIfFailures` には同じ方式の検査があるのに、形をそろえた `requireContractDatabase` には
+// 無かった。実測で末尾の `process.exit(1);` を 1 行消すと、ベンチは理由を表示したまま
+// `TRUNCATE TABLE "Tenant" CASCADE` へ進むのに 718 件すべて緑・件数も不変だった
+function runGuardInChild(databaseUrl: string): { status: number | null; stdout: string } {
+  // ガードの場所 (子プロセスから import する)
+  const lib = pathToFileURL(join(process.cwd(), 'scripts', 'lib', 'contract-database.mjs')).href;
+  // import → 呼び出し → 到達印 の順に並べる
+  const code = [
+    `const { requireContractDatabase } = await import(${JSON.stringify(lib)});`,
+    `requireContractDatabase('bench:test');`,
+    `console.log('REACHED_END');`,
+  ].join('\n');
+  // 接続先だけを差し替えて実行する
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    timeout: 60_000,
+  });
+  // 終了コードと標準出力
+  return { status: result.status, stdout: result.stdout };
+}
+
+describe('ベンチの接続先ガード', () => {
+  it('開発 DB を指していたら非 0 終了して先へ進ませない', () => {
+    // 専用でない接続先で呼ぶ
+    const result = runGuardInChild('postgresql://u:p@h:5432/agent_ops');
+    // 終了コードが取れていること (起動できなかった null を素通りさせない = fail-closed)
+    expect(typeof result.status, 'ガードを起動できていない').toBe('number');
+    // 非 0 で終わること
+    expect(result.status, '開発 DB なのに落ちていない').not.toBe(0);
+    // ガードの先へ進んでいないこと (`process.exit` を消すと ここへ到達する)
+    expect(result.stdout, 'ガードの先へ進んでいる').not.toContain('REACHED_END');
+  });
+
+  it('専用 DB なら素通りする (絞りすぎてベンチが動かなくなっていない)', () => {
+    // 接尾辞が一致する接続先で呼ぶ
+    const result = runGuardInChild(`postgresql://u:p@h:5432/agent_ops${CONTRACT_DATABASE_SUFFIX}`);
+    // 正常終了すること
+    expect(result.status, '専用 DB なのに落ちている').toBe(0);
+    // ガードの先へ進むこと
+    expect(result.stdout, 'ガードの先へ進んでいない').toContain('REACHED_END');
   });
 });

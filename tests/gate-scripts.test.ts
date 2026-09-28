@@ -1321,6 +1321,15 @@ describe('判定の結線', () => {
   // 実測で `import { exit } from 'node:process'` は `processUses` に 1 件も現れず、
   // 偽の結果 JSON を出してから `exit(0)` するだけでゲートが緑になった (773 件すべて緑)。
   // **エントリを足す差分は、その依存が import の副作用や終了経路を持たないかをレビューで確認する**
+  // **この確認は「足すとき」だけでなく「その依存の major を上げるとき」にも要る** — 照合しているのは
+  // 指定子の綴りなので、版が変わっても表は何も言わない。実際 `dotenv` の 17 → 18 で前提が動いた:
+  // v17 の `lib/main.js` は `process.exit` / `child_process` / `process.on(` / `spawn` を 1 つも
+  // 含まなかったが、v18 の `dist/index.cjs` (= `dotenv/config` が読む実体) は CLI を同梱しており
+  // `process.exit` 6 / `child_process` 2 / `spawn` 4 / `process.kill` 2 / `process.on(` 1 を持つ。
+  // `Module._load` をフックした実測では、`require('dotenv/config')` は **`child_process` を実際に
+  // 読み込む**が、シグナルの購読は 0 件で、CLI 本体は `require.main === module` の内側にあるため
+  // tsx / node のエントリ経由では起動しない。**いまは無害だが「副作用も終了経路も持たない」は
+  // もう成り立っていない**ので、次に上げるときも同じ確認をやり直すこと。
   const ALLOWED_BENCH_PACKAGES = new Set([
     'dotenv/config',
     'autocannon',

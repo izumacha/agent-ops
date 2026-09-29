@@ -274,6 +274,33 @@ describe('評価を 1 回実行する', () => {
     expect(judgeBody?.includes(long)).toBe(false);
   });
 
+  it('切り詰めの位置が絵文字の途中でも文字が壊れない', async () => {
+    // 絵文字は UTF-16 の 2 単位で 1 文字 (サロゲートペア)。**上限の位置がその組の真ん中に来るよう**、
+    // 上限 - 1 文字ぶんの ASCII を置いてから絵文字を並べる
+    const long = `${'a'.repeat(EVALUATION_RESPONSE_MAX_CHARS - 1)}${'🙂'.repeat(50)}`;
+    stubUpstream((body) =>
+      isJudgeRequest(body)
+        ? new Response(anthropicBody(judgeReply(requestedCaseIds(body))), { status: 200 })
+        : new Response(anthropicBody(long), { status: 200 }),
+    );
+    // 1 件のセットを評価する
+    await runEvaluation({ agent: AGENT, judge: JUDGE, cases: makeCases(1) });
+    // judge へ送られた本文
+    const judgeBody = sentBodies.find((body) => isJudgeRequest(body));
+    expect(judgeBody).toBeDefined();
+    // 本文から judge に読ませた文章そのものを取り出す (JSON のエスケープを解いた状態で見る)
+    const parsed = JSON.parse(judgeBody!) as { messages: { content: string }[] };
+    const userText = parsed.messages[parsed.messages.length - 1].content;
+    // **相方を失った半端な単位が 1 つも無いこと。** JSON の文字列としては
+    // `\ud83d` のまま運べてしまうので、生の本文を見るだけでは気付けない。
+    // 壊れるのは送信時 (UTF-8 へ直すとき U+FFFD (□) に置き換わる) と judge の読み取り
+    expect(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(userText),
+    ).toBe(false);
+    // 切り詰めの印は付いていること (短くした事実は judge に伝える)
+    expect(judgeBody).toContain(EVALUATION_TRUNCATION_MARK);
+  });
+
   it('ケースが 0 件なら上流を 1 度も呼ばない', async () => {
     // 正常な上流を立てておく
     stubHealthyUpstream();

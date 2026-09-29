@@ -88,6 +88,17 @@ describe('judge の応答を読み取る', () => {
     ).toBe(true);
   });
 
+  it('除外: unparsable_output — results の要素が表になっていない応答も全件を捨てる', () => {
+    // results は配列だが、中身が文字列・数値・配列で「どのケースの結果か」を読めない
+    const verdicts = readJudgeOutput(CASE_IDS, JSON.stringify({ results: ['case_1', 1, []] }));
+    // 全件が除外されること。理由は**幻覚 ID ではなく読めない出力** —
+    // judge は存在しない ID を名乗ったのではなく、指示した形を守れていない
+    expect(verdicts).toHaveLength(CASE_IDS.length);
+    expect(
+      verdicts.every((v) => !v.scored && v.reason === EvaluationExclusionReason.unparsable_output),
+    ).toBe(true);
+  });
+
   it('除外: unknown_case_id — セットに無いケース ID が 1 つでもあれば全件を捨てる', () => {
     // 1 件目は正しいが 2 件目が幻覚 ID
     const verdicts = readJudgeOutput(

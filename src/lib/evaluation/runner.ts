@@ -81,8 +81,16 @@ export async function mapWithConcurrency<T, R>(
 function truncateResponse(text: string): string {
   // 上限以内ならそのまま
   if (text.length <= EVALUATION_RESPONSE_MAX_CHARS) return text;
-  // 上限まで切って、切れていることを judge に伝える印を足す
-  return `${text.slice(0, EVALUATION_RESPONSE_MAX_CHARS)}${EVALUATION_TRUNCATION_MARK}`;
+  // 上限の位置でいったん切る
+  let cut = text.slice(0, EVALUATION_RESPONSE_MAX_CHARS);
+  // 切った末尾の 1 単位 (JS の文字列は UTF-16 の「符号単位」の並び)
+  const lastUnit = cut.charCodeAt(cut.length - 1);
+  // **絵文字などは 2 単位 1 組 (サロゲートペア) で 1 文字**。前半だけ残すと相方を失った
+  // 壊れた単位になり、JSON にすると U+FFFD (□) へ化けて judge に読めない文字が混ざる。
+  // 末尾が「組の前半」だったら 1 単位戻して組ごと落とす
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) cut = cut.slice(0, -1);
+  // 切れていることを judge に伝える印を足して返す
+  return `${cut}${EVALUATION_TRUNCATION_MARK}`;
 }
 
 // 配列を決まった大きさの塊に分ける (judge へ渡すバッチを作る)

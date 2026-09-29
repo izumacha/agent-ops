@@ -2,7 +2,8 @@
 // Prisma / Next に依存しない純粋ロジックで、Step3 の受け入れ基準「幻覚 ID など不正出力の除外」の実体。
 //
 // **判定は 2 段に分かれる**（除外理由の意味をここで一つに固定する）:
-//   1. 応答全体の異常 — JSON として読めない / 配列でない / **依頼していない・読めないケース ID を含む**。
+//   1. 応答全体の異常 — JSON として読めない / 配列でない / 要素が表になっていない (unparsable_output)、
+//      **依頼していない・文字列でないケース ID を含む** (unknown_case_id)。
 //      この場合は**そのバッチの全ケースを除外する**。幻覚 ID を混ぜてくる応答は、正しく見える行も
 //      同じ生成の産物なので信用できない (fail-closed)。基準が求めているのはまさにこの切り捨て
 //   2. ケース個別の異常 — 同じケースが 2 回来た / スコアが欠けている / 範囲外。そのケースだけ除外する
@@ -113,8 +114,10 @@ export function readJudgeOutput(requestedCaseIds: readonly string[], text: strin
   for (const item of results) {
     // 要素がオブジェクトでなければ、どのケースの結果か分からない
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      // 指示した形を守れていない応答なので、全体を信用しない
-      return excludeAll(requestedCaseIds, EvaluationExclusionReason.unknown_case_id);
+      // 指示した**形**を守れていない応答なので、全体を信用しない。理由は「幻覚 ID」ではなく
+      // 「読めない出力」 — ここで unknown_case_id を使うと、除外理由を見て原因を切り分ける人に
+      // 「judge が存在しないケース ID を名乗った」と読めてしまい、直す場所を取り違える
+      return excludeAll(requestedCaseIds, EvaluationExclusionReason.unparsable_output);
     }
     // ケース ID を読む
     const caseId = (item as { caseId?: unknown }).caseId;

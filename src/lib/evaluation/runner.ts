@@ -17,6 +17,7 @@ import {
 } from '@/lib/constants';
 import { requestAgentResponse, type AgentTarget } from './agent-response';
 import { scoreBatch, type JudgeIdentity } from './judge';
+import { createRunLogGate } from './run-log';
 
 /** 採点する 1 ケース (評価セットから読んだ行) */
 export interface EvaluationCaseInput {
@@ -121,6 +122,8 @@ export async function runEvaluation(options: {
 }): Promise<EvaluationOutcome> {
   // 使う環境変数
   const env = options.env ?? process.env;
+  // この実行ぶんのログの門 (同じ種類の失敗が何件起きても 1 行だけ出す)
+  const log = createRunLogGate();
   // ケースが無ければ何もせず空の結果を返す (呼び出し側が 0 件のセットを弾く前提だが fail-safe)
   if (options.cases.length === 0) {
     return { verdicts: [], totals: summarize([]), status: EvaluationRunStatus.completed };
@@ -128,7 +131,7 @@ export async function runEvaluation(options: {
 
   // 1 段目: ケースごとにエージェントの応答を得る (失敗は null)
   const responses = await mapWithConcurrency(options.cases, EVALUATION_CONCURRENCY, (item) =>
-    requestAgentResponse(options.agent, item.input, env),
+    requestAgentResponse(options.agent, item.input, env, log),
   );
 
   // 応答が得られたケースだけを judge へ渡す材料にする
@@ -160,7 +163,7 @@ export async function runEvaluation(options: {
   // 2 段目: バッチに分けて judge に採点させる (バッチの失敗は judge_unavailable で除外されて返る)
   const batches = chunk(judgeInputs, EVALUATION_JUDGE_BATCH_SIZE);
   const scoredBatches = await mapWithConcurrency(batches, EVALUATION_CONCURRENCY, (batch) =>
-    scoreBatch(options.judge, batch, env),
+    scoreBatch(options.judge, batch, env, log),
   );
   // ケース ID から判定を引けるようにする
   const judged = new Map(scoredBatches.flat().map((verdict) => [verdict.caseId, verdict]));

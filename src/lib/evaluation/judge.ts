@@ -20,6 +20,7 @@ import {
 } from '@/lib/constants';
 import { describeError } from '@/lib/describe-error';
 import { buildRequestBody, readResponseText } from '@/lib/llm/messages';
+import { ALWAYS_LOG, type RunLogGate } from './run-log';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 
 // プロバイダとして受け付ける値の一覧 (綴りの照合に使う。src/lib/validations/common.ts の
@@ -72,6 +73,8 @@ export async function scoreBatch(
   judge: JudgeIdentity,
   cases: readonly JudgeCaseInput[],
   env: NodeJS.ProcessEnv = process.env,
+  // 同じ種類のログを 1 実行につき 1 回だけ通す門 (バッチが全部同じ理由で失敗してもログは 1 行)
+  log: RunLogGate = ALWAYS_LOG,
 ): Promise<CaseVerdict[]> {
   // 依頼するケース ID (判定の順序と件数の基準になる)
   const caseIds = cases.map((item) => item.caseId);
@@ -110,7 +113,9 @@ export async function scoreBatch(
     // (tests/error-logging.test.ts)、式を埋める形を 1 か所でも許すと例外の message を埋める形と
     // 区別できなくなる。状況が分かる定型文にする
     if (result.status < 200 || result.status >= 300) {
-      console.error('[evaluation] judge が 2xx 以外のステータスを返しました');
+      if (log.first('judge-status')) {
+        console.error('[evaluation] judge が 2xx 以外のステータスを返しました');
+      }
       return unavailable();
     }
     // 本文を JSON として読む
@@ -119,21 +124,27 @@ export async function scoreBatch(
       payload = JSON.parse(result.body);
     } catch {
       // 上流の応答そのものが JSON でない (プロキシの前段が壊れている等)
-      console.error('[evaluation] judge の応答を JSON として解釈できませんでした');
+      if (log.first('judge-json')) {
+        console.error('[evaluation] judge の応答を JSON として解釈できませんでした');
+      }
       return unavailable();
     }
     // 応答テキストを取り出す
     const text = readResponseText(judge.provider, payload);
     // 取り出せなければ採点として使えない
     if (text === null) {
-      console.error('[evaluation] judge の応答から本文を取り出せませんでした');
+      if (log.first('judge-text')) {
+        console.error('[evaluation] judge の応答から本文を取り出せませんでした');
+      }
       return unavailable();
     }
     // テキストを厳格に読み取って判定にする (不正出力の除外はここで起きる)
     return readJudgeOutput(caseIds, text);
   } catch (error) {
     // 時間切れ・接続不能・設定不足。**詳細はサーバログにだけ残す** (§9)
-    console.error('[evaluation] judge の呼び出しに失敗しました:', describeError(error));
+    if (log.first('judge-error')) {
+      console.error('[evaluation] judge の呼び出しに失敗しました:', describeError(error));
+    }
     return unavailable();
   }
 }

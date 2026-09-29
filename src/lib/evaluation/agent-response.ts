@@ -8,6 +8,7 @@ import { EVALUATION_AGENT_MAX_TOKENS, EVALUATION_UPSTREAM_TIMEOUT_MS } from '@/l
 import { describeError } from '@/lib/describe-error';
 import { buildRequestBody, readResponseText } from '@/lib/llm/messages';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
+import { ALWAYS_LOG, type RunLogGate } from './run-log';
 
 /** 応答を得る相手 (評価対象エージェントの結線) */
 export interface AgentTarget {
@@ -26,6 +27,8 @@ export async function requestAgentResponse(
   agent: AgentTarget,
   input: string,
   env: NodeJS.ProcessEnv = process.env,
+  // 同じ種類のログを 1 実行につき 1 回だけ通す門 (200 件が同じ理由で失敗してもログは 1 行)
+  log: RunLogGate = ALWAYS_LOG,
 ): Promise<string | null> {
   // 上流を呼ぶ
   try {
@@ -50,7 +53,9 @@ export async function requestAgentResponse(
     // 2xx 以外は応答として使えない。ログにステータスを差し込まない理由は judge.ts と同じ
     // (console の実引数は「出してよい形」だけに絞ってある。tests/error-logging.test.ts)
     if (result.status < 200 || result.status >= 300) {
-      console.error('[evaluation] エージェントの上流が 2xx 以外のステータスを返しました');
+      if (log.first('agent-status')) {
+        console.error('[evaluation] エージェントの上流が 2xx 以外のステータスを返しました');
+      }
       return null;
     }
     // 本文を JSON として読む
@@ -59,14 +64,18 @@ export async function requestAgentResponse(
       payload = JSON.parse(result.body);
     } catch {
       // 応答が JSON でない
-      console.error('[evaluation] エージェントの応答を JSON として解釈できませんでした');
+      if (log.first('agent-json')) {
+        console.error('[evaluation] エージェントの応答を JSON として解釈できませんでした');
+      }
       return null;
     }
     // 応答テキストを取り出す (読めなければ null のまま返る)
     return readResponseText(agent.provider, payload);
   } catch (error) {
     // 時間切れ・接続不能・設定不足。詳細はサーバログにだけ残す (§9)
-    console.error('[evaluation] エージェントの呼び出しに失敗しました:', describeError(error));
+    if (log.first('agent-error')) {
+      console.error('[evaluation] エージェントの呼び出しに失敗しました:', describeError(error));
+    }
     return null;
   }
 }

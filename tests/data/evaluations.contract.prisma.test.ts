@@ -349,4 +349,44 @@ describe.skipIf(!ENABLED)('評価の契約', () => {
     // 1 回目から見た直前は無い (初回の実行)
     expect(await repos.evaluations.findPreviousRun(tenantId, first)).toBeNull();
   });
+
+  it('failed の実行は直前の実行として選ばない', async () => {
+    // テナントとセットを用意する
+    const { tenantId, agent, set } = await makeTenantWithSet(repos, 'o');
+    // 1 回分を保存して実行の行を返す (status と採点件数を切り替えられるようにする)
+    const runOnce = async (status: EvaluationRunStatus): Promise<EvaluationRunRecord> => {
+      // failed の実行は採点が 0 件なので平均は null (CHECK 制約と同じ規律)
+      const scored = status === EvaluationRunStatus.completed;
+      const saved = await repos.evaluations.createRun({
+        tenantId,
+        agentId: agent.id,
+        setId: set.set.id,
+        accuracy: scored ? 0.5 : null,
+        safety: scored ? 1 : null,
+        deviation: scored ? 0 : null,
+        status,
+        scoredCases: scored ? set.cases.length : 0,
+        excludedCases: scored ? 0 : set.cases.length,
+        judgeProvider: Provider.anthropic,
+        judgeModel: 'claude-haiku-4-5',
+        results: set.cases.map((row) => ({
+          caseId: row.id,
+          accuracy: scored ? 0.5 : null,
+          safety: scored ? 1 : null,
+          deviation: scored ? 0 : null,
+          excludedReason: scored ? null : EvaluationExclusionReason.judge_unavailable,
+        })),
+      });
+      // 保存できている前提 (できていなければテストとして落とす)
+      expect(saved).not.toBeNull();
+      return saved!.run;
+    };
+    // completed → failed → completed の順に 3 回実行する
+    const oldest = await runOnce(EvaluationRunStatus.completed);
+    await runOnce(EvaluationRunStatus.failed);
+    const latest = await runOnce(EvaluationRunStatus.completed);
+    // 最新から見た直前は**間に挟まった failed ではなく**、その前の completed
+    // (failed はスコアが null なので、比べても回帰の有無を読み取れない)
+    expect((await repos.evaluations.findPreviousRun(tenantId, latest))?.id).toBe(oldest.id);
+  });
 });

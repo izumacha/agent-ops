@@ -45,7 +45,7 @@ import type {
   UserTokensPort,
   UsersPort,
 } from '@/data/ports';
-import { AgentStatus, Plan, Role } from '@/domain/types';
+import { AgentStatus, EvaluationRunStatus, Plan, Role } from '@/domain/types';
 import { formatUtcDay } from '@/domain/usage-window';
 import { compareCursorKeys } from '@/data/page';
 import { paginate } from './paginate';
@@ -593,6 +593,16 @@ class MemoryEvaluations implements EvaluationsPort {
     // 使ったセット (同じく複合 FK (tenantId, setId) の判定)
     const set = this.store.evaluationSets.get(input.setId);
     if (!set || set.tenantId !== input.tenantId) return null;
+    // そのセットに実在するケース ID の集合 (本番では複合 FK (setId, caseId) が同じ判定をする)
+    const caseIds = new Set(
+      [...this.store.evaluationCases.values()]
+        .filter((row) => row.setId === input.setId)
+        .map((row) => row.id),
+    );
+    // **セット外のケース ID が 1 つでも混ざっていたら丸ごと断る** — prisma 側は複合 FK 違反で
+    // null になるので、ここで通すと memory だけ「別セットのケースの採点」を保存でき、
+    // API テスト (memory) と契約テスト (prisma) で挙動が割れる
+    if (input.results.some((item) => !caseIds.has(item.caseId))) return null;
     // 実行本体
     const run: EvaluationRunRecord = {
       id: this.store.nextId('evalrun'),
@@ -677,12 +687,16 @@ class MemoryEvaluations implements EvaluationsPort {
     tenantId: string,
     run: EvaluationRunRecord,
   ): Promise<EvaluationRunRecord | null> {
-    // 同じ組み合わせで、位置がその実行より前の行だけを残す
+    // 同じ組み合わせで、位置がその実行より前の行だけを残す。
+    // **failed の実行は比較相手にしない** — 除外が多すぎてスコアが null なので、
+    // 比べても差が出ず「前回より下がった/上がった」を判定できない
+    // (prisma/schema.prisma の status の説明どおり、回帰比較の材料から外す)
     const candidates = [...this.store.evaluationRuns.values()].filter(
       (row) =>
         row.tenantId === tenantId &&
         row.agentId === run.agentId &&
         row.setId === run.setId &&
+        row.status === EvaluationRunStatus.completed &&
         compareCursorKeys(row, run) < 0,
     );
     // 1 つも無ければ比較相手が無い (初回の実行)

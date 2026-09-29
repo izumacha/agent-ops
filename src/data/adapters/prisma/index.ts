@@ -45,7 +45,7 @@ import type {
   UserTokensPort,
   UsersPort,
 } from '@/data/ports';
-import { Plan, Role, type AgentStatus } from '@/domain/types';
+import { EvaluationRunStatus, Plan, Role, type AgentStatus } from '@/domain/types';
 import { Prisma, type PrismaClient } from '@/generated/prisma';
 
 // Prisma のエラーコード (https://www.prisma.io/docs/reference/api-reference/error-reference)
@@ -822,12 +822,16 @@ class PrismaEvaluations implements EvaluationsPort {
     run: EvaluationRunRecord,
   ): Promise<EvaluationRunRecord | null> {
     // 並び順は一覧と同じ (createdAt, id) の昇順なので、その位置より「前」を降順の先頭で引く。
-    // 同時刻の実行が 2 件あっても id で決まるので、比較相手が入れ替わらない
+    // 同時刻の実行が 2 件あっても id で決まるので、比較相手が入れ替わらない。
+    // **failed の実行は比較相手にしない** — 除外が多すぎてスコアが null なので、
+    // 比べても差が出ず「前回より下がった/上がった」を判定できない
+    // (prisma/schema.prisma の status の説明どおり、回帰比較の材料から外す)
     return this.db.evaluationRun.findFirst({
       where: {
         tenantId,
         agentId: run.agentId,
         setId: run.setId,
+        status: EvaluationRunStatus.completed,
         OR: [
           { createdAt: { lt: run.createdAt } },
           { createdAt: run.createdAt, id: { lt: run.id } },

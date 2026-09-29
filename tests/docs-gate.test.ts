@@ -21,6 +21,11 @@ import {
   USAGE_AGGREGATE_MAX_MS,
   USAGE_AGGREGATE_ROW_COUNT,
 } from '../scripts/lib/step2-criteria.mjs';
+// Step3 のベンチのしきい値 (同じくロードマップの散文と突き合わせる)
+import {
+  EVALUATION_AGREEMENT_MIN_PERCENT,
+  EVALUATION_BENCH_CASE_COUNT,
+} from '../scripts/lib/step3-criteria.mjs';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -171,6 +176,22 @@ describe('Step0 の設計成果物', () => {
     expect(stepRow, '投入件数がずれている').toContain(`${USAGE_AGGREGATE_ROW_COUNT / 10_000} 万件`);
     // 集計の上限 (散文は「≦ 1 秒」。定数はミリ秒なので秒へ直す)
     expect(stepRow, '集計の上限がずれている').toContain(`${USAGE_AGGREGATE_MAX_MS / 1_000} 秒`);
+  });
+
+  // Step3 の受け入れ基準のうち、ベンチが測る 2 つ (セットの件数・再現率) を散文と突き合わせる。
+  // Step2 と同じ理由 — 値はベンチとロードマップの 2 か所に現れるので、
+  // 「ベンチのしきい値だけを緩めて緑にする」変更をここで落とす
+  it('Step3 のベンチのしきい値がロードマップと一致する', () => {
+    // ロードマップの Step3 の行
+    const stepRow = roadmapStepRow(3);
+    // 固定評価セットの件数 (散文は「固定評価セット 100 件」。数字の途中への一致は許さない)
+    expect(stepRow, 'ロードマップの件数とベンチの件数がずれている').toMatch(
+      new RegExp(`(?<![0-9])${EVALUATION_BENCH_CASE_COUNT} 件`),
+    );
+    // 再現率の下限 (散文は「再現率 ≧ 90%」)
+    expect(stepRow, '再現率の下限がずれている').toMatch(
+      new RegExp(`(?<![0-9])${EVALUATION_AGREEMENT_MIN_PERCENT}%`),
+    );
   });
 
   // 生成元と計画書が消えていないことを固定する

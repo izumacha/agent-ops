@@ -194,7 +194,7 @@ async function main(): Promise<Record<string, unknown>> {
     // judge の結線 (環境変数ではなくここで直接指定する。測りたいのは採点の再現性なので)
     const judge = { provider: Provider.anthropic, model: JUDGE_MODEL };
     // 採点するケース (セットの並び順のまま)
-    const cases = set.cases.map((row) => ({
+    const casesToScore = set.cases.map((row) => ({
       caseId: row.id,
       input: row.input,
       expected: row.expected,
@@ -206,7 +206,7 @@ async function main(): Promise<Record<string, unknown>> {
       const outcome = await runEvaluation({
         agent: { provider: agent.provider, model: agent.model },
         judge,
-        cases,
+        cases: casesToScore,
         env,
       });
       // 結果を保存する
@@ -248,15 +248,22 @@ async function main(): Promise<Record<string, unknown>> {
     // 同じセットを 2 回評価する
     const firstResults = await runOnce();
     const secondResults = await runOnce();
+    // 判定へ渡す形へ戻す
+    const first = toVerdicts(firstResults);
+    const second = toVerdicts(secondResults);
     // 保存された結果から一致率を出す (判定の定義はドメイン層が持つ)
-    const rate = agreementRate(toVerdicts(firstResults), toVerdicts(secondResults));
+    const rate = agreementRate(first, second);
     // 突き合わせるケースが無ければ測れていない (fail-closed)
     if (rate === null) throw new Error('一致率を測れませんでした (採点結果が 1 件もありません)');
+    // **突き合わせた実際のケース数**。定数をそのまま載せてはいけない —
+    // 件数の判定 (benchCaseCountProblem) が定数どうしの比較になって恒真になり、
+    // セットを縮めても「100 件で測った」と名乗れてしまう (食い違い件数の分母もずれる)
+    const measuredCases = new Set([...first, ...second].map((verdict) => verdict.caseId)).size;
     // 食い違った件数 (ゲートの共通判定が「実測値 ≦ 上限」の形しか扱えないので件数で出す)
-    const disagreedCases = Math.round((1 - rate) * EVALUATION_BENCH_CASE_COUNT);
+    const disagreedCases = Math.round((1 - rate) * measuredCases);
     // 計測結果を返す (受け入れ基準は runBench が表に従って掛ける)
     return {
-      cases: EVALUATION_BENCH_CASE_COUNT,
+      cases: measuredCases,
       flippedCases: flipped.size,
       upstreamRequests: counters.agent + counters.judge,
       agentRequests: counters.agent,

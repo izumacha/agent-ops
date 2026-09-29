@@ -832,6 +832,11 @@ class PrismaEvaluations implements EvaluationsPort {
         agentId: run.agentId,
         setId: run.setId,
         status: EvaluationRunStatus.completed,
+        // **同じ judge で採点した実行だけを相手にする** (schema.prisma の judgeProvider の説明)。
+        // 別の judge の採点と比べた差は「エージェントが変わった」ことを示さないのに、
+        // 応答は差の数値しか返さないので、judge を替えた直後の回帰に見えてしまう
+        judgeProvider: run.judgeProvider,
+        judgeModel: run.judgeModel,
         OR: [
           { createdAt: { lt: run.createdAt } },
           { createdAt: run.createdAt, id: { lt: run.id } },

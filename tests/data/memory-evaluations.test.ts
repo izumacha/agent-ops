@@ -60,8 +60,11 @@ describe('memory アダプタの評価', () => {
     });
   });
 
-  // 1 回分の実行を保存する (status を切り替えられるようにする)
-  async function runOnce(status: EvaluationRunStatus): Promise<EvaluationRunRecord> {
+  // 1 回分の実行を保存する (status と judge のモデル名を切り替えられるようにする)
+  async function runOnce(
+    status: EvaluationRunStatus,
+    judgeModel = 'claude-haiku-4-5',
+  ): Promise<EvaluationRunRecord> {
     // failed の実行は採点 0 件なので平均は null (prisma 側の CHECK 制約と同じ規律)
     const scored = status === EvaluationRunStatus.completed;
     const saved = await repos.evaluations.createRun({
@@ -75,7 +78,7 @@ describe('memory アダプタの評価', () => {
       scoredCases: scored ? set.cases.length : 0,
       excludedCases: scored ? 0 : set.cases.length,
       judgeProvider: Provider.anthropic,
-      judgeModel: 'claude-haiku-4-5',
+      judgeModel,
       results: set.cases.map((row) => ({
         caseId: row.id,
         accuracy: scored ? 0.5 : null,
@@ -158,6 +161,38 @@ describe('memory アダプタの評価', () => {
     const latest = await runOnce(EvaluationRunStatus.completed);
     // 最新から見た直前は**間に挟まった failed ではなく**、その前の completed
     expect((await repos.evaluations.findPreviousRun(tenantId, latest))?.id).toBe(oldest.id);
+  });
+
+  it('同じケースの結果が 2 つある実行は保存できない (prisma の一意制約と同じ答え)', async () => {
+    // 同じ caseId を 2 回載せる (本番では @@unique([runId, caseId]) が止める)
+    const caseId = set.cases[0].id;
+    expect(
+      await repos.evaluations.createRun({
+        tenantId,
+        agentId,
+        setId: set.set.id,
+        accuracy: 1,
+        safety: 1,
+        deviation: 0,
+        status: EvaluationRunStatus.completed,
+        scoredCases: 2,
+        excludedCases: 0,
+        judgeProvider: Provider.anthropic,
+        judgeModel: 'claude-haiku-4-5',
+        results: [
+          { caseId, accuracy: 1, safety: 1, deviation: 0, excludedReason: null },
+          { caseId, accuracy: 0, safety: 0, deviation: 1, excludedReason: null },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it('別の judge で採点した実行は比較相手にしない', async () => {
+    // 先に別のモデルで採点した実行を作り、次に今回のモデルで採点する
+    await runOnce(EvaluationRunStatus.completed, 'claude-sonnet-4-6');
+    const latest = await runOnce(EvaluationRunStatus.completed, 'claude-haiku-4-5');
+    // judge が違う実行との差は「エージェントが変わった」ことを示さないので相手にしない
+    expect(await repos.evaluations.findPreviousRun(tenantId, latest)).toBeNull();
   });
 
   it('前が failed しか無ければ比較相手は無い', async () => {

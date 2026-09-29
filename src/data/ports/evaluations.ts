@@ -95,8 +95,9 @@ export interface EvaluationsPort {
   ): Promise<Page<EvaluationRunRecord>>;
   // 実行を結果ごと引く (他テナントの実行は null)
   findRun(tenantId: string, runId: string): Promise<EvaluationRunWithResults | null>;
-  // **同じエージェント × 同じセットの、その実行より前の最新の `completed` な実行** (回帰比較の相手)。
-  // `failed` はスコアが null で差を出せないので飛ばす (prisma/schema.prisma の status の説明)。
-  // 無ければ null (初回の実行、または前が failed しか無い場合は比較相手が無い)
+  // **同じエージェント × 同じセット × 同じ judge の、その実行より前の最新の `completed` な実行**
+  // (回帰比較の相手)。`failed` はスコアが null で差を出せないので飛ばし、別の judge で採点した実行は
+  // 比べても意味が無いので飛ばす (prisma/schema.prisma の status / judgeProvider の説明)。
+  // 無ければ null (初回の実行、judge を替えた直後、前が failed しか無い場合は比較相手が無い)
   findPreviousRun(tenantId: string, run: EvaluationRunRecord): Promise<EvaluationRunRecord | null>;
 }

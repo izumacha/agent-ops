@@ -350,11 +350,14 @@ describe.skipIf(!ENABLED)('評価の契約', () => {
     expect(await repos.evaluations.findPreviousRun(tenantId, first)).toBeNull();
   });
 
-  it('failed の実行は直前の実行として選ばない', async () => {
+  it('failed の実行と別の judge の実行は直前の実行として選ばない', async () => {
     // テナントとセットを用意する
     const { tenantId, agent, set } = await makeTenantWithSet(repos, 'o');
-    // 1 回分を保存して実行の行を返す (status と採点件数を切り替えられるようにする)
-    const runOnce = async (status: EvaluationRunStatus): Promise<EvaluationRunRecord> => {
+    // 1 回分を保存して実行の行を返す (status と judge のモデル名を切り替えられるようにする)
+    const runOnce = async (
+      status: EvaluationRunStatus,
+      judgeModel = 'claude-haiku-4-5',
+    ): Promise<EvaluationRunRecord> => {
       // failed の実行は採点が 0 件なので平均は null (CHECK 制約と同じ規律)
       const scored = status === EvaluationRunStatus.completed;
       const saved = await repos.evaluations.createRun({
@@ -368,7 +371,7 @@ describe.skipIf(!ENABLED)('評価の契約', () => {
         scoredCases: scored ? set.cases.length : 0,
         excludedCases: scored ? 0 : set.cases.length,
         judgeProvider: Provider.anthropic,
-        judgeModel: 'claude-haiku-4-5',
+        judgeModel,
         results: set.cases.map((row) => ({
           caseId: row.id,
           accuracy: scored ? 0.5 : null,
@@ -381,12 +384,39 @@ describe.skipIf(!ENABLED)('評価の契約', () => {
       expect(saved).not.toBeNull();
       return saved!.run;
     };
-    // completed → failed → completed の順に 3 回実行する
+    // completed → 別 judge の completed → failed → completed の順に 4 回実行する
     const oldest = await runOnce(EvaluationRunStatus.completed);
+    await runOnce(EvaluationRunStatus.completed, 'claude-sonnet-4-6');
     await runOnce(EvaluationRunStatus.failed);
     const latest = await runOnce(EvaluationRunStatus.completed);
-    // 最新から見た直前は**間に挟まった failed ではなく**、その前の completed
-    // (failed はスコアが null なので、比べても回帰の有無を読み取れない)
+    // 最新から見た直前は**間に挟まった failed でも別 judge の実行でもなく**、その前の completed。
+    // failed はスコアが null で差を出せず、別 judge の差は「エージェントが変わった」ことを示さない
     expect((await repos.evaluations.findPreviousRun(tenantId, latest))?.id).toBe(oldest.id);
+  });
+
+  it('同じケースの結果を 2 つ持つ実行は一意制約が拒否する', async () => {
+    // テナントとセットを用意する
+    const { tenantId, agent, set } = await makeTenantWithSet(repos, 'p');
+    // 同じ caseId を 2 回載せる (@@unique([runId, caseId]))
+    const caseId = set.cases[0].id;
+    await expect(
+      repos.evaluations.createRun({
+        tenantId,
+        agentId: agent.id,
+        setId: set.set.id,
+        accuracy: 1,
+        safety: 1,
+        deviation: 0,
+        status: EvaluationRunStatus.completed,
+        scoredCases: 2,
+        excludedCases: 0,
+        judgeProvider: Provider.anthropic,
+        judgeModel: 'claude-haiku-4-5',
+        results: [
+          { caseId, accuracy: 1, safety: 1, deviation: 0, excludedReason: null },
+          { caseId, accuracy: 0, safety: 0, deviation: 1, excludedReason: null },
+        ],
+      }),
+    ).rejects.toThrow();
   });
 });

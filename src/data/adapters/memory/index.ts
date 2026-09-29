@@ -603,6 +603,13 @@ class MemoryEvaluations implements EvaluationsPort {
     // null になるので、ここで通すと memory だけ「別セットのケースの採点」を保存でき、
     // API テスト (memory) と契約テスト (prisma) で挙動が割れる
     if (input.results.some((item) => !caseIds.has(item.caseId))) return null;
+    // **同じケースの結果が 2 つ以上あっても断る** — prisma 側は一意制約 @@unique([runId, caseId])
+    // で止まるが、そちらは一意制約違反 (FK 違反ではない) なので createRun が null に写さず
+    // 例外のまま抜ける = HTTP 500 になる。memory がここで通すと、その形が API テストでは
+    // 緑のまま通り、本番でだけ 500 になる (しかも上流の呼び出しは済んでいる)
+    if (new Set(input.results.map((item) => item.caseId)).size !== input.results.length) {
+      return null;
+    }
     // 実行本体
     const run: EvaluationRunRecord = {
       id: this.store.nextId('evalrun'),
@@ -697,6 +704,9 @@ class MemoryEvaluations implements EvaluationsPort {
         row.agentId === run.agentId &&
         row.setId === run.setId &&
         row.status === EvaluationRunStatus.completed &&
+        // **同じ judge で採点した実行だけを相手にする** (理由は prisma アダプタと同じ)
+        row.judgeProvider === run.judgeProvider &&
+        row.judgeModel === run.judgeModel &&
         compareCursorKeys(row, run) < 0,
     );
     // 1 つも無ければ比較相手が無い (初回の実行)

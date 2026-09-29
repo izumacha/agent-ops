@@ -14,7 +14,12 @@ import {
 import { GET as getEvaluationSet } from '@/app/api/v1/evaluation-sets/[setId]/route';
 import { GET as listEvaluationRuns, POST as runEvaluation } from '@/app/api/v1/evaluations/route';
 import { GET as getEvaluationRun } from '@/app/api/v1/evaluations/[runId]/route';
-import { AgentStatus, EvaluationExclusionReason, EvaluationRunStatus } from '@/domain/types';
+import {
+  AgentStatus,
+  EvaluationExclusionReason,
+  EvaluationRunStatus,
+  Provider,
+} from '@/domain/types';
 import { API_MESSAGES, EVALUATION_SET_MAX_CASES } from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
 
@@ -377,6 +382,24 @@ describe('評価の実行', () => {
     // 意図しないプロバイダに採点させず 503 で止める
     expect(run.status).toBe(503);
     expect((run.json as { message: string }).message).toBe(API_MESSAGES.judgeNotConfigured);
+  });
+
+  it('judge の接続先が設定されていなければ 1 段目を走らせる前に 503', async () => {
+    // 上流は正常に応答するが、judge のプロバイダの資格情報だけが無い
+    stubHealthyUpstream();
+    vi.stubEnv('JUDGE_PROVIDER', Provider.openai);
+    vi.stubEnv('OPENAI_API_KEY', '');
+    // 実行しようとする
+    const set = await createSet('judge の鍵が無いセット');
+    const run = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    // 設定が足りないので 503 (プロキシ経路の「設定が無い」と同じ扱い)
+    expect(run.status).toBe(503);
+    // **上流を 1 度も呼んでいないこと。** ここを通してしまうと、judge が使えないと分かるのは
+    // 2 段目に入ってからで、それまでにケース数ぶんの応答生成 (= 課金) を払い切ってしまう
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
   it('他テナントのエージェント・セットを指す実行は 404', async () => {

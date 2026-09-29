@@ -21,6 +21,7 @@ import type { ApiSchemas } from '@/lib/api-types';
 import { API_MESSAGES } from '@/lib/constants';
 import { resolveJudgeIdentity } from '@/lib/evaluation/judge';
 import { runEvaluation } from '@/lib/evaluation/runner';
+import { resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { evaluationRunCreateSchema, evaluationRunQuerySchema } from '@/lib/validations/evaluation';
 import { AgentStatus } from '@/domain/types';
 
@@ -71,6 +72,11 @@ export const POST = route(async ({ request, principal, repos }) => {
   if (judge === null) {
     throw new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.judgeNotConfigured);
   }
+  // **judge の接続先と資格情報も「1 段目を走らせる前」に確かめる。** 設定が無ければ 503 が飛ぶ。
+  // ここを省くと、judge が使えないことが分かるのは 2 段目に入ってからになり、
+  // それまでに 1 段目でケース数ぶんの上流呼び出し (= 課金) を済ませてしまう。
+  // 結果は全件 judge_unavailable で failed になるので、払った分は 1 つのスコアにもならない
+  resolveUpstreamTarget(judge.provider);
 
   // 実行する (上流の失敗はケース単位の除外になって返る)
   const outcome = await runEvaluation({

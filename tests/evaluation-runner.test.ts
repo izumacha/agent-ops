@@ -170,6 +170,22 @@ describe('judge の結線を環境変数から決める', () => {
     // 綴り間違いで意図しないプロバイダに採点させないため (fail-closed)
     expect(resolveJudgeIdentity({ ...process.env, JUDGE_PROVIDER: 'anthropicc' })).toBeNull();
   });
+
+  it('通るのは Provider の**値**だけで、キーの綴りには頼らない', () => {
+    // 受け付けた綴りは必ず Provider の値の一覧に載っていること。
+    // キー (`Object.hasOwn`) で照合すると、値だけを別の綴りへ変えた日に
+    // 「通るのに Provider ではない文字列」ができ、上流の結線が undefined になったうえ
+    // その文字列が Prisma の enum 列へ書かれる
+    const values: string[] = Object.values(Provider);
+    for (const value of values) {
+      expect(resolveJudgeIdentity({ ...process.env, JUDGE_PROVIDER: value })?.provider).toBe(value);
+    }
+    // 値の一覧に無い綴りは、たとえ Provider のキーとして存在しても通さない
+    for (const key of Object.keys(Provider)) {
+      if (values.includes(key)) continue;
+      expect(resolveJudgeIdentity({ ...process.env, JUDGE_PROVIDER: key })).toBeNull();
+    }
+  });
 });
 
 describe('評価を 1 回実行する', () => {

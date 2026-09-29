@@ -22,6 +22,10 @@ import { describeError } from '@/lib/describe-error';
 import { buildRequestBody, readResponseText } from '@/lib/llm/messages';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 
+// プロバイダとして受け付ける値の一覧 (綴りの照合に使う。src/lib/validations/common.ts の
+// provider スキーマと同じく「値」から導き、キーの綴りには頼らない)
+const PROVIDER_VALUES: readonly Provider[] = Object.values(Provider);
+
 /** どの judge が採点したか (EvaluationRun に残す) */
 export interface JudgeIdentity {
   // judge のプロバイダ
@@ -42,7 +46,11 @@ export function resolveJudgeIdentity(env: NodeJS.ProcessEnv = process.env): Judg
   let provider: Provider;
   if (providerName === undefined || providerName === '') {
     provider = JUDGE_DEFAULT_PROVIDER;
-  } else if (Object.hasOwn(Provider, providerName)) {
+  } else if (PROVIDER_VALUES.includes(providerName as Provider)) {
+    // **キーではなく「値」の一覧で照合する** — Provider はいまキーと値が同じ綴りだが、
+    // 値だけを変えた瞬間にキー照合は「通るのに Provider ではない文字列」を作り、
+    // 上流の結線 (UPSTREAMS[provider]) が undefined になって落ちるうえ、
+    // その文字列が Prisma の enum 列へそのまま書かれる
     provider = providerName as Provider;
   } else {
     // 知らないプロバイダ名は設定ミス

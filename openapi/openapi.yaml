@@ -26,6 +26,8 @@ tags:
     description: LLM 呼び出しの中継とコスト計測 (Step2)
   - name: usage
     description: 利用量・コストの集計 (Step2)
+  - name: evaluations
+    description: 品質評価 (LLM-as-judge による採点と回帰比較。Step3)
 security:
   - bearerAuth: []
 paths:
@@ -739,6 +741,176 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /evaluation-sets:
+    get:
+      tags: [evaluations]
+      operationId: listEvaluationSets
+      summary: 評価セット一覧
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 評価セットの一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationSetList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [evaluations]
+      operationId: createEvaluationSet
+      summary: 評価セットを作成する (ケースごと 1 リクエストで登録)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationSetCreate'
+      responses:
+        '201':
+          description: 作成した評価セット (ケース込み)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationSetDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /evaluation-sets/{setId}:
+    parameters:
+      - $ref: '#/components/parameters/SetId'
+    get:
+      tags: [evaluations]
+      operationId: getEvaluationSet
+      summary: 評価セットの詳細 (ケース込み)
+      responses:
+        '200':
+          description: 評価セット
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationSetDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /evaluations:
+    get:
+      tags: [evaluations]
+      operationId: listEvaluationRuns
+      summary: 評価実行の一覧 (回帰比較のためエージェント・セットで絞れる)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: agentId
+          in: query
+          description: エージェントで絞る
+          schema:
+            type: string
+        - name: setId
+          in: query
+          description: 評価セットで絞る
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 評価実行の一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationRunList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [evaluations]
+      operationId: runEvaluation
+      summary: 評価を実行する (エージェントへ入力を投げ、その応答を judge が採点する)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationRunCreate'
+      responses:
+        '201':
+          description: 実行の結果 (採点できなかったケースは除外理由つきで含まれる)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationRunDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          description: 採点用モデルの設定が正しくない (中継できない)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /evaluations/{runId}:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [evaluations]
+      operationId: getEvaluationRun
+      summary: 評価実行の詳細 (ケース単位の結果と、直前の実行との差)
+      responses:
+        '200':
+          description: 評価実行
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationRunDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 components:
   securitySchemes:
     bearerAuth:
@@ -789,6 +961,18 @@ components:
         type: string
     ApiKeyId:
       name: apiKeyId
+      in: path
+      required: true
+      schema:
+        type: string
+    SetId:
+      name: setId
+      in: path
+      required: true
+      schema:
+        type: string
+    RunId:
+      name: runId
       in: path
       required: true
       schema:
@@ -1251,6 +1435,212 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ApiKey'
+        nextCursor:
+          type: string
+    EvaluationSet:
+      type: object
+      required: [id, tenantId, name, createdAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    EvaluationCase:
+      type: object
+      required: [id, position, input, expected]
+      properties:
+        id:
+          type: string
+        position:
+          type: integer
+          description: セット内の並び順 (0 始まり)
+        input:
+          type: string
+        expected:
+          type: [string, 'null']
+          description: 期待する出力 (任意。採点の参考情報)
+    EvaluationSetDetail:
+      allOf:
+        - $ref: '#/components/schemas/EvaluationSet'
+        - type: object
+          required: [cases]
+          properties:
+            cases:
+              type: array
+              description: position 昇順
+              items:
+                $ref: '#/components/schemas/EvaluationCase'
+    EvaluationSetCreate:
+      type: object
+      additionalProperties: false
+      required: [name, cases]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        cases:
+          type: array
+          description: 配列の順がそのまま position になる。実行履歴を持つセットのケースは変更できない
+          minItems: 1
+          maxItems: 200
+          items:
+            type: object
+            additionalProperties: false
+            required: [input]
+            properties:
+              input:
+                type: string
+                minLength: 1
+                maxLength: 1000
+              expected:
+                type: string
+                minLength: 1
+                maxLength: 1000
+    EvaluationSetList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvaluationSet'
+        nextCursor:
+          type: string
+    EvaluationRun:
+      type: object
+      required:
+        [
+          id,
+          tenantId,
+          agentId,
+          setId,
+          status,
+          accuracy,
+          safety,
+          deviation,
+          scoredCases,
+          excludedCases,
+          judgeProvider,
+          judgeModel,
+          createdAt,
+        ]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        agentId:
+          type: string
+        setId:
+          type: string
+        status:
+          type: string
+          enum: [completed, failed]
+          description: 除外が多すぎる実行は failed (採点として使えない)
+        accuracy:
+          type: [number, 'null']
+          description: 採点できたケースの平均。1 件も採点できなければ null (0.0 ではない)
+        safety:
+          type: [number, 'null']
+        deviation:
+          type: [number, 'null']
+          description: 低いほど良い
+        scoredCases:
+          type: integer
+        excludedCases:
+          type: integer
+        judgeProvider:
+          type: string
+          enum: [anthropic, openai]
+        judgeModel:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    EvaluationResult:
+      type: object
+      required: [caseId, accuracy, safety, deviation, excludedReason]
+      properties:
+        caseId:
+          type: string
+        accuracy:
+          type: [number, 'null']
+        safety:
+          type: [number, 'null']
+        deviation:
+          type: [number, 'null']
+        excludedReason:
+          type: [string, 'null']
+          enum:
+            [
+              unknown_case_id,
+              duplicate_case_id,
+              score_out_of_range,
+              missing_score,
+              unparsable_output,
+              judge_unavailable,
+              agent_unavailable,
+              null,
+            ]
+          description: 除外した理由 (採点できたケースでは null)
+    EvaluationRegression:
+      type: object
+      required: [previousRunId, accuracyDelta, safetyDelta, deviationDelta]
+      description: 同じエージェント × セットの直前の実行との差 (今回 − 前回)。片方でも平均が無ければ差は null
+      properties:
+        previousRunId:
+          type: string
+        accuracyDelta:
+          type: [number, 'null']
+        safetyDelta:
+          type: [number, 'null']
+        deviationDelta:
+          type: [number, 'null']
+    EvaluationRunDetail:
+      allOf:
+        - $ref: '#/components/schemas/EvaluationRun'
+        - type: object
+          required: [results, regression]
+          properties:
+            results:
+              type: array
+              description: ケースの position 昇順
+              items:
+                $ref: '#/components/schemas/EvaluationResult'
+            regression:
+              oneOf:
+                - $ref: '#/components/schemas/EvaluationRegression'
+                - type: 'null'
+              description: 比較相手が無ければ null (初回の実行)
+    EvaluationRunCreate:
+      type: object
+      additionalProperties: false
+      required: [agentId, setId]
+      properties:
+        agentId:
+          description: 評価対象エージェントの id (資源 id の形)
+          type: string
+          minLength: 1
+          maxLength: 64
+        setId:
+          description: 使う評価セットの id (資源 id の形)
+          type: string
+          minLength: 1
+          maxLength: 64
+    EvaluationRunList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvaluationRun'
         nextCursor:
           type: string
     ProxyRequest:

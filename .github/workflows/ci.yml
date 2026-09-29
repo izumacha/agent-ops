@@ -1,5 +1,6 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step2`: gen / db:generate / lint / format:check / typecheck /
-# テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / npm audit high 0 / 本番ビルド / ベンチ 2 本) を検査し、
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step3`: gen / db:generate / lint / format:check / typecheck /
+# テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / 不正出力の除外が全理由分 pass /
+# npm audit high 0 / 本番ビルド / ベンチ 3 本) を検査し、
 # あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・
 # Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
 name: CI
@@ -24,7 +25,7 @@ jobs:
   gate:
     name: gate (実装済みの最新 Step の受け入れ基準)
     runs-on: ubuntu-latest
-    # Step2 のゲートはベンチ (1 万件投入の日次集計・プロキシ経由の追加遅延) を含むので DB が要る。
+    # Step3 のゲートはベンチ (1 万件投入の日次集計・プロキシ経由の追加遅延・採点の再現率) を含むので DB が要る。
     # **接続先は契約テストと同じ専用 DB (末尾 _contract)** — ベンチは全テーブルを TRUNCATE するので、
     # 開発 DB を指していればベンチ側が 1 件も書かずに落ちる (fail-closed)
     services:
@@ -66,8 +67,8 @@ jobs:
         run: npm run db:deploy
 
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run latest step gate (gate:step2)
-        run: npm run gate:step2
+      - name: Run latest step gate (gate:step3)
+        run: npm run gate:step3
 
       # **ゲートと同じ検査をここでも流す。** ゲートのステップを丸ごと削除する形（`STEP0_STEPS`
       # から 1 行消す・ゲート本体の呼び出しを消す）は検出網では捉えられない — 「流すと書いて

@@ -28,6 +28,8 @@ import {
   benchOutputProblems,
   evaluateStep1Report,
   evaluateStep2Report,
+  evaluateStep3Report,
+  missingExclusionCases,
   missingMatrixCases,
   missingPriceCases,
 } from '../scripts/lib/gate-report.mjs';
@@ -46,13 +48,17 @@ import {
   aggregateLatencyProblem,
   benchCriteriaFields,
   benchCriteriaJudges,
+  benchCaseCountProblem,
   benchLabels,
+  disagreementProblem,
+  injectedVarianceProblem,
   intFromEnv,
   intFromEnvValue,
   judgeBenchPayload,
   measuredRequestsProblem,
   non2xxProblem,
   runBench,
+  upstreamRequestsProblem,
   warmupCountProblem,
   warmupLatencyProblem,
 } from '../scripts/lib/bench-criteria.mjs';
@@ -60,6 +66,13 @@ import {
   PROXY_ADDED_LATENCY_P95_MAX_MS,
   USAGE_AGGREGATE_MAX_MS,
 } from '../scripts/lib/step2-criteria.mjs';
+import { EvaluationExclusionReason } from '@/domain/types';
+import {
+  EVALUATION_BENCH_CASE_COUNT,
+  EVALUATION_BENCH_FLIPPED_CASES,
+  EXCLUSION_TEST_PREFIX,
+  maxDisagreedCases,
+} from '../scripts/lib/step3-criteria.mjs';
 import {
   SCRIPTS_DIR,
   callsFunction,
@@ -406,6 +419,67 @@ function priceReport(
   };
 }
 
+// 除外理由のテスト結果だけを持つレポートを作る (判定が見るのは名前と状態だけ)
+function exclusionReport(cases: { reason: string; status?: string }[]): Record<string, unknown> {
+  // 「除外: <理由> — …」という実際のテスト名に近い形で組み立てる
+  return {
+    numPassedTests: cases.length,
+    numFailedTests: 0,
+    numPendingTests: 0,
+    testResults: [
+      {
+        assertionResults: cases.map((entry) => ({
+          fullName: `${EXCLUSION_TEST_PREFIX}${entry.reason} — 説明`,
+          status: entry.status ?? 'passed',
+        })),
+      },
+    ],
+  };
+}
+
+describe('missingExclusionCases', () => {
+  // 判定に渡す除外理由 (実在の enum ではなく合成。判定は一覧を受け取るだけなので十分)
+  const REASONS = ['unknown_case_id', 'judge_unavailable'];
+
+  it('全種類分が pass していれば不足なし', () => {
+    // 2 種類とも pass
+    const report = exclusionReport(REASONS.map((reason) => ({ reason })));
+    expect(
+      missingExclusionCases(report, { reasons: REASONS, exclusionPrefix: EXCLUSION_TEST_PREFIX }),
+    ).toEqual([]);
+  });
+
+  it('テストの無い理由は不足として返る (理由を足して書き忘れた形)', () => {
+    // 1 種類分しかテストが無い
+    const report = exclusionReport([{ reason: REASONS[0] }]);
+    expect(
+      missingExclusionCases(report, { reasons: REASONS, exclusionPrefix: EXCLUSION_TEST_PREFIX }),
+    ).toEqual(['judge_unavailable']);
+  });
+
+  it('存在しても落ちているテストは「不足」とみなす', () => {
+    // 2 種類目が失敗
+    const report = exclusionReport([
+      { reason: REASONS[0] },
+      { reason: REASONS[1], status: 'failed' },
+    ]);
+    expect(
+      missingExclusionCases(report, { reasons: REASONS, exclusionPrefix: EXCLUSION_TEST_PREFIX }),
+    ).toEqual(['judge_unavailable']);
+  });
+
+  it('接頭辞が一致するだけの別の理由のテストで代用されない', () => {
+    // `missing_score` のテストだけがある状態で `missing` を探す (短い側が長い側に当たる形)
+    const report = exclusionReport([{ reason: 'missing_score' }]);
+    expect(
+      missingExclusionCases(report, {
+        reasons: ['missing'],
+        exclusionPrefix: EXCLUSION_TEST_PREFIX,
+      }),
+    ).toEqual(['missing']);
+  });
+});
+
 describe('missingPriceCases', () => {
   it('料金表の全モデル分が pass していれば不足なし', () => {
     // 2 モデルとも pass
@@ -542,6 +616,78 @@ describe('evaluateStep2Report', () => {
     expect(
       failures.some((message) => message.includes('料金表からモデルを 1 件も読めません')),
     ).toBe(true);
+  });
+});
+
+describe('evaluateStep3Report', () => {
+  // 判定に渡す共通の材料 (Step2 のものに除外理由の一覧を足したもの)
+  const REASONS = ['unknown_case_id', 'judge_unavailable'];
+  const base = {
+    testStatus: 0,
+    requiredPassedTests: 60,
+    ...MATRIX,
+    models: PRICED_MODELS,
+    pricePrefix: PRICE_TEST_PREFIX,
+    reasons: REASONS,
+    exclusionPrefix: EXCLUSION_TEST_PREFIX,
+  };
+
+  // RBAC 行列・料金・除外理由をすべて満たすレポートを作る
+  const fullReport = (reasons = REASONS): Record<string, unknown> => {
+    // 料金までのレポート
+    const priced = priceReport(PRICED_MODELS) as {
+      testResults: { assertionResults: unknown[] }[];
+      numPassedTests: number;
+    };
+    // 除外理由のテストを足す
+    const assertionResults = [
+      ...priced.testResults[0].assertionResults,
+      ...reasons.map((reason) => ({
+        fullName: `${EXCLUSION_TEST_PREFIX}${reason} — 説明`,
+        status: 'passed',
+      })),
+    ];
+    return { ...priced, testResults: [{ assertionResults }] };
+  };
+
+  it('Step2 の基準と除外のテストがすべて揃っていれば失敗なし', () => {
+    // 行列も料金も除外も揃っている
+    expect(evaluateStep3Report({ ...base, report: fullReport() })).toEqual([]);
+  });
+
+  it('Step2 の基準 (料金計算) を引き継いでいる', () => {
+    // 料金のテストを 1 モデル分だけにする
+    const priced = priceReport([PRICED_MODELS[0]]) as {
+      testResults: { assertionResults: unknown[] }[];
+    };
+    const report = {
+      ...priced,
+      testResults: [
+        {
+          assertionResults: [
+            ...priced.testResults[0].assertionResults,
+            ...REASONS.map((reason) => ({
+              fullName: `${EXCLUSION_TEST_PREFIX}${reason}`,
+              status: 'passed',
+            })),
+          ],
+        },
+      ],
+    };
+    const failures = evaluateStep3Report({ ...base, report });
+    expect(failures.some((message) => message.includes('料金計算'))).toBe(true);
+  });
+
+  it('除外のテストが欠けていれば失敗になる (理由を足して書き忘れた形)', () => {
+    // 1 種類分しか無い
+    const failures = evaluateStep3Report({ ...base, report: fullReport([REASONS[0]]) });
+    expect(failures.some((message) => message.includes('不正出力の除外テスト'))).toBe(true);
+  });
+
+  it('除外理由を 1 件も読めなければ失敗になる (照合の空振りを通さない)', () => {
+    // reasons が空 = 正本の enum を読めなかった状態
+    const failures = evaluateStep3Report({ ...base, reasons: [], report: fullReport() });
+    expect(failures.some((message) => message.includes('除外理由を 1 件も読めません'))).toBe(true);
   });
 });
 
@@ -725,6 +871,73 @@ describe('aggregateLatencyProblem', () => {
   });
 });
 
+describe('benchCaseCountProblem', () => {
+  it('受け入れ基準どおりの件数なら問題なし', () => {
+    // 100 件ちょうど
+    expect(benchCaseCountProblem(EVALUATION_BENCH_CASE_COUNT)).toBeNull();
+  });
+
+  it('件数が足りなければ理由を返す', () => {
+    // **縮めて通す形がいちばん通しやすい** (少ない件数ほど一致率は上がりやすい)
+    expect(benchCaseCountProblem(EVALUATION_BENCH_CASE_COUNT - 1)).toContain('採点したケース');
+  });
+
+  it('件数が多すぎても理由を返す', () => {
+    // 基準は「100 件で」なので、多い側も測っているものが違う
+    expect(benchCaseCountProblem(EVALUATION_BENCH_CASE_COUNT + 1)).toContain('採点したケース');
+  });
+});
+
+describe('injectedVarianceProblem', () => {
+  it('揺れが 1 件でも注入されていれば問題なし', () => {
+    // 1 件でも違うスコアを返していれば、一致の判定が実際に動いている
+    expect(injectedVarianceProblem(1)).toBeNull();
+  });
+
+  it('揺れが 0 件なら理由を返す', () => {
+    // 決定論的なスタブでは一致率が必ず 100% になり、計測が何も検査しない
+    expect(injectedVarianceProblem(0)).toContain('揺れが 1 件も注入されていません');
+  });
+});
+
+describe('upstreamRequestsProblem', () => {
+  it('上流を 1 回以上呼んでいれば問題なし', () => {
+    // 経路を通っている
+    expect(upstreamRequestsProblem(1)).toBeNull();
+  });
+
+  it('1 度も呼んでいなければ理由を返す', () => {
+    // 経路を通らずに出した一致率は基準の証拠にならない
+    expect(upstreamRequestsProblem(0)).toContain('上流を 1 度も呼んでいません');
+  });
+});
+
+describe('disagreementProblem', () => {
+  it.each([
+    ['上限より少ない', maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT) - 1],
+    ['上限ちょうど', maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT)],
+  ])('上限以内なら問題なし: %s', (_label, disagreed) => {
+    // 再現率が基準を満たしている
+    expect(disagreementProblem(disagreed, EVALUATION_BENCH_CASE_COUNT)).toBeNull();
+  });
+
+  it('上限を 1 超えたら理由を返す', () => {
+    // 100 件中 11 件が食い違えば再現率は 89% で基準 (90%) を下回る
+    expect(
+      disagreementProblem(
+        maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT) + 1,
+        EVALUATION_BENCH_CASE_COUNT,
+      ),
+    ).toContain('再現率が低すぎます');
+  });
+
+  it('上限は件数から導く (件数が減れば許容も減る)', () => {
+    // 10 件なら許容は 1 件。**上限を固定値で持っていたら、この差が出ない**
+    expect(disagreementProblem(1, 10)).toBeNull();
+    expect(disagreementProblem(2, 10)).toContain('再現率が低すぎます');
+  });
+});
+
 // ベンチのラベルごとに「基準を満たす計測結果」と「各基準を 1 つだけ破る差分」を並べた表。
 // **表は BENCH_CRITERIA を覆っていることまで検査する**ので、基準を足して挙動を書き忘れられない
 const BENCH_PAYLOADS: Readonly<
@@ -759,6 +972,25 @@ const BENCH_PAYLOADS: Readonly<
     ok: { slowestMs: USAGE_AGGREGATE_MAX_MS },
     // その基準を破る差分
     breaks: [{ slowestMs: USAGE_AGGREGATE_MAX_MS + 1 }],
+  },
+  'evaluation-agreement': {
+    // すべての基準を満たす計測結果 (ベンチが実際に出す値に合わせる)。
+    // **食い違いを上限ちょうどにしない** — 件数を減らす破り方は上限も一緒に下げるので、
+    // 上限ちょうどだと 2 つの基準が同時に破れて「1 つだけ破る」表の意味が崩れる
+    ok: {
+      cases: EVALUATION_BENCH_CASE_COUNT,
+      flippedCases: EVALUATION_BENCH_FLIPPED_CASES,
+      upstreamRequests: 1,
+      disagreedCases: EVALUATION_BENCH_FLIPPED_CASES,
+    },
+    // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)。
+    // **件数は「減る」向きで破る** — 縮めて一致率を上げる形がいちばん通しやすいため
+    breaks: [
+      { cases: EVALUATION_BENCH_CASE_COUNT - 1 },
+      { flippedCases: 0 },
+      { upstreamRequests: 0 },
+      { disagreedCases: maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT) + 1 },
+    ],
   },
 };
 
@@ -878,7 +1110,11 @@ describe('benchOutputProblems', () => {
 describe('benchLabels', () => {
   it('基準を持つベンチのラベルをすべて返す', () => {
     // 表のキーをそのまま列挙する (検査はこれと突き合わせて網羅を確かめる)
-    expect(benchLabels().sort()).toEqual(['proxy-latency', 'usage-aggregate']);
+    expect(benchLabels().sort()).toEqual([
+      'evaluation-agreement',
+      'proxy-latency',
+      'usage-aggregate',
+    ]);
   });
 });
 
@@ -1304,13 +1540,23 @@ describe('判定の結線', () => {
   // ベンチのファイル名と、そのベンチが掛かる受け入れ基準のラベルの対応。
   // **これが「どのベンチがどの基準に掛かるか」の唯一の宣言**で、両向きに突き合わせる
   // (表に無いベンチ・実在しないベンチ・共有モジュール側の基準との食い違いをすべて落とす)
-  const BENCH_LABELS: Readonly<Record<string, { label: string; valueField: string }>> = {
-    'bench-proxy.ts': { label: 'proxy-latency', valueField: 'addedMs' },
-    'bench-usage-aggregate.ts': { label: 'usage-aggregate', valueField: 'slowestMs' },
+  // **上限の項目名もベンチごとに持つ。** 共通の 'limitMs' を決め打ちしていたときは、
+  // 時間以外を測るベンチ (採点の再現率は「件数」) を足した瞬間に、この表と実装が食い違った
+  const BENCH_LABELS: Readonly<
+    Record<string, { label: string; valueField: string; limitField: string }>
+  > = {
+    'bench-proxy.ts': { label: 'proxy-latency', valueField: 'addedMs', limitField: 'limitMs' },
+    'bench-usage-aggregate.ts': {
+      label: 'usage-aggregate',
+      valueField: 'slowestMs',
+      limitField: 'limitMs',
+    },
+    'bench-evaluation.ts': {
+      label: 'evaluation-agreement',
+      valueField: 'disagreedCases',
+      limitField: 'limitDisagreedCases',
+    },
   };
-
-  // 出力 JSON に載る上限の項目名 (ベンチ共通)
-  const BENCH_LIMIT_FIELD = 'limitMs';
 
   // ベンチが `process` に触れてよい形。**すべて純粋な読み取りだけ**で、
   // ここに無い形 (`process.exit` / 要素アクセス / 別名束縛 / `process.on('exit', …)` /
@@ -1347,6 +1593,7 @@ describe('判定の結線', () => {
     'autocannon',
     'node:child_process',
     'node:fs',
+    'node:http',
     'node:https',
     'node:net',
     'node:os',
@@ -1368,8 +1615,12 @@ describe('判定の結線', () => {
       'lib/prisma-client',
       'lib/tokens',
       'lib/proxy/upstream',
+      'lib/evaluation/runner',
       'domain/types',
+      'domain/evaluation/scores',
+      'domain/evaluation/judge-output',
       'data/adapters/prisma',
+      'data/ports',
     ].map((name) => join(SCRIPTS_DIR, '..', 'src', name)),
   );
 
@@ -1389,12 +1640,15 @@ describe('判定の結線', () => {
     'join',
     'process.cwd',
     'JSON.stringify',
+    // 受け入れ基準の上限を整数の計算だけで導く純粋関数 (副作用を持たない)
+    'maxDisagreedCases',
   ]);
 
   // 上のうち「このファイルで宣言されていない」ことまで求めるもの (共有モジュール由来であること)。
   // **ローカルに同名の関数を宣言すれば許可リストを満たせてしまう** ので、出どころまで固定する
   const SHARED_INITIALIZER_CALLS: Readonly<Record<string, string>> = {
     intFromEnv: 'bench-criteria.mjs',
+    maxDisagreedCases: 'step3-criteria.mjs',
   };
 
   // ベンチのトップレベルに置いてよい文の種類。**許す側を列挙する** —
@@ -1557,7 +1811,7 @@ describe('判定の結線', () => {
     const gate = join(SCRIPTS_DIR, latestGateScriptName());
     // 0 本なら空振りで緑になる (fail-closed)
     expect(Object.keys(BENCH_LABELS).length, 'ベンチが 1 本も無い').toBeGreaterThan(0);
-    for (const [bench, { label, valueField }] of Object.entries(BENCH_LABELS)) {
+    for (const [bench, { label, valueField, limitField }] of Object.entries(BENCH_LABELS)) {
       // そのベンチを起動する npm スクリプト名 (ゲートが実際に流すコマンドの正本)
       const script = benchNpmScriptOf(bench);
       // **新しい最終防衛線も、他の結線と同じ強さで見張る** — ここが無いと、ゲートから
@@ -1579,7 +1833,7 @@ describe('判定の結線', () => {
             // `limitMs <= limit` という恒真式になり、独立比較が消えた (実測)
             objectArgument: {
               index: 0,
-              literals: { label, valueField, limitField: BENCH_LIMIT_FIELD },
+              literals: { label, valueField, limitField },
               keys: ['label', 'valueField', 'limitField', 'limit'],
               // 材料は展開でしか運べない (手で書いた `status: 0` / `stdout: '…'` を許さない)
               forbiddenKeys: ['status', 'stdout'],
@@ -1745,6 +1999,7 @@ describe('判定の結線', () => {
   const BENCH_LIMIT_BY_LABEL: Readonly<Record<string, number>> = {
     'usage-aggregate': USAGE_AGGREGATE_MAX_MS,
     'proxy-latency': PROXY_ADDED_LATENCY_P95_MAX_MS,
+    'evaluation-agreement': maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT),
   };
 
   // 受け入れ基準を**すべて満たす**テストレポートを組み立てる (シムに書かせる中身)。
@@ -1765,11 +2020,18 @@ describe('判定の結線', () => {
     // 末尾を含んだまま縮める変異 (`readPricedModels().slice(1)`・偶数添字だけを残す形) は
     // どちらも 128 件すべて緑のまま通った (実測)。添字ごとに 1 本ずつ試せば、
     // 「どれか 1 つでも見ていないモデルがある」形はその添字の probe が必ず落とす
+    // 除外理由ごとのテスト名。**ゲートは Prisma スキーマから読むので、ここは
+    // ドメイン側の enum から組み立てる** — 同じ経路で組み立てると、片方が壊れても
+    // 両方が同じだけ縮んで空振りのまま緑になる (手がかりを変えるのが要点)
+    const exclusions = Object.values(EvaluationExclusionReason).map(
+      (reason) => `${EXCLUSION_TEST_PREFIX}${reason}`,
+    );
     const named = [
       ...ROLES.flatMap((role) =>
         ACTIONS.map((action) => `${MATRIX_TEST_PREFIX}${role} × ${action}`),
       ),
       ...priced.filter((_name, index) => index !== dropPricedIndex),
+      ...exclusions,
     ];
     // 件数の下限まで埋める
     const filler = Math.max(0, REQUIRED_PASSED_TESTS - named.length);
@@ -1784,8 +2046,9 @@ describe('判定の結線', () => {
       numPendingTests: 0,
       testResults: [{ assertionResults }],
     };
-    // **組み立てた結果が意図どおりであることを、判定そのものに確かめさせる**
-    const failures = evaluateStep2Report({
+    // **組み立てた結果が意図どおりであることを、判定そのものに確かめさせる**。
+    // 最新 Step の判定に通すので、前の Step の基準もそこから引き継がれて確かめられる
+    const failures = evaluateStep3Report({
       testStatus: 0,
       report,
       requiredPassedTests: REQUIRED_PASSED_TESTS,
@@ -1794,6 +2057,8 @@ describe('判定の結線', () => {
       matrixPrefix: MATRIX_TEST_PREFIX,
       models,
       pricePrefix: PRICE_TEST_PREFIX,
+      reasons: Object.values(EvaluationExclusionReason),
+      exclusionPrefix: EXCLUSION_TEST_PREFIX,
     });
     // 落としたなら基準を満たさないこと、満点なら満たすこと
     if (dropPricedIndex >= 0)
@@ -1918,12 +2183,12 @@ describe('判定の結線', () => {
   > {
     // ベンチ 1 本ごとに「どの npm が起動するか」と「どの項目を出すか」を対応づける
     return Object.fromEntries(
-      Object.entries(BENCH_LABELS).map(([file, { label, valueField }]) => [
+      Object.entries(BENCH_LABELS).map(([file, { label, valueField, limitField }]) => [
         benchNpmScriptOf(file),
         {
           label,
           valueField,
-          limitField: BENCH_LIMIT_FIELD,
+          limitField,
           limit: BENCH_LIMIT_BY_LABEL[label] ?? Number.NaN,
         },
       ]),

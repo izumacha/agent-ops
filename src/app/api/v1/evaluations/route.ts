@@ -28,6 +28,13 @@ import { AgentStatus } from '@/domain/types';
 // 複数の誤りを 1 応答の issues で返す (一覧ルートの既存の書き方にそろえる)
 const runListQuerySchema = pageQuerySchema.extend(evaluationRunQuerySchema.shape);
 
+// この経路が動いてよい秒数 (Next.js のルートセグメント設定。配備先の関数タイムアウトへ渡る)。
+// **既定のままにしない** — 評価は 1 リクエストの中でケース数ぶんの上流往復を待つので、
+// 既定 (配備先により数十秒) だと大きなセットで途中打ち切りになり、
+// 上流には課金されたのに実行の記録が 1 行も残らない。
+// ただしこれは**時間を延ばすだけで、完了を保証しない** (残る境界は ADR-0009)
+export const maxDuration = 300;
+
 // GET /evaluations (listEvaluationRuns)
 export const GET = route(async ({ request, principal, repos }) => {
   // view 権限。テナント条件はここで得た tenantId を必ず使う

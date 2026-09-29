@@ -4,7 +4,7 @@
 // **この呼び出しも UsageEvent に記録しない** (ADR-0009)。記録するのはプロキシを通った
 // 「利用者の呼び出し」だけで、評価はプラットフォーム側が起こす呼び出しだから
 import type { Provider } from '@/domain/types';
-import { EVALUATION_AGENT_MAX_TOKENS } from '@/lib/constants';
+import { EVALUATION_AGENT_MAX_TOKENS, EVALUATION_UPSTREAM_TIMEOUT_MS } from '@/lib/constants';
 import { describeError } from '@/lib/describe-error';
 import { buildRequestBody, readResponseText } from '@/lib/llm/messages';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
@@ -39,7 +39,14 @@ export async function requestAgentResponse(
       maxTokens: EVALUATION_AGENT_MAX_TOKENS,
     });
     // 応答を得る
-    const result = await callUpstream({ provider: agent.provider, target, body });
+    // 1 回あたりの待ち時間は評価用の短い上限にする (実行全体が関数タイムアウトに
+    // 届くと、課金されたのに実行の記録が残らない。src/lib/constants.ts の説明を参照)
+    const result = await callUpstream({
+      provider: agent.provider,
+      target,
+      body,
+      timeoutMs: EVALUATION_UPSTREAM_TIMEOUT_MS,
+    });
     // 2xx 以外は応答として使えない。ログにステータスを差し込まない理由は judge.ts と同じ
     // (console の実引数は「出してよい形」だけに絞ってある。tests/error-logging.test.ts)
     if (result.status < 200 || result.status >= 300) {

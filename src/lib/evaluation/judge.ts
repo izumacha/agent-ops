@@ -12,7 +12,12 @@ import {
   type JudgeCaseInput,
 } from '@/domain/evaluation/prompt';
 import { EvaluationExclusionReason, Provider } from '@/domain/types';
-import { JUDGE_DEFAULT_MODEL, JUDGE_DEFAULT_PROVIDER, JUDGE_MAX_TOKENS } from '@/lib/constants';
+import {
+  EVALUATION_UPSTREAM_TIMEOUT_MS,
+  JUDGE_DEFAULT_MODEL,
+  JUDGE_DEFAULT_PROVIDER,
+  JUDGE_MAX_TOKENS,
+} from '@/lib/constants';
 import { describeError } from '@/lib/describe-error';
 import { buildRequestBody, readResponseText } from '@/lib/llm/messages';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
@@ -84,7 +89,14 @@ export async function scoreBatch(
       maxTokens: JUDGE_MAX_TOKENS,
     });
     // 採点させる
-    const result = await callUpstream({ provider: judge.provider, target, body });
+    // 1 回あたりの待ち時間は評価用の短い上限にする (実行全体が関数タイムアウトに
+    // 届くと、課金されたのに実行の記録が残らない。src/lib/constants.ts の説明を参照)
+    const result = await callUpstream({
+      provider: judge.provider,
+      target,
+      body,
+      timeoutMs: EVALUATION_UPSTREAM_TIMEOUT_MS,
+    });
     // 2xx 以外は採点として使えない (本文の中身は利用者へ出さない)。
     // **ログにステータスを差し込まない** — `console` の実引数は「出してよい形」だけに絞ってあり
     // (tests/error-logging.test.ts)、式を埋める形を 1 か所でも許すと例外の message を埋める形と

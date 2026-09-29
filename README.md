@@ -62,6 +62,31 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 料金は [`src/domain/pricing/vendor-prices.json`](./src/domain/pricing/vendor-prices.json)（出典 URL と取得日つき）の単価から整数で計算する。**表に無いモデルは中継せず 422**（計測できない呼び出しは通さない。[ADR-0008](./docs/adr/0008-usage-pricing-and-aggregation.md)）。
 
+### 応答品質を評価する（Step3）
+
+評価セット（固定入力）を作り、そのセットでエージェントを評価する。実行は **2 段**で、ケースごとに
+(1) 対象エージェントへ入力を投げて応答を得る → (2) その応答を LLM-as-judge が採点する（[ADR-0009](./docs/adr/0009-llm-as-judge-evaluation.md)）。
+
+```bash
+# 1. 評価セットを作る (ケースは配列の順に並ぶ。実行履歴を持つセットのケースは変更できない)
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"基本セット","cases":[{"input":"1+1 は？","expected":"2"},{"input":"今日の天気は？"}]}' \
+  localhost:3000/api/v1/evaluation-sets
+
+# 2. そのセットで評価する (execute 権限。採点用モデルは JUDGE_PROVIDER / JUDGE_MODEL)
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agentId":"<エージェントの id>","setId":"<セットの id>"}' \
+  localhost:3000/api/v1/evaluations
+
+# 3. 実行の詳細を見る (ケース単位の採点・除外理由と、直前の実行との差が入る)
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/evaluations/<実行の id>
+```
+
+**採点できなかったケースは理由つきで除外され、実行そのものは必ず記録に残る**（judge が落ちても 500 にしない）。
+除外が半分を超えた実行は `status: "failed"`、採点できたケースが 0 件なら平均スコアは `null`（0.0 ではない）。
+**評価の呼び出しは `UsageEvent` に記録しない** — 利用者の呼び出しと混ぜると日次集計と Step4 のコスト超過ルールが
+評価のたびに跳ねるため。ただし**ベンダー側の課金は発生する**ので、上限（spend limit）は必ず設定しておく。
+
 ## 検証コマンド
 
 ```bash
@@ -73,13 +98,15 @@ npm run build        # 本番ビルド (standalone 出力)
 npm run gate:step0   # Step0 の受け入れ基準を一括検査 (gen / db:generate / lint / format:check / typecheck / test / OpenAPI / ADR)
 npm run gate:step1   # Step1 の受け入れ基準を一括検査 (上記 + テスト 60 件以上 / RBAC 3×3 の 403 / npm audit high 0)
 npm run gate:step2   # Step2 の受け入れ基準を一括検査 (上記 + 料金計算が全モデル分 pass / 本番ビルド / ベンチ 2 本)
+npm run gate:step3   # Step3 の受け入れ基準を一括検査 (上記 + 不正出力の除外が全理由分 pass / ベンチ 3 本)
 npm run bench:usage  # 1 万件投入で日次集計 ≦ 1 秒 (専用 DB が必要)
 npm run bench:proxy  # プロキシ経由の追加遅延 ≦ 50ms (先に npm run build。専用 DB が必要)
+npm run bench:evaluation # 固定評価セット 100 件を 2 回採点して再現率 ≧ 90% (専用 DB が必要)
 ```
 
-`gate:step2` はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチは全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩くので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
+`gate:step3`（と `gate:step2`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチは全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩くので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
 
-CI（`.github/workflows/ci.yml`）は `gate:step2` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
+CI（`.github/workflows/ci.yml`）は `gate:step3` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
 
 ## ディレクトリ
 
@@ -115,9 +142,9 @@ CI（`.github/workflows/ci.yml`）は `gate:step2` に加え、PostgreSQL サー
 | Step | 内容 | 期間 |
 |---|---|---|
 | 0 | 設計・骨組み（実装済み） | 1 週 |
-| 1 | エージェント台帳・権限（CRUD / API キー / RBAC。実装済み・本 README の状態） | 2 週 |
-| 2 | コスト計測プロキシ（Anthropic/OpenAI 互換） | 2 週 |
-| 3 | 品質評価（LLM-as-judge） | 2 週 |
+| 1 | エージェント台帳・権限（CRUD / API キー / RBAC。実装済み） | 2 週 |
+| 2 | コスト計測プロキシ（Anthropic/OpenAI 互換。実装済み） | 2 週 |
+| 3 | 品質評価（LLM-as-judge。実装済み・本 README の状態） | 2 週 |
 | 4 | ガードレール・自動停止・通知・監査ログ | 2 週 |
 | 5 | ダッシュボード | 2 週 |
 | 6 | マルチテナント・課金（Stripe） | 2 週 |

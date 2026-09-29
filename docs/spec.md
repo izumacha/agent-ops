@@ -59,9 +59,11 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 
 ### UC-07 エージェントの応答品質を評価する（Step3）
 
-- 主体: `operator` 以上
-- 流れ: 評価セット（固定入力 100 件）を選び実行 → LLM-as-judge が正確性・安全性・逸脱を採点 → 過去の実行と回帰比較
-- 基準: 同一入力での採点一致率 ≧ 90%、幻覚 ID 等の不正出力は除外
+- 主体: `operator` 以上（閲覧は `view`）
+- 流れ: 評価セット（固定入力 100 件）を選び実行 → **ケースごとに (1) 対象エージェントへ入力を投げて応答を得る → (2) その応答を LLM-as-judge が正確性・安全性・逸脱で採点** → 直前の実行と回帰比較
+- 事後条件: **どの段が失敗しても実行の記録は必ず 1 行残る**。採点できなかったケースは理由（`EvaluationExclusionReason`）つきで除外され、除外が半分を超えた実行は `failed`。採点できたケースが 0 件なら平均スコアは `null`（0.0 ではない）
+- 例外: 停止中のエージェントは 403、採点用モデルの設定が読めなければ 503、他テナントのエージェント・セットは 404
+- 基準: 同一入力での採点一致率 ≧ 90%、幻覚 ID 等の不正出力は除外（ADR-0009）
 
 ### UC-08 しきい値ルールを設定し自動停止させる（Step4）
 
@@ -95,6 +97,7 @@ erDiagram
   Tenant ||--o{ UsageEvent : has
   Tenant ||--o{ EvaluationSet : has
   Tenant ||--o{ EvaluationRun : has
+  Tenant ||--o{ EvaluationResult : has
   Tenant ||--o{ GuardrailRule : has
   Tenant ||--o{ Incident : has
   Tenant ||--o{ AuditLog : has
@@ -105,6 +108,8 @@ erDiagram
   Agent ||--o{ Incident : "raises"
   EvaluationSet ||--o{ EvaluationCase : contains
   EvaluationSet ||--o{ EvaluationRun : "used in"
+  EvaluationRun ||--o{ EvaluationResult : "scores"
+  EvaluationCase ||--o{ EvaluationResult : "scored in"
   GuardrailRule ||--o{ Incident : triggers
   User ||--o{ AuditLog : acts
 
@@ -163,6 +168,7 @@ erDiagram
   EvaluationCase {
     string id PK
     string setId FK
+    int position
     string input
     string expected
   }
@@ -174,6 +180,22 @@ erDiagram
     float accuracy
     float safety
     float deviation
+    EvaluationRunStatus status
+    int scoredCases
+    int excludedCases
+    Provider judgeProvider
+    string judgeModel
+  }
+  EvaluationResult {
+    string id PK
+    string tenantId FK
+    string runId FK
+    string setId FK
+    string caseId FK
+    float accuracy
+    float safety
+    float deviation
+    EvaluationExclusionReason excludedReason
   }
   GuardrailRule {
     string id PK
@@ -208,6 +230,7 @@ erDiagram
 - **履歴（`UsageEvent` / `EvaluationRun` / `Incident`）は親の削除で消さない（`Restrict`）。** コスト履歴は請求の根拠、インシデントは停止理由の記録なので、履歴を持つエージェントは削除できず `stop` で止める（`DELETE /agents/{id}` は 409）。実行履歴を持つ評価セット、発火済みのルールも同様（ルールは `enabled=false` で無効化）。
 - **設定（`ApiKey` / `GuardrailRule`）はエージェントと一緒に消える（`Cascade`）。** `ApiKey.agentId` を `SetNull` にすると削除で「テナント共通キー」へ黙って昇格し権限が広がるため、Cascade にする。
 - **監査ログの操作者（`AuditLog.actorId`）は `Restrict`。** 監査ログを持つユーザーは削除せず無効化する（`User.disabledAt`。`DELETE /users/{userId}` は無効化）。ユーザーのログイントークン（`UserToken`）は設定なので `Cascade`。テナント解約は `Cascade` でデータ一式を消す（テナント単位の消去要求に応えるため）。
+- **実行履歴を持つ評価セットのケースは変更・削除できない**（ケースの更新・削除 API を作らない。`EvaluationResult` → `EvaluationCase` も `Restrict`）。入力が動くと回帰比較が無意味になるため、変えたいときは新しいセットを作る（ADR-0009）。
 - **子テーブルは複合 FK `(tenantId, 親id)` で親を参照する。** 「別テナントのエージェント／セット／ルール／ユーザーを指す行」をクエリ規律だけでなく DB 制約でも拒否する（`Agent` / `EvaluationSet` / `GuardrailRule` / `User` に `@@unique([tenantId, id])`）。
 
 ## 4. API 一覧
@@ -248,13 +271,20 @@ erDiagram
 | POST     | `/proxy/anthropic/messages` | `proxyAnthropicMessages` | API キー（プロキシ専用） | 2 |
 | POST     | `/proxy/openai/chat/completions` | `proxyOpenAiChatCompletions` | API キー（プロキシ専用） | 2 |
 | GET      | `/usage/daily`             | `getDailyUsage`  | view           | 2    |
+| GET      | `/evaluation-sets`         | `listEvaluationSets` | view       | 3    |
+| POST     | `/evaluation-sets`         | `createEvaluationSet` | execute   | 3    |
+| GET      | `/evaluation-sets/{setId}` | `getEvaluationSet` | view         | 3    |
+| GET      | `/evaluations`             | `listEvaluationRuns` | view       | 3    |
+| POST     | `/evaluations`             | `runEvaluation`  | execute        | 3    |
+| GET      | `/evaluations/{runId}`     | `getEvaluationRun` | view         | 3    |
 
-Step3 以降（評価 `/evaluations`、ルール `/guardrails`、インシデント `/incidents`、課金 `/billing`）は各 Step の着手時にこの表と OpenAPI 定義へ追加する。
+Step4 以降（ルール `/guardrails`、インシデント `/incidents`、課金 `/billing`）は各 Step の着手時にこの表と OpenAPI 定義へ追加する。
 
 ## 5. 非機能要件（抜粋）
 
 - **セキュリティ**: 全 Server Action / Route Handler で認証・RBAC・`tenantId` の絞り込みを強制（CLAUDE.md §9）。API キー・ユーザートークンはハッシュのみ保存。JSON 本文は上限（`src/lib/constants.ts` の `JSON_BODY_MAX_BYTES`）まで（413）、`Content-Type` は `application/json` 限定（415）。監査ログは追記専用。
 - **性能**: 一覧は必ず上限（既定 50、最大 200）。日次集計の期間は最大 366 日。プロキシの追加遅延 p95 ≦ 50ms。
 - **プロキシ（Step2）**: 中継先はコードと環境変数だけから決める（クライアントの入力は接続先に影響しない）。上流の資格情報はサーバ側の環境変数から取り、クライアントのヘッダは 1 つも転送しない。上流の応答を待つ上限は `UPSTREAM_TIMEOUT_MS`。
+- **品質評価（Step3）**: judge の接続先・資格情報はプロキシと同じ結線から決める（クライアントの入力は接続先に影響しない）。**judge とエージェントの評価呼び出しは `UsageEvent` に記録しない**（利用者の呼び出しと混ぜると日次集計とコスト超過ルールが評価のたびに跳ねる。ADR-0009）。1 セットのケース数は上限（`EVALUATION_SET_MAX_CASES`）まで。
 - **可観測性**: `/api/v1/health` で DB 到達性を返す。エラーは内部詳細を出さずサーバログへ。
 - **移植性**: PostgreSQL 16 / Node 22 / Docker。ローカルと CI で検証が完結する（人手の外部手順に依存しない）。

@@ -85,9 +85,12 @@ export async function scoreBatch(
     });
     // 採点させる
     const result = await callUpstream({ provider: judge.provider, target, body });
-    // 2xx 以外は採点として使えない (本文の中身は利用者へ出さない)
+    // 2xx 以外は採点として使えない (本文の中身は利用者へ出さない)。
+    // **ログにステータスを差し込まない** — `console` の実引数は「出してよい形」だけに絞ってあり
+    // (tests/error-logging.test.ts)、式を埋める形を 1 か所でも許すと例外の message を埋める形と
+    // 区別できなくなる。状況が分かる定型文にする
     if (result.status < 200 || result.status >= 300) {
-      console.error(`[evaluation] judge が ${result.status} を返しました`);
+      console.error('[evaluation] judge が 2xx 以外のステータスを返しました');
       return unavailable();
     }
     // 本文を JSON として読む

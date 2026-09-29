@@ -40,9 +40,10 @@ export async function requestAgentResponse(
     });
     // 応答を得る
     const result = await callUpstream({ provider: agent.provider, target, body });
-    // 2xx 以外は応答として使えない
+    // 2xx 以外は応答として使えない。ログにステータスを差し込まない理由は judge.ts と同じ
+    // (console の実引数は「出してよい形」だけに絞ってある。tests/error-logging.test.ts)
     if (result.status < 200 || result.status >= 300) {
-      console.error(`[evaluation] エージェントの上流が ${result.status} を返しました`);
+      console.error('[evaluation] エージェントの上流が 2xx 以外のステータスを返しました');
       return null;
     }
     // 本文を JSON として読む

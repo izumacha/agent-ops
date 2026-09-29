@@ -147,8 +147,10 @@ describe('並列度を絞った処理', () => {
 
 describe('judge の結線を環境変数から決める', () => {
   it('指定が無ければ定数の既定値を使う', () => {
-    // 環境変数を置かない
-    expect(resolveJudgeIdentity({})).toEqual({
+    // 環境変数を置かない (NODE_ENV など既存の値は残したまま judge の指定だけを消す)
+    expect(
+      resolveJudgeIdentity({ ...process.env, JUDGE_PROVIDER: undefined, JUDGE_MODEL: undefined }),
+    ).toEqual({
       provider: JUDGE_DEFAULT_PROVIDER,
       model: JUDGE_DEFAULT_MODEL,
     });
@@ -156,7 +158,9 @@ describe('judge の結線を環境変数から決める', () => {
 
   it('指定があればそれを使う', () => {
     // プロバイダとモデルを両方指定する
-    expect(resolveJudgeIdentity({ JUDGE_PROVIDER: 'openai', JUDGE_MODEL: 'gpt-5-mini' })).toEqual({
+    expect(
+      resolveJudgeIdentity({ ...process.env, JUDGE_PROVIDER: 'openai', JUDGE_MODEL: 'gpt-5-mini' }),
+    ).toEqual({
       provider: Provider.openai,
       model: 'gpt-5-mini',
     });
@@ -164,7 +168,7 @@ describe('judge の結線を環境変数から決める', () => {
 
   it('知らないプロバイダ名は既定へ倒さず null にする', () => {
     // 綴り間違いで意図しないプロバイダに採点させないため (fail-closed)
-    expect(resolveJudgeIdentity({ JUDGE_PROVIDER: 'anthropicc' })).toBeNull();
+    expect(resolveJudgeIdentity({ ...process.env, JUDGE_PROVIDER: 'anthropicc' })).toBeNull();
   });
 });
 

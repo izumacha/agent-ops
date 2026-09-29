@@ -8,17 +8,60 @@ CREATE TYPE "EvaluationExclusionReason" AS ENUM ('unknown_case_id', 'duplicate_c
 DROP INDEX "EvaluationSet_tenantId_idx";
 
 -- AlterTable
-ALTER TABLE "EvaluationCase" ADD COLUMN     "position" INTEGER NOT NULL;
+-- **既存行がある DB でも通るように、いったん DEFAULT つきで足してから DEFAULT を外す。**
+-- Prisma の生成そのままの `ADD COLUMN ... NOT NULL`（DEFAULT 無し）は、行が 1 件でもあると
+-- PostgreSQL が「既存行に入れる値が無い」で失敗し、`prisma migrate deploy` がそこで止まる
+-- （CI は毎回まっさらな DB なので緑のまま通り、壊れるのは本番の配備だけ = fail-open）。
+-- DEFAULT を残さないのは、以後の INSERT で値の指定漏れを黙って埋めさせないため（アプリは必ず書く）
+ALTER TABLE "EvaluationCase" ADD COLUMN     "position" INTEGER NOT NULL DEFAULT 0;
+-- 既存行の並び順を採番し直す。全部 0 のままだと、この後に張る一意索引
+-- (setId, position) が「1 セットに 2 件以上」の DB で必ず衝突する。
+-- 採番は id の昇順（内容から順序を決められないので、決まった順に 0 始まりで振る）
+UPDATE "EvaluationCase" AS target
+SET "position" = numbered."rowNumber" - 1
+FROM (
+  SELECT "id", row_number() OVER (PARTITION BY "setId" ORDER BY "id") AS "rowNumber"
+  FROM "EvaluationCase"
+) AS numbered
+WHERE target."id" = numbered."id";
+ALTER TABLE "EvaluationCase" ALTER COLUMN "position" DROP DEFAULT;
 
 -- AlterTable
-ALTER TABLE "EvaluationRun" ADD COLUMN     "excludedCases" INTEGER NOT NULL,
-ADD COLUMN     "judgeModel" TEXT NOT NULL,
-ADD COLUMN     "judgeProvider" "Provider" NOT NULL,
-ADD COLUMN     "scoredCases" INTEGER NOT NULL,
-ADD COLUMN     "status" "EvaluationRunStatus" NOT NULL DEFAULT 'completed',
+-- 平均スコアを null 許容にするのが先。既存行はスコアを持っているので、この後の
+-- CHECK 制約 (scoredCases > 0 のときだけスコアがある) を満たす件数を埋める必要がある
+ALTER TABLE "EvaluationRun"
 ALTER COLUMN "accuracy" DROP NOT NULL,
 ALTER COLUMN "safety" DROP NOT NULL,
 ALTER COLUMN "deviation" DROP NOT NULL;
+
+-- 採点として使えるか。既存行は除外の概念が無かった頃のものなので completed 扱いでよい
+ALTER TABLE "EvaluationRun" ADD COLUMN     "status" "EvaluationRunStatus" NOT NULL DEFAULT 'completed';
+
+-- 除外件数。旧スキーマに除外は無かったので既存行は 0 件で正しい
+ALTER TABLE "EvaluationRun" ADD COLUMN     "excludedCases" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "EvaluationRun" ALTER COLUMN "excludedCases" DROP DEFAULT;
+
+-- 採点件数。既存行はスコアを持つので 0 にすると CHECK に反する。
+-- 旧スキーマでは「セットの全ケースを採点した」以外の解釈が無いため、セットのケース数で埋める
+-- （ケースが 1 件も無いセットでも CHECK を満たせるよう最低 1 とする）
+ALTER TABLE "EvaluationRun" ADD COLUMN     "scoredCases" INTEGER NOT NULL DEFAULT 0;
+UPDATE "EvaluationRun" AS run
+SET "scoredCases" = GREATEST(
+  (SELECT count(*) FROM "EvaluationCase" AS c WHERE c."setId" = run."setId"),
+  1
+)
+WHERE run."accuracy" IS NOT NULL;
+ALTER TABLE "EvaluationRun" ALTER COLUMN "scoredCases" DROP DEFAULT;
+
+-- どの judge が採点したか。**旧スキーマにこの列は無く、既存行の採点者は本当に分からない**ので、
+-- モデル名は実在しない綴り 'unknown' を入れて「不明」を読み取れるようにする
+-- （provider は enum なので不明を表せない。値は必須なので既定の 1 つを置くだけで、
+-- 'unknown' と対で見ないと意味を持たない）。
+-- なお、この移行が触れる既存行は手で入れた行だけ — Step3 より前にこの表へ書く経路は無かった
+ALTER TABLE "EvaluationRun" ADD COLUMN     "judgeProvider" "Provider" NOT NULL DEFAULT 'anthropic';
+ALTER TABLE "EvaluationRun" ALTER COLUMN "judgeProvider" DROP DEFAULT;
+ALTER TABLE "EvaluationRun" ADD COLUMN     "judgeModel" TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE "EvaluationRun" ALTER COLUMN "judgeModel" DROP DEFAULT;
 
 -- CreateTable
 CREATE TABLE "EvaluationResult" (

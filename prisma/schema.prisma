@@ -243,10 +243,11 @@ model EvaluationCase {
 
   set     EvaluationSet      @relation(fields: [setId], references: [id], onDelete: Cascade) // 親セット
   results EvaluationResult[] // このケースの採点結果
+  // **@@index([setId]) は置かない** — 上の 2 つの一意索引がどちらも setId 先頭なので、
+  // `WHERE setId = $1` はその先頭列から引ける。単独の索引は書き込みのたびに費用を払うだけになる
 
   @@unique([setId, id]) // EvaluationResult の複合 FK (setId, caseId) の参照先。「別セットのケースを指す結果」を DB で弾く
   @@unique([setId, position]) // セット内で並び順を重複させない
-  @@index([setId]) // セット内列挙用
 }
 
 // 評価実行 (評価セット × エージェントの採点結果。Step3)
@@ -307,8 +308,9 @@ model EvaluationResult {
   // 採点したケース (同セットであることを複合 FK で保証)。結果を持つケースは消せない (Restrict)
   evaluationCase EvaluationCase @relation(fields: [setId, caseId], references: [setId, id], onDelete: Restrict)
 
-  @@unique([runId, caseId]) // 1 実行 1 ケースにつき結果は 1 行
-  @@index([runId]) // 実行の詳細表示 (結果の一覧)
+  @@unique([runId, caseId]) // 1 実行 1 ケースにつき結果は 1 行 (実行の詳細表示もこの先頭列から引く)
+  // **@@index([runId]) は置かない** — 上の一意索引が runId 先頭なので同じ理由 (EvaluationCase を参照)。
+  // この表は 1 実行につきケース数ぶん (最大 200 行) 書くので、余分な索引の費用が最も大きい
   @@index([setId, caseId]) // Restrict の解決・ケース別履歴用
 }
 

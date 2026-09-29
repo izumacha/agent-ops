@@ -7,6 +7,11 @@ CREATE TYPE "EvaluationExclusionReason" AS ENUM ('unknown_case_id', 'duplicate_c
 -- DropIndex
 DROP INDEX "EvaluationSet_tenantId_idx";
 
+-- DropIndex
+-- この移行で張る (setId, id) / (setId, position) の一意索引はどちらも setId が先頭なので、
+-- `WHERE setId = $1` はそちらから引ける。単独の索引は書き込みの費用を増やすだけになる
+DROP INDEX "EvaluationCase_setId_idx";
+
 -- AlterTable
 -- **既存行がある DB でも通るように、いったん DEFAULT つきで足してから DEFAULT を外す。**
 -- Prisma の生成そのままの `ADD COLUMN ... NOT NULL`（DEFAULT 無し）は、行が 1 件でもあると
@@ -77,9 +82,6 @@ CREATE TABLE "EvaluationResult" (
 
     CONSTRAINT "EvaluationResult_pkey" PRIMARY KEY ("id")
 );
-
--- CreateIndex
-CREATE INDEX "EvaluationResult_runId_idx" ON "EvaluationResult"("runId");
 
 -- CreateIndex
 CREATE INDEX "EvaluationResult_setId_caseId_idx" ON "EvaluationResult"("setId", "caseId");

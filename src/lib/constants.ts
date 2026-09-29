@@ -167,7 +167,6 @@ export const API_MESSAGES = {
   microUsdOutOfRange: `0 以上 ${MICRO_USD_MAX.toString()} 以下の整数を文字列で指定してください。`,
   evaluationSetEmpty: '評価ケースを 1 件以上指定してください。',
   evaluationSetTooLarge: `評価ケースは最大 ${EVALUATION_SET_MAX_CASES} 件までです。`,
-  evaluationSetNotInTenant: '指定した評価セットが見つかりません。',
   judgeNotConfigured: '採点用モデルの設定が正しくありません。',
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;

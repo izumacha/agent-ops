@@ -1321,6 +1321,27 @@ describe('判定の結線', () => {
   // 実測で `import { exit } from 'node:process'` は `processUses` に 1 件も現れず、
   // 偽の結果 JSON を出してから `exit(0)` するだけでゲートが緑になった (773 件すべて緑)。
   // **エントリを足す差分は、その依存が import の副作用や終了経路を持たないかをレビューで確認する**
+  // **この確認は「足すとき」だけでなく「その依存の major を上げるとき」にも要る** — 照合しているのは
+  // 指定子の綴りなので、版が変わっても表は何も言わない。実際 `dotenv` の 17 → 18 で前提が動いた:
+  // v17 の `lib/main.js` は `process.exit` / `child_process` / `process.on(` / `spawn` を 1 つも
+  // 含まなかったが、v18 の `dist/index.cjs` (= `dotenv/config` が読む実体) は CLI を同梱しており
+  // `process.exit` 6 / `child_process` 2 / `spawn` 4 / `process.kill` 2 / `process.on(` 1 を持つ。
+  // `Module._load` をフックした実測では、`require('dotenv/config')` は **`child_process` を実際に
+  // 読み込む**が、シグナルの購読は 0 件で、CLI 本体は `require.main === module` の内側にあるため
+  // tsx / node のエントリ経由では起動しない。**いまは無害だが「副作用も終了経路も持たない」は
+  // もう成り立っていない。**
+  // **この注意書きは版を上げる差分には現れない**（`package.json` と lockfile しか動かず、ここの
+  // 指定子の綴りは変わらないので、レビューがこの行へ誘導されることは無い）。誘導は
+  // `CLAUDE.md` §3 の dotenv の項から一方向に張ってあり、**手順の実体はここに置く**（両方が
+  // 相手を指すと、探しに来た人がどちらにも手順を見つけられない）。
+  // **次に上げるときの手順**（上の数字はこれで測ったもの。約 10 行で済む）:
+  //   1. `node -e` で `Module._load` を差し替えてから `require('dotenv/config')` し、
+  //      読み込まれた組み込みモジュール名を集める → `child_process` 以外が増えていないか見る
+  //   2. 同じ子プロセスで `process.listenerCount('SIGINT'|'SIGTERM'|'SIGHUP'|'SIGQUIT')` を
+  //      import の前後で比べる → **0 から増えていないこと**（増えていたら CLI が無条件に走っている）
+  //   3. `dist/index.cjs` を `grep -o` で数え、`process.exit` / `spawn` / `process.kill` の出現が
+  //      `require.main === module` の内側に留まっているかをその場で読む
+  // 1 か 2 が動いたら、このコメントの数字を更新したうえで**エントリを残すか外すかを判断する**。
   const ALLOWED_BENCH_PACKAGES = new Set([
     'dotenv/config',
     'autocannon',

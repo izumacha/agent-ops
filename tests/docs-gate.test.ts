@@ -194,6 +194,32 @@ describe('Step0 の設計成果物', () => {
     );
   });
 
+  // README の見出しの「現在の段階」がロードマップと食い違っていないことを固定する。
+  // この行は CLAUDE.md §15 が言う「5 秒で伝わる要約」そのものなので、
+  // Step を足したときに更新し忘れると、README が自分の中で矛盾する
+  // (実際 Step3 を実装した PR で、見出しだけ Step2 のまま残っていた)
+  it('README の「現在の段階」がロードマップの最新の実装済み Step と一致する', () => {
+    // ロードマップの表から「実装済み」と書かれた行の Step 番号を集める
+    const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
+    const implemented = roadmap
+      .split('\n')
+      .filter((line) => /^\|\s*\d/.test(line) && line.includes('実装済み'))
+      .map((line) => Number(/^\|\s*(\d+)/.exec(line)?.[1]));
+    // 1 つも読めなければ照合が成り立たない (fail-closed)
+    expect(implemented.length, 'ロードマップに実装済みの Step が 1 つも無い').toBeGreaterThan(0);
+    // そのうち最大が「最新の実装済み Step」
+    const latest = Math.max(...implemented);
+    // README の見出しの行 (「現在の段階:」で始まる箇条書き)
+    const readme = readFileSync(join(process.cwd(), 'README.md'), 'utf8');
+    const statusLine = readme.split('\n').find((line) => line.includes('現在の段階:'));
+    // 行が無ければ照合が成り立たない (fail-closed)
+    expect(statusLine, 'README に「現在の段階」の行が無い').toBeDefined();
+    // その行が名乗る Step 番号が最新と一致すること
+    expect(statusLine, 'README の「現在の段階」がロードマップと食い違っている').toMatch(
+      new RegExp(`Step${latest}(?![0-9])`),
+    );
+  });
+
   // 生成元と計画書が消えていないことを固定する
   it('OpenAPI 定義とロードマップが存在する', () => {
     // 生成元と計画書の存在確認

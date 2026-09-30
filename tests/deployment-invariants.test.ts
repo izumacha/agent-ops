@@ -277,6 +277,7 @@ const NOT_DUPLICATED_IN_CI: Record<string, { kind: 'byOtherInvocation' | 'byCost
       why: '受け入れ基準の計測そのもの。CI で二重に回すと所要時間が倍になるので、削除はレビューで見る',
     },
     'npm run bench:proxy': { kind: 'byCost', why: '同上 (プロキシの追加遅延の計測)' },
+    'npm run bench:evaluation': { kind: 'byCost', why: '同上 (採点の再現率の計測)' },
   };
 
 describe('CI ワークフロー', () => {

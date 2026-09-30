@@ -21,6 +21,11 @@ import {
   USAGE_AGGREGATE_MAX_MS,
   USAGE_AGGREGATE_ROW_COUNT,
 } from '../scripts/lib/step2-criteria.mjs';
+// Step3 のベンチのしきい値 (同じくロードマップの散文と突き合わせる)
+import {
+  EVALUATION_AGREEMENT_MIN_PERCENT,
+  EVALUATION_BENCH_CASE_COUNT,
+} from '../scripts/lib/step3-criteria.mjs';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -171,6 +176,48 @@ describe('Step0 の設計成果物', () => {
     expect(stepRow, '投入件数がずれている').toContain(`${USAGE_AGGREGATE_ROW_COUNT / 10_000} 万件`);
     // 集計の上限 (散文は「≦ 1 秒」。定数はミリ秒なので秒へ直す)
     expect(stepRow, '集計の上限がずれている').toContain(`${USAGE_AGGREGATE_MAX_MS / 1_000} 秒`);
+  });
+
+  // Step3 の受け入れ基準のうち、ベンチが測る 2 つ (セットの件数・再現率) を散文と突き合わせる。
+  // Step2 と同じ理由 — 値はベンチとロードマップの 2 か所に現れるので、
+  // 「ベンチのしきい値だけを緩めて緑にする」変更をここで落とす
+  it('Step3 のベンチのしきい値がロードマップと一致する', () => {
+    // ロードマップの Step3 の行
+    const stepRow = roadmapStepRow(3);
+    // 固定評価セットの件数 (散文は「固定評価セット 100 件」。数字の途中への一致は許さない)
+    expect(stepRow, 'ロードマップの件数とベンチの件数がずれている').toMatch(
+      new RegExp(`(?<![0-9])${EVALUATION_BENCH_CASE_COUNT} 件`),
+    );
+    // 再現率の下限 (散文は「再現率 ≧ 90%」)
+    expect(stepRow, '再現率の下限がずれている').toMatch(
+      new RegExp(`(?<![0-9])${EVALUATION_AGREEMENT_MIN_PERCENT}%`),
+    );
+  });
+
+  // README の見出しの「現在の段階」がロードマップと食い違っていないことを固定する。
+  // この行は CLAUDE.md §15 が言う「5 秒で伝わる要約」そのものなので、
+  // Step を足したときに更新し忘れると、README が自分の中で矛盾する
+  // (実際 Step3 を実装した PR で、見出しだけ Step2 のまま残っていた)
+  it('README の「現在の段階」がロードマップの最新の実装済み Step と一致する', () => {
+    // ロードマップの表から「実装済み」と書かれた行の Step 番号を集める
+    const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
+    const implemented = roadmap
+      .split('\n')
+      .filter((line) => /^\|\s*\d/.test(line) && line.includes('実装済み'))
+      .map((line) => Number(/^\|\s*(\d+)/.exec(line)?.[1]));
+    // 1 つも読めなければ照合が成り立たない (fail-closed)
+    expect(implemented.length, 'ロードマップに実装済みの Step が 1 つも無い').toBeGreaterThan(0);
+    // そのうち最大が「最新の実装済み Step」
+    const latest = Math.max(...implemented);
+    // README の見出しの行 (「現在の段階:」で始まる箇条書き)
+    const readme = readFileSync(join(process.cwd(), 'README.md'), 'utf8');
+    const statusLine = readme.split('\n').find((line) => line.includes('現在の段階:'));
+    // 行が無ければ照合が成り立たない (fail-closed)
+    expect(statusLine, 'README に「現在の段階」の行が無い').toBeDefined();
+    // その行が名乗る Step 番号が最新と一致すること
+    expect(statusLine, 'README の「現在の段階」がロードマップと食い違っている').toMatch(
+      new RegExp(`Step${latest}(?![0-9])`),
+    );
   });
 
   // 生成元と計画書が消えていないことを固定する

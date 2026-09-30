@@ -23,9 +23,11 @@
     "db:seed": "prisma db seed",
     "bench:proxy": "tsx scripts/bench-proxy.ts",
     "bench:usage": "tsx scripts/bench-usage-aggregate.ts",
+    "bench:evaluation": "tsx scripts/bench-evaluation.ts",
     "gate:step0": "node scripts/gate-step0.mjs",
     "gate:step1": "node scripts/gate-step1.mjs",
-    "gate:step2": "node scripts/gate-step2.mjs"
+    "gate:step2": "node scripts/gate-step2.mjs",
+    "gate:step3": "node scripts/gate-step3.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",

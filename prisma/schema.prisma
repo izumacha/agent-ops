@@ -56,6 +56,25 @@ enum RuleAction {
   stop // 通知 + エージェントを suspended にする
 }
 
+// 評価実行の結果状態 (Step3)
+enum EvaluationRunStatus {
+  completed // 採点が成立した (除外があっても許容範囲内)
+  failed // 除外が多すぎて採点として使えない (しきい値は src/lib/constants.ts の EVALUATION_MAX_EXCLUSION_RATE)
+}
+
+// 採点をケース単位で除外した理由 (Step3)。**「幻覚 ID など不正出力の除外」の正本**で、
+// ゲート (scripts/gate-step3.mjs) はこの enum から期待するテスト名を導く (理由を足してテストを
+// 書き忘れたら落ちる)。判定の実装は src/domain/evaluation/judge-output.ts
+enum EvaluationExclusionReason {
+  unknown_case_id // judge がセットに無いケース ID を返した (幻覚 ID)
+  duplicate_case_id // judge が同じケース ID を 2 回返した
+  score_out_of_range // スコアが 0.0〜1.0 の範囲外
+  missing_score // スコアの項目が欠けている / 数値でない
+  unparsable_output // judge の応答を JSON として解釈できない
+  judge_unavailable // judge の呼び出しが失敗した (時間切れ・5xx・設定不足)
+  agent_unavailable // 評価対象エージェントの応答を得られなかった
+}
+
 // インシデントの状態 (Step4)
 enum IncidentStatus {
   open // 発生中 (未対応)
@@ -74,16 +93,17 @@ model Tenant {
   createdAt DateTime @default(now()) // 作成日時
   updatedAt DateTime @updatedAt // 更新日時 (自動更新)
 
-  users          User[] // 所属ユーザー
-  userTokens     UserToken[] // 発行済みログイントークン
-  agents         Agent[] // 登録エージェント
-  apiKeys        ApiKey[] // 発行 API キー
-  usageEvents    UsageEvent[] // 利用イベント
-  evaluationSets EvaluationSet[] // 評価セット
-  evaluationRuns EvaluationRun[] // 評価実行
-  guardrailRules GuardrailRule[] // ガードレール
-  incidents      Incident[] // インシデント
-  auditLogs      AuditLog[] // 監査ログ
+  users             User[] // 所属ユーザー
+  userTokens        UserToken[] // 発行済みログイントークン
+  agents            Agent[] // 登録エージェント
+  apiKeys           ApiKey[] // 発行 API キー
+  usageEvents       UsageEvent[] // 利用イベント
+  evaluationSets    EvaluationSet[] // 評価セット
+  evaluationRuns    EvaluationRun[] // 評価実行
+  evaluationResults EvaluationResult[] // 採点結果 (ケース単位)
+  guardrailRules    GuardrailRule[] // ガードレール
+  incidents         Incident[] // インシデント
+  auditLogs         AuditLog[] // 監査ログ
 
   @@index([createdAt]) // 一覧 (GET /tenants の createdAt 順のカーソル送り)
 }
@@ -209,41 +229,89 @@ model EvaluationSet {
   runs   EvaluationRun[] // このセットでの実行
 
   @@unique([tenantId, id]) // EvaluationRun の複合 FK (tenantId, setId) の参照先
-  @@index([tenantId]) // テナント絞り込み用
+  @@unique([tenantId, name]) // 同一テナント内で名前を重複させない (エージェントと同じ規律)
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
 }
 
 // 評価ケース (入力と期待出力の 1 組)
 model EvaluationCase {
   id       String  @id @default(cuid()) // 主キー
   setId    String // 所属する評価セット
+  position Int // セット内の並び順 (0 始まり)。id の採番規則に順序を頼らせない
   input    String // エージェントへの入力
   expected String? // 期待する出力 (任意。判定の参考情報)
 
-  set EvaluationSet @relation(fields: [setId], references: [id], onDelete: Cascade) // 親セット
+  set     EvaluationSet      @relation(fields: [setId], references: [id], onDelete: Cascade) // 親セット
+  results EvaluationResult[] // このケースの採点結果
+  // **@@index([setId]) は置かない** — 上の 2 つの一意索引がどちらも setId 先頭なので、
+  // `WHERE setId = $1` はその先頭列から引ける。単独の索引は書き込みのたびに費用を払うだけになる
 
-  @@index([setId]) // セット内列挙用
+  @@unique([setId, id]) // EvaluationResult の複合 FK (setId, caseId) の参照先。「別セットのケースを指す結果」を DB で弾く
+  @@unique([setId, position]) // セット内で並び順を重複させない
 }
 
 // 評価実行 (評価セット × エージェントの採点結果。Step3)
 model EvaluationRun {
-  id        String   @id @default(cuid()) // 主キー
-  tenantId  String // 所属テナント
-  agentId   String // 評価対象エージェント
-  setId     String // 使った評価セット
-  accuracy  Float // 正確性スコア (0.0〜1.0)
-  safety    Float // 安全性スコア (0.0〜1.0)
-  deviation Float // 逸脱スコア (0.0〜1.0。低いほど良い)
-  createdAt DateTime @default(now()) // 実行日時
+  id            String              @id @default(cuid()) // 主キー
+  tenantId      String // 所属テナント
+  agentId       String // 評価対象エージェント
+  setId         String // 使った評価セット
+  // 採点できたケースの平均。**null 許容なのが要点** — 1 件も採点できなかった実行を 0.0 で保存すると、
+  // Step4 の品質低下ルールがそれを「最低品質」と読んで誤発火する (「測れなかった」と「0 点」は別)
+  accuracy      Float? // 正確性スコア (0.0〜1.0)
+  safety        Float? // 安全性スコア (0.0〜1.0)
+  deviation     Float? // 逸脱スコア (0.0〜1.0。低いほど良い)
+  // 採点が成立したか。除外が多すぎる実行は failed にして、回帰比較の材料から外せるようにする
+  status        EvaluationRunStatus @default(completed)
+  scoredCases   Int // 採点できたケース数 (上の平均の分母)
+  excludedCases Int // 除外したケース数 (内訳は EvaluationResult.excludedReason)
+  // **どの judge が採点したかを残す。** 別の judge で採点した実行どうしを比べても意味が無いので、
+  // 回帰比較の前提としてスコアと同じ行に記録する
+  judgeProvider Provider // judge のプロバイダ
+  judgeModel    String // judge のモデル名
+  createdAt     DateTime            @default(now()) // 実行日時
 
-  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
+  tenant  Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
   // 対象エージェント (同テナントを複合 FK で保証)。評価履歴は回帰比較の根拠なので削除で消さない (Restrict)
-  agent  Agent         @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
+  agent   Agent              @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
   // 使った評価セット (同テナントを複合 FK で保証)。実行履歴を持つセットは削除できない (Restrict)
-  set    EvaluationSet @relation(fields: [tenantId, setId], references: [tenantId, id], onDelete: Restrict)
+  set     EvaluationSet      @relation(fields: [tenantId, setId], references: [tenantId, id], onDelete: Restrict)
+  results EvaluationResult[] // ケース単位の採点結果
 
-  @@index([tenantId, createdAt]) // 回帰比較 (テナント + 期間)
+  // EvaluationResult の複合 FK (tenantId, runId, setId) の参照先。**setId まで含めるのが要点** —
+  // これで「実行が使ったセットとは別のセットのケースを指す結果」を DB が拒否する
+  @@unique([tenantId, id, setId])
+  @@index([tenantId, agentId, setId, createdAt]) // 回帰比較 (同じエージェント × セットの直前の実行を引く)
+  @@index([tenantId, createdAt]) // 一覧 (テナント絞り込み + createdAt 順のカーソル送り)
   @@index([agentId]) // Restrict の解決・エージェント別履歴用
   @@index([setId]) // Restrict の解決・セット別履歴用
+}
+
+// 採点結果 (評価実行 × 評価ケースの 1 組。Step3)。**採点できたか、除外したかのどちらか**で、
+// 両立も両方 null も DB の CHECK 制約が拒否する (マイグレーションの生 SQL に書いてある)
+model EvaluationResult {
+  id             String                     @id @default(cuid()) // 主キー
+  tenantId       String // 所属テナント
+  runId          String // どの実行の結果か
+  setId          String // その実行が使った評価セット (複合 FK でケースとの整合を DB に守らせるために持つ)
+  caseId         String // どのケースの結果か
+  // 採点できたときのスコア (除外したケースでは null)
+  accuracy       Float? // 正確性 (0.0〜1.0)
+  safety         Float? // 安全性 (0.0〜1.0)
+  deviation      Float? // 逸脱 (0.0〜1.0。低いほど良い)
+  // 除外したときの理由 (採点できたケースでは null)
+  excludedReason EvaluationExclusionReason?
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント (テナント解約で一式消える)
+  // 親の実行 (同テナント・同セットを複合 FK で保証)。実行の付属物なので一緒に消える (Cascade)
+  run            EvaluationRun  @relation(fields: [tenantId, runId, setId], references: [tenantId, id, setId], onDelete: Cascade)
+  // 採点したケース (同セットであることを複合 FK で保証)。結果を持つケースは消せない (Restrict)
+  evaluationCase EvaluationCase @relation(fields: [setId, caseId], references: [setId, id], onDelete: Restrict)
+
+  @@unique([runId, caseId]) // 1 実行 1 ケースにつき結果は 1 行 (実行の詳細表示もこの先頭列から引く)
+  // **@@index([runId]) は置かない** — 上の一意索引が runId 先頭なので同じ理由 (EvaluationCase を参照)。
+  // この表は 1 実行につきケース数ぶん (最大 200 行) 書くので、余分な索引の費用が最も大きい
+  @@index([setId, caseId]) // Restrict の解決・ケース別履歴用
 }
 
 // ガードレールのしきい値ルール (Step4)

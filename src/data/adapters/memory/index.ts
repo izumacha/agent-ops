@@ -10,6 +10,8 @@ import type {
   ApiKeysPort,
   CreateAgentInput,
   CreateApiKeyInput,
+  CreateEvaluationRunInput,
+  CreateEvaluationSetInput,
   CreateTenantInput,
   CreateTenantResult,
   CreateUserInput,
@@ -17,6 +19,14 @@ import type {
   DailyUsageQuery,
   DailyUsageTotal,
   DeleteAgentResult,
+  EvaluationCaseRecord,
+  EvaluationResultRecord,
+  EvaluationRunFilter,
+  EvaluationRunRecord,
+  EvaluationRunWithResults,
+  EvaluationSetRecord,
+  EvaluationSetWithCases,
+  EvaluationsPort,
   ApiKeyLookup,
   Page,
   PageQuery,
@@ -35,8 +45,9 @@ import type {
   UserTokensPort,
   UsersPort,
 } from '@/data/ports';
-import { AgentStatus, Plan, Role } from '@/domain/types';
+import { AgentStatus, EvaluationRunStatus, Plan, Role } from '@/domain/types';
 import { formatUtcDay } from '@/domain/usage-window';
+import { compareCursorKeys } from '@/data/page';
 import { paginate } from './paginate';
 import { MemoryStore } from './store';
 
@@ -364,9 +375,10 @@ class MemoryAgents implements AgentsPort {
     // 対象行 (テナント境界内)
     const row = this.store.agents.get(id);
     if (!row || row.tenantId !== tenantId) return 'not_found';
-    // 履歴 (利用イベント) を持つエージェントは削除できない (本番では Restrict FK が拒否する)
-    const hasHistory = [...this.store.usageEvents.values()].some((event) => event.agentId === id);
-    if (hasHistory) return 'restricted';
+    // 履歴 (利用イベント・評価実行) を持つエージェントは削除できない (本番では Restrict FK が拒否する)
+    const hasUsage = [...this.store.usageEvents.values()].some((event) => event.agentId === id);
+    const hasRuns = [...this.store.evaluationRuns.values()].some((run) => run.agentId === id);
+    if (hasUsage || hasRuns) return 'restricted';
     // 設定 (API キー) は一緒に消える (本番の Cascade と同じ)
     for (const [keyId, key] of this.store.apiKeys) {
       if (key.agentId === id) this.store.apiKeys.delete(keyId);
@@ -513,6 +525,198 @@ class MemoryUsageEvents implements UsageEventsPort {
   }
 }
 
+// 評価 Port の memory 実装
+class MemoryEvaluations implements EvaluationsPort {
+  // 共有の表を受け取る
+  constructor(private readonly store: MemoryStore) {}
+
+  // 評価セットを作る (名前が重複していれば DuplicateError)
+  async createSet(input: CreateEvaluationSetInput): Promise<EvaluationSetWithCases> {
+    // 同じテナントに同じ名前のセットがあれば拒否する (本番の @@unique([tenantId, name]) と同じ)
+    for (const existing of this.store.evaluationSets.values()) {
+      if (existing.tenantId === input.tenantId && existing.name === input.name) {
+        throw new DuplicateError('name');
+      }
+    }
+    // セット本体
+    const set: EvaluationSetRecord = {
+      id: this.store.nextId('evalset'),
+      tenantId: input.tenantId,
+      name: input.name,
+      createdAt: this.store.now(),
+    };
+    // 表へ入れる
+    this.store.evaluationSets.set(set.id, set);
+    // ケースを配列の順に入れる (その順が position になる)
+    const cases = input.cases.map((item, index): EvaluationCaseRecord => {
+      // 1 ケース分の行
+      const row: EvaluationCaseRecord = {
+        id: this.store.nextId('evalcase'),
+        setId: set.id,
+        position: index,
+        input: item.input,
+        expected: item.expected,
+      };
+      // 表へ入れる
+      this.store.evaluationCases.set(row.id, row);
+      return row;
+    });
+    // 複製を返す (呼び出し側の書き換えで表が壊れないようにする)
+    return { set: clone(set), cases: cases.map(clone) };
+  }
+
+  // 評価セットを一覧する (テナント内)
+  async listSets(tenantId: string, query: PageQuery): Promise<Page<EvaluationSetRecord>> {
+    // テナントで絞ってからページに切る
+    const rows = [...this.store.evaluationSets.values()].filter((row) => row.tenantId === tenantId);
+    return paginate(rows, query);
+  }
+
+  // 評価セットをケースごと引く (他テナントのセットは null)
+  async findSet(tenantId: string, setId: string): Promise<EvaluationSetWithCases | null> {
+    // セット本体 (テナント境界内)
+    const set = this.store.evaluationSets.get(setId);
+    if (!set || set.tenantId !== tenantId) return null;
+    // そのセットのケースを position 昇順で集める
+    const cases = [...this.store.evaluationCases.values()]
+      .filter((row) => row.setId === setId)
+      .sort((left, right) => left.position - right.position);
+    // 複製を返す
+    return { set: clone(set), cases: cases.map(clone) };
+  }
+
+  // 実行結果を保存する (エージェントかセットが同テナントに無ければ null)
+  async createRun(input: CreateEvaluationRunInput): Promise<EvaluationRunWithResults | null> {
+    // 対象エージェント (本番では複合 FK (tenantId, agentId) が同じ判定をする)
+    const agent = this.store.agents.get(input.agentId);
+    if (!agent || agent.tenantId !== input.tenantId) return null;
+    // 使ったセット (同じく複合 FK (tenantId, setId) の判定)
+    const set = this.store.evaluationSets.get(input.setId);
+    if (!set || set.tenantId !== input.tenantId) return null;
+    // そのセットに実在するケース ID の集合 (本番では複合 FK (setId, caseId) が同じ判定をする)
+    const caseIds = new Set(
+      [...this.store.evaluationCases.values()]
+        .filter((row) => row.setId === input.setId)
+        .map((row) => row.id),
+    );
+    // **セット外のケース ID が 1 つでも混ざっていたら丸ごと断る** — prisma 側は複合 FK 違反で
+    // null になるので、ここで通すと memory だけ「別セットのケースの採点」を保存でき、
+    // API テスト (memory) と契約テスト (prisma) で挙動が割れる
+    if (input.results.some((item) => !caseIds.has(item.caseId))) return null;
+    // **同じケースの結果が 2 つ以上あっても断る** — prisma 側は一意制約 @@unique([runId, caseId])
+    // で止まるが、そちらは一意制約違反 (FK 違反ではない) なので createRun が null に写さず
+    // 例外のまま抜ける = HTTP 500 になる。memory がここで通すと、その形が API テストでは
+    // 緑のまま通り、本番でだけ 500 になる (しかも上流の呼び出しは済んでいる)
+    if (new Set(input.results.map((item) => item.caseId)).size !== input.results.length) {
+      return null;
+    }
+    // 実行本体
+    const run: EvaluationRunRecord = {
+      id: this.store.nextId('evalrun'),
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      setId: input.setId,
+      accuracy: input.accuracy,
+      safety: input.safety,
+      deviation: input.deviation,
+      status: input.status,
+      scoredCases: input.scoredCases,
+      excludedCases: input.excludedCases,
+      judgeProvider: input.judgeProvider,
+      judgeModel: input.judgeModel,
+      createdAt: this.store.now(),
+    };
+    // 表へ入れる
+    this.store.evaluationRuns.set(run.id, run);
+    // ケース単位の結果を入れる
+    const results = input.results.map((item): EvaluationResultRecord => {
+      // 1 件分の行
+      const row: EvaluationResultRecord = {
+        id: this.store.nextId('evalresult'),
+        tenantId: input.tenantId,
+        runId: run.id,
+        setId: input.setId,
+        caseId: item.caseId,
+        accuracy: item.accuracy,
+        safety: item.safety,
+        deviation: item.deviation,
+        excludedReason: item.excludedReason,
+      };
+      // 表へ入れる
+      this.store.evaluationResults.set(row.id, row);
+      return row;
+    });
+    // 複製を返す
+    return { run: clone(run), results: results.map(clone) };
+  }
+
+  // 実行を一覧する (テナント内。エージェント・セットで絞れる)
+  async listRuns(
+    tenantId: string,
+    query: PageQuery,
+    filter: EvaluationRunFilter = {},
+  ): Promise<Page<EvaluationRunRecord>> {
+    // テナントと絞り込み条件で残す行を決める
+    const rows = [...this.store.evaluationRuns.values()].filter((row) => {
+      // 他テナントの行は出さない
+      if (row.tenantId !== tenantId) return false;
+      // エージェントの指定があれば一致する行だけ
+      if (filter.agentId !== undefined && row.agentId !== filter.agentId) return false;
+      // セットの指定があれば一致する行だけ
+      if (filter.setId !== undefined && row.setId !== filter.setId) return false;
+      return true;
+    });
+    // ページに切る
+    return paginate(rows, query);
+  }
+
+  // 実行を結果ごと引く (他テナントの実行は null)
+  async findRun(tenantId: string, runId: string): Promise<EvaluationRunWithResults | null> {
+    // 実行本体 (テナント境界内)
+    const run = this.store.evaluationRuns.get(runId);
+    if (!run || run.tenantId !== tenantId) return null;
+    // ケースの position 昇順に並べたいので、ケースの位置を引けるようにする
+    const positions = new Map(
+      [...this.store.evaluationCases.values()].map((row) => [row.id, row.position]),
+    );
+    // その実行の結果を集めて並べる
+    const results = [...this.store.evaluationResults.values()]
+      .filter((row) => row.runId === runId)
+      .sort(
+        (left, right) => (positions.get(left.caseId) ?? 0) - (positions.get(right.caseId) ?? 0),
+      );
+    // 複製を返す
+    return { run: clone(run), results: results.map(clone) };
+  }
+
+  // 同じエージェント × セットの、その実行より前の最新の実行 (回帰比較の相手)
+  async findPreviousRun(
+    tenantId: string,
+    run: EvaluationRunRecord,
+  ): Promise<EvaluationRunRecord | null> {
+    // 同じ組み合わせで、位置がその実行より前の行だけを残す。
+    // **failed の実行は比較相手にしない** — 除外が多すぎてスコアが null なので、
+    // 比べても差が出ず「前回より下がった/上がった」を判定できない
+    // (prisma/schema.prisma の status の説明どおり、回帰比較の材料から外す)
+    const candidates = [...this.store.evaluationRuns.values()].filter(
+      (row) =>
+        row.tenantId === tenantId &&
+        row.agentId === run.agentId &&
+        row.setId === run.setId &&
+        row.status === EvaluationRunStatus.completed &&
+        // **同じ judge で採点した実行だけを相手にする** (理由は prisma アダプタと同じ)
+        row.judgeProvider === run.judgeProvider &&
+        row.judgeModel === run.judgeModel &&
+        compareCursorKeys(row, run) < 0,
+    );
+    // 1 つも無ければ比較相手が無い (初回の実行)
+    if (candidates.length === 0) return null;
+    // 並べて最後 (= 直前) を返す
+    candidates.sort(compareCursorKeys);
+    return clone(candidates[candidates.length - 1]);
+  }
+}
+
 // memory アダプタ一式を組み立てる (テストはこれを setReposForTesting へ渡し、store で seed する)
 export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repositories & {
   store: MemoryStore;
@@ -526,6 +730,7 @@ export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repos
     agents: new MemoryAgents(store),
     apiKeys: new MemoryApiKeys(store),
     usageEvents: new MemoryUsageEvents(store),
+    evaluations: new MemoryEvaluations(store),
   };
 }
 

@@ -43,3 +43,23 @@ export type RuleAction = (typeof RuleAction)[keyof typeof RuleAction];
 export const IncidentStatus = { open: 'open', resolved: 'resolved' } as const;
 // IncidentStatus の値の型
 export type IncidentStatus = (typeof IncidentStatus)[keyof typeof IncidentStatus];
+
+// 評価実行の結果状態 (Step3)
+export const EvaluationRunStatus = { completed: 'completed', failed: 'failed' } as const;
+// EvaluationRunStatus の値の型
+export type EvaluationRunStatus = (typeof EvaluationRunStatus)[keyof typeof EvaluationRunStatus];
+
+// 採点をケース単位で除外した理由 (Step3)。**「不正出力の除外」の正本はこの表**で、
+// ゲート (scripts/gate-step3.mjs) はここから期待するテスト名を導く
+export const EvaluationExclusionReason = {
+  unknown_case_id: 'unknown_case_id', // judge がセットに無いケース ID を返した (幻覚 ID)
+  duplicate_case_id: 'duplicate_case_id', // judge が同じケース ID を 2 回返した
+  score_out_of_range: 'score_out_of_range', // スコアが 0.0〜1.0 の範囲外
+  missing_score: 'missing_score', // スコアの項目が欠けている / 数値でない
+  unparsable_output: 'unparsable_output', // judge の応答を JSON として解釈できない
+  judge_unavailable: 'judge_unavailable', // judge の呼び出しが失敗した (時間切れ・5xx・設定不足)
+  agent_unavailable: 'agent_unavailable', // 評価対象エージェントの応答を得られなかった
+} as const;
+// EvaluationExclusionReason の値の型
+export type EvaluationExclusionReason =
+  (typeof EvaluationExclusionReason)[keyof typeof EvaluationExclusionReason];

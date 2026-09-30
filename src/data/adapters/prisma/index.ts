@@ -12,6 +12,8 @@ import type {
   ApiKeysPort,
   CreateAgentInput,
   CreateApiKeyInput,
+  CreateEvaluationRunInput,
+  CreateEvaluationSetInput,
   CreateTenantInput,
   CreateTenantResult,
   CreateUserInput,
@@ -19,6 +21,12 @@ import type {
   DailyUsageQuery,
   DailyUsageTotal,
   DeleteAgentResult,
+  EvaluationRunFilter,
+  EvaluationRunRecord,
+  EvaluationRunWithResults,
+  EvaluationSetRecord,
+  EvaluationSetWithCases,
+  EvaluationsPort,
   ApiKeyLookup,
   Page,
   PageQuery,
@@ -37,7 +45,7 @@ import type {
   UserTokensPort,
   UsersPort,
 } from '@/data/ports';
-import { Plan, Role, type AgentStatus } from '@/domain/types';
+import { EvaluationRunStatus, Plan, Role, type AgentStatus } from '@/domain/types';
 import { Prisma, type PrismaClient } from '@/generated/prisma';
 
 // Prisma のエラーコード (https://www.prisma.io/docs/reference/api-reference/error-reference)
@@ -675,6 +683,170 @@ class PrismaUsageEvents implements UsageEventsPort {
   }
 }
 
+// 評価 Port の prisma 実装。**ケースは必ず親のセット経由で辿る** (子テーブルに tenantId が無いので、
+// setId だけで直接引くとテナント境界を跨げる。docs/spec.md §3)
+class PrismaEvaluations implements EvaluationsPort {
+  // クライアントを受け取る
+  constructor(private readonly db: PrismaClient) {}
+
+  // 評価セットを作る (名前重複は DuplicateError)
+  async createSet(input: CreateEvaluationSetInput): Promise<EvaluationSetWithCases> {
+    // セットとケースを 1 つのトランザクションで入れる (途中で落ちてケースだけ残る状態を作らない)
+    try {
+      // 入れ子の create でケースごと作る
+      const created = await this.db.evaluationSet.create({
+        data: {
+          tenantId: input.tenantId,
+          name: input.name,
+          // 配列の順がそのまま position になる
+          cases: {
+            create: input.cases.map((item, index) => ({
+              position: index,
+              input: item.input,
+              expected: item.expected,
+            })),
+          },
+        },
+        // 作ったケースも position 昇順で受け取る
+        include: { cases: { orderBy: { position: 'asc' } } },
+      });
+      // セットとケースに分けて返す
+      const { cases, ...set } = created;
+      return { set, cases };
+    } catch (error) {
+      // 同じテナントに同じ名前のセットがあれば 422 へ翻訳する
+      rethrowDuplicate(error, 'name');
+    }
+  }
+
+  // セットの一覧 (テナントで絞る)
+  async listSets(tenantId: string, query: PageQuery): Promise<Page<EvaluationSetRecord>> {
+    // 1 件多く取って Page へ整形する
+    const rows = await this.db.evaluationSet.findMany(pageArgs(query, { tenantId }));
+    return toPage(rows, query.limit);
+  }
+
+  // セットをケースごと引く (テナント境界を跨がない)
+  async findSet(tenantId: string, setId: string): Promise<EvaluationSetWithCases | null> {
+    // 複合一意 (tenantId, id) で引き、ケースは position 昇順で付ける
+    const found = await this.db.evaluationSet.findUnique({
+      where: { tenantId_id: { tenantId, id: setId } },
+      include: { cases: { orderBy: { position: 'asc' } } },
+    });
+    // 見つからなければ null (他テナントのセットも同じ)
+    if (found === null) return null;
+    // セットとケースに分けて返す
+    const { cases, ...set } = found;
+    return { set, cases };
+  }
+
+  // 実行結果を保存する (エージェントかセットが同テナントに無ければ null)
+  async createRun(input: CreateEvaluationRunInput): Promise<EvaluationRunWithResults | null> {
+    // 実行と結果を 1 つのトランザクションで入れる
+    try {
+      // 入れ子の create で結果ごと作る
+      const created = await this.db.evaluationRun.create({
+        data: {
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          setId: input.setId,
+          accuracy: input.accuracy,
+          safety: input.safety,
+          deviation: input.deviation,
+          status: input.status,
+          scoredCases: input.scoredCases,
+          excludedCases: input.excludedCases,
+          judgeProvider: input.judgeProvider,
+          judgeModel: input.judgeModel,
+          // 結果はケース単位。**tenantId / setId は書かない** — どちらも親の実行への複合 FK
+          // (tenantId, runId, setId) の一部なので Prisma が実行の値から埋める。
+          // 明示すると「Unknown argument」で落ちるうえ、書けると実行とずれた値を入れられてしまう
+          results: {
+            create: input.results.map((item) => ({
+              caseId: item.caseId,
+              accuracy: item.accuracy,
+              safety: item.safety,
+              deviation: item.deviation,
+              excludedReason: item.excludedReason,
+            })),
+          },
+        },
+        // 結果はケースの position 昇順で受け取る
+        include: { results: { orderBy: { evaluationCase: { position: 'asc' } } } },
+      });
+      // 実行と結果に分けて返す
+      const { results, ...run } = created;
+      return { run, results };
+    } catch (error) {
+      // 複合 FK 違反 = 同テナントにそのエージェント/セット/ケースが居ない
+      if (isPrismaError(error, FOREIGN_KEY_VIOLATION)) return null;
+      // それ以外は握り潰さず投げ直す
+      throw error;
+    }
+  }
+
+  // 実行の一覧 (テナント + エージェント + セットで絞る)
+  async listRuns(
+    tenantId: string,
+    query: PageQuery,
+    filter: EvaluationRunFilter = {},
+  ): Promise<Page<EvaluationRunRecord>> {
+    // 絞り込み条件 (指定があるものだけ足す)
+    const where = {
+      tenantId,
+      ...(filter.agentId !== undefined ? { agentId: filter.agentId } : {}),
+      ...(filter.setId !== undefined ? { setId: filter.setId } : {}),
+    };
+    // 1 件多く取って Page へ整形する
+    const rows = await this.db.evaluationRun.findMany(pageArgs(query, where));
+    return toPage(rows, query.limit);
+  }
+
+  // 実行を結果ごと引く (テナント境界を跨がない)
+  async findRun(tenantId: string, runId: string): Promise<EvaluationRunWithResults | null> {
+    // テナントと id の両方で絞る (複合一意は (tenantId, id, setId) なので findFirst で引く)
+    const found = await this.db.evaluationRun.findFirst({
+      where: { tenantId, id: runId },
+      include: { results: { orderBy: { evaluationCase: { position: 'asc' } } } },
+    });
+    // 見つからなければ null (他テナントの実行も同じ)
+    if (found === null) return null;
+    // 実行と結果に分けて返す
+    const { results, ...run } = found;
+    return { run, results };
+  }
+
+  // 同じエージェント × セットの、その実行より前の最新の実行 (回帰比較の相手)
+  async findPreviousRun(
+    tenantId: string,
+    run: EvaluationRunRecord,
+  ): Promise<EvaluationRunRecord | null> {
+    // 並び順は一覧と同じ (createdAt, id) の昇順なので、その位置より「前」を降順の先頭で引く。
+    // 同時刻の実行が 2 件あっても id で決まるので、比較相手が入れ替わらない。
+    // **failed の実行は比較相手にしない** — 除外が多すぎてスコアが null なので、
+    // 比べても差が出ず「前回より下がった/上がった」を判定できない
+    // (prisma/schema.prisma の status の説明どおり、回帰比較の材料から外す)
+    return this.db.evaluationRun.findFirst({
+      where: {
+        tenantId,
+        agentId: run.agentId,
+        setId: run.setId,
+        status: EvaluationRunStatus.completed,
+        // **同じ judge で採点した実行だけを相手にする** (schema.prisma の judgeProvider の説明)。
+        // 別の judge の採点と比べた差は「エージェントが変わった」ことを示さないのに、
+        // 応答は差の数値しか返さないので、judge を替えた直後の回帰に見えてしまう
+        judgeProvider: run.judgeProvider,
+        judgeModel: run.judgeModel,
+        OR: [
+          { createdAt: { lt: run.createdAt } },
+          { createdAt: run.createdAt, id: { lt: run.id } },
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+  }
+}
+
 // prisma アダプタ一式を組み立てる (Composition Root と契約テストが呼ぶ)
 export function createPrismaRepos(db: PrismaClient): Repositories {
   // 各 Port を同じクライアントで結線して返す
@@ -685,5 +857,6 @@ export function createPrismaRepos(db: PrismaClient): Repositories {
     agents: new PrismaAgents(db),
     apiKeys: new PrismaApiKeys(db),
     usageEvents: new PrismaUsageEvents(db),
+    evaluations: new PrismaEvaluations(db),
   };
 }

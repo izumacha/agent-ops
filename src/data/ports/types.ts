@@ -1,7 +1,14 @@
 // データ層の Port が扱うレコード型とページネーション型 (Prisma / Next 非依存)。
 // API 層と memory / prisma アダプタが共通で使う。Prisma の生成型を使わないのは、
 // memory アダプタと API テストが `npm run db:generate` 無しでも動くようにするため
-import type { AgentStatus, Plan, Provider, Role } from '@/domain/types';
+import type {
+  AgentStatus,
+  EvaluationExclusionReason,
+  EvaluationRunStatus,
+  Plan,
+  Provider,
+  Role,
+} from '@/domain/types';
 
 // カーソルが指す位置 (createdAt, id)。符号化・復号の規則は src/data/page.ts
 export interface CursorKey {
@@ -106,4 +113,59 @@ export interface UsageEventRecord {
   // 上流の HTTP ステータス
   statusCode: number;
   createdAt: Date;
+}
+
+// 評価セット (LLM-as-judge の固定入力集合)
+export interface EvaluationSetRecord {
+  id: string;
+  tenantId: string;
+  name: string;
+  createdAt: Date;
+}
+
+// 評価ケース (入力と期待出力の 1 組)。**tenantId を持たない** —
+// 親の EvaluationSet 経由でしか到達しない子テーブルなので、テナントの絞り込みは親で行う
+// (docs/spec.md §3。setId だけで直接引かない)
+export interface EvaluationCaseRecord {
+  id: string;
+  setId: string;
+  // セット内の並び順 (0 始まり)
+  position: number;
+  input: string;
+  // 期待する出力 (無ければ null)
+  expected: string | null;
+}
+
+// 評価実行 (評価セット × エージェントの採点結果)
+export interface EvaluationRunRecord {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  setId: string;
+  // 採点できたケースの平均 (1 件も採点できなければ null)
+  accuracy: number | null;
+  safety: number | null;
+  deviation: number | null;
+  // 採点として使えるか
+  status: EvaluationRunStatus;
+  // 採点できた件数 / 除外した件数
+  scoredCases: number;
+  excludedCases: number;
+  // どの judge が採点したか (別の judge の実行どうしを比べても意味が無いので残す)
+  judgeProvider: Provider;
+  judgeModel: string;
+  createdAt: Date;
+}
+
+// 採点結果 (実行 × ケース)。スコア 3 つか除外理由のどちらかを持つ (DB の CHECK 制約と同じ規律)
+export interface EvaluationResultRecord {
+  id: string;
+  tenantId: string;
+  runId: string;
+  setId: string;
+  caseId: string;
+  accuracy: number | null;
+  safety: number | null;
+  deviation: number | null;
+  excludedReason: EvaluationExclusionReason | null;
 }

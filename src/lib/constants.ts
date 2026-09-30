@@ -1,7 +1,7 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
-import { AgentStatus, Role } from '@/domain/types';
+import { AgentStatus, Provider, Role } from '@/domain/types';
 
 // アプリ名 (画面タイトル等で使う)
 export const APP_NAME = 'Agent Ops';
@@ -64,6 +64,55 @@ export const UPSTREAM_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 // 上限を超えた申告は「トークン数を読めなかった」として扱い、料金 0 の行を必ず 1 行残す
 // (ADR-0007 決定 5)。列の型を変えるときはここも合わせる
 export const USAGE_TOKENS_MAX = 2_147_483_647;
+// ─────────────────────────────────────────────
+// 品質評価 (Step3) の上限値と既定値。judge の結線・実行の刻み方はここが唯一の参照元
+// ─────────────────────────────────────────────
+
+// 1 つの評価セットに入れられるケース数の上限。受け入れ基準の「固定評価セット 100 件」を
+// 余裕をもって満たす件数の歯止め (§8/§9: 1 リクエストで無制限のケースを作らせない)。
+//
+// **この件数だけでは本文の大きさを縛れない。先に効くのは JSON_BODY_MAX_BYTES (64 KiB) のほう。**
+// 1 ケースは input・expected とも最大 LONG_TEXT_MAX_LENGTH (1000 文字) 書けるので、長い本文を
+// 並べれば 100 件に届く前に 413 になる (JSON の飾りを除いた 1 ケースあたりの取り分は、
+// 200 件なら約 310 バイト、100 件でも約 640 バイト)。
+// つまり**上限は「件数 200」と「本文 64 KiB」の小さいほう**で、短い入力なら件数が、
+// 長い入力なら本文サイズが先に当たる。
+// 本文の上限を上げて解く道は取らない — JSON_BODY_MAX_BYTES と ENTRY_MAX_BODY_BYTES は
+// 未認証の相手に握らせるヒープを実測して決めた値 (src/lib/body-limits.ts) で、全経路に効く。
+// 長いケースを並べたくなったら、全体を緩めるのではなくこの経路だけの上限を足すこと
+export const EVALUATION_SET_MAX_CASES = 200;
+// judge へ 1 回で採点させるケース数。**1 件ずつにしない** — ケース ID を返させる形が
+// 成り立たなくなり、受け入れ基準が求める「幻覚 ID の除外」を試す経路そのものが消える。
+// 大きすぎると 1 回の応答が長くなって解析に失敗しやすくなるので、その間を取る
+export const EVALUATION_JUDGE_BATCH_SIZE = 10;
+// 上流 (エージェント応答の生成・judge の採点) を同時に走らせる本数。
+// 1 実行で最大 EVALUATION_SET_MAX_CASES 回の往復が起きるので、逐次だと待ち時間が積み上がる
+export const EVALUATION_CONCURRENCY = 4;
+// 評価が上流 1 回を待つ上限 (ミリ秒)。**プロキシ経路の UPSTREAM_TIMEOUT_MS (120 秒) を使わない** —
+// 評価は 1 リクエストの中で「ケース数 ÷ 同時実行数」回ぶんの待ち時間が積み上がるので、
+// 1 回あたりを長くすると実行全体が配備先の関数タイムアウトに届き、
+// **上流には課金されたのに実行の記録が 1 行も残らない**状態になる (ADR-0009 の「残る境界」)。
+// 生成は max_tokens を EVALUATION_AGENT_MAX_TOKENS / JUDGE_MAX_TOKENS に絞ってあるので短く済む
+export const EVALUATION_UPSTREAM_TIMEOUT_MS = 30_000;
+// 除外がこの割合を超えた実行は failed とする (採点として使えないため)。
+// **0 ではなく 1 でもない**: 数件の除外で実行ごと捨てると回帰比較が途切れ、逆に全件除外でも
+// completed のままだと「スコアが無い実行」が比較対象に並ぶ。半分を境にする
+export const EVALUATION_MAX_EXCLUSION_RATE = 0.5;
+// judge へ渡すエージェント応答の長さの上限 (文字)。超えた分は切り詰める。
+// 上限が無いと、長い応答が 1 件あるだけで judge への本文が膨らみ、そのバッチ全体が失敗する
+export const EVALUATION_RESPONSE_MAX_CHARS = 4000;
+// 応答を切り詰めたことを示す印 (judge に「ここで切れている」と伝えるため本文へ足す)
+export const EVALUATION_TRUNCATION_MARK = '…(以下省略)';
+// judge の既定のプロバイダ (環境変数 JUDGE_PROVIDER で上書きできる)
+export const JUDGE_DEFAULT_PROVIDER = Provider.anthropic;
+// judge の既定のモデル (環境変数 JUDGE_MODEL で上書きできる)。採点は短い JSON を返すだけなので
+// 安いモデルを既定にする。**綴りをコードへ散らさない** (§9 モデル名は定数か環境変数で管理する)
+export const JUDGE_DEFAULT_MODEL = 'claude-haiku-4-5';
+// judge に生成させる上限トークン数 (返すのは短い JSON なので小さくてよい)
+export const JUDGE_MAX_TOKENS = 1024;
+// 評価対象エージェントに生成させる上限トークン数
+export const EVALUATION_AGENT_MAX_TOKENS = 1024;
+
 // JSON 本文の上限 (バイト) の再公開。値そのものは `src/lib/body-limits.ts` が持つ
 // (`next.config.ts` が import する都合で、あちらは `@/...` を含まない定数だけのファイルにしてある)
 export { JSON_BODY_MAX_BYTES, JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
@@ -116,6 +165,9 @@ export const API_MESSAGES = {
   invalidDecimalInteger: '10 進の整数で指定してください。',
   invalidCursor: 'cursor の形式が不正です。前の応答の nextCursor をそのまま指定してください。',
   microUsdOutOfRange: `0 以上 ${MICRO_USD_MAX.toString()} 以下の整数を文字列で指定してください。`,
+  evaluationSetEmpty: '評価ケースを 1 件以上指定してください。',
+  evaluationSetTooLarge: `評価ケースは最大 ${EVALUATION_SET_MAX_CASES} 件までです。`,
+  judgeNotConfigured: '採点用モデルの設定が正しくありません。',
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;
 

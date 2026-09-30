@@ -21,6 +21,11 @@ import {
   USAGE_AGGREGATE_MAX_MS,
   USAGE_AGGREGATE_ROW_COUNT,
 } from './step2-criteria.mjs';
+import {
+  EVALUATION_AGREEMENT_MIN_PERCENT,
+  EVALUATION_BENCH_CASE_COUNT,
+  maxDisagreedCases,
+} from './step3-criteria.mjs';
 
 // 捨て玉 (ウォームアップ) の最大遅延に置く上限 (ミリ秒)。
 // **受け入れ基準の 50ms から導かない。** あちらは「プロキシ経由と直接の差」の予算で、こちらは
@@ -164,6 +169,64 @@ export function aggregateLatencyProblem(slowestMs) {
   return `集計が遅すぎます: ${slowestMs}ms (上限 ${USAGE_AGGREGATE_MAX_MS}ms、${USAGE_AGGREGATE_ROW_COUNT} 件)`;
 }
 
+/**
+ * 再現率のベンチが**受け入れ基準どおりの件数**を採点したかを判定する。
+ * **これが無いと縮めて通せる** — 5 件だけ採点して 1 件も食い違わなければ一致率 100% になり、
+ * 「固定評価セット 100 件で」という基準の前半が黙って消える
+ * @param {number} cases 採点したケース数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function benchCaseCountProblem(cases) {
+  // 基準どおりの件数なら問題なし
+  if (cases === EVALUATION_BENCH_CASE_COUNT) return null;
+  // 違えば測っているものが基準と違う
+  return `採点したケースが ${cases} 件です (受け入れ基準は ${EVALUATION_BENCH_CASE_COUNT} 件)`;
+}
+
+/**
+ * 2 回目の採点に**揺れが実際に注入されたか**を判定する。
+ * **これが無いと計測そのものが何も検査しない** — 決定論的なスタブに対して同じ採点を 2 回すれば
+ * 一致率は必ず 100% になり、一致の判定を「常に true」に変えても緑のまま通る
+ * @param {number} flippedCases スタブが 2 回目に違うスコアを返したケース数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function injectedVarianceProblem(flippedCases) {
+  // 1 件以上揺らしていれば問題なし
+  if (flippedCases > 0) return null;
+  // 揺れが無ければ一致率は必ず 100% になり、計測に意味が無い
+  return '2 回目の採点に揺れが 1 件も注入されていません (一致率が常に 100% になり計測になりません)';
+}
+
+/**
+ * 上流 (エージェント・judge) を実際に呼んだかを判定する。
+ * 1 度も呼ばずに出した一致率は、経路を通っていないので基準の証拠にならない
+ * @param {number} requests 上流への呼び出し回数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function upstreamRequestsProblem(requests) {
+  // 1 回以上呼んでいれば問題なし
+  if (requests > 0) return null;
+  // 0 回なら計測として成立していない
+  return '上流を 1 度も呼んでいません (評価の経路を通らずに結果を出しています)';
+}
+
+/**
+ * 受け入れ基準「固定評価セット 100 件で採点の再現率 ≧ 90%」を判定する。
+ * **一致率ではなく「食い違った件数」で見る**のは、ゲートの共通判定が「実測値 ≦ 上限」の形しか
+ * 扱わないため。上限は引数で受け取らず自分で導く (実測値と上限の入れ替えを起こさない)
+ * @param {number} disagreedCases 2 回の結果が食い違ったケース数
+ * @param {number} cases 採点したケース数 (上限の分母)
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function disagreementProblem(disagreedCases, cases) {
+  // その件数に対して許される食い違いの上限
+  const limit = maxDisagreedCases(cases);
+  // 上限以内なら問題なし
+  if (disagreedCases <= limit) return null;
+  // 超えていれば再現率が基準を下回っている
+  return `再現率が低すぎます: ${cases} 件中 ${disagreedCases} 件が食い違いました (上限 ${limit} 件 = 再現率 ${EVALUATION_AGREEMENT_MIN_PERCENT}%)`;
+}
+
 // ベンチごとの受け入れ基準の表。**「どの値を、どの判定に掛けるか」の唯一の定義。**
 //
 // **要点は「判定へ渡す値を、出力 JSON に載せる値そのものから読む」こと。** 以前はベンチ本体が
@@ -196,6 +259,17 @@ const BENCH_CRITERIA = {
   'usage-aggregate': [
     // 受け入れ基準そのもの (1 万件の集計 ≦ 上限)
     { fields: ['slowestMs'], judge: aggregateLatencyProblem },
+  ],
+  // 採点の再現率ベンチ (scripts/bench-evaluation.ts)
+  'evaluation-agreement': [
+    // 基準どおりの件数を採点したか (縮めて通せないように)
+    { fields: ['cases'], judge: benchCaseCountProblem },
+    // 2 回目に揺れが注入されたか (無いと一致率が常に 100% になり計測にならない)
+    { fields: ['flippedCases'], judge: injectedVarianceProblem },
+    // 上流を実際に呼んだか (経路を通らずに出した一致率は証拠にならない)
+    { fields: ['upstreamRequests'], judge: upstreamRequestsProblem },
+    // 受け入れ基準そのもの (食い違い ≦ 上限 = 再現率 ≧ 90%)
+    { fields: ['disagreedCases', 'cases'], judge: disagreementProblem },
   ],
 };
 

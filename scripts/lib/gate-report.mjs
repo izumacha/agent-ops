@@ -183,6 +183,74 @@ export function evaluateStep2Report({
 }
 
 /**
+ * 除外理由のそれぞれについて、pass した「除外: <理由>」のテストが見つからないものを返す。
+ * **期待するテスト名は除外理由の一覧 (正本の enum) から導く** — ここに書き写すと、
+ * 理由を足した人がテストを書き忘れてもゲートは緑のままになる (料金表と同じ形)。
+ * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
+ * @param {{ reasons: string[], exclusionPrefix: string }} exclusion 除外理由の一覧とテスト名の接頭辞
+ * @returns {string[]} 見つからなかった理由の配列 (すべて揃っていれば空)
+ */
+export function missingExclusionCases(report, { reasons, exclusionPrefix }) {
+  // 「除外: <理由>」を含む pass したテストがあるか
+  return missingPassedCases(
+    report,
+    reasons,
+    (reason) => `${exclusionPrefix}${reason}`,
+    (reason) => reason,
+  );
+}
+
+/**
+ * Step3 の受け入れ基準のうち、テストレポートから判定できるぶんを見る。
+ * Step2 までの基準 (件数・RBAC 行列・料金計算・失敗 0) は**引き継ぐ** — ゲートは常に最新 Step の
+ * ものだけを回すので、ここで引き継がないと前の Step の基準が誰にも見られなくなる。
+ * 再現率はテストではなくベンチ (scripts/bench-evaluation.ts) が測るので、ここでは扱わない。
+ * @param {object} input 判定材料 (Step2 のものに除外理由の一覧を足したもの)
+ * @param {number} input.testStatus `npm run test` の終了コード
+ * @param {object} input.report vitest の JSON レポート
+ * @param {number} input.requiredPassedTests pass したテストの下限
+ * @param {string[]} input.roles 役割の一覧
+ * @param {string[]} input.actions 操作の一覧
+ * @param {string} input.matrixPrefix RBAC 行列テストの名前の接頭辞
+ * @param {{ provider: string, model: string }[]} input.models 料金表のモデル一覧
+ * @param {string} input.pricePrefix 料金テストの名前の接頭辞
+ * @param {string[]} input.reasons 除外理由の一覧 (正本の enum から導く)
+ * @param {string} input.exclusionPrefix 除外テストの名前の接頭辞
+ * @returns {string[]} 失敗の理由 (基準を満たしていれば空)
+ */
+export function evaluateStep3Report({
+  testStatus,
+  report,
+  requiredPassedTests,
+  roles,
+  actions,
+  matrixPrefix,
+  models,
+  pricePrefix,
+  reasons,
+  exclusionPrefix,
+}) {
+  // Step2 までの基準をそのまま引き継ぐ
+  const failures = evaluateStep2Report({
+    testStatus,
+    report,
+    requiredPassedTests,
+    roles,
+    actions,
+    matrixPrefix,
+    models,
+    pricePrefix,
+  });
+  // 除外理由を 1 件も読めなければ、照合が空振りしている (fail-closed)
+  if (reasons.length === 0) failures.push('除外理由を 1 件も読めません');
+  // 全種類の除外理由に、pass したテストがあること
+  const missing = missingExclusionCases(report, { reasons, exclusionPrefix });
+  if (missing.length > 0) failures.push(`不正出力の除外テストが不足/失敗: ${missing.join(', ')}`);
+  // 判定結果
+  return failures;
+}
+
+/**
  * ベンチ 1 本の実行結果 (終了コードと標準出力) を、受け入れ基準の観点で判定する。
  *
  * **ゲートが終了コードだけを見ていた穴を塞ぐ。** ベンチの中で受け入れ基準を強制していても、

@@ -3,6 +3,10 @@
 import type {
   AgentRecord,
   ApiKeyRecord,
+  EvaluationCaseRecord,
+  EvaluationResultRecord,
+  EvaluationRunRecord,
+  EvaluationSetRecord,
   TenantRecord,
   UsageEventRecord,
   UserRecord,
@@ -27,6 +31,14 @@ export class MemoryStore {
   // 利用イベント (プロキシが中継した呼び出しの記録)。本番の Restrict FK と同じく、
   // ここに行があるエージェントは削除できない (Step2 より前は Set の仮置きで模していた)
   readonly usageEvents = new Map<string, UsageEventRecord>();
+  // 評価セット (LLM-as-judge の固定入力集合)
+  readonly evaluationSets = new Map<string, EvaluationSetRecord>();
+  // 評価ケース (親セット経由でしか触らない。テナントの絞り込みは親で行う)
+  readonly evaluationCases = new Map<string, EvaluationCaseRecord>();
+  // 評価実行 (本番の Restrict FK と同じく、ここに行があるエージェント・セットは削除できない)
+  readonly evaluationRuns = new Map<string, EvaluationRunRecord>();
+  // 採点結果 (実行 × ケース)
+  readonly evaluationResults = new Map<string, EvaluationResultRecord>();
   // 採番用の連番 (cuid の代わり。テストで読みやすいよう接頭辞 + 連番にする)
   private sequence = 0;
 

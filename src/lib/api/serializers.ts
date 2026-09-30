@@ -4,6 +4,10 @@ import type {
   AgentRecord,
   ApiKeyRecord,
   DailyUsageTotal,
+  EvaluationCaseRecord,
+  EvaluationResultRecord,
+  EvaluationRunRecord,
+  EvaluationSetRecord,
   Page,
   TenantRecord,
   UserRecord,
@@ -13,6 +17,11 @@ import type {
   AgentDto,
   ApiKeyDto,
   DailyUsageDto,
+  EvaluationCaseDto,
+  EvaluationRegressionDto,
+  EvaluationResultDto,
+  EvaluationRunDto,
+  EvaluationSetDto,
   TenantDto,
   UserDto,
   UserTokenDto,
@@ -112,5 +121,77 @@ export function toDailyUsageDto(row: DailyUsageTotal): DailyUsageDto {
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
     costMicroUsd: row.costMicroUsd.toString(),
+  };
+}
+
+// 評価セット (一覧・詳細の共通部分)
+export function toEvaluationSetDto(row: EvaluationSetRecord): EvaluationSetDto {
+  // 公開するプロパティだけを写す
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    name: row.name,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+// 評価ケース (setId は親に現れるので DTO には載せない)
+export function toEvaluationCaseDto(row: EvaluationCaseRecord): EvaluationCaseDto {
+  // 並び順と中身だけを写す
+  return { id: row.id, position: row.position, input: row.input, expected: row.expected };
+}
+
+// 評価実行 (一覧・詳細の共通部分)
+export function toEvaluationRunDto(row: EvaluationRunRecord): EvaluationRunDto {
+  // 公開するプロパティだけを写す
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    agentId: row.agentId,
+    setId: row.setId,
+    status: row.status,
+    accuracy: row.accuracy,
+    safety: row.safety,
+    deviation: row.deviation,
+    scoredCases: row.scoredCases,
+    excludedCases: row.excludedCases,
+    judgeProvider: row.judgeProvider,
+    judgeModel: row.judgeModel,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+// 採点結果 (どのケースがどう採点・除外されたか)
+export function toEvaluationResultDto(row: EvaluationResultRecord): EvaluationResultDto {
+  // id / runId / setId は親に現れるので載せない
+  return {
+    caseId: row.caseId,
+    accuracy: row.accuracy,
+    safety: row.safety,
+    deviation: row.deviation,
+    excludedReason: row.excludedReason,
+  };
+}
+
+// 2 つの値の差 (今回 − 前回)。**片方でも平均が無ければ差は null** —
+// 「測れなかった」実行との差を 0 や現在値として出すと、回帰の有無を読み違える
+function scoreDelta(current: number | null, previous: number | null): number | null {
+  // どちらかが無ければ差は出せない
+  if (current === null || previous === null) return null;
+  // 今回から前回を引く
+  return current - previous;
+}
+
+// 直前の実行との差 (回帰比較)
+export function toEvaluationRegressionDto(
+  current: EvaluationRunRecord,
+  previous: EvaluationRunRecord,
+): EvaluationRegressionDto {
+  // 3 項目の差をそれぞれ求める
+  return {
+    previousRunId: previous.id,
+    accuracyDelta: scoreDelta(current.accuracy, previous.accuracy),
+    safetyDelta: scoreDelta(current.safety, previous.safety),
+    deviationDelta: scoreDelta(current.deviation, previous.deviation),
   };
 }

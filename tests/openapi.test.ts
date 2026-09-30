@@ -23,6 +23,7 @@ import { RESOURCE_ID_MAX_LENGTH } from '@/domain/resource-id';
 import type { ZodObject, ZodTypeAny } from 'zod';
 import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
+import { evaluationRunCreateSchema, evaluationSetCreateSchema } from '@/lib/validations/evaluation';
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
@@ -82,6 +83,8 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   AgentCreate: agentCreateSchema,
   AgentUpdate: agentUpdateSchema,
   ApiKeyCreate: apiKeyCreateSchema,
+  EvaluationSetCreate: evaluationSetCreateSchema,
+  EvaluationRunCreate: evaluationRunCreateSchema,
   'PUT /users/{userId}/role': userRoleSchema,
   ProxyRequest: proxyRequestSchema,
 };

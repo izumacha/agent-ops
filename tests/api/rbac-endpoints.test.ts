@@ -31,6 +31,13 @@ import { DELETE as revokeUserToken } from '@/app/api/v1/users/[userId]/tokens/[t
 import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/route';
 import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
 import { GET as getDailyUsage } from '@/app/api/v1/usage/daily/route';
+import {
+  GET as listEvaluationSets,
+  POST as createEvaluationSet,
+} from '@/app/api/v1/evaluation-sets/route';
+import { GET as getEvaluationSet } from '@/app/api/v1/evaluation-sets/[setId]/route';
+import { GET as listEvaluationRuns, POST as runEvaluation } from '@/app/api/v1/evaluations/route';
+import { GET as getEvaluationRun } from '@/app/api/v1/evaluations/[runId]/route';
 import { canPerform, type Action } from '@/domain/rbac';
 import { Role } from '@/domain/types';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
@@ -211,6 +218,32 @@ const ENDPOINTS: Record<
     requires: 'view',
     invoke: async (t) =>
       (await call(getDailyUsage, { token: t, query: 'from=2026-01-01&to=2026-01-31' })).status,
+  },
+  listEvaluationSets: {
+    requires: 'view',
+    invoke: async (t) => (await call(listEvaluationSets, { token: t })).status,
+  },
+  createEvaluationSet: {
+    requires: 'execute',
+    invoke: async (t) => (await call(createEvaluationSet, { token: t, body: {} })).status,
+  },
+  getEvaluationSet: {
+    requires: 'view',
+    invoke: async (t) =>
+      (await call(getEvaluationSet, { token: t, params: { setId: seed.a.id } })).status,
+  },
+  listEvaluationRuns: {
+    requires: 'view',
+    invoke: async (t) => (await call(listEvaluationRuns, { token: t })).status,
+  },
+  runEvaluation: {
+    requires: 'execute',
+    invoke: async (t) => (await call(runEvaluation, { token: t, body: {} })).status,
+  },
+  getEvaluationRun: {
+    requires: 'view',
+    invoke: async (t) =>
+      (await call(getEvaluationRun, { token: t, params: { runId: seed.a.id } })).status,
   },
 };
 

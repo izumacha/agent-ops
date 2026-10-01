@@ -33,7 +33,7 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "dotenv": "^18.0.4",
-    "next": "^16.3.4",
+    "next": "^16.3.6",
     "prisma": "^7.10.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
@@ -48,12 +48,12 @@
     "@types/semver": "^7.8.0",
     "autocannon": "^8.0.0",
     "eslint": "^9.39.4",
-    "eslint-config-next": "^16.3.4",
+    "eslint-config-next": "^16.3.6",
     "openapi-typescript": "^7.9.1",
     "prettier": "^3.9.6",
     "semver": "^7.8.5",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.0",
+    "vitest": "^5.0.2",
     "yaml": "^2.9.0"
   },
   "overrides": {

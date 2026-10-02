@@ -17,6 +17,7 @@ import {
   RuleAction,
   RuleKind,
 } from '@/domain/types';
+import { GUARDRAIL_ERROR_RATE_MIN_REQUESTS } from '@/domain/guardrail/rule';
 
 // 監査ログの鍵（下限を満たす固定値）
 const AUDIT_SECRET = 'evaluate-test-audit-secret-0123456789';
@@ -396,6 +397,16 @@ describe('ガードレールの判定', () => {
     expect(store.incidents.size).toBe(1);
     expect((await repos.auditLogs.readChain(tenantId, 100)).rows).toHaveLength(2);
     expect(sent).toHaveLength(2);
+    // **2 通目の時刻はその発火の時刻**（インシデント行の作成時刻ではない）。
+    // 行の時刻を送ると「数日前に起きた出来事の通知がいま届いた」ように見え、しかも本文の
+    // 要約はこの発火の実測値なので、1 通の中で時刻と数字が別の出来事を指すことになる
+    const incident = [...store.incidents.values()][0]!;
+    // 送られた本文から時刻だけを取り出す（stubNotify は本文を unknown で貯める）
+    const occurredAtOf = (index: number): string =>
+      (sent[index] as { occurredAt: string }).occurredAt;
+    expect(occurredAtOf(1)).not.toBe(incident.createdAt.toISOString());
+    // 1 通目より後の時刻になっている（単調に進む）
+    expect(new Date(occurredAtOf(1)).getTime() >= new Date(occurredAtOf(0)).getTime()).toBe(true);
   });
 
   it('発火は監査ログに判断の根拠付きで残る', async () => {
@@ -460,8 +471,12 @@ describe('ガードレールの判定', () => {
     // なので、2 件発火させて「最初の通知の時点で 2 件とも記録済みか」を見る
     await makeRule(RuleKind.cost, 1_000, RuleAction.stop);
     await makeRule(RuleKind.error_rate, 0.5, RuleAction.stop);
-    // 料金もエラー率も超える 1 件（500 なので失敗率 100%）
-    await recordUsage(1_500n, 500);
+    // 料金もエラー率も超える窓を作る。**エラー率は分母が
+    // GUARDRAIL_ERROR_RATE_MIN_REQUESTS に届かないと発火しない**ので、その件数ぶん積む
+    // （どれも 500 なので失敗率 100%、合計の料金もしきい値 1000 を超える）
+    for (let index = 0; index < GUARDRAIL_ERROR_RATE_MIN_REQUESTS; index += 1) {
+      await recordUsage(1_500n, 500);
+    }
     // 最初の送信の時点で記録済みだったインシデントの件数
     let incidentsAtFirstSend: number | undefined;
     stubNotify(() => {
@@ -481,10 +496,11 @@ describe('ガードレールの判定', () => {
   });
 
   it('通知の本文には要約と停止したかが入る', async () => {
-    // エラー率で発火させる（2 件中 2 件失敗 = 100%）
+    // エラー率で発火させる（最小の分母ぶん積んで全件失敗 = 100%）
     await makeRule(RuleKind.error_rate, 0.5, RuleAction.stop);
-    await recordUsage(0n, 500);
-    await recordUsage(0n, 503);
+    for (let index = 0; index < GUARDRAIL_ERROR_RATE_MIN_REQUESTS; index += 1) {
+      await recordUsage(0n, index % 2 === 0 ? 500 : 503);
+    }
     const sent = stubNotify();
     // 判定する
     const result = await evaluateGuardrails(

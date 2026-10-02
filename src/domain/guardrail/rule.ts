@@ -164,6 +164,23 @@ export function worstQualityScore(scores: QualityScores | null): number | null {
   return Math.min(scores.accuracy, scores.safety, deviationAsQuality);
 }
 
+/**
+ * エラー率ルールが発火するのに必要な、窓の中の最小の呼び出し回数。
+ *
+ * **これが無いと「窓の中で 1 回だけ呼んで、それが失敗した」エージェントが必ず止まる**
+ * (1/1 = 100% なので、しきい値をどう置いても超える)。失敗には送り主自身のペイロードの誤り
+ * (4xx) も入るので、低トラフィックのエージェントがたった 1 回のミスで suspended になり、
+ * 復帰には人の操作 (UC-09) が要る。
+ *
+ * 「測れていないものは発火させない」(呼び出し 0 件の窓・採点 0 件の評価) と同じ考え方の延長で、
+ * **分母が小さすぎる割合は「測れていない」側に倒す**。値は「1 件や 2 件の偶然では止めず、
+ * それでも早めに気付ける」ところに置いた (20 件なら 1 件の失敗は 5% で、現実的なしきい値
+ * (10〜50%) には届かない)。コストと品質には要らない (合計と平均スコアは 1 件でも意味を持つ)。
+ *
+ * **ここに置くのは `src/domain/` が `src/lib/` を参照しないため** (ドメインは純粋に保つ)。
+ */
+export const GUARDRAIL_ERROR_RATE_MIN_REQUESTS = 20;
+
 /** 発火したときに記録する実測値 (種別ごとに単位が違うので判別可能な共用体にする) */
 export type RuleObservation =
   | { kind: typeof RuleKind.cost; costMicroUsd: bigint }
@@ -192,8 +209,13 @@ function observe(kind: RuleKind, measurement: GuardrailMeasurement): RuleObserva
     case RuleKind.error_rate:
       // 呼び出しが 1 件も無い窓ではエラー率を定義できない (0/0)。
       // **分母が 0 のまま割らない**のが要点 — `3 / 0` は Infinity になり、
-      // どんなしきい値でも必ず発火する (集計の分母と分子の整合が崩れたときに全件停止する)
-      return measurement.requests <= 0
+      // どんなしきい値でも必ず発火する (集計の分母と分子の整合が崩れたときに全件停止する)。
+      //
+      // **分母が小さすぎる割合も「測れていない」側に倒す** (GUARDRAIL_ERROR_RATE_MIN_REQUESTS)。
+      // 1 件だけ呼んで失敗した窓は 1/1 = 100% なので、しきい値をどう置いても必ず超える —
+      // 失敗には送り主自身のペイロードの誤り (4xx) も入るので、低トラフィックのエージェントが
+      // たった 1 回のミスで自動停止し、復帰に人の操作が要る状態になる
+      return measurement.requests < GUARDRAIL_ERROR_RATE_MIN_REQUESTS
         ? null
         : { kind, rate: measurement.errorRequests / measurement.requests };
     case RuleKind.quality:

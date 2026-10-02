@@ -484,6 +484,69 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     expect(await repos.guardrailRules.delete(a.tenantId, created.rule.id)).toBe('restricted');
   });
 
+  it('エージェントを消すとそのエージェント向けのルールも消える (Cascade)', async () => {
+    // **memory 側がこの挙動を持っているかを確かめる相手**（ADR-0006 の死角を閉じる正本）
+    const a = await makeTenantWithAgent(repos, 'a');
+    // そのエージェント向けのルールと、テナント全体のルールを 1 本ずつ
+    const scoped = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      RULES_MAX,
+    );
+    const tenantWide = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: null,
+        kind: RuleKind.error_rate,
+        threshold: 0.5,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      RULES_MAX,
+    );
+    if (scoped.status !== 'created' || tenantWide.status !== 'created') {
+      throw new Error('ルールを作れませんでした');
+    }
+    // 履歴が無いので消せる
+    expect(await repos.agents.delete(a.tenantId, a.agent.id)).toBe('deleted');
+    // **エージェント向けのルールは消え、テナント全体のルールは残る**
+    const rules = await repos.guardrailRules.list(a.tenantId, { limit: 50 });
+    expect(rules.items.map((row) => row.id)).toEqual([tenantWide.rule.id]);
+  });
+
+  it('インシデントを持つエージェントは消せない (Restrict)', async () => {
+    // テナントとエージェント
+    const a = await makeTenantWithAgent(repos, 'a');
+    // ルールを作って発火させる（利用イベントは作らない = インシデントだけが履歴）
+    const created = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      RULES_MAX,
+    );
+    if (created.status !== 'created') throw new Error('ルールを作れませんでした');
+    await repos.incidents.raise({
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      ruleId: created.rule.id,
+      summary: '発火',
+      suspendAgent: false,
+    });
+    // 「なぜ止まったか」の記録が消えるので、エージェントも消せない
+    expect(await repos.agents.delete(a.tenantId, a.agent.id)).toBe('restricted');
+  });
+
   it('インシデントの解決は 1 度だけ成功する', async () => {
     // テナントとエージェント
     const a = await makeTenantWithAgent(repos, 'a');

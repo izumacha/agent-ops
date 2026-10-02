@@ -27,6 +27,7 @@ import { runEvaluation } from '@/lib/evaluation/runner';
 import { resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { evaluationRunCreateSchema, evaluationRunQuerySchema } from '@/lib/validations/evaluation';
 import { AgentStatus } from '@/domain/types';
+import { evaluationBasisTime } from '@/domain/usage-window';
 
 // 一覧のクエリ (limit / cursor に agentId / setId を足す)。1 つのスキーマで検証し、
 // 複数の誤りを 1 応答の issues で返す (一覧ルートの既存の書き方にそろえる)
@@ -158,7 +159,10 @@ export const POST = route(
       tenantId,
       agentId: agent.id,
       kinds: QUALITY_RULE_KINDS,
-      now: new Date(),
+      // **基準時刻は「保存した実行の時刻」と「いま」の遅いほう。** DB の時計がアプリより
+      // 進んでいると、窓の終端 (基準時刻の 1 ミリ秒後) が保存した行より前になり、
+      // いま採点した結果が集計に入らない (品質ルールが発火しない fail-open)
+      now: evaluationBasisTime(saved.run.createdAt, new Date()),
       // 評価を走らせたユーザーを操作主体として残す（自動発火だが起点は人の操作）
       actorId: user.id,
     });

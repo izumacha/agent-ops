@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   evaluateRule,
+  GUARDRAIL_ERROR_RATE_MIN_REQUESTS,
   guardrailWindow,
   isValidWindowMinutes,
   RULE_COMPARISON,
@@ -209,18 +210,50 @@ describe('発火: cost', () => {
 });
 
 describe('発火: error_rate', () => {
+  // 最小の呼び出し回数を満たす分母（これを下回る窓は「測れていない」側に倒す）
+  const ENOUGH = GUARDRAIL_ERROR_RATE_MIN_REQUESTS;
+
   it('しきい値を超えたら発火し、実測の割合を返す', () => {
-    // 10 件中 3 件が失敗 (30%) で、しきい値 20%
+    // 全体の 30% が失敗で、しきい値 20%
+    const errorRequests = ENOUGH * 0.3;
     expect(
-      evaluateRule(RuleKind.error_rate, 0.2, measurement({ requests: 10, errorRequests: 3 })),
+      evaluateRule(RuleKind.error_rate, 0.2, measurement({ requests: ENOUGH, errorRequests })),
     ).toEqual({ fired: true, observation: { kind: RuleKind.error_rate, rate: 0.3 } });
   });
 
   it('しきい値ちょうどでは発火しない', () => {
-    // 10 件中 2 件 (20%) で、しきい値 20%
+    // ちょうど 20% で、しきい値 20%
     expect(
-      evaluateRule(RuleKind.error_rate, 0.2, measurement({ requests: 10, errorRequests: 2 })),
+      evaluateRule(
+        RuleKind.error_rate,
+        0.2,
+        measurement({ requests: ENOUGH, errorRequests: ENOUGH * 0.2 }),
+      ),
     ).toEqual({ fired: false });
+  });
+
+  it('呼び出しが少なすぎる窓では発火しない (1 回の失敗で止めない)', () => {
+    // **1 件だけ呼んで失敗した窓は 1/1 = 100%** なので、門番が無いとしきい値をどう置いても
+    // 必ず発火する。失敗には送り主自身のペイロードの誤り (4xx) も入るので、低トラフィックの
+    // エージェントがたった 1 回のミスで自動停止し、復帰に人の操作が要る状態になる
+    expect(
+      evaluateRule(RuleKind.error_rate, 0.5, measurement({ requests: 1, errorRequests: 1 })),
+    ).toEqual({ fired: false });
+    // 境界: 最小 - 1 件は測れていない / 最小ちょうどは測れている
+    expect(
+      evaluateRule(
+        RuleKind.error_rate,
+        0.5,
+        measurement({ requests: ENOUGH - 1, errorRequests: ENOUGH - 1 }),
+      ),
+    ).toEqual({ fired: false });
+    expect(
+      evaluateRule(
+        RuleKind.error_rate,
+        0.5,
+        measurement({ requests: ENOUGH, errorRequests: ENOUGH }),
+      ),
+    ).toEqual({ fired: true, observation: { kind: RuleKind.error_rate, rate: 1 } });
   });
 
   it('呼び出しが 0 件の窓では発火しない (0/0 は測れない)', () => {
@@ -242,9 +275,13 @@ describe('発火: error_rate', () => {
   });
 
   it('全件失敗した窓では発火する', () => {
-    // 5 件中 5 件が失敗 (100%)
+    // 分母が十分あって全件失敗 (100%)
     expect(
-      evaluateRule(RuleKind.error_rate, 0.5, measurement({ requests: 5, errorRequests: 5 })),
+      evaluateRule(
+        RuleKind.error_rate,
+        0.5,
+        measurement({ requests: ENOUGH, errorRequests: ENOUGH }),
+      ),
     ).toEqual({ fired: true, observation: { kind: RuleKind.error_rate, rate: 1 } });
   });
 });

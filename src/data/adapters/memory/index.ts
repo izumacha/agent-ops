@@ -424,13 +424,25 @@ class MemoryAgents implements AgentsPort {
     // 対象行 (テナント境界内)
     const row = this.store.agents.get(id);
     if (!row || row.tenantId !== tenantId) return 'not_found';
-    // 履歴 (利用イベント・評価実行) を持つエージェントは削除できない (本番では Restrict FK が拒否する)
+    // 履歴 (利用イベント・評価実行・インシデント) を持つエージェントは削除できない
+    // (本番では Restrict FK が拒否する)。**インシデントも履歴として数える** —
+    // `Incident.agent` は onDelete: Restrict なので、prisma は 409 相当で拒む。
+    // ここに入れていなかった頃は memory だけが 204 を返し、しかも「インシデントがあるなら
+    // UsageEvent もある」ため普段は現れない食い違いとして残っていた (ADR-0006 の死角)
     const hasUsage = [...this.store.usageEvents.values()].some((event) => event.agentId === id);
     const hasRuns = [...this.store.evaluationRuns.values()].some((run) => run.agentId === id);
-    if (hasUsage || hasRuns) return 'restricted';
+    const hasIncidents = [...this.store.incidents.values()].some((row) => row.agentId === id);
+    if (hasUsage || hasRuns || hasIncidents) return 'restricted';
     // 設定 (API キー) は一緒に消える (本番の Cascade と同じ)
     for (const [keyId, key] of this.store.apiKeys) {
       if (key.agentId === id) this.store.apiKeys.delete(keyId);
+    }
+    // **そのエージェント向けのガードレールのルールも一緒に消える** (`GuardrailRule.agent` は
+    // onDelete: Cascade)。消していなかった頃は memory だけがルールを残し、消えたエージェントを
+    // 指すルールが一覧に出続け、テナントのルール数上限にも数えられていた。
+    // **テナント全体のルール (agentId が null) は残す** — 対象が消えたわけではない
+    for (const [ruleId, rule] of this.store.guardrailRules) {
+      if (rule.agentId === id) this.store.guardrailRules.delete(ruleId);
     }
     // 本体を消す
     this.store.agents.delete(id);

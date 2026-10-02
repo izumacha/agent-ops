@@ -22,6 +22,7 @@ import {
   GUARDRAIL_RULES_MAX_PER_TENANT,
   UPSTREAM_MAX_RESPONSE_BYTES,
 } from '@/lib/constants';
+import { GUARDRAIL_ERROR_RATE_MIN_REQUESTS } from '@/domain/guardrail/rule';
 import { call, seedApiKey, seedEachTest } from './helpers';
 import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 
@@ -1234,6 +1235,30 @@ describe('中継の直後のガードレール判定', () => {
     return created.rule;
   }
 
+  /**
+   * 窓の中に「失敗した呼び出し」を台帳へ直接積む。
+   *
+   * エラー率のルールは分母が `GUARDRAIL_ERROR_RATE_MIN_REQUESTS` に届かない窓では発火しない
+   * （1 件だけ呼んで失敗した窓は 1/1 = 100% になるので、門番が無いと 1 回のミスで止まる）。
+   * 中継の経路を確かめたいテストは、**その 1 回が最後の 1 件になるように**残りをここで積む。
+   */
+  async function spendFailures(count: number): Promise<void> {
+    // 失敗として数えられる status で count 件積む
+    for (let index = 0; index < count; index += 1) {
+      await seed.repos.usageEvents.record({
+        tenantId: seed.a.id,
+        agentId: seed.a.agent.id,
+        provider: Provider.anthropic,
+        model: ANTHROPIC_MODEL,
+        inputTokens: 1,
+        outputTokens: 1,
+        costMicroUsd: 0n,
+        latencyMs: 1,
+        statusCode: 502,
+      });
+    }
+  }
+
   // 中継を 1 回呼ぶ
   async function relay(secret: string) {
     // 正常な本文で呼ぶ
@@ -1319,6 +1344,8 @@ describe('中継の直後のガードレール判定', () => {
     stubUpstream({ status: 500, body: { error: 'upstream down' } });
     await makeRule(RuleKind.error_rate, 0.5);
     const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 分母を最小の 1 件手前まで埋める（この中継が最後の 1 件になる）
+    await spendFailures(GUARDRAIL_ERROR_RATE_MIN_REQUESTS - 1);
     // 中継は失敗する
     expect((await relay(key.secret)).status).toBe(502);
     // 失敗した呼び出しも台帳に入り、エラー率 100% で発火して停止している
@@ -1335,6 +1362,8 @@ describe('中継の直後のガードレール判定', () => {
     stubUpstream(new TypeError('fetch failed'));
     await makeRule(RuleKind.error_rate, 0.5);
     const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 分母を最小の 1 件手前まで埋める（この中継が最後の 1 件になる）
+    await spendFailures(GUARDRAIL_ERROR_RATE_MIN_REQUESTS - 1);
     // 繋がらないので 502
     expect((await relay(key.secret)).status).toBe(502);
     // この呼び出しも台帳に入り、エラー率 100% で発火して停止している

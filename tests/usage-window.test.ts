@@ -1,6 +1,7 @@
 // 集計期間の規則 (src/domain/usage-window.ts)。日の境目は UTC で、API と両アダプタが同じ規則を使う
 import { describe, expect, it } from 'vitest';
 import {
+  evaluationBasisTime,
   formatUtcDay,
   parseUtcDay,
   resolveUsageWindow,
@@ -127,5 +128,31 @@ describe('UTC の暦月の窓 (予算の「当月」)', () => {
     // UTC の月初の直前（JST では翌日）でも、UTC では前の月に属する
     const window = utcMonthWindow(new Date('2026-10-31T23:00:00.000Z'));
     expect(window.start.toISOString()).toBe('2026-10-01T00:00:00.000Z');
+  });
+});
+
+describe('判定の基準時刻', () => {
+  // アプリの時計の「いま」
+  const now = new Date('2026-10-02T10:00:00.000Z');
+
+  it('DB の時計が進んでいれば書いた行の時刻を使う', () => {
+    // **これが要点** — 窓の終端は基準時刻の 1 ミリ秒後なので、基準を「いま」にすると
+    // 書いたばかりの行が窓から落ち、しきい値を越えさせた当の支出が集計に入らない
+    const recordedAt = new Date(now.getTime() + 1);
+    expect(evaluationBasisTime(recordedAt, now)).toBe(recordedAt);
+  });
+
+  it('DB の時計が遅れていれば「いま」を使う', () => {
+    // 行の時刻が「いま」より前なら、もともと窓に入っている
+    expect(evaluationBasisTime(new Date(now.getTime() - 5_000), now)).toBe(now);
+  });
+
+  it('同じ時刻なら「いま」を使う (どちらでも同じ値)', () => {
+    expect(evaluationBasisTime(new Date(now.getTime()), now)).toBe(now);
+  });
+
+  it('記録できていなければ「いま」を使う', () => {
+    // 記録に失敗しても判定は走る（記録は fail-open）
+    expect(evaluationBasisTime(null, now)).toBe(now);
   });
 });

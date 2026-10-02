@@ -377,6 +377,34 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     });
   });
 
+  it('エージェントを消すとそのエージェント向けのルールも消える (prisma の Cascade と同じ)', async () => {
+    // エージェント向けと、テナント全体のルールを 1 本ずつ
+    const scoped = await makeRule(RuleKind.cost, RuleAction.notify, true);
+    const tenantWide = await makeRule(RuleKind.error_rate, RuleAction.notify, false);
+    // 履歴が無いので消せる
+    expect(await repos.agents.delete(tenantId, agentId)).toBe('deleted');
+    // **エージェント向けのルールは消え、テナント全体のルールは残る。**
+    // 消していなかった頃は、消えたエージェントを指すルールが一覧に出続け、
+    // テナントのルール数上限にも数えられていた（prisma は Cascade で消す）
+    const rules = await repos.guardrailRules.list(tenantId, { limit: 50 });
+    expect(rules.items.map((row) => row.id)).toEqual([tenantWide.id]);
+    expect(rules.items.map((row) => row.id)).not.toContain(scoped.id);
+  });
+
+  it('インシデントを持つエージェントは消せない (prisma の Restrict と同じ)', async () => {
+    // ルールを作って発火させる（利用イベントは作らない = インシデントだけが履歴）
+    const rule = await makeRule(RuleKind.cost, RuleAction.notify, true);
+    await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: rule.id,
+      summary: '発火',
+      suspendAgent: false,
+    });
+    // 「なぜ止まったか」の記録が消えるので、エージェントも消せない
+    expect(await repos.agents.delete(tenantId, agentId)).toBe('restricted');
+  });
+
   it('payload は呼び出し側のオブジェクトを共有しない (追記専用を参照の共有で破らない)', async () => {
     // **これが無いと、追記専用のはずの行が外から書き換えられる。** 書き換えても `hash` は
     // 再計算されないので、その行は検証で hash_mismatch になる（prisma 側は DB のトリガが

@@ -326,7 +326,14 @@ export async function evaluateGuardrails(
       incidentId: raised.incident.id,
       summary,
       suspended: raised.suspended,
-      occurredAt: raised.incident.createdAt.toISOString(),
+      // **この発火の時刻**（インシデント行の作成時刻ではない）。開いているインシデントを
+      // 再利用したとき（`created === false`）に行の作成時刻を送ると、「数日前に起きた
+      // 出来事の通知がいま届いた」ように見える。要約もこの発火の実測値で組み立てているので、
+      // 時刻も同じ発火のものにそろえる。
+      // **インシデント行のほうは最初の発火を表したまま**（`createdAt` と `summary` は更新しない）
+      // で、各回の実測値は通知と監査ログに残る。回数や最終発火時刻を行に持たせるのは
+      // ADR-0010 の宿題（列が増えるので、ダッシュボードで必要になったときに決める）
+      occurredAt: trigger.now.toISOString(),
     });
   }
   // **通知はすべての記録と停止が終わってから**（受け手の応答時間を停止までの計測に入れない）。

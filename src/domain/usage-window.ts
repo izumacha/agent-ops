@@ -106,3 +106,27 @@ export function utcMonthWindow(now: Date): { start: Date; endExclusive: Date } {
   // 半開区間（開始を含み、終了を含まない）
   return { start, endExclusive };
 }
+
+/**
+ * 判定の基準時刻を決める。**「いま」と「判定の引き金になった行の時刻」の遅いほう**を返す。
+ *
+ * **これが無いと、DB の時計がアプリの時計より進んでいるときに引き金の行が窓から落ちる。**
+ * `UsageEvent.createdAt` / `EvaluationRun.createdAt` は DB の `now()` が入れる値で、集計窓の
+ * 終端はアプリの時計から組み立てる（`guardrailWindow` は基準時刻の 1 ミリ秒後を終端にする）。
+ * 2 つの時計が 1 ミリ秒以上ずれていると、書いたばかりの行が `createdAt < 終端` を満たさず、
+ * **しきい値を越えさせた当の支出が集計に入らない**。そのため発火せず、以降の呼び出しが
+ * 来なければエージェントは止まらないまま残る（受け入れ基準「発火から停止まで ≦ 3 秒」が
+ * 破れる fail-open。マネージドな PostgreSQL の NTP ドリフトで現実に起こりうる）。
+ *
+ * 遅いほうを採るので、DB が進んでいても引き金の行は必ず窓に入る。逆に DB が遅れている場合は
+ * 行の時刻が「いま」より前なので、もともと窓に入っている。
+ *
+ * @param recordedAt 引き金になった行の時刻（記録できなかった場合は null）
+ * @param now アプリの時計の「いま」
+ */
+export function evaluationBasisTime(recordedAt: Date | null, now: Date): Date {
+  // 記録できていなければアプリの時計をそのまま使う
+  if (recordedAt === null) return now;
+  // 遅いほうを基準にする（同じならどちらでも同じ値）
+  return recordedAt.getTime() > now.getTime() ? recordedAt : now;
+}

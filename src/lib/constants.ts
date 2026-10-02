@@ -1,7 +1,7 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
-import { AgentStatus, Provider, Role } from '@/domain/types';
+import { AgentStatus, IncidentStatus, Provider, Role, RuleAction, RuleKind } from '@/domain/types';
 
 // アプリ名 (画面タイトル等で使う)
 export const APP_NAME = 'Agent Ops';
@@ -18,6 +18,25 @@ export const AGENT_STATUS_LABELS: Readonly<Record<AgentStatus, string>> = {
   [AgentStatus.active]: '稼働中', // active
   [AgentStatus.stopped]: '停止中', // stopped
   [AgentStatus.suspended]: '自動停止', // suspended
+};
+
+// ガードレールのルール種別の日本語ラベル (インシデントの要約文と画面で使う)
+export const RULE_KIND_LABELS: Readonly<Record<RuleKind, string>> = {
+  [RuleKind.cost]: 'コスト超過', // cost
+  [RuleKind.error_rate]: 'エラー率', // error_rate
+  [RuleKind.quality]: '品質低下', // quality
+};
+
+// ルール発火時の動作の日本語ラベル
+export const RULE_ACTION_LABELS: Readonly<Record<RuleAction, string>> = {
+  [RuleAction.notify]: '通知のみ', // notify
+  [RuleAction.stop]: '通知して自動停止', // stop
+};
+
+// インシデント状態の日本語ラベル
+export const INCIDENT_STATUS_LABELS: Readonly<Record<IncidentStatus, string>> = {
+  [IncidentStatus.open]: '発生中', // open
+  [IncidentStatus.resolved]: '解決済み', // resolved
 };
 
 // ─────────────────────────────────────────────
@@ -42,6 +61,16 @@ export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;
 export const USER_TOKEN_MAX_TTL_DAYS = 365;
 // プラットフォーム管理者トークン (環境変数) に要求する最小長。短い値は設定ミスとみなして使わない (fail-closed)
 export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
+// ガードレールの集計窓の下限 (分)。0 や負の窓は「期間が無い」ので判定できない
+export const GUARDRAIL_WINDOW_MIN_MINUTES = 1;
+// ガードレールの集計窓の上限 (分 = 7 日)。**無制限の窓を許さない** (§8 / §9) —
+// ルールの判定はプロキシの中継 1 回ごとに走るので、窓が伸びるほど毎回の集計が重くなる。
+// 7 日を超える傾向は Step5 のダッシュボードが扱う領域で、即時の自動停止の材料ではない
+export const GUARDRAIL_WINDOW_MAX_MINUTES = 60 * 24 * 7;
+// コスト超過ルールのしきい値の上限 (マイクロ USD)。**`GuardrailRule.threshold` は倍精度浮動小数**
+// なので、整数として正確に表せる範囲 (2^53-1) までに絞る。これを超えると「設定した額」と
+// 「保存された額」が静かにずれる (約 90 億 USD 相当なので実用上の制約にはならない)
+export const GUARDRAIL_COST_THRESHOLD_MAX = Number.MAX_SAFE_INTEGER;
 // 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。
 // 短い鍵は総当たりで求められ、求められた鍵があれば連鎖をまるごと作り直せるので検知の意味が消える。
 // プラットフォーム管理者トークンと同じ 32 文字以上を要求する (別の値にする理由が無いので値も揃える)

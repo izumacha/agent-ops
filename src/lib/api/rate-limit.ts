@@ -10,7 +10,12 @@
 // ADR-0010 に記録する。それでも「無制限」ではなくなるので、置かないより明確に良い。
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
-import { API_MESSAGES, PROXY_RATE_LIMIT_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from '@/lib/constants';
+import {
+  API_MESSAGES,
+  PROXY_RATE_LIMIT_ENV,
+  PROXY_RATE_LIMIT_PER_MINUTE,
+  RATE_LIMIT_WINDOW_MS,
+} from '@/lib/constants';
 import type { Principal } from './auth';
 
 /** 1 回の判定の結果 */
@@ -179,12 +184,37 @@ export function rateLimitedError(retryAfterSeconds: number): ApiError {
   });
 }
 
+/**
+ * 環境変数があればその上限を、無ければ既定（`PROXY_RATE_LIMIT_PER_MINUTE`）を返す。
+ *
+ * **ベンチが上書きする**（`scripts/bench-proxy.ts`）: 1 接続で毎秒数百件を出すので既定の
+ * 上限では 9 割近くが 429 になり、測れるのは「中継の追加遅延」ではなく「429 を返す速さ」に
+ * なる（実測で 3516 件のうち 3116 件が 429 になり、ベンチの「2xx 以外があれば失敗」の
+ * 門番が正しく落とした）。
+ *
+ * **読めない値は既定へ倒す（fail-closed）。** 設定ミスで制限が消えるより、効いている方が安全。
+ * 逆に「とても大きい値」を入れれば実質的に制限を外せるが、環境変数は運用者が意図して置く
+ * 信頼値なので、それはその配備先の判断として受け入れる。
+ */
+export function configuredRateLimit(env: NodeJS.ProcessEnv = process.env): number {
+  // 環境変数を読み、前後の空白を落とす
+  const raw = env[PROXY_RATE_LIMIT_ENV]?.trim();
+  // 未設定・空は既定
+  if (raw === undefined || raw === '') return PROXY_RATE_LIMIT_PER_MINUTE;
+  // 数値として読む（`Number` は空文字を 0 にするので、空の判定を先に済ませてある）
+  const parsed = Number(raw);
+  // 正の整数でなければ既定へ倒す（0 や負の値を通すと制限が丸ごと無効になる）
+  if (!Number.isInteger(parsed) || parsed <= 0) return PROXY_RATE_LIMIT_PER_MINUTE;
+  // 設定された上限
+  return parsed;
+}
+
 // ── プロセス共有の制限器 ──────────────────────────────
 // **1 つのインスタンスをすべてのルートで共有する。** ルートごとに持つと、同じ API キーが
 // 別のルートを交互に叩くだけで合計が上限の 2 倍まで通る（枠は「送信元ごと」で、
 // 「送信元とルートの組ごと」ではない）
 let shared = new SlidingWindowRateLimiter({
-  limit: PROXY_RATE_LIMIT_PER_MINUTE,
+  limit: configuredRateLimit(),
   windowMs: RATE_LIMIT_WINDOW_MS,
 });
 
@@ -207,6 +237,6 @@ export function resetSharedRateLimiterForTesting(options?: RateLimiterOptions): 
   }
   // 指定が無ければ既定の設定で作り直す
   shared = new SlidingWindowRateLimiter(
-    options ?? { limit: PROXY_RATE_LIMIT_PER_MINUTE, windowMs: RATE_LIMIT_WINDOW_MS },
+    options ?? { limit: configuredRateLimit(), windowMs: RATE_LIMIT_WINDOW_MS },
   );
 }

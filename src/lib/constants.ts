@@ -96,6 +96,13 @@ export const NOTIFY_SIGNING_SECRET_MIN_LENGTH = 32;
 // 「壊れたクライアントの暴走を止める」には十分に効く。正当な使い方（1 件ずつ中継する
 // エージェント）には届かない高さに置いてある
 export const PROXY_RATE_LIMIT_PER_MINUTE = 600;
+// 上限を上書きできる環境変数の名前。**既定は上の定数**で、配備先ごとに上げ下げできる。
+// 用途は (a) 運用者の調整、(b) ベンチ (scripts/bench-proxy.ts) が計測を妨げられないようにすること。
+// **名前を定数にしてここに置くのは、ベンチが取り込めるようにするため** — ベンチの import は
+// 許可リストで絞ってあり (tests/gate-scripts.test.ts)、実行時の副作用を持つモジュール
+// (src/lib/api/rate-limit.ts は読み込み時に共有インスタンスを作る) は取り込めない。
+// 綴りをベンチへ書き写すと写しが 2 つになるので、定数だけのこのファイルを共有する
+export const PROXY_RATE_LIMIT_ENV = 'PROXY_RATE_LIMIT_PER_MINUTE';
 // レート制限の窓の長さ (ミリ秒)。1 分 = 上の定数の「1 分」の定義
 export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。

@@ -1,9 +1,15 @@
 // レート制限（src/lib/api/rate-limit.ts）の検査。
 // **時刻を引数で受け取る形**にしてあるので、窓の境界を決定的に固定できる（実時間を待たない）。
 import { describe, expect, it } from 'vitest';
-import { rateLimitKeyFor, rateLimitedError, SlidingWindowRateLimiter } from '@/lib/api/rate-limit';
+import {
+  configuredRateLimit,
+  rateLimitKeyFor,
+  rateLimitedError,
+  SlidingWindowRateLimiter,
+} from '@/lib/api/rate-limit';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { Provider, Role } from '@/domain/types';
+import { PROXY_RATE_LIMIT_ENV, PROXY_RATE_LIMIT_PER_MINUTE } from '@/lib/constants';
 
 // 検査で使う窓の長さ（1 分）
 const WINDOW_MS = 60_000;
@@ -171,5 +177,39 @@ describe('レート制限の例外', () => {
     const error = rateLimitedError(42);
     expect(error.status).toBe(HTTP_STATUS.TOO_MANY_REQUESTS);
     expect(error.headers).toEqual({ 'Retry-After': '42' });
+  });
+});
+
+describe('上限の環境変数による上書き', () => {
+  // 環境変数を組み立てる（NODE_ENV は ProcessEnv で必須）
+  function env(value: string | undefined): NodeJS.ProcessEnv {
+    // 指定された値だけを入れる
+    return { NODE_ENV: 'test', [PROXY_RATE_LIMIT_ENV]: value } as NodeJS.ProcessEnv;
+  }
+
+  it('未設定なら既定の上限', () => {
+    // 未設定・空文字・空白だけはすべて既定
+    for (const value of [undefined, '', '   ']) {
+      expect(configuredRateLimit(env(value))).toBe(PROXY_RATE_LIMIT_PER_MINUTE);
+    }
+  });
+
+  it('正の整数なら上書きが効く（ベンチが計測を妨げられないようにする用途）', () => {
+    // 前後の空白は落とす
+    expect(configuredRateLimit(env('1234'))).toBe(1234);
+    expect(configuredRateLimit(env(' 1234 '))).toBe(1234);
+  });
+
+  it.each([
+    ['0（制限が丸ごと無効になる）', '0'],
+    ['負の値', '-1'],
+    ['小数', '1.5'],
+    ['数値でない', 'たくさん'],
+    ['指数表記でない混在', '12abc'],
+    ['Infinity', 'Infinity'],
+    ['NaN', 'NaN'],
+  ])('読めない値は既定へ倒す（fail-closed）: %s', (_label, value) => {
+    // **設定ミスで制限が消えるより、効いている方が安全**
+    expect(configuredRateLimit(env(value))).toBe(PROXY_RATE_LIMIT_PER_MINUTE);
   });
 });

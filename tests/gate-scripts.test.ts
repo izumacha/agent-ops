@@ -1614,6 +1614,10 @@ describe('判定の結線', () => {
     [
       'lib/prisma-client',
       'lib/tokens',
+      // **定数だけのモジュール**（実行時コードを持たず、import は `lib/body-limits`（これも
+      // 定数だけ）1 つ。副作用も終了経路も無い）。ベンチが受け入れ基準に関係する値
+      // （しきい値の上限・レート制限の環境変数名）を**写さずに**読むために要る
+      'lib/constants',
       'lib/proxy/upstream',
       'lib/evaluation/runner',
       'domain/types',

@@ -67,5 +67,7 @@ export const POST = route(
     };
     return Response.json(body);
   },
-  { rateLimit: RATE_LIMIT_TIER.outbound },
+  // **認可を先に確かめる**（権限の無い要求でテナントの小さい枠を使い切らせない。
+  // 理由は `RouteOptions.requiredAction`）
+  { rateLimit: RATE_LIMIT_TIER.outbound, requiredAction: 'stop' },
 );

@@ -172,18 +172,46 @@ export async function notifyGuardrailIncident(
   // 出さない方が正しい (§9)。**代わりに直すべき環境変数の名前を文言に書く** —
   // 運用者にとっては `{channel: 'webhook'}` より「どの変数を直すか」のほうが役に立つ
   for (const result of results) {
-    // 設定ミスだけを記録する (未設定・署名なしは意図的な状態なので出さない)
-    if (result.status !== 'rejected_target') continue;
-    // Webhook の宛先が駄目だったとき
-    if (result.channel === NotifyChannel.webhook) {
-      console.error(
-        '[notify] NOTIFY_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
-      );
+    // **宛先が設定されていないものだけは出さない** (送るものが無いだけで、異常ではない)。
+    // それ以外の「届かなかった」はすべて残す — **以前は rejected_target だけを出していた**ので、
+    // (a) 宛先は正しいが署名鍵が短い (`unsigned`)、(b) 受け手が 2xx 以外を返した (`failed`) の
+    // 2 つが**ログに 1 行も残らず**消えていた。どちらも「発火して停止したのに通知が 1 通も届かず、
+    // 理由がどこにも無い」状態になる (§6 エラーを握り潰さない)。
+    // なお `failed` のうち例外で終わったものは sendTo 側でも 1 行出る (原因が分かる形で残す)
+    if (result.status === 'not_configured' || result.status === 'delivered') continue;
+    // Webhook 側か、メール中継側かで文言を分ける (直すべき環境変数の名前を文言に書く)
+    const isWebhook = result.channel === NotifyChannel.webhook;
+    // 宛先の形が受け付けられないとき
+    if (result.status === 'rejected_target') {
+      if (isWebhook) {
+        console.error(
+          '[notify] NOTIFY_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
+        );
+      } else {
+        console.error(
+          '[notify] NOTIFY_MAIL_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
+        );
+      }
+      continue;
+    }
+    // 署名鍵が無い・短いとき (宛先は設定されているので、運用者は送るつもりでいる)
+    if (result.status === 'unsigned') {
+      if (isWebhook) {
+        console.error(
+          '[notify] NOTIFY_SIGNING_SECRET が未設定か短すぎるため NOTIFY_WEBHOOK_URL へ送りませんでした (32 文字以上が必要)',
+        );
+      } else {
+        console.error(
+          '[notify] NOTIFY_SIGNING_SECRET が未設定か短すぎるため NOTIFY_MAIL_WEBHOOK_URL へ送りませんでした (32 文字以上が必要)',
+        );
+      }
+      continue;
+    }
+    // 受け手へ届かなかったとき (2xx 以外・3xx・接続不能・時間切れ)
+    if (isWebhook) {
+      console.error('[notify] NOTIFY_WEBHOOK_URL の受け手へ通知が届きませんでした');
     } else {
-      // メール中継の宛先が駄目だったとき
-      console.error(
-        '[notify] NOTIFY_MAIL_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
-      );
+      console.error('[notify] NOTIFY_MAIL_WEBHOOK_URL の受け手へ通知が届きませんでした');
     }
   }
   // 呼び出し側が監査ログへ「送れたか」を残せるように結果を返す

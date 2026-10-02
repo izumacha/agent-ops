@@ -57,7 +57,8 @@ export const GET = route(async ({ request, principal, repos }) => {
 //
 // **レート制限を掛ける。** 1 要求でケース数ぶん (最大 EVALUATION_SET_MAX_CASES × 2 回) の
 // 上流呼び出しが走るので、掛けないとプロキシに置いた課金の保護をこちらから迂回できる
-// (中継の代わりに評価を回せばよいことになる)。枠は `user:<id>` 単位 (rateLimitKeyFor)。
+// (中継の代わりに評価を回せばよいことになる)。**数える単位はテナント** (rateLimitKeyFor) —
+// 資格情報ごとにすると、API キーやユーザーを増やすだけで上限が何倍にもなる。
 //
 // **枠は `fanOut`** — 中継と同じ枠 (毎分 600) では保護にならない。600 要求ぶんの枠は
 // この経路では上流呼び出し 24 万回ぶんの枠と同じ意味になるため
@@ -177,5 +178,7 @@ export const POST = route(
     };
     return Response.json(body, { status: HTTP_STATUS.CREATED });
   },
-  { rateLimit: RATE_LIMIT_TIER.fanOut },
+  // **認可を先に確かめる**（権限の無い要求でテナントの小さい枠を使い切らせない。
+  // 理由は `RouteOptions.requiredAction`）
+  { rateLimit: RATE_LIMIT_TIER.fanOut, requiredAction: 'execute' },
 );

@@ -239,7 +239,7 @@ erDiagram
 
 ### 削除の規則（参照整合性）
 
-- **履歴（`UsageEvent` / `EvaluationRun` / `Incident`）は親の削除で消さない（`Restrict`）。** コスト履歴は請求の根拠、インシデントは停止理由の記録なので、履歴を持つエージェントは削除できず `stop` で止める（`DELETE /agents/{id}` は 409）。実行履歴を持つ評価セット、発火済みのルールも同様（ルールは `enabled=false` で無効化する想定だが、**その API はまだ無い** — ADR-0010 の宿題）。
+- **履歴（`UsageEvent` / `EvaluationRun` / `Incident`）は親の削除で消さない（`Restrict`）。** コスト履歴は請求の根拠、インシデントは停止理由の記録なので、履歴を持つエージェントは削除できず `stop` で止める（`DELETE /agents/{id}` は 409）。実行履歴を持つ評価セット、発火済みのルールも同様（ルールは `enabled=false` で無効化する想定だが、**その API はまだ無い** — ADR-0010 の宿題で、Step5 の最初に入れる）。**そのため、しきい値を誤った `stop` ルールは発火後に API から止められない**（インシデントを解決して復帰させても次の中継で再び発火する）。回避策として、`stop` のルールは最初 `notify` で入れて挙動を確かめてから作り直す（発火していないルールは削除できる）。
 - **設定（`ApiKey` / `GuardrailRule`）はエージェントと一緒に消える（`Cascade`）。** `ApiKey.agentId` を `SetNull` にすると削除で「テナント共通キー」へ黙って昇格し権限が広がるため、Cascade にする。
 - **監査ログの操作者（`AuditLog.actorId`）は `Restrict`。** 監査ログを持つユーザーは削除せず無効化する（`User.disabledAt`。`DELETE /users/{userId}` は無効化）。ユーザーのログイントークン（`UserToken`）は設定なので `Cascade`。テナント解約は `Cascade` でデータ一式を消す（テナント単位の消去要求に応えるため）。
 - **実行履歴を持つ評価セットのケースは変更・削除できない**（ケースの更新・削除 API を作らない。`EvaluationResult` → `EvaluationCase` も `Restrict`）。入力が動くと回帰比較が無意味になるため、変えたいときは新しいセットを作る（ADR-0009）。

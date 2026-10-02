@@ -484,6 +484,31 @@ describe('評価の実行のレート制限', () => {
     resetSharedRateLimiterForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
   });
 
+  it('権限の無い要求は枠を消費しない (403 が先に出る)', async () => {
+    // **これが要点** — レート制限は認証の後・本体の前に掛かるので、`route()` の側で認可しないと
+    // view しか持たない利用者が**テナント全体の枠**を使い切れる（どれも本体で 403 になるのに
+    // 枠は減り、同じテナントの operator が窓のあいだ 429 になる）。枠はベンダーへの課金を
+    // 抑えるためのものなので、上流へ 1 度も出ない要求で消費されるのは誤り
+    stubHealthyUpstream();
+    const set = await createSet();
+    // viewer で上限ぶん叩く（すべて 403）
+    for (let index = 0; index < TEST_LIMIT + 2; index += 1) {
+      const denied = await call(runEvaluation, {
+        token: seed.a.tokens.viewer,
+        body: { agentId: seed.a.agent.id, setId: set.id },
+      });
+      expect(denied.status).toBe(403);
+    }
+    // **枠は減っていない** — operator は上限ぶん通る
+    for (let index = 0; index < TEST_LIMIT; index += 1) {
+      const ok = await call(runEvaluation, {
+        token: seed.a.tokens.operator,
+        body: { agentId: seed.a.agent.id, setId: set.id },
+      });
+      expect(ok.status, JSON.stringify(ok.json)).toBe(201);
+    }
+  });
+
   it('上限を超えた実行は 429 で断り、上流を呼ばない', async () => {
     // **ここが制限を置いた目的** — 1 要求でケース数ぶんの課金対象の呼び出しが走るので、
     // 中継だけを守っても「評価を回す」側から同じ費用を発生させられる（実測で制限が無かった）

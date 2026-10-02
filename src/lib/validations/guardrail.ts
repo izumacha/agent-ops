@@ -6,6 +6,7 @@
 import { z } from './zod';
 import { resourceId } from './common';
 import { isValidWindowMinutes, thresholdRangeFor } from '@/domain/guardrail/rule';
+import { FIRST_AUDIT_SEQ } from '@/domain/audit/chain';
 import { IncidentStatus, RuleAction, RuleKind } from '@/domain/types';
 import { pageQuerySchema } from '@/lib/api/pagination';
 import {
@@ -84,6 +85,27 @@ export const incidentListQuerySchema = pageQuerySchema.extend({
   agentId: resourceId.optional(),
   // 状態で絞る（open / resolved）
   status: z.enum(Object.values(IncidentStatus)).optional(),
+});
+
+/**
+ * 連鎖の検証のクエリ。
+ *
+ * **`fromSeq` でその連番から検証できる**（省略時は先頭）。行数が 1 回の上限を超えるテナントでは
+ * これが無いと**毎回同じ最古の上限件数だけを検証し続け、それ以降の行は二度と検証されない**
+ * （新しい行を書き換えても「無傷」と答える状態になる）。
+ *
+ * **文字列で受けて BigInt へ直す。** 連番は BigInt なので、JSON の数値（倍精度）で受けると
+ * 2^53 を超えた時点で別の行を指す。**10 進の数字だけを許す**（先頭の `+`・空白・指数表記は
+ * 弾く。`BigInt('')` が 0 になるので空文字も弾く）
+ */
+export const auditChainVerifyQuerySchema = z.strictObject({
+  // 読み始める連番（1 以上の 10 進整数。省略時は先頭）
+  fromSeq: z
+    .string()
+    .regex(/^[0-9]+$/, API_MESSAGES.auditFromSeqInvalid)
+    .transform((value) => BigInt(value))
+    .refine((value) => value >= FIRST_AUDIT_SEQ, API_MESSAGES.auditFromSeqInvalid)
+    .optional(),
 });
 
 /** 明示実行の本文（どのエージェントを判定するか） */

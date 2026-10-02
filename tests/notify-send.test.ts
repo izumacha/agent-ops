@@ -163,6 +163,37 @@ describe('ガードレールの通知', () => {
     expect(results.every((r) => r.status === 'failed')).toBe(true);
   });
 
+  it('届かなかった理由をサーバログに残す (未設定だけは出さない)', async () => {
+    // **これが無いと「発火して停止したのに通知が 1 通も届かず、理由がどこにも無い」状態になる。**
+    // 以前は宛先の形が駄目なときだけ出していたので、署名鍵が短い・受け手が 500 を返すの 2 つが
+    // ログに 1 行も残らず消えていた
+    const logged: unknown[][] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args);
+    });
+    // 受け手が 500 を返す
+    stubFetch(() => new Response(null, { status: 500 }));
+    await notifyGuardrailIncident(PAYLOAD, env());
+    // 2 つの宛先ぶん「届かなかった」が残る
+    expect(logged.filter((args) => String(args[0]).includes('届きませんでした'))).toHaveLength(2);
+    // 署名鍵が短いとき: 直すべき環境変数の名前が文言に出る
+    logged.length = 0;
+    await notifyGuardrailIncident(PAYLOAD, env({ [NOTIFY_SIGNING_SECRET_ENV]: 'short' }));
+    expect(logged.filter((args) => String(args[0]).includes('NOTIFY_SIGNING_SECRET'))).toHaveLength(
+      2,
+    );
+    // 宛先が未設定なら 1 行も出さない (送るものが無いだけで異常ではない)
+    logged.length = 0;
+    await notifyGuardrailIncident(
+      PAYLOAD,
+      env({
+        [NOTIFY_URL_ENV[NotifyChannel.webhook]]: '',
+        [NOTIFY_URL_ENV[NotifyChannel.email]]: '',
+      }),
+    );
+    expect(logged).toHaveLength(0);
+  });
+
   it('宛先が未設定なら送らない (異常ではない)', async () => {
     // 呼び出しを記録する
     const calls = stubFetch(() => new Response(null, { status: 204 }));

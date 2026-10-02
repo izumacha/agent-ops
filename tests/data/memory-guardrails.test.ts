@@ -444,6 +444,46 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     expect((appended.payload as Record<string, string>).status).toBe('active');
     const { rows } = await repos.auditLogs.readChain(tenantId, CHAIN_LIMIT);
     expect((rows[0]?.payload as Record<string, string>).status).toBe('active');
+    // **読み出しの経路は 3 つある**（append の戻り値・readChain・list）。
+    // 1 つでも表のオブジェクトを指したままだと、そこから保存済みの行を書き換えられる
+    const listed = await repos.auditLogs.list(tenantId, { limit: 10 });
+    const listedPayload = listed.items[0]?.payload as Record<string, string>;
+    expect(listedPayload.status).toBe('active');
+    // 返ってきた行を書き換えても表には響かない
+    listedPayload.status = 'tampered';
+    const again = await repos.auditLogs.readChain(tenantId, CHAIN_LIMIT);
+    expect((again.rows[0]?.payload as Record<string, string>).status).toBe('active');
+  });
+
+  it('途中の連番から読める (錨として 1 つ前の行のハッシュも返す)', async () => {
+    // 3 行積む
+    const first = await appendAudit('a1');
+    const second = await appendAudit('a2');
+    const third = await appendAudit('a3');
+    // 2 件目から読む
+    const page = await repos.auditLogs.readChain(tenantId, CHAIN_LIMIT, second.seq);
+    expect(page.rows.map((row) => row.id)).toEqual([second.id, third.id]);
+    // **錨は 1 件目のハッシュ**（これが無いと区間の継ぎ目を検証できない）
+    expect(page.anchorHash).toBe(first.hash);
+    // 先頭から読むときは錨が無い
+    const fromHead = await repos.auditLogs.readChain(tenantId, CHAIN_LIMIT);
+    expect(fromHead.anchorHash).toBeNull();
+    expect(fromHead.rows).toHaveLength(3);
+  });
+
+  it('上限に達したら続きがあると返す (区間に分けて検証できる)', async () => {
+    // 3 行積んで上限 2 で読む
+    const first = await appendAudit('a1');
+    const second = await appendAudit('a2');
+    const third = await appendAudit('a3');
+    const page = await repos.auditLogs.readChain(tenantId, 2);
+    expect(page.rows.map((row) => row.id)).toEqual([first.id, second.id]);
+    expect(page.reachedLimit).toBe(true);
+    // 続きは最後に読んだ行の次から（錨はその 1 つ前 = second）
+    const rest = await repos.auditLogs.readChain(tenantId, 2, second.seq + 1n);
+    expect(rest.rows.map((row) => row.id)).toEqual([third.id]);
+    expect(rest.reachedLimit).toBe(false);
+    expect(rest.anchorHash).toBe(second.hash);
   });
 
   it('表を直接書き換えると連鎖の検証が落ちる (prisma 側でトリガを外した場合と同じ結果)', async () => {

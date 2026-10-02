@@ -238,6 +238,15 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     const all = await repos.auditLogs.readChain(a.tenantId, CHAIN_LIMIT);
     expect(all.rows).toHaveLength(3);
     expect(all.reachedLimit).toBe(false);
+    // **続きは fromSeq で読める。** これが無いと、行数が上限を超えたテナントでは毎回同じ
+    // 最古の区間だけを検証し続け、それ以降の行は二度と検証されない (書き換えても「無傷」になる)
+    const second = all.rows[1]!;
+    const rest = await repos.auditLogs.readChain(a.tenantId, CHAIN_LIMIT, second.seq + 1n);
+    expect(rest.rows.map((row) => row.seq)).toEqual([all.rows[2]!.seq]);
+    // 錨は 1 つ前の行 (= 2 件目) のハッシュ。区間の継ぎ目を検証するのに使う
+    expect(rest.anchorHash).toBe(second.hash);
+    // 先頭から読むときは錨が無い
+    expect(all.anchorHash).toBeNull();
   });
 
   it('ルール数が上限に達したら作れない (判定と挿入が同じトランザクション)', async () => {

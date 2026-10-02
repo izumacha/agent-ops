@@ -115,7 +115,14 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 # 5. 監査ログと、その改ざん検知 (verify は admin 限定)
 curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/audit-logs
 curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/audit-logs/verify
+# 続きがある (reachedLimit: true) なら、返ってきた nextFromSeq を渡して次の区間を検証する
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "localhost:3000/api/v1/audit-logs/verify?fromSeq=<nextFromSeq の値>"
 ```
+
+**検証は区間に分かれる。** 1 回に読む行数には上限があるので、`reachedLimit` が `true` なら
+`nextFromSeq` を `?fromSeq=` に渡して続きを検証する（渡さずに呼び直すと**同じ最古の区間を
+検証し続ける**ことになり、それ以降の行は一度も確かめられない）。区間の継ぎ目も検証される。
 
 **`AUDIT_HMAC_SECRET`（32 文字以上）が必須。** 人が行う操作（停止・復帰・インシデントの解決・ルールの
 登録と削除）は、鍵が無いと **503 で何も変えずに**断る（変えてから記録に失敗すると、記録の無い変更が

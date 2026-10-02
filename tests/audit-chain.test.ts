@@ -139,6 +139,42 @@ describe('監査ログのハッシュ連鎖', () => {
     expect(verifyAuditChain(SECRET, TENANT, rows, secretsEqual)).toEqual({ ok: true, verified: 3 });
   });
 
+  it('錨を渡せば途中の区間だけを検証できる', () => {
+    // **これが無いと、行数が 1 回の上限を超えたテナントでは最古の区間しか検証できない**
+    // （それ以降の行は二度と確かめられず、書き換えても「無傷」と答える）
+    const rows = chainOf(SECRET, [row(), row({ action: 'b' }), row({ action: 'c' })]);
+    // 2 件目から検証する（錨は 1 件目のハッシュ）
+    expect(
+      verifyAuditChain(SECRET, TENANT, rows.slice(1), secretsEqual, {
+        expectedSeq: 2n,
+        previousHash: rows[0]!.hash,
+      }),
+    ).toEqual({ ok: true, verified: 2 });
+  });
+
+  it('区間の継ぎ目も検証する (錨が合わなければ壊れていると答える)', () => {
+    // **継ぎ目を見ないと、区間に分けた瞬間に「行の差し込み」を見逃す**
+    const rows = chainOf(SECRET, [row(), row({ action: 'b' }), row({ action: 'c' })]);
+    // 錨のハッシュだけを別の値にする（1 件目が差し替えられた状況）
+    expect(
+      verifyAuditChain(SECRET, TENANT, rows.slice(1), secretsEqual, {
+        expectedSeq: 2n,
+        previousHash: 'deadbeef',
+      }),
+    ).toMatchObject({ ok: false, brokenSeq: 2n, reason: 'prev_hash_mismatch' });
+  });
+
+  it('錨の連番が合わなければ壊れていると答える (区間の先頭が削除されている)', () => {
+    // 2 件目から読むつもりで 3 件目が返ってきた状況（間の行が消えている）
+    const rows = chainOf(SECRET, [row(), row({ action: 'b' }), row({ action: 'c' })]);
+    expect(
+      verifyAuditChain(SECRET, TENANT, rows.slice(2), secretsEqual, {
+        expectedSeq: 2n,
+        previousHash: rows[0]!.hash,
+      }),
+    ).toMatchObject({ ok: false, brokenSeq: 3n, reason: 'seq_not_sequential' });
+  });
+
   it('空の連鎖は ok を返す (まだ 1 件も記録が無いテナント)', () => {
     // 行が無い状態
     expect(verifyAuditChain(SECRET, TENANT, [], secretsEqual)).toEqual({ ok: true, verified: 0 });

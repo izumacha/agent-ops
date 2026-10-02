@@ -2,7 +2,7 @@
 // Prisma を直接 import してよいのはこのディレクトリと結線箇所 (src/lib/prisma*.ts) だけ (ESLint が強制する)。
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
 import { randomUUID } from 'node:crypto';
-import { nextAuditSeq } from '@/domain/audit/chain';
+import { FIRST_AUDIT_SEQ, nextAuditSeq } from '@/domain/audit/chain';
 import { USAGE_ERROR_STATUS_FLOOR } from '@/domain/guardrail/rule';
 import { DuplicateError } from '@/data/errors';
 import { fetchCount, toPage, type CursorKey } from '@/data/page';
@@ -1210,17 +1210,33 @@ class PrismaAuditLogs implements AuditLogsPort {
   async readChain(
     tenantId: string,
     limit: number,
-  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean }> {
+    fromSeq?: bigint,
+  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean; anchorHash: string | null }> {
+    // 読み始める連番 (省略時は先頭)
+    const start = fromSeq ?? FIRST_AUDIT_SEQ;
     // 上限より 1 件多く取り、続きがあるかを知る
     const rows = await this.db.auditLog.findMany({
-      where: { tenantId },
+      where: { tenantId, seq: { gte: start } },
       orderBy: { seq: 'asc' },
       take: limit + 1,
     });
     // 上限に達したか
     const reachedLimit = rows.length > limit;
+    // **直前の行のハッシュ**(途中から検証するときの錨)。先頭から読むなら錨は無い
+    const previous =
+      start <= FIRST_AUDIT_SEQ
+        ? null
+        : await this.db.auditLog.findFirst({
+            where: { tenantId, seq: { lt: start } },
+            orderBy: { seq: 'desc' },
+            select: { hash: true },
+          });
     // 返すのは上限までの分
-    return { rows: reachedLimit ? rows.slice(0, limit) : rows, reachedLimit };
+    return {
+      rows: reachedLimit ? rows.slice(0, limit) : rows,
+      reachedLimit,
+      anchorHash: previous?.hash ?? null,
+    };
   }
 }
 

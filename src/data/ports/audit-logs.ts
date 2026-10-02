@@ -53,14 +53,24 @@ export interface AuditLogsPort {
   // 一覧する (テナント内、createdAt 昇順)
   list(tenantId: string, query: PageQuery): Promise<Page<AuditLogRecord>>;
   /**
-   * 連鎖の検証のために**テナントの全行を seq の昇順で**読む。
+   * 連鎖の検証のために**テナントの行を seq の昇順で**読む。
    *
-   * ページ送りを持たないのは、連鎖の検証が「1 行目から最後まで順に」たどる操作で、
-   * 途中から始められないため (前の行のハッシュが要る)。代わりに `limit` で読む件数に上限を置き、
-   * 上限に達したかを返す — 行数が増えても 1 回の要求が無制限に重くならないようにする (§8)。
+   * `limit` で 1 回に読む件数に上限を置き、上限に達したかを返す — 行数が増えても 1 回の要求が
+   * 無制限に重くならないようにする (§8)。
+   *
+   * **`fromSeq` でその連番から読み始められる。** 連鎖の検証は「前の行のハッシュ」が要るので
+   * 一見ページ送りができないが、**直前の行のハッシュを一緒に返せば続きから検証できる**
+   * (`anchorHash`)。これが無いと、行数が上限を超えたテナントでは**毎回同じ最古の
+   * `limit` 件だけを検証し続け、それ以降の行は二度と検証されない** — DB を触れる相手が
+   * 新しい行を書き換えても「無傷」と答える状態になり、改ざん検知が静かに効かなくなる。
+   *
+   * @param fromSeq 読み始める連番 (省略時は先頭 = 1)
+   * @returns rows: 読んだ行 / reachedLimit: 上限に達したか /
+   *   anchorHash: `fromSeq` の 1 つ前の行のハッシュ (先頭から読むとき・前の行が無いときは null)
    */
   readChain(
     tenantId: string,
     limit: number,
-  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean }>;
+    fromSeq?: bigint,
+  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean; anchorHash: string | null }>;
 }

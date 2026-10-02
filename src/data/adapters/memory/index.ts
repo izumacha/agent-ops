@@ -1,7 +1,7 @@
 // memory アダプタ: Port をインメモリの表で実装する (API テスト用。DB 無しで本番と同じ経路を通す)。
 // 本番 (prisma アダプタ) と挙動をそろえる要点: テナント絞り込み・一意制約 (DuplicateError)・
 // ページネーションの並び順・削除の Restrict
-import { nextAuditSeq } from '@/domain/audit/chain';
+import { FIRST_AUDIT_SEQ, nextAuditSeq } from '@/domain/audit/chain';
 import { USAGE_ERROR_STATUS_FLOOR } from '@/domain/guardrail/rule';
 import { DuplicateError } from '@/data/errors';
 import type {
@@ -1045,22 +1045,38 @@ class MemoryAuditLogs implements AuditLogsPort {
   async list(tenantId: string, query: PageQuery): Promise<Page<AuditLogRecord>> {
     // テナントで絞ってから共通のページネーションに通す
     const rows = [...this.store.auditLogs.values()].filter((row) => row.tenantId === tenantId);
-    return paginate(rows, query);
+    const page = await paginate(rows, query);
+    // **ここも payload を複製する。** `paginate` の複製は浅い（`{...row}`）ので、返した行の
+    // `payload` は表のオブジェクトを指したまま。3 つの読み書き経路のうち 2 つだけを複製すると、
+    // 残った 1 つから保存済みの行を書き換えられ、追記専用の保証が片側だけ成立する状態になる
+    return { ...page, items: page.items.map((row) => cloneAuditLog(row)) };
   }
 
-  // 連鎖の検証のために seq 昇順で読む (上限付き)
+  // 連鎖の検証のために seq 昇順で読む (上限付き。fromSeq から読み始められる)
   async readChain(
     tenantId: string,
     limit: number,
-  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean }> {
+    fromSeq?: bigint,
+  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean; anchorHash: string | null }> {
+    // 読み始める連番 (省略時は先頭)
+    const start = fromSeq ?? FIRST_AUDIT_SEQ;
     // テナントの行を seq の昇順に並べる
-    const all = [...this.store.auditLogs.values()]
+    const ordered = [...this.store.auditLogs.values()]
       .filter((row) => row.tenantId === tenantId)
       .sort((left, right) => (left.seq < right.seq ? -1 : left.seq > right.seq ? 1 : 0));
+    // 読み始める連番より前の行 (錨。途中から検証するときに前の行のハッシュが要る)
+    const before = ordered.filter((row) => row.seq < start);
+    // 読む範囲
+    const all = ordered.filter((row) => row.seq >= start);
     // 上限までに切る
     const rows = all.slice(0, limit).map((row) => cloneAuditLog(row));
     // 上限に達したか (呼び出し側が「まだ続きがある」と伝えられるようにする)
-    return { rows, reachedLimit: all.length > limit };
+    return {
+      rows,
+      reachedLimit: all.length > limit,
+      // 先頭から読むなら錨は無い (前の行が無いときも null)
+      anchorHash: start <= FIRST_AUDIT_SEQ ? null : (before[before.length - 1]?.hash ?? null),
+    };
   }
 
   // そのテナントの直前の行 (seq が最大のもの。無ければ undefined)

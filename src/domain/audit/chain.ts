@@ -117,10 +117,32 @@ export function auditRowHash(secret: string, row: AuditChainRow): string {
   return createHmac('sha256', secret).update(canonicalAuditRow(row), 'utf8').digest('hex');
 }
 
-// 次の行の連番 (直前の行が無ければ 1 から始める)
+/**
+ * テナントの最初の行の連番。
+ *
+ * **1 始まりであることをここが決める。** 採番・検証・途中からの読み出しの 3 か所が
+ * 「先頭はどれか」を知る必要があるので、裸の `1n` を散らさず 1 つの定数から読む
+ */
+export const FIRST_AUDIT_SEQ = 1n;
+
+// 次の行の連番 (直前の行が無ければ先頭から始める)
 export function nextAuditSeq(previousSeq: bigint | null): bigint {
-  // 直前が無ければ 1、あれば +1
-  return previousSeq === null ? 1n : previousSeq + 1n;
+  // 直前が無ければ先頭、あれば +1
+  return previousSeq === null ? FIRST_AUDIT_SEQ : previousSeq + 1n;
+}
+
+/**
+ * 途中から検証するときの錨 (`verifyAuditChain` の省略可能な引数)。
+ *
+ * **行数が 1 回の上限を超えるテナントではこれが無いと検証が止まる** — 錨が無ければ常に
+ * 先頭の `limit` 件しか確かめられず、それ以降の行は二度と検証されない (新しい行を書き換えても
+ * 「無傷」と答える状態になる)。`expectedSeq` の 1 つ前の行のハッシュを `previousHash` に渡す。
+ */
+export interface AuditChainAnchor {
+  // 最初に見る行の連番 (この行の seq がこれと一致することを要求する)
+  expectedSeq: bigint;
+  // その 1 つ前の行のハッシュ (前の行が無ければ null)
+  previousHash: string | null;
 }
 
 // 連鎖を検証する 1 行ぶんの入力。**payload は `unknown` で受ける** —
@@ -165,11 +187,13 @@ export function verifyAuditChain(
   tenantId: string,
   rows: readonly StoredAuditRow[],
   hashesEqual: (left: string, right: string) => boolean,
+  anchor?: AuditChainAnchor,
 ): AuditChainVerification {
-  // 直前の行のハッシュ (最初の行の prevHash はこれと同じ null であることを要求する)
-  let previousHash: string | null = null;
-  // 期待する連番 (1 から 1 ずつ増える)
-  let expectedSeq = 1n;
+  // 直前の行のハッシュ (最初の行の prevHash はこれと同じであることを要求する)。
+  // **途中から検証するときは錨のハッシュから始める** — 省略時は先頭なので null
+  let previousHash: string | null = anchor?.previousHash ?? null;
+  // 期待する連番 (先頭から 1 ずつ増える。途中からなら錨が示す連番から)
+  let expectedSeq = anchor?.expectedSeq ?? FIRST_AUDIT_SEQ;
   // 検証し終えた行数 (壊れた行は含めない)
   let verified = 0;
   // 先頭から 1 行ずつ見る

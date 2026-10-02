@@ -7,6 +7,8 @@ import { authenticate, authenticateApiKey, type Principal } from './auth';
 import { withPrivateCacheHeaders } from './cache-headers';
 import { ApiError, errorResponse, notFoundError, validationError } from './errors';
 import { enforceRateLimit, type RateLimitTier } from './rate-limit';
+import { requireAction } from './guard';
+import type { Action } from '@/domain/rbac';
 import { HTTP_STATUS } from './http-status';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
@@ -55,10 +57,25 @@ export interface RouteOptions {
    * 必ずこの指定を持つ」。手書きの一覧ではなくコードの連鎖から導くので、上流を呼ぶルートを
    * 新しく足した人が指定を忘れたら落ちる。
    *
-   * 枠の違いは `RATE_LIMIT_TIER` が持つ。**1 要求で何十回も外へ出る経路には `heavy` を指定する** —
-   * 回数だけを数える枠では、1 要求の重さが 2 桁違う経路に同じ上限を当てても保護にならない
+   * 枠の違いは `RATE_LIMIT_TIER` が持つ。**1 要求で上流へ扇状に出る経路には `fanOut`、応答を
+   * 返す前に外部の往復を待つ経路には `outbound` を指定する** — 回数だけを数える 1 つの枠では、
+   * 1 要求の重さが違う経路に同じ上限を当てても保護にならない
    */
   rateLimit?: RateLimitTier;
+  /**
+   * レート制限を数える**前に**要求する RBAC の操作 (省略時は route() では確かめない)。
+   *
+   * **追加の枠 (`fanOut` / `outbound`) を持つルートでは必須**（`tests/route-wrapping.test.ts` が
+   * 印から導いて要求する）。理由は順序で、レート制限は認証の後・本体の前に掛かるので、
+   * ここで認可しないと**権限の無い利用者がテナント全体の小さい枠を使い切れる** —
+   * view しか持たない利用者が `POST /evaluations` を 6 回投げると、どれも本体で 403 になるのに
+   * 枠は消費され、同じテナントの operator / admin が窓のあいだ 429 になる（枠はベンダーへの
+   * 課金を抑えるためのものなので、**上流へ 1 度も出ない要求で消費されるのは誤り**）。
+   *
+   * 本体側の `requireAction` は残す（`tenantId` と `user` を取り出すのに要るうえ、
+   * ここの宣言を落としたときに認可が丸ごと消えないため。二重に呼んでも副作用は無い）
+   */
+  requiredAction?: Action;
 }
 
 // route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
@@ -77,6 +94,14 @@ export const ROUTE_HANDLER_BRAND = Symbol.for('agent-ops.routeHandler');
  * `standard` へ落とす変更が検出網から見えない (印は true のままなので)
  */
 export const ROUTE_RATE_LIMIT_BRAND = Symbol.for('agent-ops.routeRateLimit');
+
+/**
+ * そのルートがレート制限より前に要求する RBAC の操作を外から読むための印
+ * (宣言していなければ `null`)。
+ *
+ * 印にするのは `ROUTE_RATE_LIMIT_BRAND` と同じ理由（綴りではなく結線を読む）。
+ */
+export const ROUTE_REQUIRED_ACTION_BRAND = Symbol.for('agent-ops.routeRequiredAction');
 
 /**
  * URL の動的セグメント (パスに現れる id) の形を確かめる。形が違えばそんな資源は存在しないので 404。
@@ -133,6 +158,10 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
       // **レート制限は認証の後**に掛ける。キーを認証済みの id から作るので、
       // 偽装できるヘッダ (X-Forwarded-For) に頼らずに数えられる。
       // 認証より前に掛けると、未認証の総当たりで正規の利用者の枠を枯渇させられる
+      // **認可はレート制限より先に。** 権限の無い要求で枠を消費させない（理由は requiredAction）
+      if (options.requiredAction !== undefined) {
+        requireAction(principal, options.requiredAction);
+      }
       // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
       if (options.rateLimit !== undefined) {
         enforceRateLimit(principal, options.rateLimit, Date.now());
@@ -152,6 +181,10 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
   Object.defineProperty(wrapped, ROUTE_HANDLER_BRAND, { value: true });
   // レート制限を掛けたかも同じ形で載せる (検出網が結線そのものを読めるようにする)
   Object.defineProperty(wrapped, ROUTE_RATE_LIMIT_BRAND, { value: options.rateLimit ?? null });
+  // レート制限より前に要求する操作も同じ形で載せる (検出網が結線そのものを読めるようにする)
+  Object.defineProperty(wrapped, ROUTE_REQUIRED_ACTION_BRAND, {
+    value: options.requiredAction ?? null,
+  });
   // 包んだ関数を返す
   return wrapped;
 }

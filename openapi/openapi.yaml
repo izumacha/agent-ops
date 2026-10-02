@@ -1134,9 +1134,25 @@ paths:
       tags: [audit-logs]
       operationId: verifyAuditLogs
       summary: |
-        監査ログのハッシュ連鎖を検証する (admin ロール限定)。テナントの全行を連番順に読み、
+        監査ログのハッシュ連鎖を検証する (admin ロール限定)。テナントの行を連番順に読み、
         記録されたハッシュを鍵付きで再計算して突き合わせる。壊れていれば**最初に壊れた連番と
-        その理由**を返す。鍵 (AUDIT_HMAC_SECRET) が未設定・短すぎるときは 503
+        その理由**を返す。鍵 (AUDIT_HMAC_SECRET) が未設定・短すぎるときは 503。
+
+        1 回に読む件数には上限 (src/lib/constants.ts の AUDIT_CHAIN_VERIFY_MAX_ROWS) があり、
+        続きがあるときは reachedLimit: true と nextFromSeq を返す。**その値を fromSeq に渡して
+        続きを検証する** — 渡さないと毎回最古の区間だけを検証することになり、それ以降の行は
+        一度も確かめられない
+      parameters:
+        - name: fromSeq
+          in: query
+          required: false
+          description: |
+            読み始める行の連番 (1 以上の整数。既定は先頭)。前の区間の応答の nextFromSeq を渡す。
+            **区間の継ぎ目も検証される** (1 つ前の行のハッシュを錨にして、最初の行の
+            prevHash と突き合わせる) ので、区間に分けても連鎖の強さは落ちない
+          schema:
+            type: string
+            pattern: '^[0-9]+$'
       responses:
         '200':
           description: 検証した (壊れていても 200。壊れているかは本文の ok で示す)
@@ -1400,7 +1416,15 @@ components:
       type: string
       description: |
         ガードレールの種別。cost と error_rate は**しきい値を上回ったら**発火、quality は
-        **下回ったら**発火する (向きの正本は src/domain/guardrail/rule.ts の RULE_COMPARISON)
+        **下回ったら**発火する (向きの正本は src/domain/guardrail/rule.ts の RULE_COMPARISON)。
+
+        **測れていない窓では発火しない**: 呼び出しが 0 件の窓 (cost / error_rate)、採点が 0 件の
+        評価 (quality)、そして **error_rate は窓の中の呼び出しが
+        GUARDRAIL_ERROR_RATE_MIN_REQUESTS 件に届かない場合**。最後の 1 つがあるのは、1 件だけ
+        呼んで失敗した窓が 1/1 = 100% になり、しきい値をどう置いても必ず発火してしまうため
+        (失敗には送り主自身のペイロードの誤り = 4xx も入るので、低トラフィックのエージェントが
+        1 回のミスで自動停止する)。低トラフィックのエージェントに error_rate を設定しても
+        発火しないのはこの理由で、窓を長くすると分母が増えて発火するようになる
       enum: [cost, error_rate, quality]
     RuleAction:
       type: string
@@ -2195,7 +2219,12 @@ components:
           type: boolean
           description: |
             1 回に読む上限 (src/lib/constants.ts の AUDIT_CHAIN_VERIFY_MAX_ROWS) に達したか。
-            true なら続きの行は検証していない (連鎖は先頭から順にしか辿れないのでページ送りが無い)
+            true なら続きの行は検証していないので、nextFromSeq を fromSeq に渡して続きを検証する
+        nextFromSeq:
+          type: string
+          description: |
+            続きの区間を検証するために fromSeq へ渡す連番 (reachedLimit が true のときだけ。
+            BigInt なので文字列)。これを渡さずに呼び直すと、同じ最古の区間を検証し続ける
         brokenSeq:
           type: string
           description: 最初に壊れた行の連番 (ok が false のときだけ。BigInt なので文字列)

@@ -682,6 +682,43 @@ describe('監査ログと連鎖の検証', () => {
     });
   });
 
+  it('fromSeq で続きの区間を検証でき、継ぎ目も確かめる', async () => {
+    // **これが無いと、行数が 1 回の上限を超えたテナントでは最古の区間しか検証されない**
+    // （それ以降の行を書き換えても「無傷」と答え、改ざん検知が静かに効かなくなる）
+    await appendViaResolve();
+    await appendViaResolve();
+    await appendViaResolve();
+    // 2 件目から検証する
+    const result = await call(verifyAuditLogs, {
+      token: seed.a.tokens.admin,
+      query: 'fromSeq=2',
+    });
+    expect(result.status).toBe(200);
+    // 2 件（2 件目と 3 件目）を検証し、継ぎ目も通っている
+    expect(result.json).toMatchObject({ ok: true, verified: 2, reachedLimit: false });
+    // **継ぎ目を見ている**: 1 件目を書き換えると、2 件目から始めた検証が落ちる
+    const rows = [...seed.store.auditLogs.values()].sort((x, y) => Number(x.seq - y.seq));
+    const head = rows[0];
+    if (!head) throw new Error('行が見つかりません');
+    seed.store.auditLogs.set(head.id, { ...head, hash: 'deadbeef' });
+    const broken = await call(verifyAuditLogs, {
+      token: seed.a.tokens.admin,
+      query: 'fromSeq=2',
+    });
+    expect(broken.json).toMatchObject({ ok: false, brokenSeq: '2', reason: 'prev_hash_mismatch' });
+  });
+
+  it('fromSeq の形が違えば 422', async () => {
+    // 連番は 1 以上の 10 進整数だけ（空文字・符号付き・小数・指数は弾く）
+    for (const value of ['', '0', '-1', '1.5', '1e3', 'abc', ' 1']) {
+      const result = await call(verifyAuditLogs, {
+        token: seed.a.tokens.admin,
+        query: `fromSeq=${encodeURIComponent(value)}`,
+      });
+      expect(result.status, `fromSeq=${value}`).toBe(422);
+    }
+  });
+
   it('鍵が未設定なら 503（鍵なしで「無傷」と答えない）', async () => {
     // 1 行書いてから鍵を外す
     await appendViaResolve();

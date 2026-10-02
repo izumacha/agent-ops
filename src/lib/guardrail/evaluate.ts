@@ -42,6 +42,23 @@ export interface GuardrailTrigger {
   now: Date;
   // 監査ログに残す操作主体。自動発火は null（人が起点の明示実行ではそのユーザー）
   actorId: string | null;
+  /**
+   * 通知の送信を**待たずに**戻るか（既定は待つ）。
+   *
+   * **中継の経路だけ true にする。** 通知は受け手の応答時間が外部で決まるので、待つと
+   * その時間がまるごと中継の応答時間に乗る（受け手が黙り込めば `NOTIFY_TIMEOUT_MS` ぶん。
+   * 実測では 1.2 秒で応答する受け手に対して中継が 1.2 秒以上掛かった）。受け入れ基準の
+   * 「中継の追加遅延 ≦ 50ms」を外部の遅さで破ることになり、しかも**ベンチは発火しない
+   * ルールで測るので検出できない**。
+   *
+   * **待つ側を既定にする理由**: 明示実行の API は「いま判定して結果を返す」操作なので、
+   * 通知が出たかまで含めて応答と対応しているほうが読みやすく、テストも決定的になる。
+   *
+   * **残る境界**: 待たない側では、応答を返した後に関数を凍結する配備先（serverless）で
+   * 通知が完了しないことがある。通知は元から fail-open（失敗しても停止を取り消さない）なので
+   * この取り落としは設計の範囲内で、**止める側は待ってから応答を返す**（停止は通知より前）。
+   */
+  detachNotifications?: boolean;
 }
 
 /** 発火した 1 件の結果 */
@@ -314,7 +331,14 @@ export async function evaluateGuardrails(
   }
   // **通知はすべての記録と停止が終わってから**（受け手の応答時間を停止までの計測に入れない）。
   // 失敗しても結果は変えない（`notifyGuardrailIncident` は例外を外へ出さない）
-  await Promise.all(notifications.map((payload) => notifyGuardrailIncident(payload, env)));
+  const sending = Promise.all(
+    notifications.map((payload) => notifyGuardrailIncident(payload, env)),
+  );
+  // 待つかどうかは起点が決める（理由は `detachNotifications` のコメント）。
+  // **待たない側でも必ず `void` で受ける** — 浮いた Promise を放置すると、将来
+  // `notifyGuardrailIncident` が例外を出す形へ変わったときに unhandled rejection になる
+  if (trigger.detachNotifications === true) void sending;
+  else await sending;
   // 判定した件数と発火したもの
   return { evaluated: rules.length, fired };
 }

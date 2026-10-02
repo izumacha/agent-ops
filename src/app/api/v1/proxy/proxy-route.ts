@@ -172,6 +172,10 @@ async function recordUsageAndEvaluate(
     now: new Date(),
     // 自動発火なので操作主体は居ない（API キーはユーザーではない）
     actorId: null,
+    // **通知は待たない。** 受け手の応答時間は外部で決まるので、待つとその時間が中継の
+    // 応答時間に乗る（受け入れ基準「追加遅延 ≦ 50ms」を外部の遅さで破る形。理由と残る境界は
+    // `GuardrailTrigger.detachNotifications` のコメント）。**停止は待ってから応答を返す**
+    detachNotifications: true,
   });
 }
 

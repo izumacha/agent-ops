@@ -503,6 +503,67 @@ describe('ガードレールの判定', () => {
     });
   });
 
+  it('既定では通知の完了まで待ってから戻る（明示実行の応答と対応させる）', async () => {
+    // **待たない側を既定にすると、明示実行の API が「通知したかどうか不明」な応答を返す。**
+    // 中継の経路だけが `detachNotifications: true` で待たない（理由は同項目のコメント）。
+    // ここでは「戻った時点で通知が完了している」ことを固定する — 送信を始めたかではなく
+    // 完了したかを見るので、`void` で投げ捨てる形に変えると落ちる
+    await makeRule(RuleKind.cost, 1_000, RuleAction.notify);
+    await recordUsage(1_500n);
+    // 通知が完了したか
+    let finished = false;
+    // 受け手はひと呼吸おいてから応答する（同じティックで終わらせない）
+    vi.stubGlobal('fetch', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      finished = true;
+      return new Response(null, { status: 204 });
+    });
+    // 既定（待つ）で判定する
+    await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: USAGE_RULE_KINDS, now: basisTime(), actorId: null },
+      env(),
+    );
+    // 戻った時点で通知は終わっている
+    expect(finished).toBe(true);
+  });
+
+  it('detachNotifications なら通知の完了を待たずに戻る', async () => {
+    // 中継の経路が使う側。**受け手の応答時間を中継の遅延に乗せない**のが目的
+    await makeRule(RuleKind.cost, 1_000, RuleAction.notify);
+    await recordUsage(1_500n);
+    // 完了したか
+    let finished = false;
+    // 解決を手元で握る（テストが完了させるまで終わらない）
+    let finish = (): void => {};
+    const sent = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    vi.stubGlobal('fetch', async () => {
+      await sent;
+      finished = true;
+      return new Response(null, { status: 204 });
+    });
+    // 待たない側で判定する
+    await evaluateGuardrails(
+      repos,
+      {
+        tenantId,
+        agentId,
+        kinds: USAGE_RULE_KINDS,
+        now: basisTime(),
+        actorId: null,
+        detachNotifications: true,
+      },
+      env(),
+    );
+    // **戻った時点では通知が終わっていない**
+    expect(finished).toBe(false);
+    // 後始末: 完了させてから抜ける（浮いたままにしない）
+    finish();
+    await sent;
+  });
+
   it('通知の受け手が落ちていても停止は取り消さない', async () => {
     // 通知だけが失敗する状況
     await makeRule(RuleKind.cost, 1_000, RuleAction.stop);

@@ -1246,6 +1246,55 @@ describe('中継の直後のガードレール判定', () => {
     expect((await relay(key.secret)).status).toBe(403);
   });
 
+  it('通知の往復を待たずに応答を返す（外部の遅さを中継の遅延に乗せない）', async () => {
+    // **これが無いと受け入れ基準「追加遅延 ≦ 50ms」を外部の遅さで破れる。** しかも
+    // プロキシのベンチは「発火しないルール」で測るので、この経路は一度も通らない（実測で、
+    // 1.2 秒で応答する受け手に対して中継が 1.2 秒以上掛かった）。
+    // ここでは「通知が完了するより前に応答が返る」ことを決定的に確かめる
+    //
+    // 上流は正常、しきい値 1 マイクロ USD で必ず発火する
+    await makeRule(RuleKind.cost, 1);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 通知の宛先を設定する（未設定だと送らずに戻るので待つかどうかを試せない）
+    vi.stubEnv('NOTIFY_WEBHOOK_URL', 'http://127.0.0.1:4099/hook');
+    vi.stubEnv('NOTIFY_SIGNING_SECRET', 'proxy-test-notify-secret-0123456789');
+    // 通知が完了したかどうか
+    let notified = false;
+    // 解決を手元で握る（テスト側が明示的に完了させるまで通知は終わらない）
+    let finishNotify = (): void => {};
+    const notifyFinished = new Promise<void>((resolve) => {
+      finishNotify = resolve;
+    });
+    // fetch を上流と通知で振り分ける（上流は即答、通知は待たせる）
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        // 通知の宛先への呼び出しは、テストが完了させるまで待つ
+        if (String(input).includes('/hook')) {
+          await notifyFinished;
+          notified = true;
+          return new Response(null, { status: 204 });
+        }
+        // 上流は正常な応答を即返す
+        return new Response(JSON.stringify(anthropicResponse(1_000, 1_000)), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+    // 中継する（通知はまだ終わっていない）
+    const relayed = await relay(key.secret);
+    // **応答は返っている**
+    expect(relayed.status).toBe(200);
+    // **通知はまだ完了していない**（待っていたらここは true になっている）
+    expect(notified).toBe(false);
+    // 止める側は待ってから応答を返している（こちらは遅延に乗せてよい。受け入れ基準 3 秒以内）
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    // 後始末: 通知を完了させてから抜ける（浮いたままにしない）
+    finishNotify();
+    await notifyFinished;
+  });
+
   it('失敗した中継でもエラー率のルールが発火する', async () => {
     // **失敗の経路で判定を呼ばないと「上流が落ち続けているのに止まらない」ことになる**。
     // 上流が 500 を返す（502 に写って返る）

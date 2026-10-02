@@ -22,6 +22,7 @@ import {
   UPSTREAM_MAX_RESPONSE_BYTES,
 } from '@/lib/constants';
 import { call, seedApiKey, seedEachTest } from './helpers';
+import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -972,5 +973,81 @@ describe('遅延の記録', () => {
     await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
     // 測った時間が記録されている (0 固定や未計測の変異を落とす。上振れは環境次第なので下限だけ見る)
     expect(recordedEvents()[0].latencyMs).toBeGreaterThanOrEqual(delayMs);
+  });
+});
+
+describe('プロキシのレート制限', () => {
+  // 検査用の小さい上限（本番の既定は PROXY_RATE_LIMIT_PER_MINUTE で、そこまで叩くのは遅い）。
+  // **上限そのものの値はここの主題ではない** — 確かめたいのは「上限に達したら断る」挙動
+  const TEST_LIMIT = 2;
+  // 窓は 1 分（窓の境界は tests/rate-limit.test.ts が決定的に固定している）
+  const TEST_WINDOW_MS = 60_000;
+
+  // 各テストの前に小さい上限で作り直す（helpers の seedEachTest も作り直すので、この順で上書きする）
+  beforeEach(() => {
+    resetSharedRateLimiterForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
+  });
+
+  // 中継を 1 回呼ぶ
+  async function relay(secret: string) {
+    // 上流は毎回正常応答（fetch の差し替えは呼び出しごとに使い回せる）
+    return call(proxyAnthropic, {
+      method: 'POST',
+      token: secret,
+      body: { model: ANTHROPIC_MODEL, messages: [{ role: 'user', content: 'こんにちは' }] },
+    });
+  }
+
+  it('上限までは中継し、超えたら 429 と Retry-After を返す', async () => {
+    // 上流は正常応答
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    // エージェントに紐づくキー
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 上限までは通る
+    for (let i = 0; i < TEST_LIMIT; i += 1) {
+      expect((await relay(key.secret)).status).toBe(200);
+    }
+    // 次は断られる
+    const limited = await relay(key.secret);
+    expect(limited.status).toBe(429);
+    // Retry-After は整数の秒数（RFC 9110 の delay-seconds）
+    expect(limited.headers.get('Retry-After')).toMatch(/^\d+$/);
+    // 文言は利用者向けの日本語（内部詳細を含めない）
+    expect(limited.json).toMatchObject({ message: API_MESSAGES.rateLimited });
+  });
+
+  it('断った要求は上流へ出ず、利用イベントも記録しない', async () => {
+    // **ここが制限を置いた目的** — 上限を超えた要求で上流の課金を発生させない。
+    // 「429 を返す」だけ確かめても、先に中継してから断る実装でも緑になる
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 上限まで使う
+    for (let i = 0; i < TEST_LIMIT; i += 1) await relay(key.secret);
+    // ここまでの上流呼び出しと記録の件数を覚える
+    const callsBefore = fetchCalls.length;
+    const eventsBefore = recordedEvents().length;
+    // 断られる要求を 3 回出す
+    for (let i = 0; i < 3; i += 1) {
+      expect((await relay(key.secret)).status).toBe(429);
+    }
+    // 上流へは 1 度も出ていない
+    expect(fetchCalls).toHaveLength(callsBefore);
+    // 台帳も増えていない（上流へ 1 バイトも出ていない呼び出しは記録しない方針と一致）
+    expect(recordedEvents()).toHaveLength(eventsBefore);
+  });
+
+  it('API キーごとに枠が独立している', () => {
+    // **キーは API キーの id から作る**ので、同じエージェントに 2 本発行すれば枠も 2 つ。
+    // テナント単位にすると、1 本の暴走したキーが同じテナントの他のキーを止めてしまう
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    const first = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const second = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 片方で使い切ってから、もう片方で通ることを確かめる
+    return (async () => {
+      for (let i = 0; i < TEST_LIMIT; i += 1) await relay(first.secret);
+      expect((await relay(first.secret)).status).toBe(429);
+      // 別のキーは枠を使っていないので通る
+      expect((await relay(second.secret)).status).toBe(200);
+    })();
   });
 });

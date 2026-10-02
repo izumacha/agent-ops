@@ -2,6 +2,7 @@
 // Route Handler を HTTP を介さずに直接呼ぶ (本番と同じ認証・認可・検証の経路を通す)
 import { afterEach, beforeEach } from 'vitest';
 import { setReposForTesting } from '@/data';
+import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, ApiKeyRecord, UserRecord, UserTokenRecord } from '@/data';
 import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
@@ -110,6 +111,10 @@ function setupSeed(): Seed {
   const repos = createMemoryRepos();
   // Composition Root を差し替える
   setReposForTesting(repos);
+  // **レート制限の表も作り直す。** 表はプロセスの寿命いっぱい残るので、作り直さないと
+  // 「前のテストが使った枠」が次のテストへ漏れ、同じファイルの後ろのテストだけが 429 になる
+  // （実行順に依存した赤になり、原因が分かりにくい）
+  resetSharedRateLimiterForTesting();
   // プラットフォーム管理者トークンを設定する (元の値は後始末で戻す)
   platformTokenBefore = process.env.PLATFORM_ADMIN_TOKEN;
   process.env.PLATFORM_ADMIN_TOKEN = PLATFORM_TOKEN;

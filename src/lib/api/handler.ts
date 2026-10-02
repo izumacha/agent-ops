@@ -6,6 +6,7 @@ import { API_MESSAGES } from '@/lib/constants';
 import { authenticate, authenticateApiKey, type Principal } from './auth';
 import { withPrivateCacheHeaders } from './cache-headers';
 import { ApiError, errorResponse, notFoundError, validationError } from './errors';
+import { rateLimitedError, rateLimitKeyFor, sharedRateLimiter } from './rate-limit';
 import { HTTP_STATUS } from './http-status';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
@@ -42,6 +43,17 @@ export type RouteAuth = 'user' | 'apiKey';
 export interface RouteOptions {
   // 受け付ける資格情報の種類 (省略時は 'user')
   auth?: RouteAuth;
+  /**
+   * レート制限を掛けるか (省略時は掛けない)。
+   *
+   * **既定を「掛けない」にしてあるのは、掛け忘れが 429 ではなく「制限なし」に倒れるから**で、
+   * 本来は逆向き (fail-closed) が望ましい。それでも既定を off にしているのは、全ルートに
+   * 掛けると一覧の読み出しのような安いルートまで同じ枠を食い、**上流へ出る中継の枠を
+   * 画面の描画が奪う**形になるため。掛ける対象は「外部へ費用を発生させる経路」に絞る。
+   * 掛け忘れは `tests/api/rate-limit.test.ts` が「中継ルートには掛かっていること」を
+   * ルートの束から導いて見張る
+   */
+  rateLimit?: boolean;
 }
 
 // route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
@@ -99,6 +111,15 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
       const repos = await getRepos();
       // 認証 (失敗は 401 の ApiError)
       const principal = await authenticateRequest(request, repos);
+      // **レート制限は認証の後**に掛ける。キーを認証済みの id から作るので、
+      // 偽装できるヘッダ (X-Forwarded-For) に頼らずに数えられる。
+      // 認証より前に掛けると、未認証の総当たりで正規の利用者の枠を枯渇させられる
+      if (options.rateLimit === true) {
+        // そのルートの送信元を表すキー
+        const decision = sharedRateLimiter().check(rateLimitKeyFor(principal), Date.now());
+        // 上限を超えていれば 429 (Retry-After 付き) で断る
+        if (!decision.allowed) throw rateLimitedError(decision.retryAfterSeconds);
+      }
       // 動的セグメントを解決する
       const params = await context.params;
       // 資源 id の形でないセグメントは本体へ渡さず 404 にする (DB へ渡すと 500 になる値を入口で止める)

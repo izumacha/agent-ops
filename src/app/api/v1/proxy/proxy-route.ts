@@ -293,7 +293,9 @@ export function proxyRoute(provider: Provider) {
         throw error;
       }
     },
-    // このルートは API キーでしか呼べない
-    { auth: 'apiKey' },
+    // このルートは API キーでしか呼べない。**レート制限を掛ける唯一のルート** —
+    // 上流へ費用を発生させる経路なので、有効なキー 1 本で無制限に要求できる状態を残さない
+    // (ADR-0007 の「残る宿題」。§9 公開エンドポイントを保護する)
+    { auth: 'apiKey', rateLimit: true },
   );
 }

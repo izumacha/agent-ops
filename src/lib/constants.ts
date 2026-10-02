@@ -89,6 +89,15 @@ export const NOTIFY_SIGNATURE_HEADER = 'x-agent-ops-signature';
 // 通知の署名鍵 (環境変数 NOTIFY_SIGNING_SECRET) に要求する最小長。
 // 短い鍵は総当たりで求められ、求められたら任意の通知を偽装できる
 export const NOTIFY_SIGNING_SECRET_MIN_LENGTH = 32;
+// プロキシ経路のレート制限: 1 つの API キーが窓の中で出せる中継の回数。
+//
+// 根拠は ADR-0007 の実測「本文を最悪の形に詰めた要求でも 1 通あたり 3.3ms」。1 分 600 回でも
+// 1 プロセスあたり約 2 秒ぶんの計算量に収まる一方、上流の課金は 600 回ぶん発生するので、
+// 「壊れたクライアントの暴走を止める」には十分に効く。正当な使い方（1 件ずつ中継する
+// エージェント）には届かない高さに置いてある
+export const PROXY_RATE_LIMIT_PER_MINUTE = 600;
+// レート制限の窓の長さ (ミリ秒)。1 分 = 上の定数の「1 分」の定義
+export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。
 // 短い鍵は総当たりで求められ、求められた鍵があれば連鎖をまるごと作り直せるので検知の意味が消える。
 // プラットフォーム管理者トークンと同じ 32 文字以上を要求する (別の値にする理由が無いので値も揃える)
@@ -196,6 +205,9 @@ export const API_MESSAGES = {
   apiKeyNotBoundToAgent:
     'この API キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
   agentNotActive: 'このエージェントは停止中です。復帰させてから呼び出してください。',
+  rateLimited: '要求が多すぎます。Retry-After 秒だけ待ってからやり直してください。',
+  budgetExceeded:
+    'このエージェントの予算 (当月) を超えました。予算を見直すか、翌月まで待ってから呼び出してください。',
   unsupportedModel:
     '料金表に無いモデルです。対応モデルを指定してください (計測できない呼び出しは中継しません)。',
   streamingNotSupported: 'ストリーミング (stream: true) には未対応です。',

@@ -29,9 +29,12 @@ import {
   evaluateStep1Report,
   evaluateStep2Report,
   evaluateStep3Report,
+  evaluateStep4Report,
   missingExclusionCases,
+  missingFiringCases,
   missingMatrixCases,
   missingPriceCases,
+  missingTamperCases,
 } from '../scripts/lib/gate-report.mjs';
 import { PRICE_TEST_PREFIX } from '../scripts/lib/step2-criteria.mjs';
 import {
@@ -73,6 +76,21 @@ import {
   EXCLUSION_TEST_PREFIX,
   maxDisagreedCases,
 } from '../scripts/lib/step3-criteria.mjs';
+import {
+  FIRING_TEST_PREFIX,
+  GUARDRAIL_E2E_TEST_NAME,
+  GUARDRAIL_STOP_MAX_MS,
+  TAMPER_TEST_PREFIX,
+} from '../scripts/lib/step4-criteria.mjs';
+import {
+  auditRowsProblem,
+  firedRulesProblem,
+  guardrailStopProblem,
+  suspendedAgentsProblem,
+} from '../scripts/lib/bench-criteria.mjs';
+import { readPrismaEnumMembers, readTsConstValues } from '../scripts/lib/source-enums.mjs';
+import { AuditChainBreak } from '@/domain/audit/chain';
+import { RuleKind } from '@/domain/types';
 import {
   SCRIPTS_DIR,
   callsFunction,
@@ -691,6 +709,234 @@ describe('evaluateStep3Report', () => {
   });
 });
 
+describe('evaluateStep4Report', () => {
+  // 判定に渡す共通の材料 (Step3 のものに種別・壊れ方・E2E のテスト名を足したもの)
+  const REASONS = ['unknown_case_id', 'judge_unavailable'];
+  // **種別と壊れ方は正本から取る** — 手書きの一覧にすると、この検査だけが古い一覧を見続ける
+  const KINDS = Object.values(RuleKind);
+  const BREAKS = Object.values(AuditChainBreak);
+  const base = {
+    testStatus: 0,
+    requiredPassedTests: 60,
+    ...MATRIX,
+    models: PRICED_MODELS,
+    pricePrefix: PRICE_TEST_PREFIX,
+    reasons: REASONS,
+    exclusionPrefix: EXCLUSION_TEST_PREFIX,
+    kinds: KINDS,
+    firingPrefix: FIRING_TEST_PREFIX,
+    breaks: BREAKS,
+    tamperPrefix: TAMPER_TEST_PREFIX,
+    e2eTestName: GUARDRAIL_E2E_TEST_NAME,
+  };
+
+  // Step4 の基準をすべて満たすレポートを作る (欠かす項目を指定できる)
+  const fullReport = (
+    options: { kinds?: readonly string[]; breaks?: readonly string[]; e2e?: boolean } = {},
+  ): Record<string, unknown> => {
+    // 料金までのレポート
+    const priced = priceReport(PRICED_MODELS) as {
+      testResults: { assertionResults: unknown[] }[];
+      numPassedTests: number;
+    };
+    // 除外理由・発火・改ざん検知・E2E のテストを足す。**発火と改ざん検知は実際の名前の形に似せる** —
+    // 改ざん検知は「接頭辞 … 壊れ方 で落ちる」のように手がかりが離れているので、
+    // 連続した 1 本の needle では照合できない形になっていることをここで固定する
+    const assertionResults = [
+      ...priced.testResults[0].assertionResults,
+      ...REASONS.map((reason) => ({
+        fullName: `${EXCLUSION_TEST_PREFIX}${reason} — 説明`,
+        status: 'passed',
+      })),
+      ...(options.kinds ?? KINDS).map((kind) => ({
+        fullName: `${FIRING_TEST_PREFIX}${kind} しきい値を超えたら発火する`,
+        status: 'passed',
+      })),
+      ...(options.breaks ?? BREAKS).map((reason) => ({
+        fullName: `${TAMPER_TEST_PREFIX}値を書き換えた行は ${reason} で落ちる`,
+        status: 'passed',
+      })),
+      ...(options.e2e === false
+        ? []
+        : [{ fullName: `ガードレールの E2E ${GUARDRAIL_E2E_TEST_NAME}`, status: 'passed' }]),
+    ];
+    return { ...priced, testResults: [{ assertionResults }] };
+  };
+
+  it('前 Step の基準と発火・改ざん検知・E2E がすべて揃っていれば失敗なし', () => {
+    // 行列・料金・除外・発火・改ざん検知・E2E が揃っている
+    expect(evaluateStep4Report({ ...base, report: fullReport() })).toEqual([]);
+  });
+
+  it('Step3 の基準 (不正出力の除外) を引き継いでいる', () => {
+    // 除外理由を 1 件も読めなかった状態にする (Step3 側の判定が効いているか)
+    const failures = evaluateStep4Report({ ...base, reasons: [], report: fullReport() });
+    expect(failures.some((message) => message.includes('除外理由を 1 件も読めません'))).toBe(true);
+  });
+
+  it('発火のテストが欠けていれば失敗になる (種別を足して書き忘れた形)', () => {
+    // 1 種別分しか無い
+    const failures = evaluateStep4Report({
+      ...base,
+      report: fullReport({ kinds: [KINDS[0]] }),
+    });
+    expect(failures.some((message) => message.includes('発火のテスト'))).toBe(true);
+  });
+
+  it('種別を 1 件も読めなければ失敗になる (照合の空振りを通さない)', () => {
+    // kinds が空 = 正本の enum を読めなかった状態
+    const failures = evaluateStep4Report({ ...base, kinds: [], report: fullReport() });
+    expect(failures.some((message) => message.includes('種別を 1 件も読めません'))).toBe(true);
+  });
+
+  it('改ざん検知のテストが欠けていれば失敗になる (壊れ方を足して書き忘れた形)', () => {
+    // 1 種類分しか無い
+    const failures = evaluateStep4Report({
+      ...base,
+      report: fullReport({ breaks: [BREAKS[0]] }),
+    });
+    expect(failures.some((message) => message.includes('改ざん検知のテスト'))).toBe(true);
+  });
+
+  it('壊れ方を 1 件も読めなければ失敗になる (照合の空振りを通さない)', () => {
+    // breaks が空 = 正本の定数を読めなかった状態
+    const failures = evaluateStep4Report({ ...base, breaks: [], report: fullReport() });
+    expect(failures.some((message) => message.includes('壊れ方を 1 件も読めません'))).toBe(true);
+  });
+
+  it('E2E が無ければ失敗になる', () => {
+    // E2E のテストだけを落とす
+    const failures = evaluateStep4Report({ ...base, report: fullReport({ e2e: false }) });
+    expect(failures.some((message) => message.includes('E2E のテスト'))).toBe(true);
+  });
+});
+
+describe('missingFiringCases', () => {
+  // レポートを 1 本の名前から作る
+  const reportOf = (names: string[]): Record<string, unknown> => ({
+    testResults: [{ assertionResults: names.map((fullName) => ({ fullName, status: 'passed' })) }],
+  });
+
+  it('発火は「接頭辞 + 種別」を項目として名指ししていることを求める', () => {
+    // 正しい形は欠けなし
+    expect(
+      missingFiringCases(reportOf([`${FIRING_TEST_PREFIX}cost 超過で発火`]), {
+        kinds: ['cost'],
+        firingPrefix: FIRING_TEST_PREFIX,
+      }),
+    ).toEqual([]);
+    // 接頭辞が無いだけの名前では当たらない
+    expect(
+      missingFiringCases(reportOf(['cost の判定']), {
+        kinds: ['cost'],
+        firingPrefix: FIRING_TEST_PREFIX,
+      }),
+    ).toEqual(['cost']);
+  });
+});
+
+describe('missingTamperCases', () => {
+  // レポートを 1 本の名前から作る
+  const reportOf = (names: string[]): Record<string, unknown> => ({
+    testResults: [{ assertionResults: names.map((fullName) => ({ fullName, status: 'passed' })) }],
+  });
+
+  it('改ざん検知は接頭辞と壊れ方の**両方**を含むことを求める', () => {
+    // 離れた 2 つの手がかりを両方持つ名前なら欠けなし
+    expect(
+      missingTamperCases(reportOf([`${TAMPER_TEST_PREFIX}書き換えた行は hash_mismatch で落ちる`]), {
+        breaks: ['hash_mismatch'],
+        tamperPrefix: TAMPER_TEST_PREFIX,
+      }),
+    ).toEqual([]);
+    // 壊れ方の綴りだけで接頭辞が無い名前は、改ざん検知のテストとは言えない
+    expect(
+      missingTamperCases(reportOf(['hash_mismatch という値を作る']), {
+        breaks: ['hash_mismatch'],
+        tamperPrefix: TAMPER_TEST_PREFIX,
+      }),
+    ).toEqual(['hash_mismatch']);
+  });
+
+  it('接尾辞が一致する壊れ方を取り違えない (prev_hash_mismatch で hash_mismatch を満たさない)', () => {
+    // **左側の境界を見ない版はここで通ってしまう** — `prev_hash_mismatch` の中の
+    // `hash_mismatch` は直後が空白なので、右側だけの判定では境界を満たす (実測)。
+    // そのとき `hash_mismatch` のテストが 1 件も無くてもゲートは緑のまま通る
+    expect(
+      missingTamperCases(
+        reportOf([`${TAMPER_TEST_PREFIX}行を差し込むと prev_hash_mismatch で落ちる`]),
+        { breaks: ['hash_mismatch'], tamperPrefix: TAMPER_TEST_PREFIX },
+      ),
+    ).toEqual(['hash_mismatch']);
+  });
+});
+
+describe('列挙の正本の読み取り (source-enums)', () => {
+  it('Prisma スキーマの enum を読める', () => {
+    // **ドメイン側の TypeScript と一致することの担保は tests/domain-enums.test.ts が持つ**ので、
+    // ここは「スキーマから読めた一覧がドメインと同じ」ことを見れば読み取りの正しさが分かる
+    expect(readPrismaEnumMembers('test', 'RuleKind').sort()).toEqual(
+      Object.values(RuleKind).sort(),
+    );
+  });
+
+  it('TypeScript の as const の値を読める', () => {
+    // 連鎖の壊れ方は DB に保存しないので schema には無く、ソースから読む
+    expect(
+      readTsConstValues('test', 'src/domain/audit/chain.ts', 'AuditChainBreak').sort(),
+    ).toEqual(Object.values(AuditChainBreak).sort());
+  });
+
+  it('見つからなければ空配列 (呼び出し側が fail-closed で落とす)', () => {
+    // 存在しない enum / 定数 / ファイル (どれも空配列。例外にしない)
+    expect(readPrismaEnumMembers('test', 'NoSuchEnum')).toEqual([]);
+    expect(readTsConstValues('test', 'src/domain/audit/chain.ts', 'NoSuchConst')).toEqual([]);
+    // 読めないファイルは理由をエラー出力へ残す (握り潰さない)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(readTsConstValues('test', 'src/does-not-exist.ts', 'X')).toEqual([]);
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+});
+
+describe('firedRulesProblem', () => {
+  it('発火が 0 件なら理由を返す (何も起きていない速さを通さない)', () => {
+    // 1 件以上なら問題なし
+    expect(firedRulesProblem(1)).toBeNull();
+    // 0 件なら「停止まで」を測っていない
+    expect(firedRulesProblem(0)).toContain('発火していません');
+  });
+});
+
+describe('suspendedAgentsProblem', () => {
+  it('停止が永続化されていなければ理由を返す', () => {
+    // 1 件以上なら問題なし
+    expect(suspendedAgentsProblem(1)).toBeNull();
+    // 0 件なら発火だけを測っている
+    expect(suspendedAgentsProblem(0)).toContain('停止していません');
+  });
+});
+
+describe('auditRowsProblem', () => {
+  it('監査ログが残っていなければ理由を返す (fail-open で抜けた分だけ速い数字)', () => {
+    // 1 件以上なら問題なし
+    expect(auditRowsProblem(1)).toBeNull();
+    // 0 件なら記録の費用を含まない計測になっている
+    expect(auditRowsProblem(0)).toContain('監査ログが残っていません');
+  });
+});
+
+describe('guardrailStopProblem', () => {
+  it('上限ちょうどは通し、1 超えたら理由を返す', () => {
+    // 境界は上限ちょうどまで通す
+    expect(guardrailStopProblem(GUARDRAIL_STOP_MAX_MS)).toBeNull();
+    // 1 ミリ秒超えたら受け入れ基準を満たしていない
+    expect(guardrailStopProblem(GUARDRAIL_STOP_MAX_MS + 1)).toContain(
+      '発火から停止までが遅すぎます',
+    );
+  });
+});
+
 describe('runSteps', () => {
   it('ステップが失敗したらその場で非 0 終了する (後続を実行しない)', () => {
     // 存在しない npm script を 1 つ実行させ、そのあとに到達しないことを見る
@@ -992,6 +1238,19 @@ const BENCH_PAYLOADS: Readonly<
       { disagreedCases: maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT) + 1 },
     ],
   },
+  'guardrail-stop': {
+    // すべての基準を満たす計測結果 (ベンチは 3 回測るので件数も 3)
+    ok: { firedRules: 3, suspendedAgents: 3, auditRows: 3, elapsedMs: GUARDRAIL_STOP_MAX_MS },
+    // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)。
+    // **件数は 0 で破る** — 「発火していない」「停止していない」「記録が無い」はどれも
+    // 0 件として現れ、そのとき所要時間だけが基準を満たす (速い) 形になる
+    breaks: [
+      { firedRules: 0 },
+      { suspendedAgents: 0 },
+      { auditRows: 0 },
+      { elapsedMs: GUARDRAIL_STOP_MAX_MS + 1 },
+    ],
+  },
 };
 
 describe('benchOutputProblems', () => {
@@ -1112,6 +1371,7 @@ describe('benchLabels', () => {
     // 表のキーをそのまま列挙する (検査はこれと突き合わせて網羅を確かめる)
     expect(benchLabels().sort()).toEqual([
       'evaluation-agreement',
+      'guardrail-stop',
       'proxy-latency',
       'usage-aggregate',
     ]);
@@ -1556,6 +1816,11 @@ describe('判定の結線', () => {
       valueField: 'disagreedCases',
       limitField: 'limitDisagreedCases',
     },
+    'bench-guardrail.ts': {
+      label: 'guardrail-stop',
+      valueField: 'elapsedMs',
+      limitField: 'limitMs',
+    },
   };
 
   // ベンチが `process` に触れてよい形。**すべて純粋な読み取りだけ**で、
@@ -1625,6 +1890,10 @@ describe('判定の結線', () => {
       'domain/evaluation/judge-output',
       'data/adapters/prisma',
       'data/ports',
+      // **ガードレールの判定の唯一の入口**（発火から停止までを測るベンチが呼ぶ）。
+      // import 時の副作用も終了経路も持たず、本番の 3 つの起点がすべてこの関数を通るので、
+      // ベンチが「本番と同じ経路」を測れる（別の経路を測るベンチは基準の証拠にならない）
+      'lib/guardrail/evaluate',
     ].map((name) => join(SCRIPTS_DIR, '..', 'src', name)),
   );
 
@@ -2004,6 +2273,7 @@ describe('判定の結線', () => {
     'usage-aggregate': USAGE_AGGREGATE_MAX_MS,
     'proxy-latency': PROXY_ADDED_LATENCY_P95_MAX_MS,
     'evaluation-agreement': maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT),
+    'guardrail-stop': GUARDRAIL_STOP_MAX_MS,
   };
 
   // 受け入れ基準を**すべて満たす**テストレポートを組み立てる (シムに書かせる中身)。
@@ -2030,12 +2300,26 @@ describe('判定の結線', () => {
     const exclusions = Object.values(EvaluationExclusionReason).map(
       (reason) => `${EXCLUSION_TEST_PREFIX}${reason}`,
     );
+    // ルールの種別ごとの発火テスト名。**ここも手がかりを変える** (ゲートは Prisma スキーマ、
+    // ここはドメイン側の enum)。同じ経路で組み立てると両方が同じだけ縮んで空振りで緑になる
+    const firings = Object.values(RuleKind).map(
+      (kind) => `${FIRING_TEST_PREFIX}${kind} が発火する`,
+    );
+    // 連鎖の壊れ方ごとの改ざん検知テスト名。**実際の名前と同じく手がかりが離れた形**にする
+    // (接頭辞のすぐ後ろに壊れ方を置く形で組み立てると、離れた形を照合できない退行に気付けない)
+    const tampers = Object.values(AuditChainBreak).map(
+      (reason) => `${TAMPER_TEST_PREFIX}壊すと ${reason} で落ちる`,
+    );
     const named = [
       ...ROLES.flatMap((role) =>
         ACTIONS.map((action) => `${MATRIX_TEST_PREFIX}${role} × ${action}`),
       ),
       ...priced.filter((_name, index) => index !== dropPricedIndex),
       ...exclusions,
+      ...firings,
+      ...tampers,
+      // E2E は 1 本だけ (受け入れ基準 3)
+      GUARDRAIL_E2E_TEST_NAME,
     ];
     // 件数の下限まで埋める
     const filler = Math.max(0, REQUIRED_PASSED_TESTS - named.length);
@@ -2052,7 +2336,7 @@ describe('判定の結線', () => {
     };
     // **組み立てた結果が意図どおりであることを、判定そのものに確かめさせる**。
     // 最新 Step の判定に通すので、前の Step の基準もそこから引き継がれて確かめられる
-    const failures = evaluateStep3Report({
+    const failures = evaluateStep4Report({
       testStatus: 0,
       report,
       requiredPassedTests: REQUIRED_PASSED_TESTS,
@@ -2063,6 +2347,11 @@ describe('判定の結線', () => {
       pricePrefix: PRICE_TEST_PREFIX,
       reasons: Object.values(EvaluationExclusionReason),
       exclusionPrefix: EXCLUSION_TEST_PREFIX,
+      kinds: Object.values(RuleKind),
+      firingPrefix: FIRING_TEST_PREFIX,
+      breaks: Object.values(AuditChainBreak),
+      tamperPrefix: TAMPER_TEST_PREFIX,
+      e2eTestName: GUARDRAIL_E2E_TEST_NAME,
     });
     // 落としたなら基準を満たさないこと、満点なら満たすこと
     if (dropPricedIndex >= 0)

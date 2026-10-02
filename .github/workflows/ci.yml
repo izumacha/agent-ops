@@ -1,6 +1,7 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step3`: gen / db:generate / lint / format:check / typecheck /
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step4`: gen / db:generate / lint / format:check / typecheck /
 # テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / 不正出力の除外が全理由分 pass /
-# npm audit high 0 / 本番ビルド / ベンチ 3 本) を検査し、
+# 発火が全種別分 pass / 改ざん検知が全種類分 pass / E2E が pass /
+# npm audit high 0 / 本番ビルド / ベンチ 4 本) を検査し、
 # あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・
 # Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
 name: CI
@@ -67,8 +68,8 @@ jobs:
         run: npm run db:deploy
 
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run latest step gate (gate:step3)
-        run: npm run gate:step3
+      - name: Run latest step gate (gate:step4)
+        run: npm run gate:step4
 
       # **ゲートと同じ検査をここでも流す。** ゲートのステップを丸ごと削除する形（`STEP0_STEPS`
       # から 1 行消す・ゲート本体の呼び出しを消す）は検出網では捉えられない — 「流すと書いて

@@ -278,6 +278,7 @@ const NOT_DUPLICATED_IN_CI: Record<string, { kind: 'byOtherInvocation' | 'byCost
     },
     'npm run bench:proxy': { kind: 'byCost', why: '同上 (プロキシの追加遅延の計測)' },
     'npm run bench:evaluation': { kind: 'byCost', why: '同上 (採点の再現率の計測)' },
+    'npm run bench:guardrail': { kind: 'byCost', why: '同上 (発火から停止までの計測)' },
   };
 
 describe('CI ワークフロー', () => {

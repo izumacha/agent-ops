@@ -358,7 +358,7 @@ model Incident {
   @@index([ruleId]) // Restrict の解決・ルール別インシデント用
 }
 
-// 監査ログ (誰が・いつ・何に・何をしたか。追記専用。Step4 で改ざん検知のハッシュ連鎖を足す)
+// 監査ログ (誰が・いつ・何に・何をしたか。追記専用＋改ざん検知のハッシュ連鎖。Step4)
 model AuditLog {
   id         String   @id @default(cuid()) // 主キー
   tenantId   String // 所属テナント
@@ -368,6 +368,15 @@ model AuditLog {
   targetId   String // 対象の ID
   payload    Json? // 操作の詳細 (機微情報は入れない)
   createdAt  DateTime @default(now()) // 記録日時
+  // テナントごとの連番 (1 始まり)。**連鎖の順序はこれだけが決める** —
+  // createdAt で順序を決めると同一ミリ秒に入った 2 行で前後が定まらず、cuid も単調増加しないため、
+  // 「どの行の次がどの行か」が曖昧な連鎖は原理的に検証できない (再計算する順序が一意に決まらない)
+  seq        BigInt
+  // 直前の行のハッシュ (テナントの最初の行だけ null)。これがあるので 1 行の差し替えが後続すべてを壊す
+  prevHash   String?
+  // この行のハッシュ (HMAC-SHA256)。鍵は環境変数 AUDIT_HMAC_SECRET で、**鍵なしのハッシュにしない** —
+  // 素のハッシュだと DB への書き込み権限を得た相手が連鎖をまるごと作り直せて検知にならない
+  hash       String
 
   // 親テナント。テナント解約時はデータ一式を消す (テナント単位の消去要求に応えるため)
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -375,6 +384,7 @@ model AuditLog {
   // 壊れるため。監査ログを持つユーザーは削除せず無効化する (Step1 で User に無効化フラグを足す)
   actor  User?  @relation(fields: [actorId], references: [id], onDelete: Restrict)
 
-  @@index([tenantId, createdAt]) // 期間検索
+  @@unique([tenantId, seq]) // 連鎖を seq 順に読む経路。採番の衝突 (同じ番号の 2 行) もここで防ぐ
+  @@index([tenantId, createdAt]) // 期間検索 (一覧の既定の並び。seq の索引では期間で絞れない)
   @@index([actorId]) // Restrict の解決・操作者別検索用
 }

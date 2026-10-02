@@ -40,6 +40,19 @@ export function thresholdRangeFor(kind: RuleKind, costMax: number): ThresholdRan
   return kind === RuleKind.cost ? { min: 0, max: costMax } : { min: 0, max: RATIO_MAX };
 }
 
+/**
+ * エラー率ルールが「失敗」として数える上流 HTTP ステータスの下限 (これ以上が失敗)。
+ *
+ * **ここが唯一の定義**で、memory アダプタの集計と prisma アダプタの SQL が同じ値を読む。
+ * 2 か所に数値を書くと、アダプタごとに違う率を出しながらどちらのテストも緑になる
+ * (memory で API テストが通り、prisma の契約テストも別の値で通る = ADR-0006 の死角)。
+ *
+ * 400 以上をまとめて失敗に数えるのは、台帳に載る `statusCode` が**上流の実際の値**で、
+ * 4xx（入力の誤り・レート制限）も 5xx（上流の障害）もどちらも「その呼び出しは使えなかった」
+ * という同じ事実を表すため。エージェントの健全性を見る指標としては区別しない。
+ */
+export const USAGE_ERROR_STATUS_FLOOR = 400;
+
 /** 集計窓 (開始は含み、終了は含まない半開区間)。日次集計の UsageWindow と同じ約束 */
 export interface GuardrailWindow {
   start: Date;

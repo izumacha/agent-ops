@@ -1,15 +1,36 @@
 // prisma アダプタ: Port を Prisma (PostgreSQL) で実装する (本番用)。
 // Prisma を直接 import してよいのはこのディレクトリと結線箇所 (src/lib/prisma*.ts) だけ (ESLint が強制する)。
 // テナント絞り込みは全クエリの where に必ず入れる (ADR-0002)
+import { randomUUID } from 'node:crypto';
+import { nextAuditSeq } from '@/domain/audit/chain';
+import { USAGE_ERROR_STATUS_FLOOR } from '@/domain/guardrail/rule';
 import { DuplicateError } from '@/data/errors';
 import { fetchCount, toPage, type CursorKey } from '@/data/page';
 import { toSafeCount } from '@/data/safe-count';
 import type {
+  ActiveRuleQuery,
   AgentFilter,
   AgentRecord,
   AgentsPort,
   ApiKeyRecord,
   ApiKeysPort,
+  AppendAuditLogInput,
+  AuditHashInput,
+  AuditLogRecord,
+  AuditLogsPort,
+  CreateGuardrailRuleInput,
+  CreateGuardrailRuleResult,
+  DeleteGuardrailRuleResult,
+  GuardrailRuleRecord,
+  GuardrailRulesPort,
+  IncidentFilter,
+  IncidentRecord,
+  IncidentsPort,
+  RaiseIncidentInput,
+  RaisedIncident,
+  ResolveIncidentResult,
+  UsageWindowQuery,
+  UsageWindowTotal,
   CreateAgentInput,
   CreateApiKeyInput,
   CreateEvaluationRunInput,
@@ -45,7 +66,7 @@ import type {
   UserTokensPort,
   UsersPort,
 } from '@/data/ports';
-import { EvaluationRunStatus, Plan, Role, type AgentStatus } from '@/domain/types';
+import { AgentStatus, EvaluationRunStatus, IncidentStatus, Plan, Role } from '@/domain/types';
 import { Prisma, type PrismaClient } from '@/generated/prisma';
 
 // Prisma のエラーコード (https://www.prisma.io/docs/reference/api-reference/error-reference)
@@ -616,6 +637,13 @@ class PrismaApiKeys implements ApiKeysPort {
 
 // 集計の 1 行を SQL から受け取る形 (数値はすべて BIGINT で返させる。
 // COUNT(*) と SUM() の戻りの型がプロバイダ次第で変わると、合計だけが静かに丸まる)
+// ガードレールの窓の集計の戻り (集約関数は BIGINT を返すので bigint で受ける)
+interface WindowTotalRow {
+  requests: bigint;
+  errorRequests: bigint;
+  costMicroUsd: bigint;
+}
+
 interface DailyTotalRow {
   day: string;
   requests: bigint;
@@ -680,6 +708,38 @@ class PrismaUsageEvents implements UsageEventsPort {
       outputTokens: toSafeCount(row.outputTokens, '出力トークン'),
       costMicroUsd: row.costMicroUsd,
     }));
+  }
+
+  // 任意の半開区間を 1 つの合計にまとめる (ガードレールの判定が使う。memory アダプタと同じ規則)。
+  // **分母と分子を 1 クエリで取る** — 2 回に分けるとその間に入った呼び出しのぶん食い違い、
+  // `3 / 0` のような測定値が生まれる (判定側は「測れない」として扱うが、作らないほうがよい)。
+  // 失敗の下限は `USAGE_ERROR_STATUS_FLOOR` から渡す (数値を SQL に直書きしない)
+  async windowTotals(tenantId: string, query: UsageWindowQuery): Promise<UsageWindowTotal> {
+    // エージェントの絞り込み (指定が無ければ null を渡して条件を効かせない)
+    const agentId = query.agentId ?? null;
+    // 1 クエリで 3 つの合計を取る (タグ付きテンプレートなので値はすべてパラメータとして渡る)
+    const rows = await this.db.$queryRaw<WindowTotalRow[]>`
+      SELECT
+        COUNT(*)::bigint AS "requests",
+        COUNT(*) FILTER (WHERE "statusCode" >= ${USAGE_ERROR_STATUS_FLOOR})::bigint
+          AS "errorRequests",
+        COALESCE(SUM("costMicroUsd"), 0)::bigint AS "costMicroUsd"
+      FROM "UsageEvent"
+      WHERE "tenantId" = ${tenantId}
+        AND "createdAt" >= ${query.start}
+        AND "createdAt" < ${query.endExclusive}
+        AND (${agentId}::text IS NULL OR "agentId" = ${agentId})
+    `;
+    // 集約関数は行が無くても 1 行返るが、欠けを 0 として扱う (fail-safe)
+    const row = rows[0];
+    // 行が取れなければ「何も無かった窓」として返す
+    if (row === undefined) return { requests: 0, errorRequests: 0, costMicroUsd: 0n };
+    // SQL の戻り (BIGINT) を Port の型へ写す
+    return {
+      requests: toSafeCount(row.requests, '呼び出し回数'),
+      errorRequests: toSafeCount(row.errorRequests, '失敗した呼び出し回数'),
+      costMicroUsd: row.costMicroUsd,
+    };
   }
 }
 
@@ -845,6 +905,290 @@ class PrismaEvaluations implements EvaluationsPort {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
   }
+
+  // そのエージェントの最新の completed な実行 (品質低下ルールが読む相手)。
+  // **failed は飛ばす** — 除外が多すぎた実行のスコアは null で、それを「品質が落ちた」と
+  // 読むのは誤判定 (採点できていないことと品質が低いことは別)
+  async findLatestCompletedRun(
+    tenantId: string,
+    agentId: string,
+  ): Promise<EvaluationRunRecord | null> {
+    // 一覧と同じ並び (createdAt, id) の降順で先頭を取る (同時刻でも相手が入れ替わらない)
+    return this.db.evaluationRun.findFirst({
+      where: { tenantId, agentId, status: EvaluationRunStatus.completed },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+  }
+}
+
+// ── ガードレールのルール ──────────────────────────
+class PrismaGuardrailRules implements GuardrailRulesPort {
+  // クライアントを受け取る
+  constructor(private readonly db: PrismaClient) {}
+
+  // ルールを作る。**件数の判定と挿入を同じトランザクションに置き、テナント行をロックして直列化する** —
+  // 数えてから挿入する形に分けると、同時に 2 件来たときにどちらの count も上限未満を返して上限を超える
+  // (「最後の有効な admin」判定と同じ理由・同じ手口)
+  async create(
+    input: CreateGuardrailRuleInput,
+    maxRulesPerTenant: number,
+  ): Promise<CreateGuardrailRuleResult> {
+    // 1 つのトランザクションで「ロック → 数える → 挿入」を行う
+    return this.db.$transaction(async (tx) => {
+      // 同じテナントの要求を 1 本ずつ通す (子テーブル INSERT の FK 検査 (FOR KEY SHARE) とは衝突しない)
+      const locked = await tx.$queryRaw<
+        { id: string }[]
+      >`SELECT id FROM "Tenant" WHERE id = ${input.tenantId} FOR NO KEY UPDATE`;
+      // テナントが無ければ作れない (エージェントが見つからないのと同じ扱いで存在を隠す)
+      if (locked.length === 0) return { status: 'agent_not_found' as const };
+      // 現在のルール数を数える
+      const existing = await tx.guardrailRule.count({ where: { tenantId: input.tenantId } });
+      // 上限に達していれば作らない
+      if (existing >= maxRulesPerTenant) return { status: 'too_many_rules' as const };
+      // 挿入を試みる
+      try {
+        // 作成した行をそのまま返す
+        const rule = await tx.guardrailRule.create({
+          data: {
+            tenantId: input.tenantId,
+            agentId: input.agentId,
+            kind: input.kind,
+            threshold: input.threshold,
+            windowMinutes: input.windowMinutes,
+            action: input.action,
+          },
+        });
+        // 作成できた
+        return { status: 'created' as const, rule };
+      } catch (error) {
+        // 複合 FK (tenantId, agentId) 違反 = 同テナントにそのエージェントが居ない
+        if (isPrismaError(error, FOREIGN_KEY_VIOLATION))
+          return { status: 'agent_not_found' as const };
+        // それ以外は握り潰さず投げ直す
+        throw error;
+      }
+    });
+  }
+
+  // ルールを一覧する (テナント内、createdAt 昇順)
+  async list(tenantId: string, query: PageQuery): Promise<Page<GuardrailRuleRecord>> {
+    // 共通のページネーション (1 件多く取って次ページの有無を知る)
+    const rows = await this.db.guardrailRule.findMany(pageArgs(query, { tenantId }));
+    // ページに整形する
+    return toPage(rows, query.limit);
+  }
+
+  // ルールを消す (インシデントを持つルールは消せない = DB の Restrict FK)
+  async delete(tenantId: string, ruleId: string): Promise<DeleteGuardrailRuleResult> {
+    // 削除を試みる
+    try {
+      // 複合一意 (tenantId, id) で 1 回だけ消す (他テナントの id は見つからない)
+      await this.db.guardrailRule.delete({ where: { tenantId_id: { tenantId, id: ruleId } } });
+      // 消せた
+      return 'deleted';
+    } catch (error) {
+      // 無い行の削除は P2025
+      if (isPrismaError(error, RECORD_NOT_FOUND)) return 'not_found';
+      // インシデントから参照されている (Restrict)
+      if (isPrismaError(error, FOREIGN_KEY_VIOLATION)) return 'restricted';
+      // それ以外は握り潰さず投げ直す
+      throw error;
+    }
+  }
+
+  // 判定の対象になる有効なルールを引く (エージェント指定のものとテナント全体のものの和集合)
+  async findActiveRules(tenantId: string, query: ActiveRuleQuery): Promise<GuardrailRuleRecord[]> {
+    // 種別の絞り込み (指定が無ければ条件を付けない)
+    const kindFilter = query.kinds === undefined ? {} : { kind: { in: [...query.kinds] } };
+    // テナント内の有効なルールのうち、対象エージェント向けか agentId が null のもの
+    return this.db.guardrailRule.findMany({
+      where: {
+        tenantId,
+        enabled: true,
+        ...kindFilter,
+        OR: [{ agentId: query.agentId }, { agentId: null }],
+      },
+      // 並びを決定的にする (memory アダプタと同じ順序)
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+  }
+}
+
+// ── インシデント ──────────────────────────
+class PrismaIncidents implements IncidentsPort {
+  // クライアントを受け取る
+  constructor(private readonly db: PrismaClient) {}
+
+  // 発火を記録し、必要なら**同じトランザクションで**エージェントを停止する。
+  // 1 つの操作にするのは、片方だけ成立した状態 (止まったが記録が無い / 記録はあるが止まっていない) を
+  // 作らないため。受け入れ基準「発火から停止まで ≦ 3 秒」も、記録と停止が同じ往復で終わることで満たす
+  async raise(input: RaiseIncidentInput): Promise<RaisedIncident | null> {
+    // 1 つのトランザクションで「記録 → 必要なら停止」を行う
+    return this.db.$transaction(async (tx) => {
+      // 対象エージェントの状態をロックして読む (停止の判定とこの後の更新を直列化する)
+      const locked = await tx.$queryRaw<
+        { status: AgentStatus }[]
+      >`SELECT status FROM "Agent" WHERE "tenantId" = ${input.tenantId} AND id = ${input.agentId} FOR NO KEY UPDATE`;
+      // 同テナントに居なければ記録しない
+      if (locked.length === 0) return null;
+      // 記録を試みる (ルールが同テナントに無ければ複合 FK 違反になる)
+      try {
+        // インシデントを作る
+        const incident = await tx.incident.create({
+          data: {
+            tenantId: input.tenantId,
+            agentId: input.agentId,
+            ruleId: input.ruleId,
+            summary: input.summary,
+          },
+        });
+        // 停止を要求されていて、かつ今が稼働中なら suspended にする。
+        // **既に stopped / suspended のときは状態を変えない** — 手動停止を自動停止で塗り替えると、
+        // 復帰の判断 (誰が止めたのか) が読めなくなる
+        const suspended = input.suspendAgent && locked[0].status === AgentStatus.active;
+        // 状態を変えるときだけ更新する
+        if (suspended) {
+          await tx.agent.update({
+            where: { tenantId_id: { tenantId: input.tenantId, id: input.agentId } },
+            data: { status: AgentStatus.suspended },
+          });
+        }
+        // 記録と「実際に止めたか」を返す
+        return { incident, suspended };
+      } catch (error) {
+        // 複合 FK (tenantId, ruleId) 違反 = 同テナントにそのルールが無い
+        if (isPrismaError(error, FOREIGN_KEY_VIOLATION)) return null;
+        // それ以外は握り潰さず投げ直す
+        throw error;
+      }
+    });
+  }
+
+  // インシデントを一覧する (テナント内、createdAt 昇順。絞り込みは任意)
+  async list(
+    tenantId: string,
+    query: PageQuery,
+    filter?: IncidentFilter,
+  ): Promise<Page<IncidentRecord>> {
+    // 共通のページネーション (絞り込みは undefined なら条件に入れない)
+    const rows = await this.db.incident.findMany(
+      pageArgs(query, {
+        tenantId,
+        ...(filter?.agentId === undefined ? {} : { agentId: filter.agentId }),
+        ...(filter?.status === undefined ? {} : { status: filter.status }),
+      }),
+    );
+    // ページに整形する
+    return toPage(rows, query.limit);
+  }
+
+  // インシデントを引く (他テナントのものは null)
+  async findById(tenantId: string, incidentId: string): Promise<IncidentRecord | null> {
+    // 複合一意で引く (他テナントの id は見つからない)
+    return this.db.incident.findFirst({ where: { tenantId, id: incidentId } });
+  }
+
+  // 解決済みにする (既に解決済みなら 'already_resolved')
+  async resolve(tenantId: string, incidentId: string): Promise<ResolveIncidentResult> {
+    // **条件付き更新で「開いているものだけ」を閉じる** — 読んでから書く形に分けると、
+    // 同時に 2 回呼ばれたときに両方が 'resolved' を返して監査ログが二重に残る
+    const updated = await this.db.incident.updateMany({
+      where: { tenantId, id: incidentId, status: IncidentStatus.open },
+      data: { status: IncidentStatus.resolved, resolvedAt: new Date() },
+    });
+    // 1 行更新できたなら解決した
+    if (updated.count > 0) return 'resolved';
+    // 更新できなかったので、行そのものが無いのか既に解決済みなのかを見分ける
+    const existing = await this.db.incident.findFirst({
+      where: { tenantId, id: incidentId },
+      select: { status: true },
+    });
+    // 行が無ければ「無い」、あれば既に解決済み
+    return existing === null ? 'not_found' : 'already_resolved';
+  }
+}
+
+// ── 監査ログ ──────────────────────────
+class PrismaAuditLogs implements AuditLogsPort {
+  // クライアントを受け取る
+  constructor(private readonly db: PrismaClient) {}
+
+  // 1 行を追記する。**直前の行をロックしてから採番する** —
+  // ロックが無いと、同時に 2 つの要求が同じ seq を採って一意制約で片方が落ちる (連鎖は壊れないが
+  // 操作が失敗する) か、prevHash が同じ行を 2 つ作って連鎖が枝分かれする
+  async append(
+    input: AppendAuditLogInput,
+    computeHash: (hashInput: AuditHashInput) => string,
+  ): Promise<AuditLogRecord> {
+    // 1 つのトランザクションで「ロック → 採番 → ハッシュ → 挿入」を行う
+    return this.db.$transaction(async (tx) => {
+      // そのテナントの行を**テナント行のロックで**直列化する。
+      // **監査ログの最後の行そのものをロックできない** — 1 行も無いテナントではロックする行が無く、
+      // 「無いことのロック」は行ロックでは表せない (ギャップロックは PostgreSQL に無い)。
+      // テナント行を掴めば、同じテナントの追記は 1 本ずつ通る
+      await tx.$queryRaw`SELECT id FROM "Tenant" WHERE id = ${input.tenantId} FOR NO KEY UPDATE`;
+      // 直前の行 (seq が最大のもの) を引く
+      const previous = await tx.auditLog.findFirst({
+        where: { tenantId: input.tenantId },
+        orderBy: { seq: 'desc' },
+        select: { seq: true, hash: true },
+      });
+      // 次の連番 (直前が無ければ 1)
+      const seq = nextAuditSeq(previous?.seq ?? null);
+      // 直前の行のハッシュ (最初の行は null)
+      const prevHash = previous?.hash ?? null;
+      // **id を先に決める** — ハッシュの入力に id が入るので、DB の既定値 (cuid) に任せられない
+      // (既定値に任せると、挿入後に返ってきた id でハッシュを計算し直して UPDATE することになり、
+      //  追記専用トリガが UPDATE を拒否する = そもそも書けない)。
+      // **この表だけアプリが id を決める。** 形は `isResourceId` の許す範囲に収まり
+      // (英数字と `-`)、`randomUUID` は標準ライブラリの暗号学的乱数なので推測もできない
+      const id = randomUUID();
+      // ハッシュを計算してもらう (鍵と計算方法はアプリ側が持つ。アダプタは鍵に触らない)
+      const hash = computeHash({ seq, prevHash, id });
+      // 挿入する (createdAt も呼び出し側の値をそのまま入れる。DB の既定値に任せると
+      // ハッシュに入れた時刻と保存される時刻が別の瞬間になり、全行が検証に失敗する)
+      return tx.auditLog.create({
+        data: {
+          id,
+          tenantId: input.tenantId,
+          actorId: input.actorId,
+          action: input.action,
+          targetType: input.targetType,
+          targetId: input.targetId,
+          payload: input.payload === null ? Prisma.DbNull : input.payload,
+          createdAt: input.createdAt,
+          seq,
+          prevHash,
+          hash,
+        },
+      });
+    });
+  }
+
+  // 一覧する (テナント内、createdAt 昇順)
+  async list(tenantId: string, query: PageQuery): Promise<Page<AuditLogRecord>> {
+    // 共通のページネーション
+    const rows = await this.db.auditLog.findMany(pageArgs(query, { tenantId }));
+    // ページに整形する
+    return toPage(rows, query.limit);
+  }
+
+  // 連鎖の検証のために seq 昇順で読む (上限付き)
+  async readChain(
+    tenantId: string,
+    limit: number,
+  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean }> {
+    // 上限より 1 件多く取り、続きがあるかを知る
+    const rows = await this.db.auditLog.findMany({
+      where: { tenantId },
+      orderBy: { seq: 'asc' },
+      take: limit + 1,
+    });
+    // 上限に達したか
+    const reachedLimit = rows.length > limit;
+    // 返すのは上限までの分
+    return { rows: reachedLimit ? rows.slice(0, limit) : rows, reachedLimit };
+  }
 }
 
 // prisma アダプタ一式を組み立てる (Composition Root と契約テストが呼ぶ)
@@ -858,5 +1202,8 @@ export function createPrismaRepos(db: PrismaClient): Repositories {
     apiKeys: new PrismaApiKeys(db),
     usageEvents: new PrismaUsageEvents(db),
     evaluations: new PrismaEvaluations(db),
+    guardrailRules: new PrismaGuardrailRules(db),
+    incidents: new PrismaIncidents(db),
+    auditLogs: new PrismaAuditLogs(db),
   };
 }

@@ -100,4 +100,9 @@ export interface EvaluationsPort {
   // 比べても意味が無いので飛ばす (prisma/schema.prisma の status / judgeProvider の説明)。
   // 無ければ null (初回の実行、judge を替えた直後、前が failed しか無い場合は比較相手が無い)
   findPreviousRun(tenantId: string, run: EvaluationRunRecord): Promise<EvaluationRunRecord | null>;
+  // **そのエージェントの最新の `completed` な実行** (品質低下ルールが読む相手)。
+  // `failed` を飛ばすのは、除外が多すぎた実行のスコアを「品質が落ちた」と読むのが誤判定だから
+  // (採点できていないことと品質が低いことは別)。1 度も実行していなければ null で、
+  // そのときルールは発火しない (測れていないものを「悪い」と読まない。fail-safe)
+  findLatestCompletedRun(tenantId: string, agentId: string): Promise<EvaluationRunRecord | null>;
 }

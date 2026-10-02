@@ -344,7 +344,11 @@ model Incident {
   ruleId      String // 発火したルール
   status      IncidentStatus @default(open) // 状態
   summary     String // 発火理由の要約 (通知本文にも使う)
-  triggeredAt DateTime       @default(now()) // 発火日時
+  // 発火日時 (= 行の作成日時。発火した瞬間にこの行ができるので 2 つの概念に分けない)。
+  // **名前を createdAt にそろえる**のは、一覧のカーソル (src/data/page.ts) が
+  // 「(createdAt, id) の組」を位置として符号化する唯一の規則になっているため。
+  // この表だけ別名にすると、共有のページネーションをこの表のために一般化することになる
+  createdAt   DateTime       @default(now())
   resolvedAt  DateTime? // 解決日時
 
   tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
@@ -353,7 +357,8 @@ model Incident {
   // 発火ルール (同テナントを複合 FK で保証)。インシデントを起こしたルールは削除できない (Restrict。無効化は enabled=false)
   rule   GuardrailRule @relation(fields: [tenantId, ruleId], references: [tenantId, id], onDelete: Restrict)
 
-  @@index([tenantId, status]) // 未解決一覧
+  @@index([tenantId, status]) // 未解決一覧 (status で絞る経路)
+  @@index([tenantId, createdAt]) // 一覧の既定の並び (カーソルの位置比較がこの順序を使う)
   @@index([agentId]) // Restrict の解決・エージェント別インシデント用
   @@index([ruleId]) // Restrict の解決・ルール別インシデント用
 }

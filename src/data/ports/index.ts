@@ -1,7 +1,9 @@
 // 全 Port をまとめた束 (Composition Root と API 層が受け渡す単位)
 import type { AgentsPort } from './agents';
 import type { ApiKeysPort } from './api-keys';
+import type { AuditLogsPort } from './audit-logs';
 import type { EvaluationsPort } from './evaluations';
+import type { GuardrailRulesPort, IncidentsPort } from './guardrails';
 import type { TenantsPort } from './tenants';
 import type { UserTokensPort } from './user-tokens';
 import type { UsageEventsPort } from './usage-events';
@@ -16,12 +18,17 @@ export interface Repositories {
   apiKeys: ApiKeysPort;
   usageEvents: UsageEventsPort;
   evaluations: EvaluationsPort;
+  guardrailRules: GuardrailRulesPort;
+  incidents: IncidentsPort;
+  auditLogs: AuditLogsPort;
 }
 
 // 各 Port の型と入力型をここから再公開する (利用側は個別ファイルのパスを知らなくてよい)
 export type * from './agents';
 export type * from './api-keys';
+export type * from './audit-logs';
 export type * from './evaluations';
+export type * from './guardrails';
 export type * from './tenants';
 export type * from './types';
 export type * from './usage-events';

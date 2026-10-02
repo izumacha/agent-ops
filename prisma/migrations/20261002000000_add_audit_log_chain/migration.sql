@@ -112,3 +112,23 @@ ALTER TABLE "GuardrailRule" ADD CONSTRAINT "GuardrailRule_threshold_in_range" CH
     ELSE "threshold" >= 0 AND "threshold" <= 1
   END
 );
+
+
+-- ─────────────────────────────────────────────
+-- ここも手書き。**Incident の発火日時の列名を createdAt にそろえる。**
+--
+-- 一覧のカーソル (src/data/page.ts) は「(createdAt, id) の組」を位置として符号化する唯一の規則で、
+-- 全テーブルがその名前を使っている。この表だけ triggeredAt のままにすると、共有の
+-- ページネーションをこの表のために一般化することになる (6 つ以上の一覧が通る経路を広げる)。
+-- 発火した瞬間に行ができるので、発火日時と作成日時は同じものであり概念も増えない。
+--
+-- **`prisma migrate diff` が出す DROP COLUMN + ADD COLUMN をそのまま使わない。**
+-- 到達する最終形は同じだが、既存行があれば発火日時を黙って捨てる (いまこの表は全環境で空なので
+-- 実害は無いが、移行の形としては誤り)。RENAME は値を保ったまま同じ最終形になる。
+-- ─────────────────────────────────────────────
+
+-- 列名を変える (値はそのまま残る)
+ALTER TABLE "Incident" RENAME COLUMN "triggeredAt" TO "createdAt";
+
+-- CreateIndex
+CREATE INDEX "Incident_tenantId_createdAt_idx" ON "Incident"("tenantId", "createdAt");

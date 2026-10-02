@@ -5,6 +5,7 @@
 // 素通しにすると、クライアントが送った Authorization が上流へ届いたり、上流向けの資格情報を
 // 上書きされたりする。必要になったヘッダ (anthropic-beta など) はここへ明示的に足す。
 import { Provider } from '@/domain/types';
+import { parseOutboundUrl } from '@/lib/outbound-url';
 import { API_MESSAGES, UPSTREAM_MAX_RESPONSE_BYTES, UPSTREAM_TIMEOUT_MS } from '@/lib/constants';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
@@ -58,9 +59,6 @@ export function upstreamEnvNames(): { baseUrlEnv: string; apiKeyEnv: string }[] 
   return Object.values(UPSTREAMS).map(({ baseUrlEnv, apiKeyEnv }) => ({ baseUrlEnv, apiKeyEnv }));
 }
 
-// ループバック (自分自身) を指すホスト名。**非本番でだけ** http を許す相手
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
-
 // 中継が設定されていない・設定が安全でないときの例外 (利用者には理由の詳細を出さない)
 function notConfiguredError(): ApiError {
   // 503: 今はこの中継を行えない
@@ -79,25 +77,17 @@ export function resolveUpstreamBaseUrl(provider: Provider, env: NodeJS.ProcessEn
   const raw = env[config.baseUrlEnv]?.trim();
   // 指定が空文字なら「未設定」と同じ扱いにする (空の環境変数で公式へ向くほうが安全側)
   const candidate = raw === undefined || raw === '' ? config.defaultBaseUrl : raw;
-  // URL として読めること
-  let url: URL;
-  try {
-    url = new URL(candidate);
-  } catch {
-    // 読めない値は設定ミス
-    throw notConfiguredError();
-  }
-  // 資格情報付き URL (user:pass@host) は拒否する (ログや Referer に漏れる形)
-  if (url.username !== '' || url.password !== '') throw notConfiguredError();
-  // クエリ・フラグメント付きの基底 URL は、パスを足すと意味が変わるので拒否する
+  // スキームと資格情報の規則は共有モジュールが持つ (通知の宛先と同じ規則。§6 DRY)
+  const parsed = parseOutboundUrl(candidate, env);
+  // 受け付けられない形は設定ミス
+  if (!parsed.ok) throw notConfiguredError();
+  // 読めた URL
+  const url = parsed.url;
+  // **クエリ・フラグメント付きの基底 URL はこの経路だけが拒否する** —
+  // 後ろに固定パスを足すので、クエリがあると意味が変わる (通知の宛先はそのまま POST するので許す)
   if (url.search !== '' || url.hash !== '') throw notConfiguredError();
-  // https ならそのまま使える
-  if (url.protocol === 'https:') return url;
-  // http はローカルのスタブ上流に限る。本番では平文の中継を許さない (資格情報が素で流れる)
-  const loopback = LOOPBACK_HOSTS.has(url.hostname) || LOOPBACK_HOSTS.has(`[${url.hostname}]`);
-  if (url.protocol === 'http:' && loopback && env.NODE_ENV !== 'production') return url;
-  // それ以外は拒否 (fail-closed)
-  throw notConfiguredError();
+  // 使える基底 URL
+  return url;
 }
 
 /** 中継先の完全な URL (基底 + プロバイダごとの固定パス)。クライアントの URL は使わない */

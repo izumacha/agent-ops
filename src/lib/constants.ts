@@ -78,6 +78,17 @@ export const GUARDRAIL_RULES_MAX_PER_TENANT = 50;
 // 連鎖の検証で 1 回に読む監査ログの上限。検証は 1 行目から順にたどるので途中から始められず、
 // ページ送りができない。代わりに読む件数を区切り、上限に達したかを応答で伝える (§8)
 export const AUDIT_CHAIN_VERIFY_MAX_ROWS = 10_000;
+// 通知 1 回の待ち時間の上限 (ミリ秒)。**発火から停止までの計測には入らない** (通知は停止より後)
+// が、受け手が黙り込んだときに発火の処理そのものが長引かないよう区切る
+export const NOTIFY_TIMEOUT_MS = 5_000;
+// 通知の応答本文を読む上限 (バイト)。受け手の応答に意味は無いので読んで捨てるだけ。
+// 読まずに捨てると接続が滞留する実装があるので読むが、無制限に読むとメモリを食う
+export const NOTIFY_MAX_RESPONSE_BYTES = 64 * 1024;
+// 通知に付ける署名のヘッダ名。受け手が検証に使う (値は `sha256=<16 進>`)
+export const NOTIFY_SIGNATURE_HEADER = 'x-agent-ops-signature';
+// 通知の署名鍵 (環境変数 NOTIFY_SIGNING_SECRET) に要求する最小長。
+// 短い鍵は総当たりで求められ、求められたら任意の通知を偽装できる
+export const NOTIFY_SIGNING_SECRET_MIN_LENGTH = 32;
 // 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。
 // 短い鍵は総当たりで求められ、求められた鍵があれば連鎖をまるごと作り直せるので検知の意味が消える。
 // プラットフォーム管理者トークンと同じ 32 文字以上を要求する (別の値にする理由が無いので値も揃える)

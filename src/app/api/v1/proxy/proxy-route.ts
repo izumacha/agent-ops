@@ -18,6 +18,7 @@ import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
 import { assertWithinBudget } from '@/lib/guardrail/budget';
+import { evaluateGuardrailsSafely, USAGE_RULE_KINDS } from '@/lib/guardrail/evaluate';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 // エラーをログへ落とす形 (PII やクエリ引数を message ごと出さないための唯一の経路)
 import { describeError } from '@/lib/describe-error';
@@ -152,6 +153,28 @@ async function recordUsage(
   }
 }
 
+// 利用イベントを記録し、**続けてガードレールを判定する**。どちらも失敗しても投げない。
+//
+// **判定を記録の直後に置くのが要点**（cron 間隔に依存せず「発火から停止まで ≦ 3 秒」を満たす）。
+// 成功した中継と失敗した中継の両方から呼ぶ — エラー率のルールは失敗した呼び出しを見るので、
+// 失敗の経路で呼ばないと「上流が落ち続けているのに止まらない」ことになる
+async function recordUsageAndEvaluate(
+  repos: Repositories,
+  input: Parameters<typeof recordUsage>[1],
+): Promise<void> {
+  // まず台帳へ 1 行書く（判定はこの行を含めて集計する）
+  await recordUsage(repos, input);
+  // 使用量から測れる種別だけを見る（品質は評価実行の表を見るので、中継では引かない）
+  await evaluateGuardrailsSafely(repos, {
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    kinds: USAGE_RULE_KINDS,
+    now: new Date(),
+    // 自動発火なので操作主体は居ない（API キーはユーザーではない）
+    actorId: null,
+  });
+}
+
 /**
  * 1 プロバイダ分のプロキシ Route Handler を組み立てる。
  * **認証は API キーだけ** (route の auth: 'apiKey')。ユーザートークンでは 401 になる
@@ -218,7 +241,7 @@ export function proxyRoute(provider: Provider) {
               NO_COST);
         // 記録する (成功・失敗ともに 1 行。ステータスは**実際の上流の値**)
         alreadyRecorded = true;
-        await recordUsage(repos, {
+        await recordUsageAndEvaluate(repos, {
           tenantId,
           agentId: agent.id,
           provider,
@@ -279,7 +302,7 @@ export function proxyRoute(provider: Provider) {
         // (上流が未設定の 503 は `resolveUpstreamTarget` が **この try に入る前**に投げるので
         //  ここには来ない。上流へ 1 バイトも出ていない呼び出しを記録しない方針は変えていない)
         if (!alreadyRecorded) {
-          await recordUsage(repos, {
+          await recordUsageAndEvaluate(repos, {
             tenantId,
             agentId: agent.id,
             provider,

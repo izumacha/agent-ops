@@ -19,9 +19,16 @@ import {
   EvaluationExclusionReason,
   EvaluationRunStatus,
   Provider,
+  RuleAction,
+  RuleKind,
 } from '@/domain/types';
-import { API_MESSAGES, EVALUATION_SET_MAX_CASES } from '@/lib/constants';
+import {
+  API_MESSAGES,
+  EVALUATION_SET_MAX_CASES,
+  GUARDRAIL_RULES_MAX_PER_TENANT,
+} from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
+import { AuditAction } from '@/domain/audit/action';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -462,5 +469,126 @@ describe('評価の実行', () => {
       query: `setId=${other.id}`,
     });
     expect((miss.json as { items: unknown[] }).items).toHaveLength(0);
+  });
+});
+
+describe('評価実行の直後のガードレール判定', () => {
+  // judge が「依頼されたケースを低いスコアで返す」上流（品質ルールを発火させる）
+  function stubLowQualityUpstream(score: number): void {
+    // judge には低いスコアを、エージェントには応答を返す
+    stubUpstream((body) =>
+      isJudgeRequest(body)
+        ? new Response(
+            anthropicBody(
+              JSON.stringify({
+                results: requestedCaseIds(body).map((caseId) => ({
+                  caseId,
+                  accuracy: score,
+                  safety: score,
+                  deviation: 0,
+                })),
+              }),
+            ),
+            { status: 200 },
+          )
+        : new Response(anthropicBody('エージェントの応答'), { status: 200 }),
+    );
+  }
+
+  // 品質ルールを 1 件作る（発火したら停止する）
+  async function makeQualityRule(threshold: number) {
+    // そのエージェント向けのルール
+    const created = await seed.repos.guardrailRules.create(
+      {
+        tenantId: seed.a.id,
+        agentId: seed.a.agent.id,
+        kind: RuleKind.quality,
+        threshold,
+        windowMinutes: 60,
+        action: RuleAction.stop,
+      },
+      GUARDRAIL_RULES_MAX_PER_TENANT,
+    );
+    // 作れていなければテストとして落とす
+    if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);
+  }
+
+  // 監査ログの鍵を設定する
+  beforeEach(() => {
+    vi.stubEnv('AUDIT_HMAC_SECRET', 'evaluations-test-audit-secret-0123');
+  });
+
+  it('品質が下回ったら実行の直後に発火してエージェントを停止する', async () => {
+    // **cron 間隔に依存せず、保存の直後に判定する**のが要点（UC-08）。
+    // しきい値 0.9 に対して 0.2 で採点させる
+    await makeQualityRule(0.9);
+    stubLowQualityUpstream(0.2);
+    const set = await createSet();
+    // 実行する
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    // 実行そのものは成功して保存されている（201）
+    expect(result.status, JSON.stringify(result.json)).toBe(201);
+    // **応答を返した時点でもう停止している**
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    // インシデントが 1 件できている
+    expect(seed.store.incidents.size).toBe(1);
+  });
+
+  it('品質がしきい値を上回っていれば発火しない', async () => {
+    // しきい値 0.5 に対して満点で採点させる
+    await makeQualityRule(0.5);
+    stubHealthyUpstream();
+    const set = await createSet();
+    // 実行する
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status).toBe(201);
+    // 停止もインシデントも起きない
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+    expect(seed.store.incidents.size).toBe(0);
+  });
+
+  it('判定が失敗しても保存済みの実行を 500 で隠さない', async () => {
+    // **実行はすでに保存されている**ので、判定の失敗で 500 にすると
+    // 「保存された実行が利用者からは失敗に見える」ことになる
+    await makeQualityRule(0.9);
+    stubLowQualityUpstream(0.2);
+    const set = await createSet();
+    // ルールの取得が必ず失敗するようにする
+    vi.spyOn(seed.repos.guardrailRules, 'findActiveRules').mockRejectedValue(
+      new Error('DB が落ちている'),
+    );
+    // 実行する
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    // 201 のまま
+    expect(result.status).toBe(201);
+    // 判定できなかったので停止もしていない
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+  });
+
+  it('発火は監査ログに「誰が起点か」付きで残る', async () => {
+    // 自動発火だが起点は人の操作なので、評価を走らせたユーザーを操作主体として残す
+    await makeQualityRule(0.9);
+    stubLowQualityUpstream(0.2);
+    const set = await createSet();
+    await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    // 監査ログが 1 行あり、operator が操作主体として入っている
+    const rows = [...seed.store.auditLogs.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: AuditAction.guardrail_fired,
+      actorId: seed.a.users.operator.id,
+    });
   });
 });

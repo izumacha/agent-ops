@@ -34,6 +34,10 @@ export interface ThresholdRange {
 // 割合 (0〜1) で表す種別の上限。エラー率・品質スコアはどちらも 0〜1 の比率
 const RATIO_MAX = 1;
 
+// 逸脱スコアが最良のときの値 (0.0〜1.0 で低いほど良いので、1 から引くと「高いほど良い」へ直せる)。
+// **裸の 1 を書かない** — RATIO_MAX と同じ値だが意味が違う (あちらは割合の上限、こちらは反転の基点)
+const DEVIATION_BEST = 1;
+
 // 種別ごとのしきい値の範囲。コストはマイクロ USD の整数なので上限は金額の上限に合わせる
 export function thresholdRangeFor(kind: RuleKind, costMax: number): ThresholdRange {
   // コストだけは金額の上限まで、割合の 2 種は 0〜1
@@ -80,8 +84,17 @@ export function isValidWindowMinutes(windowMinutes: number, min: number, max: nu
 
 /**
  * 「いまから過去 windowMinutes 分」の集計窓を作る。範囲外の長さなら **null**。
- * **終了は now を含まない**半開区間にして、日次集計 (`src/domain/usage-window.ts`) と約束を揃える
- * (境界の 1 件が両方の窓に入る・どちらにも入らない、という取りこぼしを作らないため)。
+ *
+ * **終了は `now` を含む。** 判定は「いま記録した呼び出しの直後」に走るので、`now` を
+ * 含まない形にすると**その呼び出し自身が窓から落ちる** — タイムスタンプがミリ秒精度で、
+ * 記録と判定は同じミリ秒に収まるため。実測で、終了を `now` ちょうどにしていた版は
+ * 中継の直後にコストルールが 1 件も発火しなかった（その呼び出しの料金が次の呼び出しまで
+ * 数えられない fail-open）。
+ *
+ * 日次集計（`src/domain/usage-window.ts`）が半開なのは、**隣り合う日の窓**で境界の 1 件が
+ * 二重に入る／どちらにも入らないのを防ぐため。こちらは「末尾がいまの移動窓」で隣の窓が
+ * 無いので、その理由は上端には当てはまらない。**開始側は半開のまま**（`start` を含み、
+ * `start` の 1 ミリ秒前は含まない）。
  */
 export function guardrailWindow(
   now: Date,
@@ -91,8 +104,10 @@ export function guardrailWindow(
 ): GuardrailWindow | null {
   // 範囲外の長さでは窓を作らない (呼び出し側が「判定できない」として扱う)
   if (!isValidWindowMinutes(windowMinutes, min, max)) return null;
-  // 終了は呼び出し時刻そのもの (含まない)
-  const endExclusive = new Date(now.getTime());
+  // 終了は「呼び出し時刻の 1 ミリ秒後」。Port の集計は `createdAt < endExclusive` で絞るので、
+  // こうすると `now` ちょうどに記録された行まで含まれる（上のコメントの理由）。
+  // **ミリ秒を足すのは精度の都合**で、タイムスタンプが同じミリ秒に収まる限り不可避
+  const endExclusive = new Date(now.getTime() + 1);
   // 開始はそこから窓の長さだけ戻した時刻 (含む)
   const start = new Date(endExclusive.getTime() - windowMinutes * MILLIS_PER_MINUTE);
   // 半開区間として返す
@@ -121,11 +136,18 @@ export interface QualityScores {
 }
 
 /**
- * 評価実行から「品質」として読む 1 つの数値を決める。**3 観点のうち最も低いもの**を採る。
+ * 評価実行から「品質」として読む 1 つの数値を決める。**3 観点のうち最も悪いもの**を採る。
  *
- * 平均ではなく最小にするのは、1 観点だけが崩れた形 (正確性は保ったまま安全性が落ちた等) を
+ * 平均ではなく最悪値にするのは、1 観点だけが崩れた形 (正確性は保ったまま安全性が落ちた等) を
  * 他の観点が埋めて見えなくしないため。しきい値の列は 1 つなので、どれか 1 つでも割ったら
  * 発火する側に倒す (§9 fail-safe)。
+ *
+ * **向きをそろえてから比べる。** `accuracy` / `safety` は高いほど良いが、**`deviation` (逸脱) は
+ * 低いほど良い** (0.0〜1.0。`prisma/schema.prisma` と `src/domain/evaluation/prompt.ts` が
+ * そう宣言している)。素の `Math.min` を 3 つに当てると、**逸脱の無い完璧な実行 (deviation = 0) が
+ * 品質 0 と読まれ、正のしきい値を持つ品質ルールが健全なエージェントを必ず停止させる**
+ * (実測: 満点の採点 `{accuracy: 1, safety: 1, deviation: 0}` でしきい値 0.5 のルールが発火した)。
+ * `1 - deviation` に直してから最小を採る。
  *
  * **1 観点でも null なら全体を null にする。** `scoredCases = 0` のときは 3 つとも null に
  * なる約束 (DB の CHECK 制約で守っている) なので実際には 3 つ揃って欠けるが、片方だけ欠けた
@@ -134,12 +156,12 @@ export interface QualityScores {
 export function worstQualityScore(scores: QualityScores | null): number | null {
   // 評価実行そのものが無ければ測れていない
   if (scores === null) return null;
-  // 3 観点を配列にする
-  const values = [scores.accuracy, scores.safety, scores.deviation];
-  // 1 つでも欠けていれば測れていない扱いにする
-  if (values.some((value) => value === null)) return null;
-  // 欠けが無いので数値として最小を採る
-  return Math.min(...(values as number[]));
+  // 3 観点のうち 1 つでも欠けていれば測れていない扱いにする
+  if (scores.accuracy === null || scores.safety === null || scores.deviation === null) return null;
+  // **逸脱だけ向きが逆**なので「高いほど良い」側へ直す (0 の逸脱 = 品質 1.0)
+  const deviationAsQuality = DEVIATION_BEST - scores.deviation;
+  // 向きのそろった 3 つのうち最も低いものが「最も悪い観点」
+  return Math.min(scores.accuracy, scores.safety, deviationAsQuality);
 }
 
 /** 発火したときに記録する実測値 (種別ごとに単位が違うので判別可能な共用体にする) */

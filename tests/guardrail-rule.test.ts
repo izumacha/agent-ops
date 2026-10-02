@@ -44,9 +44,35 @@ describe('ガードレールの集計窓', () => {
       GUARDRAIL_WINDOW_MIN_MINUTES,
       GUARDRAIL_WINDOW_MAX_MINUTES,
     );
-    // 開始は 15 分前、終了は基準時刻そのもの
-    expect(window?.start.toISOString()).toBe('2026-10-02T11:45:00.000Z');
-    expect(window?.endExclusive.toISOString()).toBe('2026-10-02T12:00:00.000Z');
+    // **窓は `(now - 15 分, now]` を覆う**（基準時刻を含み、長さはちょうど 15 分）。
+    // Port の集計は `start <= createdAt < endExclusive` で絞るので、その形にするには
+    // 両端を 1 ミリ秒ずつ後ろへ置くことになる。開始を `now - 15 分` のままにすると
+    // 窓の長さが 15 分 + 1 ミリ秒になり、「直近 15 分の料金」という意味からずれる
+    expect(window?.start.toISOString()).toBe('2026-10-02T11:45:00.001Z');
+    expect(window?.endExclusive.toISOString()).toBe('2026-10-02T12:00:00.001Z');
+    // 長さはちょうど 15 分
+    expect(window!.endExclusive.getTime() - window!.start.getTime()).toBe(15 * 60 * 1000);
+  });
+
+  it('基準時刻ちょうどに記録された行を窓に含む（その呼び出し自身が落ちない）', () => {
+    // **これが落ちていると、中継の直後の判定がその呼び出しの料金を数えない**（fail-open）。
+    // 記録と判定は同じミリ秒に収まるので、終了を基準時刻ちょうど（含まない）にすると
+    // 自分自身が窓の外になる。実測で、その版は中継の直後にコストルールが 1 件も発火しなかった
+    const now = new Date('2026-10-02T12:00:00.000Z');
+    const window = guardrailWindow(
+      now,
+      15,
+      GUARDRAIL_WINDOW_MIN_MINUTES,
+      GUARDRAIL_WINDOW_MAX_MINUTES,
+    );
+    // Port の集計は `createdAt < endExclusive` で絞るので、基準時刻ちょうどが窓の中に入る
+    expect(now.getTime() < (window?.endExclusive.getTime() ?? 0)).toBe(true);
+    // 窓の長さはちょうど 15 分のまま（上端を 1 ミリ秒ずらした分、下端も同じだけずれる）
+    expect((window?.endExclusive.getTime() ?? 0) - (window?.start.getTime() ?? 0)).toBe(
+      15 * 60 * 1000,
+    );
+    // 15 分より前（ちょうど境界）は窓の外
+    expect((window?.start.getTime() ?? 0) > now.getTime() - 15 * 60 * 1000).toBe(true);
   });
 
   it('渡した Date を書き換えない (呼び出し側の時刻が動かない)', () => {
@@ -116,9 +142,19 @@ describe('しきい値の範囲', () => {
 });
 
 describe('品質スコアの読み取り', () => {
-  it('3 観点のうち最も低い値を採る (1 観点の崩れを他が埋めて隠さない)', () => {
-    // 安全性だけが低い
-    expect(worstQualityScore({ accuracy: 0.9, safety: 0.3, deviation: 0.95 })).toBe(0.3);
+  it('3 観点のうち最も悪い値を採る (1 観点の崩れを他が埋めて隠さない)', () => {
+    // 安全性だけが低い (逸脱は 0.05 = ほぼ無いので品質としては 0.95)
+    expect(worstQualityScore({ accuracy: 0.9, safety: 0.3, deviation: 0.05 })).toBe(0.3);
+  });
+
+  it('逸脱は「低いほど良い」ので向きを直してから比べる', () => {
+    // **これを間違えると、完璧な実行が「品質 0」と読まれて健全なエージェントが必ず停止する**。
+    // 満点の採点 (逸脱なし) は品質 1.0
+    expect(worstQualityScore({ accuracy: 1, safety: 1, deviation: 0 })).toBe(1);
+    // 逸脱だけが最悪 (1.0) なら品質は 0
+    expect(worstQualityScore({ accuracy: 1, safety: 1, deviation: 1 })).toBe(0);
+    // 逸脱が一番悪い観点になる場合 (1 - 0.8 = 0.2 が最小)
+    expect(worstQualityScore({ accuracy: 0.9, safety: 0.9, deviation: 0.8 })).toBeCloseTo(0.2);
   });
 
   it('評価実行が無ければ null (測れていない)', () => {

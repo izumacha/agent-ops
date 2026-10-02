@@ -13,12 +13,13 @@ import {
 } from '@/app/api/v1/proxy/proxy-route';
 import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/route';
 import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
-import { AgentStatus, Provider } from '@/domain/types';
+import { AgentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import * as pricing from '@/domain/pricing';
 import {
   API_MESSAGES,
   JSON_BODY_MAX_BYTES,
   JSON_BODY_MAX_DEPTH,
+  GUARDRAIL_RULES_MAX_PER_TENANT,
   UPSTREAM_MAX_RESPONSE_BYTES,
 } from '@/lib/constants';
 import { call, seedApiKey, seedEachTest } from './helpers';
@@ -1191,5 +1192,112 @@ describe('プロキシの予算の強制', () => {
     const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
     // 当月の累計は 0 なので通る
     expect((await relay(key.secret)).status).toBe(200);
+  });
+});
+
+describe('中継の直後のガードレール判定', () => {
+  // 通知は送らない設定で動かす（宛先が未設定なら送らずに済む。fetch は上流用に差し替えてある）
+  // ルール 1 件を作る
+  async function makeRule(kind: RuleKind, threshold: number, windowMinutes = 60) {
+    // stop ルール（発火したら停止する）
+    const created = await seed.repos.guardrailRules.create(
+      {
+        tenantId: seed.a.id,
+        agentId: seed.a.agent.id,
+        kind,
+        threshold,
+        windowMinutes,
+        action: RuleAction.stop,
+      },
+      GUARDRAIL_RULES_MAX_PER_TENANT,
+    );
+    // 作れていなければテストとして落とす
+    if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);
+    return created.rule;
+  }
+
+  // 中継を 1 回呼ぶ
+  async function relay(secret: string) {
+    // 正常な本文で呼ぶ
+    return call(proxyAnthropic, {
+      method: 'POST',
+      token: secret,
+      body: { model: ANTHROPIC_MODEL, messages: [{ role: 'user', content: 'こんにちは' }] },
+    });
+  }
+
+  // 監査ログの鍵を設定する（無いと記録だけが欠ける）
+  beforeEach(() => {
+    vi.stubEnv('AUDIT_HMAC_SECRET', 'proxy-test-audit-secret-0123456789ab');
+  });
+
+  it('コスト超過のルールが中継の直後に発火してエージェントを停止する', async () => {
+    // 1 回で料金がしきい値を超える応答（しきい値 1 マイクロ USD）
+    stubUpstream({ status: 200, body: anthropicResponse(1_000, 1_000) });
+    await makeRule(RuleKind.cost, 1);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 1 回目の中継は通る（この呼び出しの料金が台帳に入り、その直後に判定される）
+    expect((await relay(key.secret)).status).toBe(200);
+    // **応答を返した時点でもう停止している**（cron を待たない）
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    // インシデントが 1 件できている
+    expect(seed.store.incidents.size).toBe(1);
+    // 2 回目は停止中なので中継されない（403）
+    expect((await relay(key.secret)).status).toBe(403);
+  });
+
+  it('失敗した中継でもエラー率のルールが発火する', async () => {
+    // **失敗の経路で判定を呼ばないと「上流が落ち続けているのに止まらない」ことになる**。
+    // 上流が 500 を返す（502 に写って返る）
+    stubUpstream({ status: 500, body: { error: 'upstream down' } });
+    await makeRule(RuleKind.error_rate, 0.5);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 中継は失敗する
+    expect((await relay(key.secret)).status).toBe(502);
+    // 失敗した呼び出しも台帳に入り、エラー率 100% で発火して停止している
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    expect(seed.store.incidents.size).toBe(1);
+  });
+
+  it('上流へ繋がらなかった中継でもエラー率のルールが発火する', async () => {
+    // **記録の経路は 2 つある**: 上流が応答を返した場合（5xx を 502 に写す経路も含む）と、
+    // 上流へ繋がらなかった・時間切れになった場合（catch の経路）。
+    // 後者で判定を呼ばないと「上流がダウンしていて 1 度も応答が無い」ときに止まらない。
+    // 実測で、catch 側だけ判定を外す変異は上流 500 のテストでは落ちなかった
+    // （あちらは応答が返るので前者の経路を通る）
+    stubUpstream(new TypeError('fetch failed'));
+    await makeRule(RuleKind.error_rate, 0.5);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 繋がらないので 502
+    expect((await relay(key.secret)).status).toBe(502);
+    // この呼び出しも台帳に入り、エラー率 100% で発火して停止している
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    expect(seed.store.incidents.size).toBe(1);
+  });
+
+  it('ルールが無ければ何も起きない（中継だけが成立する）', async () => {
+    // ルールを作らずに中継する
+    stubUpstream({ status: 200, body: anthropicResponse(1_000, 1_000) });
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    expect((await relay(key.secret)).status).toBe(200);
+    // 停止もインシデントも起きない
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+    expect(seed.store.incidents.size).toBe(0);
+  });
+
+  it('判定が失敗しても中継の応答は変えない', async () => {
+    // **判定はすでに成立した中継のあとに走る**ので、ここで 500 にすると
+    // 「上流の課金は発生して応答も得たのに失敗を返す」ことになる
+    stubUpstream({ status: 200, body: anthropicResponse(1_000, 1_000) });
+    await makeRule(RuleKind.cost, 1);
+    // ルールの取得が必ず失敗するようにする
+    vi.spyOn(seed.repos.guardrailRules, 'findActiveRules').mockRejectedValue(
+      new Error('DB が落ちている'),
+    );
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 中継は 200 のまま
+    expect((await relay(key.secret)).status).toBe(200);
+    // 停止はしていない（判定できなかったので）
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
   });
 });

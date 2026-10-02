@@ -20,6 +20,7 @@ import {
 import type { ApiSchemas } from '@/lib/api-types';
 import { API_MESSAGES } from '@/lib/constants';
 import { resolveJudgeIdentity } from '@/lib/evaluation/judge';
+import { evaluateGuardrailsSafely, QUALITY_RULE_KINDS } from '@/lib/guardrail/evaluate';
 import { runEvaluation } from '@/lib/evaluation/runner';
 import { resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { evaluationRunCreateSchema, evaluationRunQuerySchema } from '@/lib/validations/evaluation';
@@ -52,7 +53,7 @@ export const GET = route(async ({ request, principal, repos }) => {
 // POST /evaluations (runEvaluation)
 export const POST = route(async ({ request, principal, repos }) => {
   // execute 権限
-  const { tenantId } = requireAction(principal, 'execute');
+  const { tenantId, user } = requireAction(principal, 'execute');
   // 本文を検証する
   const input = await readJsonBody(request, evaluationRunCreateSchema);
 
@@ -123,6 +124,20 @@ export const POST = route(async ({ request, principal, repos }) => {
   });
   // 保存できなければ、実行のあいだにエージェントかセットが消えている (404 で隠す)
   if (saved === null) throw notFoundError();
+
+  // **保存の直後に品質のガードレールを判定する。** cron 間隔に依存せず
+  // 「発火から停止まで ≦ 3 秒」を満たすため（UC-08）。見るのは品質だけで、コストとエラー率は
+  // 中継の経路が見る（評価の実行では利用イベントが増えないので、ここで見ても何も動かない）。
+  // **判定の失敗で 500 にしない** — 実行はすでに保存されているので、500 にすると
+  // 「保存された実行が利用者からは失敗に見える」ことになる
+  await evaluateGuardrailsSafely(repos, {
+    tenantId,
+    agentId: agent.id,
+    kinds: QUALITY_RULE_KINDS,
+    now: new Date(),
+    // 評価を走らせたユーザーを操作主体として残す（自動発火だが起点は人の操作）
+    actorId: user.id,
+  });
 
   // 回帰比較の相手 (同じエージェント × セットの直前の実行。初回なら null)
   const previous = await repos.evaluations.findPreviousRun(tenantId, saved.run);

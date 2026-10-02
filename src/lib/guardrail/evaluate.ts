@@ -74,6 +74,13 @@ const NOTHING_EVALUATED: GuardrailEvaluation = { evaluated: 0, fired: [] };
 export const USAGE_RULE_KINDS: readonly RuleKind[] = [RuleKind.cost, RuleKind.error_rate];
 
 /**
+ * 評価実行の直後に見る種別。中継では利用イベントしか増えないので、品質は評価の経路だけが見る。
+ * **2 つの表を足し合わせると全種別になる**ことは `tests/guardrail-evaluate.test.ts` が
+ * `RuleKind` から導いて確かめる（種別を足して結線を忘れると、そのルールは永久に発火しない）
+ */
+export const QUALITY_RULE_KINDS: readonly RuleKind[] = [RuleKind.quality];
+
+/**
  * 1 つのルールの判定に必要な測定値をそろえる。
  *
  * **同じ窓の長さの集計は 1 回だけ問い合わせる**（`usageByWindow` に貯める）。ルールを
@@ -290,4 +297,32 @@ export async function evaluateGuardrails(
   await Promise.all(notifications.map((payload) => notifyGuardrailIncident(payload, env)));
   // 判定した件数と発火したもの
   return { evaluated: rules.length, fired };
+}
+
+/**
+ * 起点から呼ぶ **fail-safe な包み**。例外を外へ出さず、サーバログに残すだけ。
+ *
+ * 判定は「すでに成立した操作のあと」に走るので、ここで例外を投げると**成功した操作が
+ * 失敗したことになる**: 中継の経路なら上流の課金は発生して応答も得たのに 500 を返し、
+ * 評価の経路なら保存済みの実行を 500 で隠してしまう。どちらも「起きたことと返す答えが
+ * 食い違う」形なので、判定の失敗は判定だけの失敗に閉じる。
+ *
+ * **止める側の fail-closed とは矛盾しない。** 止められなかったときに安全側へ倒す相手は
+ * 「判定できたのに止めない」ことで、ここは「判定そのものが失敗した」場合。
+ */
+export async function evaluateGuardrailsSafely(
+  repos: Repositories,
+  trigger: GuardrailTrigger,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<GuardrailEvaluation | null> {
+  // 判定を試みる
+  try {
+    // 成功したら結果をそのまま返す（呼び出し側が使わなくてもよい）
+    return await evaluateGuardrails(repos, trigger, env);
+  } catch (error) {
+    // DB の障害などで判定できなかったことを残す（黙って飛ばさない。§6）
+    console.error('[guardrail] ガードレールの判定に失敗しました:', describeError(error));
+    // 判定できなかったことを null で表す
+    return null;
+  }
 }

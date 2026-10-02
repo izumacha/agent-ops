@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryRepos } from '@/data/adapters/memory';
 import { MemoryStore } from '@/data/adapters/memory/store';
 import type { Repositories } from '@/data/ports';
-import { evaluateGuardrails, USAGE_RULE_KINDS } from '@/lib/guardrail/evaluate';
+import { evaluateGuardrails, QUALITY_RULE_KINDS, USAGE_RULE_KINDS } from '@/lib/guardrail/evaluate';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { AUDIT_HMAC_SECRET_ENV } from '@/lib/audit/secret';
 import { NOTIFY_SIGNING_SECRET_ENV, NOTIFY_URL_ENV, NotifyChannel } from '@/lib/notify/send';
@@ -503,5 +503,22 @@ describe('ガードレールの判定', () => {
     // 他テナントのルールは見えないので 1 件も判定しない
     expect(result).toEqual({ evaluated: 0, fired: [] });
     expect((await repos.agents.findById(tenantId, agentId))?.status).toBe(AgentStatus.active);
+  });
+});
+
+describe('起点ごとに見る種別の表', () => {
+  it('2 つの表を合わせると RuleKind を全網羅する（結線漏れを落とす）', () => {
+    // **種別を足して起点へ結線し忘れると、そのルールは作れるのに永久に発火しない**
+    // （fail-open）。判定そのものは動くので、どのテストも緑のまま通ってしまう。
+    // `RuleKind` から導いて照合するので、足した人はどちらかの表に入れるまで赤になる
+    const wired = new Set<string>([...USAGE_RULE_KINDS, ...QUALITY_RULE_KINDS]);
+    // enum の全値（正準は src/domain/types.ts）
+    expect([...wired].sort()).toEqual([...Object.values(RuleKind)].sort());
+  });
+
+  it('2 つの表は重ならない（同じ種別を 2 つの起点が判定しない）', () => {
+    // 重なると同じ超過で 2 件のインシデントが立ち、通知も 2 通になる
+    const overlap = USAGE_RULE_KINDS.filter((kind) => QUALITY_RULE_KINDS.includes(kind));
+    expect(overlap).toEqual([]);
   });
 });

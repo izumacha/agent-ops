@@ -42,6 +42,10 @@ export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;
 export const USER_TOKEN_MAX_TTL_DAYS = 365;
 // プラットフォーム管理者トークン (環境変数) に要求する最小長。短い値は設定ミスとみなして使わない (fail-closed)
 export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
+// 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。
+// 短い鍵は総当たりで求められ、求められた鍵があれば連鎖をまるごと作り直せるので検知の意味が消える。
+// プラットフォーム管理者トークンと同じ 32 文字以上を要求する (別の値にする理由が無いので値も揃える)
+export const AUDIT_HMAC_SECRET_MIN_LENGTH = 32;
 // テナント作成時に最初の admin へ発行するログイントークンの用途名 (UserToken.name に保存され一覧に出る)
 export const USER_TOKEN_BOOTSTRAP_NAME = '初期管理者トークン';
 // 開発用 CLI (scripts/issue-user-token.ts) が発行するトークンの既定の用途名 (--name 省略時)
@@ -168,6 +172,12 @@ export const API_MESSAGES = {
   evaluationSetEmpty: '評価ケースを 1 件以上指定してください。',
   evaluationSetTooLarge: `評価ケースは最大 ${EVALUATION_SET_MAX_CASES} 件までです。`,
   judgeNotConfigured: '採点用モデルの設定が正しくありません。',
+  // 監査ログの鍵が未設定・短すぎるとき。**何が足りないかは外へ出さない** (§9 の「内部詳細を漏らさない」)。
+  // 503 にするのは「設定が無いので今はできない」側の事情だから (上流未設定と同じ扱い)
+  auditNotConfigured: '監査ログの設定が正しくありません。',
+  // 監査ログの検証で連鎖が壊れていたとき。**壊れていること自体は隠さない** —
+  // 隠すと改ざんが運用に伝わらず、改ざん検知を置いた意味が無くなる
+  auditChainBroken: '監査ログの連鎖が壊れています。運用担当者に連絡してください。',
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;
 

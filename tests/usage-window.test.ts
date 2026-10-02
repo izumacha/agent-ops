@@ -1,6 +1,11 @@
 // 集計期間の規則 (src/domain/usage-window.ts)。日の境目は UTC で、API と両アダプタが同じ規則を使う
 import { describe, expect, it } from 'vitest';
-import { formatUtcDay, parseUtcDay, resolveUsageWindow } from '@/domain/usage-window';
+import {
+  formatUtcDay,
+  parseUtcDay,
+  resolveUsageWindow,
+  utcMonthWindow,
+} from '@/domain/usage-window';
 
 describe('UTC の日付の読み書き', () => {
   it('YYYY-MM-DD を UTC の 0 時として読む', () => {
@@ -78,5 +83,49 @@ describe('集計期間の組み立て', () => {
     const resolved = resolveUsageWindow('2026-03-28', '2026-03-30', 366);
     // 3 日 (ローカル時刻の 23 時間の日があっても影響しない)
     expect(resolved.ok && resolved.window.days).toBe(3);
+  });
+});
+
+describe('UTC の暦月の窓 (予算の「当月」)', () => {
+  it('その月の 1 日 0 時から翌月の 1 日 0 時まで (半開区間)', () => {
+    // 月の途中の時刻から組み立てる
+    const window = utcMonthWindow(new Date('2026-10-15T13:45:30.123Z'));
+    expect(window.start.toISOString()).toBe('2026-10-01T00:00:00.000Z');
+    expect(window.endExclusive.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+  });
+
+  it('月初・月末ちょうどでも同じ月に属する', () => {
+    // 1 日 0 時（窓の開始そのもの）
+    expect(utcMonthWindow(new Date('2026-10-01T00:00:00.000Z')).start.toISOString()).toBe(
+      '2026-10-01T00:00:00.000Z',
+    );
+    // 月末の 23:59:59.999（まだ 10 月）
+    const last = utcMonthWindow(new Date('2026-10-31T23:59:59.999Z'));
+    expect(last.start.toISOString()).toBe('2026-10-01T00:00:00.000Z');
+    expect(last.endExclusive.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+  });
+
+  it('12 月は翌年の 1 月へ繰り上がる', () => {
+    // **年をまたぐ**ので、月だけを +1 すると壊れる形
+    const window = utcMonthWindow(new Date('2026-12-20T00:00:00.000Z'));
+    expect(window.start.toISOString()).toBe('2026-12-01T00:00:00.000Z');
+    expect(window.endExclusive.toISOString()).toBe('2027-01-01T00:00:00.000Z');
+  });
+
+  it('1 月 31 日でも 2 月が 28/29 日でも日数のずれが起きない', () => {
+    // **`setUTCMonth(+1)` に頼ると「1 月 31 日 + 1 か月 = 3 月 3 日」になる**。
+    // 月初の 0 時から組み立てているのでそれが起きないことを固定する
+    const january = utcMonthWindow(new Date('2026-01-31T12:00:00.000Z'));
+    expect(january.endExclusive.toISOString()).toBe('2026-02-01T00:00:00.000Z');
+    // うるう年の 2 月（2028 年）
+    const leapFebruary = utcMonthWindow(new Date('2028-02-29T12:00:00.000Z'));
+    expect(leapFebruary.start.toISOString()).toBe('2028-02-01T00:00:00.000Z');
+    expect(leapFebruary.endExclusive.toISOString()).toBe('2028-03-01T00:00:00.000Z');
+  });
+
+  it('ローカルタイムゾーンに依存しない (UTC で切る)', () => {
+    // UTC の月初の直前（JST では翌日）でも、UTC では前の月に属する
+    const window = utcMonthWindow(new Date('2026-10-31T23:00:00.000Z'));
+    expect(window.start.toISOString()).toBe('2026-10-01T00:00:00.000Z');
   });
 });

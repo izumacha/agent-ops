@@ -1051,3 +1051,145 @@ describe('プロキシのレート制限', () => {
     })();
   });
 });
+
+describe('プロキシの予算の強制', () => {
+  // 当月の累計を作るために記録する 1 件あたりの料金（マイクロ USD）
+  const SPENT_PER_EVENT = 400n;
+
+  // そのエージェントに予算を設定する（表を直接書き換える）
+  function setBudget(budgetMicroUsd: bigint | null): void {
+    // 既存の行を取り出す
+    const agent = seed.store.agents.get(seed.a.agent.id);
+    // 無ければテストとして落とす
+    if (!agent) throw new Error('エージェントの行が見つかりません');
+    // 予算だけを差し替える
+    seed.store.agents.set(agent.id, { ...agent, budgetMicroUsd });
+  }
+
+  // 当月の利用を 1 件記録する（createdAt は表の時計 = いまなので当月に入る）
+  async function spend(): Promise<void> {
+    // 料金だけが意味を持つ 1 行
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: seed.a.agent.id,
+      provider: Provider.anthropic,
+      model: ANTHROPIC_MODEL,
+      inputTokens: 1,
+      outputTokens: 1,
+      costMicroUsd: SPENT_PER_EVENT,
+      latencyMs: 1,
+      statusCode: 200,
+    });
+  }
+
+  // 中継を 1 回呼ぶ
+  async function relay(secret: string) {
+    // 正常な本文で呼ぶ
+    return call(proxyAnthropic, {
+      method: 'POST',
+      token: secret,
+      body: { model: ANTHROPIC_MODEL, messages: [{ role: 'user', content: 'こんにちは' }] },
+    });
+  }
+
+  it('予算が未設定なら集計もせず中継する', async () => {
+    // **設定していないエージェントの中継に 1 クエリ増やさない**のが要点
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(null);
+    const windowTotals = vi.spyOn(seed.repos.usageEvents, 'windowTotals');
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 中継できる
+    expect((await relay(key.secret)).status).toBe(200);
+    // 当月の集計は 1 度も引いていない
+    expect(windowTotals).not.toHaveBeenCalled();
+  });
+
+  it('予算に届いていなければ中継する', async () => {
+    // 予算 1000 に対して 400 だけ使った状態
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(1_000n);
+    await spend();
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // まだ余っているので通る
+    expect((await relay(key.secret)).status).toBe(200);
+  });
+
+  it('予算に達したら 403 で断り、上流へ出さず記録もしない', async () => {
+    // **上流へ出してから断っても課金は発生する**ので、出ていないことまで見る
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(1_000n);
+    // ちょうど予算に達するまで使う（400 × 3 = 1200 ≧ 1000）
+    await spend();
+    await spend();
+    await spend();
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 断られる前の件数を覚える
+    const callsBefore = fetchCalls.length;
+    const eventsBefore = recordedEvents().length;
+    // 403 で断られる
+    const result = await relay(key.secret);
+    expect(result.status).toBe(403);
+    expect(result.json).toMatchObject({ message: API_MESSAGES.budgetExceeded });
+    // 上流へは出ていない
+    expect(fetchCalls).toHaveLength(callsBefore);
+    // 台帳も増えていない（上流へ 1 バイトも出ていない呼び出しは記録しない）
+    expect(recordedEvents()).toHaveLength(eventsBefore);
+  });
+
+  it('予算ちょうどで断る（上限は「ここまで使ってよい」の意味）', async () => {
+    // 予算 800 に対して 400 × 2 = 800（ちょうど）
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(SPENT_PER_EVENT * 2n);
+    await spend();
+    await spend();
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // ちょうど達した時点で断る
+    expect((await relay(key.secret)).status).toBe(403);
+  });
+
+  it('他のエージェントの利用は予算に数えない', async () => {
+    // 同じテナントに 2 つ目のエージェントを作り、そちらで使う
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(SPENT_PER_EVENT);
+    const other = await seed.repos.agents.create({
+      tenantId: seed.a.id,
+      name: 'bot-2',
+      description: null,
+      provider: Provider.anthropic,
+      model: ANTHROPIC_MODEL,
+      budgetMicroUsd: null,
+    });
+    // 2 つ目のエージェントで予算ぶんを使う
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: other.id,
+      provider: Provider.anthropic,
+      model: ANTHROPIC_MODEL,
+      inputTokens: 1,
+      outputTokens: 1,
+      costMicroUsd: SPENT_PER_EVENT,
+      latencyMs: 1,
+      statusCode: 200,
+    });
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 1 つ目のエージェントの枠は減っていないので通る
+    expect((await relay(key.secret)).status).toBe(200);
+  });
+
+  it('先月の利用は当月の予算に数えない', async () => {
+    // 当月の窓の外（先月）に記録を移す
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(SPENT_PER_EVENT);
+    await spend();
+    // 記録の作成日時を先月へずらす（表を直接書き換える）
+    for (const [id, event] of seed.store.usageEvents) {
+      // 当月の 1 日より前へ移す
+      const lastMonth = new Date(event.createdAt);
+      lastMonth.setUTCMonth(lastMonth.getUTCMonth() - 1);
+      seed.store.usageEvents.set(id, { ...event, createdAt: lastMonth });
+    }
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 当月の累計は 0 なので通る
+    expect((await relay(key.secret)).status).toBe(200);
+  });
+});

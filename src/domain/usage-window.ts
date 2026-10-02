@@ -87,3 +87,22 @@ export function resolveUsageWindow(
   // ここまで通れば期間として使える
   return { ok: true, window: { start: from, endExclusive, days } };
 }
+
+/**
+ * その時刻が属する **UTC の暦月**の半開区間を返す（予算の「当月」の定義）。
+ *
+ * **日境界と同じ理由で UTC に固定する。** 月境界をサーバのローカル時刻にすると、配備先の
+ * タイムゾーンが変わるだけで「当月いくら使ったか」が変わり、予算の判定が環境依存になる。
+ *
+ * **`setUTCMonth` の繰り上がりに頼らない。** 月初の 0 時から組み立てるので
+ * 「1 月 31 日 + 1 か月 = 3 月 3 日」のような日数のずれが起きない（`Date.UTC` に月 12 を
+ * 渡すと翌年 1 月になるのは仕様どおりの繰り上がりで、こちらは意図している）。
+ */
+export function utcMonthWindow(now: Date): { start: Date; endExclusive: Date } {
+  // その月の 1 日 0 時（UTC）
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  // 翌月の 1 日 0 時（UTC）。月に 12 を渡せば翌年 1 月になる
+  const endExclusive = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  // 半開区間（開始を含み、終了を含まない）
+  return { start, endExclusive };
+}

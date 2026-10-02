@@ -17,6 +17,7 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
+import { assertWithinBudget } from '@/lib/guardrail/budget';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 // エラーをログへ落とす形 (PII やクエリ引数を message ごと出さないための唯一の経路)
 import { describeError } from '@/lib/describe-error';
@@ -167,6 +168,10 @@ export function proxyRoute(provider: Provider) {
       if (findModelPrice(provider, body.model) === null) {
         throw validationError([{ path: 'model', message: API_MESSAGES.unsupportedModel }]);
       }
+      // **予算を確かめてから上流を呼ぶ。** 中継してから断っても課金は発生してしまう。
+      // 予算が未設定のエージェントでは問い合わせも起きない（§8）。
+      // ガードレールのコストルールとは別物で、こちらは状態を変えずに要求を断るだけ
+      await assertWithinBudget(repos, { tenantId, agent, now: new Date() });
       // 検証済みの本文を組み立て直して送る (受け取ったバイト列をそのまま流さないので、
       // 本文の前後に紛れ込んだ余計なバイトが上流へ届かない)。
       // **JSON として作り直すので値の正規化が起きる**: 2^53 を超える整数は丸められ

@@ -131,9 +131,10 @@ curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/audit-logs/verif
 
 **上流へ費用を発生させる経路にはレート制限が掛かる**（中継 ・ 評価の実行 ・ ガードレールの明示実行。
 既定は毎分 `PROXY_RATE_LIMIT_PER_MINUTE` 件で、環境変数で上書きできる。超過は 429 ＋ `Retry-After`）。
-**1 要求で何十回も外へ出る経路（評価の実行・ガードレールの明示実行）には、それに加えてより小さい枠**
-（`HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE` 件）が掛かる — 1 要求の重さが 2 桁違うので、回数だけを数える
-1 つの枠では保護にならない。**`Agent.budgetMicroUsd` を設定すると、当月（UTC）の累計がそれを超えた
+**1 要求の重さが違う経路には、それに加えて別の小さい枠**が掛かる（評価の実行は
+`FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE` 件、ガードレールの明示実行は
+`OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE` 件）— 回数だけを数える 1 つの枠では、
+1 要求で上流へ 400 回出る経路を守れない。数える単位は**テナント**（API キーを増やしても枠は増えない）。**`Agent.budgetMicroUsd` を設定すると、当月（UTC）の累計がそれを超えた
 中継と評価の実行を 403 で断る**（上流を呼んでから断っても課金は発生するため、呼ぶ前に確かめる）。
 ただし**評価の呼び出し自体は利用台帳に記録しない設計**（ADR-0009）なので、その支出は予算に積まれない
 — 上限はベンダー側の月次利用上限（spend limit）で設定すること。

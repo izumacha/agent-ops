@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   configuredRateLimit,
   enforceRateLimit,
-  heavyRateLimiter,
+  extraRateLimiter,
   RATE_LIMIT_TIER,
   rateLimitKeyFor,
   rateLimitedError,
@@ -129,8 +129,10 @@ describe('スライディングウィンドウのレート制限', () => {
 });
 
 describe('レート制限のキー', () => {
-  it('認証済みの id から作り、種類ごとに接頭辞を付ける', () => {
-    // **偽装できる値（IP・ヘッダ）は使わない**のが要点。3 種類の主体を確かめる
+  it('テナント単位で数え、プラットフォーム管理者だけ単一の枠になる', () => {
+    // **偽装できる値（IP・ヘッダ）は使わない**のが要点。3 種類の主体を確かめる。
+    // **資格情報ごと（API キー・ユーザー）にしない** — どちらも API から好きなだけ増やせるので、
+    // 枠を資格情報ごとに持つとキーを増やすだけで上限が何倍にもなる
     expect(
       rateLimitKeyFor({
         kind: 'agent',
@@ -149,8 +151,8 @@ describe('レート制限のキー', () => {
           updatedAt: new Date(),
         },
       }),
-    ).toBe('apiKey:ak-1');
-    // ユーザーはユーザー単位
+    ).toBe('tenant:tn-1');
+    // ユーザーも同じテナントの枠（admin がユーザーを増やしても枠は増えない）
     expect(
       rateLimitKeyFor({
         kind: 'user',
@@ -166,14 +168,14 @@ describe('レート制限のキー', () => {
           updatedAt: new Date(),
         },
       }),
-    ).toBe('user:us-1');
+    ).toBe('tenant:tn-1');
     // プラットフォーム管理者トークンは 1 本しかないので単一の枠
     expect(rateLimitKeyFor({ kind: 'platform' })).toBe('platform');
   });
 
   it('同じ id でも種類が違えば枠を共有しない', () => {
     // 接頭辞があるので、たまたま同じ id でも別の枠になる
-    expect(rateLimitKeyFor({ kind: 'platform' })).not.toBe('apiKey:platform');
+    expect(rateLimitKeyFor({ kind: 'platform' })).not.toBe('tenant:platform');
   });
 });
 
@@ -239,10 +241,10 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
       { limit: 2, windowMs: WINDOW_MS },
     );
     // 重い経路を 2 回通す（小さい枠の上限まで）
-    enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0);
-    enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0);
+    enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0);
+    enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0);
     // 3 回目は小さい枠で断られる
-    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0)).toThrow();
+    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0)).toThrow();
     // **共有の枠も 2 件ぶん消費されている** — 置き換えだと、重い経路と中継を交互に叩くだけで
     // 合計が共有の上限を超える。残りは 10 - 2 = 8 件なので、8 回は通って 9 回目で断られる
     for (let index = 0; index < 8; index += 1) {
@@ -260,10 +262,10 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
     // 共有の枠を使い切る
     enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0);
     // 重い経路は共有の枠で断られる
-    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0)).toThrow();
+    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0)).toThrow();
     // **小さい枠は 1 件も数えていない** — 順に check を呼ぶ形だと、通った側だけが
     // 数えてしまい、断られ続けるあいだ小さい枠が減り続ける
-    expect(heavyRateLimiter().trackedKeys).toBe(0);
+    expect(extraRateLimiter(RATE_LIMIT_TIER.fanOut)?.trackedKeys).toBe(0);
     // 共有の枠は使い切ったぶんだけ（断った要求で増えていない）
     expect(sharedRateLimiter().trackedKeys).toBe(1);
   });
@@ -275,12 +277,12 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
       { limit: 1, windowMs: WINDOW_MS },
     );
     // 両方の枠を使い切る（共有は T0、小さい枠も T0）
-    enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0);
+    enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0);
     // 共有の枠だけをさらに古くするため、少し進めた時刻で中継を 1 回…は通らないので、
     // ここでは「両方が断る」状況で例外の待ち時間が正の整数であることを確かめる
     let thrown: unknown = null;
     try {
-      enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0 + 1_000);
+      enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0 + 1_000);
     } catch (error) {
       thrown = error;
     }

@@ -12,7 +12,8 @@ import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
 import {
   API_MESSAGES,
-  HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE,
+  FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE,
+  OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE,
   PROXY_RATE_LIMIT_ENV,
   PROXY_RATE_LIMIT_PER_MINUTE,
   RATE_LIMIT_WINDOW_MS,
@@ -189,11 +190,19 @@ export function rateLimitKeyFor(principal: Principal): string {
   // 主体の種類ごとに数える単位を決める
   switch (principal.kind) {
     case 'agent':
-      // 中継は API キー単位で数える（同じエージェントに複数のキーを発行できる）
-      return `apiKey:${principal.apiKeyId}`;
     case 'user':
-      // ユーザー向け API はユーザー単位
-      return `user:${principal.user.id}`;
+      // **テナント単位で数える。** API キー単位・ユーザー単位にしてはいけない —
+      // どちらも利用者が API から好きなだけ増やせるので（`POST /api-keys` ・ `POST /users` に
+      // 件数の上限は無い）、枠を資格情報ごとに持つと**キーを増やすだけで上限が何倍にもなる**。
+      // 実測の形: 同じエージェント向けのキーを 100 本発行すると中継は毎分 60,000 回通り、
+      // 予算 (`Agent.budgetMicroUsd`) が未設定なら上流への課金に歯止めが無くなる。
+      // エージェント単位でも同じ（エージェントも API から増やせる）。
+      //
+      // **代償**: 1 つの壊れたクライアントが同じテナントの枠を食い潰しうる（以前の
+      // 「キーごとに独立」はこれを避ける意図だった）。費用を払う単位はテナントなので、
+      // 「自分の枠を自分で使い切る」ほうを選ぶ（ベンダーへの無制限な課金より軽い）。
+      // 配備先ごとの調整は `PROXY_RATE_LIMIT_PER_MINUTE` で行う。
+      return `tenant:${principal.tenantId}`;
     case 'platform':
       // プラットフォーム管理者トークンは 1 本しかないので単一の枠
       return 'platform';
@@ -242,28 +251,62 @@ let shared = new SlidingWindowRateLimiter({
   windowMs: RATE_LIMIT_WINDOW_MS,
 });
 
-// **重い経路だけが追加で消費する枠.** 上の枠と置き換えるのではなく両方を消費する
-// （置き換えだと重い経路と中継を交互に叩くだけで合計が上の上限を超える。理由は
-//  `HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE` のコメント）
-let heavy = new SlidingWindowRateLimiter({
-  limit: HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE,
-  windowMs: RATE_LIMIT_WINDOW_MS,
-});
-
 /**
  * そのルートに掛ける枠の種類。
  *
  * - `standard`: 上流へ 1 回ぶんの費用を出す経路（中継 2 本）。共有の枠だけを消費する
- * - `heavy`: 1 要求で何十回も外へ出る、または応答前に外部の往復を待つ経路。
- *   共有の枠**と**小さい枠の両方を消費する
+ * - `fanOut`: 1 要求で上流へ扇状に出る経路（評価の実行）
+ * - `outbound`: 応答を返す前に外部の往復を待つ経路（ガードレールの明示実行）
+ *
+ * `standard` 以外は共有の枠**と**種類ごとの小さい枠の両方を消費する。
+ * **「重い」をひとまとめにしない** — 重さの中身（ベンダーへの課金 / 外部の応答時間と DB 負荷）が
+ * 違えば妥当な上限も違うので、1 つに束ねるとどちらかの経路に必ず不適切な値になる
+ * （理由は `src/lib/constants.ts` の 2 つの定数のコメント）。
  */
 export const RATE_LIMIT_TIER = {
   standard: 'standard',
-  heavy: 'heavy',
+  fanOut: 'fanOut',
+  outbound: 'outbound',
 } as const;
 
 /** 枠の種類（`RouteOptions.rateLimit` に書く値） */
 export type RateLimitTier = (typeof RATE_LIMIT_TIER)[keyof typeof RATE_LIMIT_TIER];
+
+/**
+ * 種類ごとの「追加で消費する枠」の上限（`null` は追加の枠を持たない）。
+ *
+ * **網羅的な表にする** — 種類を足したらここへ書かないと型検査が落ちるので、
+ * 「追加の枠を持たせるかどうか」を必ず一度決めることになる
+ */
+const EXTRA_FRAME_LIMIT: Readonly<Record<RateLimitTier, number | null>> = {
+  standard: null,
+  fanOut: FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE,
+  outbound: OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE,
+};
+
+// 種類ごとの追加の枠を作る（上の表から導くので、種類を足したら自動で増える）
+function buildExtraFrames(
+  options?: RateLimiterOptions,
+): Map<RateLimitTier, SlidingWindowRateLimiter> {
+  // 表の各項目から制限器を 1 つずつ作る
+  return new Map(
+    Object.entries(EXTRA_FRAME_LIMIT).flatMap(([tier, limit]) =>
+      // 追加の枠を持たない種類は作らない
+      limit === null
+        ? []
+        : [
+            [
+              tier as RateLimitTier,
+              new SlidingWindowRateLimiter(options ?? { limit, windowMs: RATE_LIMIT_WINDOW_MS }),
+            ] as const,
+          ],
+    ),
+  );
+}
+
+// **種類ごとに追加で消費する枠.** 共有の枠と置き換えるのではなく両方を消費する
+// （置き換えだと重い経路と中継を交互に叩くだけで合計が共有の上限を超える）
+let extraFrames = buildExtraFrames();
 
 /** プロセス共有の制限器を返す（テストが表の状態を覗くのに使う） */
 export function sharedRateLimiter(): SlidingWindowRateLimiter {
@@ -271,10 +314,10 @@ export function sharedRateLimiter(): SlidingWindowRateLimiter {
   return shared;
 }
 
-/** 重い経路用の制限器を返す（テストが表の状態を覗くのに使う） */
-export function heavyRateLimiter(): SlidingWindowRateLimiter {
-  // 重い経路用のインスタンス
-  return heavy;
+/** 種類ごとの追加の枠を返す（持たない種類なら undefined。テストが表の状態を覗くのに使う） */
+export function extraRateLimiter(tier: RateLimitTier): SlidingWindowRateLimiter | undefined {
+  // その種類のインスタンス
+  return extraFrames.get(tier);
 }
 
 /**
@@ -287,8 +330,10 @@ export function heavyRateLimiter(): SlidingWindowRateLimiter {
 export function enforceRateLimit(principal: Principal, tier: RateLimitTier, now: number): void {
   // 数える単位（認証済みの id。偽装できる値は使わない）
   const key = rateLimitKeyFor(principal);
-  // 見るべき枠（重い経路は共有の枠も消費する）
-  const limiters = tier === RATE_LIMIT_TIER.heavy ? [shared, heavy] : [shared];
+  // その種類の追加の枠（持たない種類もある）
+  const extra = extraFrames.get(tier);
+  // 見るべき枠（追加の枠を持つ種類は共有の枠も消費する）
+  const limiters = extra === undefined ? [shared] : [shared, extra];
   // まず全部を覗き見して、断るものがあるか調べる
   const denials = limiters
     .map((limiter) => limiter.inspect(key, now))
@@ -309,7 +354,7 @@ export function enforceRateLimit(principal: Principal, tier: RateLimitTier, now:
  */
 export function resetSharedRateLimiterForTesting(
   options?: RateLimiterOptions,
-  heavyOptions?: RateLimiterOptions,
+  extraOptions?: RateLimiterOptions,
 ): void {
   // 本番で作り直せると、呼ぶだけで全員の枠が空になる
   if (process.env.NODE_ENV === 'production') {
@@ -319,10 +364,8 @@ export function resetSharedRateLimiterForTesting(
   shared = new SlidingWindowRateLimiter(
     options ?? { limit: configuredRateLimit(), windowMs: RATE_LIMIT_WINDOW_MS },
   );
-  // **重い経路の枠も必ず作り直す** — 片方だけ空にすると、前のテストが使った枠が
+  // **追加の枠も必ず全部作り直す** — 片方だけ空にすると、前のテストが使った枠が
   // 次のテストへ漏れる（しかも漏れるのは小さいほうの枠なので、無関係なテストが 429 で落ちる）。
-  // 指定が無ければ既定（`HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE`）で作る
-  heavy = new SlidingWindowRateLimiter(
-    heavyOptions ?? { limit: HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE, windowMs: RATE_LIMIT_WINDOW_MS },
-  );
+  // 指定が無ければ種類ごとの既定で作る
+  extraFrames = buildExtraFrames(extraOptions);
 }

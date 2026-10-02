@@ -1037,18 +1037,36 @@ describe('プロキシのレート制限', () => {
     expect(recordedEvents()).toHaveLength(eventsBefore);
   });
 
-  it('API キーごとに枠が独立している', () => {
-    // **キーは API キーの id から作る**ので、同じエージェントに 2 本発行すれば枠も 2 つ。
-    // テナント単位にすると、1 本の暴走したキーが同じテナントの他のキーを止めてしまう
+  it('同じテナントの API キーは枠を共有する', () => {
+    // **キーはテナント単位で数える。** API キー単位にすると、`POST /api-keys` を叩いて
+    // キーを増やすだけで上限が何倍にもなる（件数の上限は無く、発行経路にレート制限も無い）。
+    // 実測の形: 同じエージェント向けのキーを 100 本発行すると中継は毎分 60,000 回通り、
+    // 予算が未設定なら上流への課金に歯止めが無くなる。
+    //
+    // **代償は「1 本の暴走したクライアントが同じテナントの枠を食い潰す」こと。** 費用を払う
+    // 単位はテナントなので、ベンダーへの無制限な課金よりそちらを選ぶ（ADR-0010）
     stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
     const first = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
     const second = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
-    // 片方で使い切ってから、もう片方で通ることを確かめる
+    // 片方で使い切ったら、もう片方も断られることを確かめる
     return (async () => {
       for (let i = 0; i < TEST_LIMIT; i += 1) await relay(first.secret);
       expect((await relay(first.secret)).status).toBe(429);
-      // 別のキーは枠を使っていないので通る
-      expect((await relay(second.secret)).status).toBe(200);
+      // **別のキーでも通らない**（枠はテナントのもの）
+      expect((await relay(second.secret)).status).toBe(429);
+    })();
+  });
+
+  it('別のテナントの枠は独立している', () => {
+    // テナントをまたいだ巻き添えは起こさない（枠はテナントごと）
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    const mine = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const other = seedApiKey(seed, { tenantId: seed.b.id, agentId: seed.b.agent.id });
+    return (async () => {
+      for (let i = 0; i < TEST_LIMIT; i += 1) await relay(mine.secret);
+      expect((await relay(mine.secret)).status).toBe(429);
+      // 別テナントは枠を使っていないので通る
+      expect((await relay(other.secret)).status).toBe(200);
     })();
   });
 });

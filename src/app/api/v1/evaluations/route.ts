@@ -58,8 +58,9 @@ export const GET = route(async ({ request, principal, repos }) => {
 // 上流呼び出しが走るので、掛けないとプロキシに置いた課金の保護をこちらから迂回できる
 // (中継の代わりに評価を回せばよいことになる)。枠は `user:<id>` 単位 (rateLimitKeyFor)。
 //
-// **枠は `heavy`** — 中継と同じ枠 (毎分 600) では保護にならない。600 要求ぶんの枠は
-// この経路では上流呼び出し 24 万回ぶんの枠と同じ意味になるため (HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE)
+// **枠は `fanOut`** — 中継と同じ枠 (毎分 600) では保護にならない。600 要求ぶんの枠は
+// この経路では上流呼び出し 24 万回ぶんの枠と同じ意味になるため
+// (FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE)
 export const POST = route(
   async ({ request, principal, repos }) => {
     // execute 権限
@@ -172,5 +173,5 @@ export const POST = route(
     };
     return Response.json(body, { status: HTTP_STATUS.CREATED });
   },
-  { rateLimit: RATE_LIMIT_TIER.heavy },
+  { rateLimit: RATE_LIMIT_TIER.fanOut },
 );

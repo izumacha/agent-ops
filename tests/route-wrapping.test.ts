@@ -227,7 +227,7 @@ describe('Route Handler の結線', () => {
   // **残る境界**: この網が導けるのは「ケースを回す経路」だけ。応答を返す前に外部の往復を
   // 待つ経路 (`POST /guardrails/run`) は連鎖から区別できない (通知のモジュールへ到達するのは
   // 中継も同じで、あちらは待たずに投げる) ので、そちらは下の個別の検査が固定する。
-  it('ケースをまとめて回すルートは heavy の枠で数えている', async () => {
+  it('ケースをまとめて回すルートは fanOut の枠で数えている', async () => {
     // src 全体の import グラフ
     const graph = sourceImportGraph();
     // ケースを回して上流を呼ぶモジュール
@@ -253,22 +253,22 @@ describe('Route Handler の結線', () => {
         checked += 1;
         expect(
           (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND],
-          `${relativeToApp} の ${method} は 1 要求で何十回も上流へ出るのに heavy の枠ではない`,
-        ).toBe(RATE_LIMIT_TIER.heavy);
+          `${relativeToApp} の ${method} は 1 要求で何十回も上流へ出るのに fanOut の枠ではない`,
+        ).toBe(RATE_LIMIT_TIER.fanOut);
       }
     }
     // 1 つも見ていなければ走査が壊れている
-    expect(checked, 'heavy の枠を確かめた export が 0 件').toBeGreaterThan(0);
+    expect(checked, 'fanOut の枠を確かめた export が 0 件').toBeGreaterThan(0);
   });
 
   // 応答を返す前に通知の往復を待つ経路。連鎖からは中継と区別できないので個別に固定する
   // (ここを standard へ落とすと、外部の応答時間を乗せた要求を毎分 600 回出せる)
-  it('通知の往復を待つ明示実行は heavy の枠で数えている', async () => {
+  it('通知の往復を待つ明示実行は outbound の枠で数えている', async () => {
     // 明示実行のルート
     const runRoute: Record<string, unknown> = await import('@/app/api/v1/guardrails/run/route');
     // POST の印が heavy であること
     const post = runRoute.POST as unknown as Record<symbol, unknown>;
-    expect(post[ROUTE_RATE_LIMIT_BRAND]).toBe(RATE_LIMIT_TIER.heavy);
+    expect(post[ROUTE_RATE_LIMIT_BRAND]).toBe(RATE_LIMIT_TIER.outbound);
   });
 
   // 契約に無いメソッドは、認可の網羅ガードの表にも載らないまま公開される

@@ -29,6 +29,7 @@ import {
 } from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
 import { AuditAction } from '@/domain/audit/action';
+import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -469,6 +470,50 @@ describe('評価の実行', () => {
       query: `setId=${other.id}`,
     });
     expect((miss.json as { items: unknown[] }).items).toHaveLength(0);
+  });
+});
+
+describe('評価の実行のレート制限', () => {
+  // 検査用の小さい上限（本番の既定まで叩くのは遅い）。確かめたいのは「上限に達したら断る」挙動
+  const TEST_LIMIT = 2;
+  // 窓は 1 分（境界そのものは tests/rate-limit.test.ts が決定的に固定している）
+  const TEST_WINDOW_MS = 60_000;
+
+  // 各テストの前に小さい上限で作り直す（seedEachTest も作り直すので、この順で上書きする）
+  beforeEach(() => {
+    resetSharedRateLimiterForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
+  });
+
+  it('上限を超えた実行は 429 で断り、上流を呼ばない', async () => {
+    // **ここが制限を置いた目的** — 1 要求でケース数ぶんの課金対象の呼び出しが走るので、
+    // 中継だけを守っても「評価を回す」側から同じ費用を発生させられる（実測で制限が無かった）
+    stubHealthyUpstream();
+    const set = await createSet();
+    // 上限までは通る
+    for (let index = 0; index < TEST_LIMIT; index += 1) {
+      const ok = await call(runEvaluation, {
+        token: seed.a.tokens.operator,
+        body: { agentId: seed.a.agent.id, setId: set.id },
+      });
+      expect(ok.status, JSON.stringify(ok.json)).toBe(201);
+    }
+    // ここまでの上流呼び出しの回数を覚える
+    const callsBefore = (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls
+      .length;
+    // 次は断られる
+    const limited = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(limited.status).toBe(429);
+    // Retry-After は整数の秒数（RFC 9110 の delay-seconds）
+    expect(limited.headers.get('Retry-After')).toMatch(/^\d+$/);
+    // 文言は利用者向けの日本語
+    expect(limited.json).toMatchObject({ message: API_MESSAGES.rateLimited });
+    // **上流へは 1 度も出ていない**（先に実行してから断る実装では緑にならない）
+    expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(
+      callsBefore,
+    );
   });
 });
 

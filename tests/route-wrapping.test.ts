@@ -13,7 +13,8 @@ import { forEachNode, parseSourceFiles } from './lib/source-files';
 import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
-import { ROUTE_HANDLER_BRAND } from '@/lib/api/handler';
+import { ROUTE_HANDLER_BRAND, ROUTE_RATE_LIMIT_BRAND } from '@/lib/api/handler';
+import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
 
 // App Router の入口 (この下にある route.ts はすべて配信される)
 const APP_DIR = join(process.cwd(), 'src', 'app');
@@ -156,6 +157,58 @@ describe('Route Handler の結線', () => {
     }
     // 1 つも見ていなければ走査が壊れている
     expect(checked).toBeGreaterThan(0);
+  });
+
+  // **上流 LLM を呼ぶルートはレート制限を掛ける。**
+  //
+  // `rateLimit` は既定が「掛けない」なので、付け忘れは 429 ではなく**制限なし**に倒れる
+  // (handler.ts のコメントが認めている fail-open)。掛ける対象は「外部へ費用を発生させる経路」で、
+  // それは **import の連鎖から導ける** — 上流を実際に呼ぶのは `src/lib/proxy/upstream.ts` の
+  // 1 か所だけ (judge も同じ結線を共有する。ADR-0009) なので、そこへ到達するルートが対象。
+  //
+  // **手書きの一覧にしない** — 一覧だと、上流を呼ぶルートを新しく足した人が一覧への追記を
+  // 忘れたぶんだけ検出網が静かに狭まる (この repo が繰り返し避けている形)。実測でも、
+  // POST /evaluations は 1 要求で最大 400 回の課金対象の呼び出しを出すのに制限が無く、
+  // プロキシに置いた保護を「中継の代わりに評価を回す」だけで迂回できた。
+  //
+  // **判定は印 (ROUTE_RATE_LIMIT_BRAND) を実体から読む** — ソースの綴りを見る形は
+  // 設定を変数へ出す・展開する・別名で渡すといった書き方がすべて死角になる。
+  //
+  // **残る境界**: 粒度はモジュール単位なので、見るのは非 GET の export に限る
+  // (同じモジュールの GET は一覧の読み出しで上流を呼ばない)。上流を呼ぶ GET を足すと
+  // この網からは外れるので、そのときはここを広げること。
+  it('上流 LLM を呼ぶルートの非 GET はレート制限を掛けている', async () => {
+    // src 全体の import グラフ (1 度だけ作る)
+    const graph = sourceImportGraph();
+    // 上流を呼ぶモジュール (到達を調べる相手)
+    const upstream = join(SRC_DIR, 'lib', 'proxy', 'upstream.ts');
+    // グラフに乗っていなければ走査が壊れている (fail-closed)
+    expect(graph.has(upstream), '上流を呼ぶモジュールを走査できていない').toBe(true);
+    // 上流へ到達するルート
+    const costly = routeFiles.filter(({ full }) => reachesModule(graph, full, upstream));
+    // 1 本も無ければ導出が壊れている (fail-closed。黙って「対象ゼロ＝緑」にしない)
+    expect(costly.length, '上流へ到達するルートを 1 本も見つけられない').toBeGreaterThan(0);
+    // 実際に印を確かめた数
+    let checked = 0;
+    for (const { full, relativeToApp } of costly) {
+      // モジュールを読み込む (綴りではなく値を見る)
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // GET は読み出しなので対象外 (上の「残る境界」)
+        if (method === 'GET') continue;
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // レート制限の印を持つこと
+        checked += 1;
+        expect(
+          (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND] === true,
+          `${relativeToApp} の ${method} は上流を呼ぶのにレート制限が無い`,
+        ).toBe(true);
+      }
+    }
+    // 1 つも見ていなければ走査が壊れている
+    expect(checked, 'レート制限を確かめた export が 0 件').toBeGreaterThan(0);
   });
 
   // 契約に無いメソッドは、認可の網羅ガードの表にも載らないまま公開される

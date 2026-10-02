@@ -35,6 +35,9 @@ const MEASURE_ROUNDS = 3;
 const MODEL = 'claude-sonnet-4-6';
 // 投入するイベントの応答ステータス (成功。エラー率ルールは仕込まないので 200 でよい)
 const STATUS_CODE = 200;
+// 監査ログを数えるときに読むページの上限。**ラウンド数を流用しない** — 1 ラウンドで書かれる
+// 監査行が 2 件以上になった時点でページが黙って切り詰められ、門番が過少に数えて素通りする
+const AUDIT_PAGE_LIMIT = 50;
 
 // ベンチ本体。**判定も出力も終了コードもここには書かない** — 計測結果を返すだけにして、
 // 受け入れ基準の強制は scripts/lib/bench-criteria.mjs の runBench に集約する (理由はそちら)
@@ -139,7 +142,7 @@ async function main(): Promise<Record<string, unknown>> {
       // suspended になっていれば 1 回分として数える
       if (stored?.status === AgentStatus.suspended) suspendedAgents += 1;
       // 監査ログが残ったかを見る (鍵が無ければ記録は飛ばされるので、件数で確かめる)
-      const logs = await repos.auditLogs.list(tenant.id, { limit: MEASURE_ROUNDS });
+      const logs = await repos.auditLogs.list(tenant.id, { limit: AUDIT_PAGE_LIMIT });
       // 残っていた件数を足す
       auditRows += logs.items.length;
     }

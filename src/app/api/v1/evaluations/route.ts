@@ -51,101 +51,108 @@ export const GET = route(async ({ request, principal, repos }) => {
 });
 
 // POST /evaluations (runEvaluation)
-export const POST = route(async ({ request, principal, repos }) => {
-  // execute 権限
-  const { tenantId, user } = requireAction(principal, 'execute');
-  // 本文を検証する
-  const input = await readJsonBody(request, evaluationRunCreateSchema);
+//
+// **レート制限を掛ける。** 1 要求でケース数ぶん (最大 EVALUATION_SET_MAX_CASES × 2 回) の
+// 上流呼び出しが走るので、掛けないとプロキシに置いた課金の保護をこちらから迂回できる
+// (中継の代わりに評価を回せばよいことになる)。枠は `user:<id>` 単位 (rateLimitKeyFor)
+export const POST = route(
+  async ({ request, principal, repos }) => {
+    // execute 権限
+    const { tenantId, user } = requireAction(principal, 'execute');
+    // 本文を検証する
+    const input = await readJsonBody(request, evaluationRunCreateSchema);
 
-  // 評価対象エージェント (自テナントのものだけ。他テナントの id は 404 で隠す)
-  const agent = await repos.agents.findById(tenantId, input.agentId);
-  if (agent === null) throw notFoundError();
-  // 停止中のエージェントは呼び出さない (プロキシ経路と同じ扱い)
-  if (agent.status !== AgentStatus.active) {
-    throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.agentNotActive);
-  }
-  // 使う評価セット (同じく自テナントのものだけ)
-  const set = await repos.evaluations.findSet(tenantId, input.setId);
-  if (set === null) throw notFoundError();
+    // 評価対象エージェント (自テナントのものだけ。他テナントの id は 404 で隠す)
+    const agent = await repos.agents.findById(tenantId, input.agentId);
+    if (agent === null) throw notFoundError();
+    // 停止中のエージェントは呼び出さない (プロキシ経路と同じ扱い)
+    if (agent.status !== AgentStatus.active) {
+      throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.agentNotActive);
+    }
+    // 使う評価セット (同じく自テナントのものだけ)
+    const set = await repos.evaluations.findSet(tenantId, input.setId);
+    if (set === null) throw notFoundError();
 
-  // どの judge が採点するか (環境変数の綴り間違いは既定へ倒さず 503 にする)
-  const judge = resolveJudgeIdentity();
-  if (judge === null) {
-    throw new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.judgeNotConfigured);
-  }
-  // **judge の接続先と資格情報も「1 段目を走らせる前」に確かめる。** 設定が無ければ 503 が飛ぶ。
-  // ここを省くと、judge が使えないことが分かるのは 2 段目に入ってからになり、
-  // それまでに 1 段目でケース数ぶんの上流呼び出し (= 課金) を済ませてしまう。
-  // 結果は全件 judge_unavailable で failed になるので、払った分は 1 つのスコアにもならない
-  resolveUpstreamTarget(judge.provider);
+    // どの judge が採点するか (環境変数の綴り間違いは既定へ倒さず 503 にする)
+    const judge = resolveJudgeIdentity();
+    if (judge === null) {
+      throw new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.judgeNotConfigured);
+    }
+    // **judge の接続先と資格情報も「1 段目を走らせる前」に確かめる。** 設定が無ければ 503 が飛ぶ。
+    // ここを省くと、judge が使えないことが分かるのは 2 段目に入ってからになり、
+    // それまでに 1 段目でケース数ぶんの上流呼び出し (= 課金) を済ませてしまう。
+    // 結果は全件 judge_unavailable で failed になるので、払った分は 1 つのスコアにもならない
+    resolveUpstreamTarget(judge.provider);
 
-  // 実行する (上流の失敗はケース単位の除外になって返る)
-  const outcome = await runEvaluation({
-    agent: { provider: agent.provider, model: agent.model },
-    judge,
-    cases: set.cases.map((row) => ({
-      caseId: row.id,
-      input: row.input,
-      expected: row.expected,
-    })),
-  });
+    // 実行する (上流の失敗はケース単位の除外になって返る)
+    const outcome = await runEvaluation({
+      agent: { provider: agent.provider, model: agent.model },
+      judge,
+      cases: set.cases.map((row) => ({
+        caseId: row.id,
+        input: row.input,
+        expected: row.expected,
+      })),
+    });
 
-  // 結果を保存する (実行・ケース単位の結果を 1 つのトランザクションで)
-  const saved = await repos.evaluations.createRun({
-    tenantId,
-    agentId: agent.id,
-    setId: set.set.id,
-    accuracy: outcome.totals.accuracy,
-    safety: outcome.totals.safety,
-    deviation: outcome.totals.deviation,
-    status: outcome.status,
-    scoredCases: outcome.totals.scoredCases,
-    excludedCases: outcome.totals.excludedCases,
-    judgeProvider: judge.provider,
-    judgeModel: judge.model,
-    // 採点できたケースはスコアを、除外したケースは理由を持つ (両立しないことは DB の CHECK も守る)
-    results: outcome.verdicts.map((verdict) =>
-      verdict.scored
-        ? {
-            caseId: verdict.caseId,
-            accuracy: verdict.scores.accuracy,
-            safety: verdict.scores.safety,
-            deviation: verdict.scores.deviation,
-            excludedReason: null,
-          }
-        : {
-            caseId: verdict.caseId,
-            accuracy: null,
-            safety: null,
-            deviation: null,
-            excludedReason: verdict.reason,
-          },
-    ),
-  });
-  // 保存できなければ、実行のあいだにエージェントかセットが消えている (404 で隠す)
-  if (saved === null) throw notFoundError();
+    // 結果を保存する (実行・ケース単位の結果を 1 つのトランザクションで)
+    const saved = await repos.evaluations.createRun({
+      tenantId,
+      agentId: agent.id,
+      setId: set.set.id,
+      accuracy: outcome.totals.accuracy,
+      safety: outcome.totals.safety,
+      deviation: outcome.totals.deviation,
+      status: outcome.status,
+      scoredCases: outcome.totals.scoredCases,
+      excludedCases: outcome.totals.excludedCases,
+      judgeProvider: judge.provider,
+      judgeModel: judge.model,
+      // 採点できたケースはスコアを、除外したケースは理由を持つ (両立しないことは DB の CHECK も守る)
+      results: outcome.verdicts.map((verdict) =>
+        verdict.scored
+          ? {
+              caseId: verdict.caseId,
+              accuracy: verdict.scores.accuracy,
+              safety: verdict.scores.safety,
+              deviation: verdict.scores.deviation,
+              excludedReason: null,
+            }
+          : {
+              caseId: verdict.caseId,
+              accuracy: null,
+              safety: null,
+              deviation: null,
+              excludedReason: verdict.reason,
+            },
+      ),
+    });
+    // 保存できなければ、実行のあいだにエージェントかセットが消えている (404 で隠す)
+    if (saved === null) throw notFoundError();
 
-  // **保存の直後に品質のガードレールを判定する。** cron 間隔に依存せず
-  // 「発火から停止まで ≦ 3 秒」を満たすため（UC-08）。見るのは品質だけで、コストとエラー率は
-  // 中継の経路が見る（評価の実行では利用イベントが増えないので、ここで見ても何も動かない）。
-  // **判定の失敗で 500 にしない** — 実行はすでに保存されているので、500 にすると
-  // 「保存された実行が利用者からは失敗に見える」ことになる
-  await evaluateGuardrailsSafely(repos, {
-    tenantId,
-    agentId: agent.id,
-    kinds: QUALITY_RULE_KINDS,
-    now: new Date(),
-    // 評価を走らせたユーザーを操作主体として残す（自動発火だが起点は人の操作）
-    actorId: user.id,
-  });
+    // **保存の直後に品質のガードレールを判定する。** cron 間隔に依存せず
+    // 「発火から停止まで ≦ 3 秒」を満たすため（UC-08）。見るのは品質だけで、コストとエラー率は
+    // 中継の経路が見る（評価の実行では利用イベントが増えないので、ここで見ても何も動かない）。
+    // **判定の失敗で 500 にしない** — 実行はすでに保存されているので、500 にすると
+    // 「保存された実行が利用者からは失敗に見える」ことになる
+    await evaluateGuardrailsSafely(repos, {
+      tenantId,
+      agentId: agent.id,
+      kinds: QUALITY_RULE_KINDS,
+      now: new Date(),
+      // 評価を走らせたユーザーを操作主体として残す（自動発火だが起点は人の操作）
+      actorId: user.id,
+    });
 
-  // 回帰比較の相手 (同じエージェント × セットの直前の実行。初回なら null)
-  const previous = await repos.evaluations.findPreviousRun(tenantId, saved.run);
-  // 201 で結果を返す
-  const body: ApiSchemas['EvaluationRunDetail'] = {
-    ...toEvaluationRunDto(saved.run),
-    results: saved.results.map(toEvaluationResultDto),
-    regression: previous === null ? null : toEvaluationRegressionDto(saved.run, previous),
-  };
-  return Response.json(body, { status: HTTP_STATUS.CREATED });
-});
+    // 回帰比較の相手 (同じエージェント × セットの直前の実行。初回なら null)
+    const previous = await repos.evaluations.findPreviousRun(tenantId, saved.run);
+    // 201 で結果を返す
+    const body: ApiSchemas['EvaluationRunDetail'] = {
+      ...toEvaluationRunDto(saved.run),
+      results: saved.results.map(toEvaluationResultDto),
+      regression: previous === null ? null : toEvaluationRegressionDto(saved.run, previous),
+    };
+    return Response.json(body, { status: HTTP_STATUS.CREATED });
+  },
+  { rateLimit: true },
+);

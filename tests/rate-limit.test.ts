@@ -171,6 +171,25 @@ describe('レート制限のキー', () => {
   });
 });
 
+describe('ルートに載るレート制限の印', () => {
+  // **印そのものの挙動を固定する。** この印は検出網 (tests/route-wrapping.test.ts) が
+  // 「そのルートが制限を掛けているか」を綴りに頼らず読むための唯一の手がかりなので、
+  // 常に true を返すよう書き換えても**本番の挙動は変わらない**（実測で全件緑のまま通った）。
+  // 印が嘘をつく変異はここでしか落ちないので、両方の向きを直接確かめる
+  it('指定したときだけ true になる', async () => {
+    // 包む対象は何でもよい（印は包んだ関数に載る）
+    const { route, ROUTE_RATE_LIMIT_BRAND } = await import('@/lib/api/handler');
+    // 何も指定しなければ「掛けない」側（既定は fail-open だが、印はそれを正しく申告する）
+    const plain = route(async () => new Response(null)) as unknown as Record<symbol, unknown>;
+    expect(plain[ROUTE_RATE_LIMIT_BRAND]).toBe(false);
+    // 指定したときだけ true
+    const limited = route(async () => new Response(null), {
+      rateLimit: true,
+    }) as unknown as Record<symbol, unknown>;
+    expect(limited[ROUTE_RATE_LIMIT_BRAND]).toBe(true);
+  });
+});
+
 describe('レート制限の例外', () => {
   it('429 と Retry-After を持つ', () => {
     // 秒数はヘッダに整数の文字列で載る

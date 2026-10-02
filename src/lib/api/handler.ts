@@ -50,14 +50,26 @@ export interface RouteOptions {
    * 本来は逆向き (fail-closed) が望ましい。それでも既定を off にしているのは、全ルートに
    * 掛けると一覧の読み出しのような安いルートまで同じ枠を食い、**上流へ出る中継の枠を
    * 画面の描画が奪う**形になるため。掛ける対象は「外部へ費用を発生させる経路」に絞る。
-   * 掛け忘れは `tests/api/rate-limit.test.ts` が「中継ルートには掛かっていること」を
-   * ルートの束から導いて見張る
+   * 掛け忘れは `tests/route-wrapping.test.ts` が **import の連鎖から導いて**見張る —
+   * 「上流 LLM を呼ぶモジュール (`src/lib/proxy/upstream.ts`) へ到達するルートの非 GET は
+   * 必ずこの指定を持つ」。手書きの一覧ではなくコードの連鎖から導くので、上流を呼ぶルートを
+   * 新しく足した人が指定を忘れたら落ちる
    */
   rateLimit?: boolean;
 }
 
 // route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
 export const ROUTE_HANDLER_BRAND = Symbol.for('agent-ops.routeHandler');
+
+/**
+ * そのルートがレート制限を掛けているかを外から読むための印。
+ *
+ * **ソースの綴りを読む形にしない** — `route(handler, OPTIONS)` のように設定を変数へ出す・
+ * 展開する・別名で渡すといった書き方がすべて死角になる (`ROUTE_HANDLER_BRAND` を
+ * 実体から読んでいるのと同じ理由)。実際に包まれた関数に値として載せれば、
+ * 検出網は「何と書いてあるか」ではなく「どう結線されたか」を見られる
+ */
+export const ROUTE_RATE_LIMIT_BRAND = Symbol.for('agent-ops.routeRateLimit');
 
 /**
  * URL の動的セグメント (パスに現れる id) の形を確かめる。形が違えばそんな資源は存在しないので 404。
@@ -133,6 +145,8 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
   };
   // 「route() が包んだ」という印を付ける (列挙されない定義なので DTO や JSON には現れない)
   Object.defineProperty(wrapped, ROUTE_HANDLER_BRAND, { value: true });
+  // レート制限を掛けたかも同じ形で載せる (検出網が結線そのものを読めるようにする)
+  Object.defineProperty(wrapped, ROUTE_RATE_LIMIT_BRAND, { value: options.rateLimit === true });
   // 包んだ関数を返す
   return wrapped;
 }

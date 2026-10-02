@@ -6,7 +6,7 @@ import { API_MESSAGES } from '@/lib/constants';
 import { authenticate, authenticateApiKey, type Principal } from './auth';
 import { withPrivateCacheHeaders } from './cache-headers';
 import { ApiError, errorResponse, notFoundError, validationError } from './errors';
-import { rateLimitedError, rateLimitKeyFor, sharedRateLimiter } from './rate-limit';
+import { enforceRateLimit, type RateLimitTier } from './rate-limit';
 import { HTTP_STATUS } from './http-status';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
@@ -44,7 +44,7 @@ export interface RouteOptions {
   // 受け付ける資格情報の種類 (省略時は 'user')
   auth?: RouteAuth;
   /**
-   * レート制限を掛けるか (省略時は掛けない)。
+   * レート制限を掛けるか、掛けるならどの枠で数えるか (省略時は掛けない)。
    *
    * **既定を「掛けない」にしてあるのは、掛け忘れが 429 ではなく「制限なし」に倒れるから**で、
    * 本来は逆向き (fail-closed) が望ましい。それでも既定を off にしているのは、全ルートに
@@ -53,21 +53,28 @@ export interface RouteOptions {
    * 掛け忘れは `tests/route-wrapping.test.ts` が **import の連鎖から導いて**見張る —
    * 「上流 LLM を呼ぶモジュール (`src/lib/proxy/upstream.ts`) へ到達するルートの非 GET は
    * 必ずこの指定を持つ」。手書きの一覧ではなくコードの連鎖から導くので、上流を呼ぶルートを
-   * 新しく足した人が指定を忘れたら落ちる
+   * 新しく足した人が指定を忘れたら落ちる。
+   *
+   * 枠の違いは `RATE_LIMIT_TIER` が持つ。**1 要求で何十回も外へ出る経路には `heavy` を指定する** —
+   * 回数だけを数える枠では、1 要求の重さが 2 桁違う経路に同じ上限を当てても保護にならない
    */
-  rateLimit?: boolean;
+  rateLimit?: RateLimitTier;
 }
 
 // route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
 export const ROUTE_HANDLER_BRAND = Symbol.for('agent-ops.routeHandler');
 
 /**
- * そのルートがレート制限を掛けているかを外から読むための印。
+ * そのルートがどの枠でレート制限を掛けているかを外から読むための印
+ * (掛けていなければ `null`、掛けていれば `RateLimitTier` の値)。
  *
  * **ソースの綴りを読む形にしない** — `route(handler, OPTIONS)` のように設定を変数へ出す・
  * 展開する・別名で渡すといった書き方がすべて死角になる (`ROUTE_HANDLER_BRAND` を
  * 実体から読んでいるのと同じ理由)。実際に包まれた関数に値として載せれば、
- * 検出網は「何と書いてあるか」ではなく「どう結線されたか」を見られる
+ * 検出網は「何と書いてあるか」ではなく「どう結線されたか」を見られる。
+ *
+ * **真偽値ではなく枠の種類を載せる** — 「掛かっているか」だけを載せると、重い経路の指定を
+ * `standard` へ落とす変更が検出網から見えない (印は true のままなので)
  */
 export const ROUTE_RATE_LIMIT_BRAND = Symbol.for('agent-ops.routeRateLimit');
 
@@ -126,11 +133,9 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
       // **レート制限は認証の後**に掛ける。キーを認証済みの id から作るので、
       // 偽装できるヘッダ (X-Forwarded-For) に頼らずに数えられる。
       // 認証より前に掛けると、未認証の総当たりで正規の利用者の枠を枯渇させられる
-      if (options.rateLimit === true) {
-        // そのルートの送信元を表すキー
-        const decision = sharedRateLimiter().check(rateLimitKeyFor(principal), Date.now());
-        // 上限を超えていれば 429 (Retry-After 付き) で断る
-        if (!decision.allowed) throw rateLimitedError(decision.retryAfterSeconds);
+      // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
+      if (options.rateLimit !== undefined) {
+        enforceRateLimit(principal, options.rateLimit, Date.now());
       }
       // 動的セグメントを解決する
       const params = await context.params;
@@ -146,7 +151,7 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
   // 「route() が包んだ」という印を付ける (列挙されない定義なので DTO や JSON には現れない)
   Object.defineProperty(wrapped, ROUTE_HANDLER_BRAND, { value: true });
   // レート制限を掛けたかも同じ形で載せる (検出網が結線そのものを読めるようにする)
-  Object.defineProperty(wrapped, ROUTE_RATE_LIMIT_BRAND, { value: options.rateLimit === true });
+  Object.defineProperty(wrapped, ROUTE_RATE_LIMIT_BRAND, { value: options.rateLimit ?? null });
   // 包んだ関数を返す
   return wrapped;
 }

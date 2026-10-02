@@ -14,6 +14,7 @@ import { ApiError, validationError } from '@/lib/api/errors';
 import { requireProxyAgent } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
@@ -325,9 +326,10 @@ export function proxyRoute(provider: Provider) {
         throw error;
       }
     },
-    // このルートは API キーでしか呼べない。**レート制限を掛ける唯一のルート** —
-    // 上流へ費用を発生させる経路なので、有効なキー 1 本で無制限に要求できる状態を残さない
-    // (ADR-0007 の「残る宿題」。§9 公開エンドポイントを保護する)
-    { auth: 'apiKey', rateLimit: true },
+    // このルートは API キーでしか呼べない。**レート制限を掛ける** — 上流へ費用を発生させる
+    // 経路なので、有効なキー 1 本で無制限に要求できる状態を残さない
+    // (ADR-0007 の「残る宿題」。§9 公開エンドポイントを保護する)。
+    // 枠は `standard` (1 要求 = 上流 1 回。重い経路と同じ枠で数えない)
+    { auth: 'apiKey', rateLimit: RATE_LIMIT_TIER.standard },
   );
 }

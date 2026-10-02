@@ -12,6 +12,7 @@ import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
 import {
   API_MESSAGES,
+  HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE,
   PROXY_RATE_LIMIT_ENV,
   PROXY_RATE_LIMIT_PER_MINUTE,
   RATE_LIMIT_WINDOW_MS,
@@ -101,6 +102,25 @@ export class SlidingWindowRateLimiter {
    * @param now 現在時刻（ミリ秒）。呼び出し側が渡すので、テストが時刻を決められる
    */
   check(key: string, now: number): RateLimitDecision {
+    // 数えながら判定する
+    return this.evaluate(key, now, true);
+  }
+
+  /**
+   * 数えずに「いま通せるか」だけを返す。
+   *
+   * **2 つ以上の枠を同時に見る経路のために要る**（`enforceRateLimit`）。`check` を順に呼ぶと、
+   * 1 つ目が通って 2 つ目が断ったときに 1 つ目だけが呼び出しを数えてしまう。断った要求を
+   * 数えないのはこの制限器の約束（数えると断られ続けるあいだ窓が延びて永久に通れない）なので、
+   * 「全部の枠が通ると分かってから数える」ために覗き見だけの形を用意する。
+   */
+  inspect(key: string, now: number): RateLimitDecision {
+    // 数えずに判定する
+    return this.evaluate(key, now, false);
+  }
+
+  // 判定の本体。`record` が true のときだけ今回の呼び出しを覚える
+  private evaluate(key: string, now: number, record: boolean): RateLimitDecision {
     // まず期限切れの記録を間隔ごとに回収する（表が膨らみ続けないように）
     this.sweepIfDue(now);
     // 窓の開始時刻（これ以前の記録は数えない）
@@ -122,9 +142,13 @@ export class SlidingWindowRateLimiter {
       // 断る
       return { allowed: false, retryAfterSeconds };
     }
-    // 通すので今回の時刻を足して覚える
-    recent.push(now);
-    this.hits.set(key, recent);
+    // 通すので今回の時刻を足して覚える。**覗き見のときは表に触らない** —
+    // 空の配列でも書き戻すとキーが表に残り、覗き見だけで表を膨らませられる
+    // （断る側の書き戻しは既にあるキーの絞り込みなので、新しいキーは作らない）
+    if (record) {
+      recent.push(now);
+      this.hits.set(key, recent);
+    }
     // 通す（`retryAfterSeconds` は使われない）
     return { allowed: true, retryAfterSeconds: 0 };
   }
@@ -218,10 +242,63 @@ let shared = new SlidingWindowRateLimiter({
   windowMs: RATE_LIMIT_WINDOW_MS,
 });
 
-/** プロセス共有の制限器を返す（`route()` が使う） */
+// **重い経路だけが追加で消費する枠.** 上の枠と置き換えるのではなく両方を消費する
+// （置き換えだと重い経路と中継を交互に叩くだけで合計が上の上限を超える。理由は
+//  `HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE` のコメント）
+let heavy = new SlidingWindowRateLimiter({
+  limit: HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+});
+
+/**
+ * そのルートに掛ける枠の種類。
+ *
+ * - `standard`: 上流へ 1 回ぶんの費用を出す経路（中継 2 本）。共有の枠だけを消費する
+ * - `heavy`: 1 要求で何十回も外へ出る、または応答前に外部の往復を待つ経路。
+ *   共有の枠**と**小さい枠の両方を消費する
+ */
+export const RATE_LIMIT_TIER = {
+  standard: 'standard',
+  heavy: 'heavy',
+} as const;
+
+/** 枠の種類（`RouteOptions.rateLimit` に書く値） */
+export type RateLimitTier = (typeof RATE_LIMIT_TIER)[keyof typeof RATE_LIMIT_TIER];
+
+/** プロセス共有の制限器を返す（テストが表の状態を覗くのに使う） */
 export function sharedRateLimiter(): SlidingWindowRateLimiter {
   // 共有インスタンス
   return shared;
+}
+
+/** 重い経路用の制限器を返す（テストが表の状態を覗くのに使う） */
+export function heavyRateLimiter(): SlidingWindowRateLimiter {
+  // 重い経路用のインスタンス
+  return heavy;
+}
+
+/**
+ * その主体の 1 回の呼び出しを数え、上限を超えていれば 429 を投げる。
+ *
+ * **判定の順序をここ 1 か所に閉じ込める**（`route()` から枠の組み合わせを追い出す）。
+ * すべての枠を**先に覗き見して**から数えるので、片方だけが消費された状態にならない。
+ * 断るときは待ち時間の**長いほう**を返す（短いほうを返すと、その時刻に再試行しても必ず断られる）。
+ */
+export function enforceRateLimit(principal: Principal, tier: RateLimitTier, now: number): void {
+  // 数える単位（認証済みの id。偽装できる値は使わない）
+  const key = rateLimitKeyFor(principal);
+  // 見るべき枠（重い経路は共有の枠も消費する）
+  const limiters = tier === RATE_LIMIT_TIER.heavy ? [shared, heavy] : [shared];
+  // まず全部を覗き見して、断るものがあるか調べる
+  const denials = limiters
+    .map((limiter) => limiter.inspect(key, now))
+    .filter((decision) => !decision.allowed);
+  // 1 つでも断るなら、待ち時間の長いほうで 429 にする（どの枠も数えない）
+  if (denials.length > 0) {
+    throw rateLimitedError(Math.max(...denials.map((decision) => decision.retryAfterSeconds)));
+  }
+  // 全部通るので、ここで初めて数える
+  for (const limiter of limiters) limiter.check(key, now);
 }
 
 /**
@@ -230,7 +307,10 @@ export function sharedRateLimiter(): SlidingWindowRateLimiter {
  * 表はプロセスの寿命いっぱい残るので、これが無いとテストの実行順によって
  * 「前のテストが使った枠」が次のテストへ漏れる（`setReposForTesting` と同じ扱い）。
  */
-export function resetSharedRateLimiterForTesting(options?: RateLimiterOptions): void {
+export function resetSharedRateLimiterForTesting(
+  options?: RateLimiterOptions,
+  heavyOptions?: RateLimiterOptions,
+): void {
   // 本番で作り直せると、呼ぶだけで全員の枠が空になる
   if (process.env.NODE_ENV === 'production') {
     throw new Error('resetSharedRateLimiterForTesting は本番では使えません。');
@@ -238,5 +318,11 @@ export function resetSharedRateLimiterForTesting(options?: RateLimiterOptions): 
   // 指定が無ければ既定の設定で作り直す
   shared = new SlidingWindowRateLimiter(
     options ?? { limit: configuredRateLimit(), windowMs: RATE_LIMIT_WINDOW_MS },
+  );
+  // **重い経路の枠も必ず作り直す** — 片方だけ空にすると、前のテストが使った枠が
+  // 次のテストへ漏れる（しかも漏れるのは小さいほうの枠なので、無関係なテストが 429 で落ちる）。
+  // 指定が無ければ既定（`HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE`）で作る
+  heavy = new SlidingWindowRateLimiter(
+    heavyOptions ?? { limit: HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE, windowMs: RATE_LIMIT_WINDOW_MS },
   );
 }

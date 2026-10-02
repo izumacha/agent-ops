@@ -1886,6 +1886,10 @@ describe('判定の結線', () => {
       'lib/proxy/upstream',
       'lib/evaluation/runner',
       'domain/types',
+      // **金額の上限の定数**（`domain/money` は純粋な解析・整形の関数と定数だけで、
+      // import も無く副作用も終了経路も持たない）。プロキシのベンチが「予算を持つ
+      // エージェントの中継」を測るために、到達しない上限を**写さずに**読むために要る
+      'domain/money',
       'domain/evaluation/scores',
       'domain/evaluation/judge-output',
       'data/adapters/prisma',

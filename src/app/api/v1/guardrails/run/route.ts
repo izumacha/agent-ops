@@ -8,6 +8,7 @@ import { readJsonBody } from '@/lib/api/body';
 import { notFoundError } from '@/lib/api/errors';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
+import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import type { ApiSchemas } from '@/lib/api-types';
 import { evaluateGuardrails } from '@/lib/guardrail/evaluate';
 import { guardrailRunSchema } from '@/lib/validations/guardrail';
@@ -18,37 +19,49 @@ import { RuleKind } from '@/domain/types';
 const ALL_RULE_KINDS: readonly RuleKind[] = Object.values(RuleKind);
 
 // POST /guardrails/run (runGuardrails)
-export const POST = route(async ({ request, principal, repos }) => {
-  // stop 権限 (発火すると停止しうるので、停止と同じ権限を要求する)
-  const { tenantId, user } = requireAction(principal, 'stop');
-  // 本文を検証する
-  const input = await readJsonBody(request, guardrailRunSchema);
-  // 対象エージェントが自テナントに居ること (他テナントの id は 404 で隠す)
-  const agent = await repos.agents.findById(tenantId, input.agentId);
-  if (agent === null) throw notFoundError();
-  // **自動実行と同じ関数を通す。** ここは fail-safe の包みを使わない —
-  // 利用者が明示的に「判定しろ」と言った操作なので、判定できなかったことは隠さず 500 にする
-  // (自動実行で包むのは「すでに成立した操作の答えを変えないため」で、事情が逆)
-  const result = await evaluateGuardrails(repos, {
-    tenantId,
-    agentId: agent.id,
-    kinds: ALL_RULE_KINDS,
-    now: new Date(),
-    // 人が起点の操作なので、その利用者を操作主体として監査ログへ残す
-    actorId: user.id,
-  });
-  // 判定した件数と発火したものを返す
-  const body: ApiSchemas['GuardrailRunResult'] = {
-    evaluated: result.evaluated,
-    fired: result.fired.map((row) => ({
-      ruleId: row.ruleId,
-      kind: row.kind,
-      action: row.action,
-      incidentId: row.incidentId,
-      suspended: row.suspended,
-      // 新しい行を作ったか（false なら incidentId は既に開いていた行を指す）
-      created: row.created,
-    })),
-  };
-  return Response.json(body);
-});
+//
+// **レート制限は `heavy` の枠で掛ける。** この経路は 1 要求で (a) 有効ルールの読み出し、
+// (b) 種別ごとの集計クエリ、(c) 発火すればインシデント・監査ログの書き込み、
+// (d) **応答を返す前に待つ通知の往復** まで行う。中継と同じ枠 (毎分 600) で数えると、
+// 1 要求の重さが 2 桁違う経路に同じ上限を当てることになり保護にならない。
+// 想定する使い方 (cron からの定期実行・運用者の確認) は毎分 1〜2 回で足りる。
+//
+// 通知を待つのは自動実行と違ってここが「人が結果を見る操作」だから。待つ代わりに外部の
+// 応答時間がこの API の応答時間に乗るので、**枠を絞るのは通知の往復に対する歯止めも兼ねる**
+export const POST = route(
+  async ({ request, principal, repos }) => {
+    // stop 権限 (発火すると停止しうるので、停止と同じ権限を要求する)
+    const { tenantId, user } = requireAction(principal, 'stop');
+    // 本文を検証する
+    const input = await readJsonBody(request, guardrailRunSchema);
+    // 対象エージェントが自テナントに居ること (他テナントの id は 404 で隠す)
+    const agent = await repos.agents.findById(tenantId, input.agentId);
+    if (agent === null) throw notFoundError();
+    // **自動実行と同じ関数を通す。** ここは fail-safe の包みを使わない —
+    // 利用者が明示的に「判定しろ」と言った操作なので、判定できなかったことは隠さず 500 にする
+    // (自動実行で包むのは「すでに成立した操作の答えを変えないため」で、事情が逆)
+    const result = await evaluateGuardrails(repos, {
+      tenantId,
+      agentId: agent.id,
+      kinds: ALL_RULE_KINDS,
+      now: new Date(),
+      // 人が起点の操作なので、その利用者を操作主体として監査ログへ残す
+      actorId: user.id,
+    });
+    // 判定した件数と発火したものを返す
+    const body: ApiSchemas['GuardrailRunResult'] = {
+      evaluated: result.evaluated,
+      fired: result.fired.map((row) => ({
+        ruleId: row.ruleId,
+        kind: row.kind,
+        action: row.action,
+        incidentId: row.incidentId,
+        suspended: row.suspended,
+        // 新しい行を作ったか（false なら incidentId は既に開いていた行を指す）
+        created: row.created,
+      })),
+    };
+    return Response.json(body);
+  },
+  { rateLimit: RATE_LIMIT_TIER.heavy },
+);

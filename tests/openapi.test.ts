@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
+// ファイル URL への変換 (Route Handler を動的に取り込んで印を読むのに使う)
+import { pathToFileURL } from 'node:url';
 // YAML パーサ (OpenAPI 定義は YAML)
 import { parse } from 'yaml';
 import { ALLOWED_ROUTE_FILE_NAME, ROUTE_FILE_PATTERN } from './lib/route-files';
@@ -30,6 +32,7 @@ import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
 import { guardrailRuleCreateSchema, guardrailRunSchema } from '@/lib/validations/guardrail';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
+import { ROUTE_RATE_LIMIT_BRAND } from '@/lib/api/handler';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -360,6 +363,54 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
         );
       }
     }
+  });
+
+  // **レート制限を掛けたオペレーションは 429 を宣言する。**
+  //
+  // 宣言が無いと、生成した型 (`src/generated/openapi.d.ts`) にその応答が現れないので、
+  // この API を型から使うクライアントは 429 と Retry-After を知らないまま書かれる
+  // (実測: `rateLimit` を足した `POST /evaluations` が 429 を宣言しておらず、同じ差分で
+  //  足した他のステータスはすべて宣言されていた)。
+  //
+  // **期待は契約側の一覧ではなく実装の結線から導く** — ルートに載る印
+  // (`ROUTE_RATE_LIMIT_BRAND`) を読むので、新しく制限を掛けた人が契約の更新を忘れたら落ちる。
+  // 印は枠の種類をそのまま載せるので、`null` でなければ「掛かっている」
+  it('レート制限を掛けたオペレーションは 429 を宣言している', async () => {
+    // 確かめた数 (0 件なら走査が壊れている)
+    let checked = 0;
+    for (const { path, method, op } of operations) {
+      // 契約のパスを Next.js のディレクトリへ戻す ({param} → [param])
+      const file = join(
+        process.cwd(),
+        'src',
+        'app',
+        'api',
+        'v1',
+        ...path
+          .slice(1)
+          .split('/')
+          .map((segment) => segment.replace(/^\{(.+)\}$/, '[$1]')),
+        ALLOWED_ROUTE_FILE_NAME,
+      );
+      // 実装が無ければ別のテストが落とすので、ここでは見ない
+      if (!existsSync(file)) continue;
+      // モジュールを読み込み、そのメソッドの export を取り出す
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(file).href);
+      const exported = routeModule[method.toUpperCase()];
+      if (exported === undefined) continue;
+      // 印を読む (綴りではなく結線を見る)
+      const tier = (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND];
+      // 掛けていなければ宣言は要らない
+      if (tier === null || tier === undefined) continue;
+      // 429 を宣言していること
+      checked += 1;
+      expect(
+        Object.keys(op.responses ?? {}),
+        `${method.toUpperCase()} ${path} はレート制限 (${String(tier)}) を掛けているのに 429 を宣言していない`,
+      ).toContain('429');
+    }
+    // 1 つも確かめていなければ、印の読み取りか走査が壊れている (fail-closed)
+    expect(checked, 'レート制限を掛けたオペレーションを 1 つも見つけられない').toBeGreaterThan(0);
   });
 
   // 予算の上限値は説明文にも書いてあるので、定数と一致することを固定する (散文の写しだけが古くなるのを防ぐ)

@@ -517,6 +517,85 @@ describe('評価の実行のレート制限', () => {
   });
 });
 
+describe('評価の実行の予算の強制', () => {
+  // そのエージェントに予算を設定する（表を直接書き換える）
+  function setBudget(budgetMicroUsd: bigint | null): void {
+    // 既存の行を取り出す
+    const agent = seed.store.agents.get(seed.a.agent.id);
+    // 無ければテストとして落とす
+    if (!agent) throw new Error('エージェントの行が見つかりません');
+    // 予算だけを差し替える
+    seed.store.agents.set(agent.id, { ...agent, budgetMicroUsd });
+  }
+
+  // 当月の利用を 1 件記録する（createdAt は表の時計 = いまなので当月に入る）
+  async function spend(costMicroUsd: bigint): Promise<void> {
+    // 料金だけが意味を持つ 1 行
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: seed.a.agent.id,
+      provider: seed.a.agent.provider,
+      model: seed.a.agent.model,
+      inputTokens: 1,
+      outputTokens: 1,
+      costMicroUsd,
+      latencyMs: 1,
+      statusCode: 200,
+    });
+  }
+
+  it('予算に達したエージェントの評価は 403 で断り、上流を呼ばない', async () => {
+    // **ここが大事な点** — 中継では断られるのに評価では通ると、予算の強制を
+    // 「中継の代わりに評価を回す」だけで迂回できる（1 要求でケース数ぶんの課金になる）
+    stubHealthyUpstream();
+    const set = await createSet();
+    setBudget(1_000n);
+    await spend(1_000n);
+    // 上流呼び出しの回数を覚える
+    const callsBefore = (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls
+      .length;
+    // 403 で断られる（中継経路と同じ文言）
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status).toBe(403);
+    expect(result.json).toMatchObject({ message: API_MESSAGES.budgetExceeded });
+    // **上流へは 1 度も出ていない**（実行してから断る実装では緑にならない）
+    expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(
+      callsBefore,
+    );
+  });
+
+  it('予算に届いていなければ実行できる', async () => {
+    // 予算 1000 に対して 400 だけ使った状態
+    stubHealthyUpstream();
+    const set = await createSet();
+    setBudget(1_000n);
+    await spend(400n);
+    // まだ余っているので通る
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status, JSON.stringify(result.json)).toBe(201);
+  });
+
+  it('予算が未設定なら当月の集計を引かない', async () => {
+    // **設定していないエージェントの実行に 1 クエリ増やさない**（中継経路と同じ扱い）
+    stubHealthyUpstream();
+    const set = await createSet();
+    setBudget(null);
+    const windowTotals = vi.spyOn(seed.repos.usageEvents, 'windowTotals');
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status, JSON.stringify(result.json)).toBe(201);
+    expect(windowTotals).not.toHaveBeenCalled();
+  });
+});
+
 describe('評価実行の直後のガードレール判定', () => {
   // judge が「依頼されたケースを低いスコアで返す」上流（品質ルールを発火させる）
   function stubLowQualityUpstream(score: number): void {

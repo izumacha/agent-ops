@@ -10,6 +10,7 @@ import { readJsonBody } from '@/lib/api/body';
 import { ApiError, notFoundError } from '@/lib/api/errors';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { pageQuerySchema, parseQuery } from '@/lib/api/pagination';
 import {
   toEvaluationRegressionDto,
@@ -20,6 +21,7 @@ import {
 import type { ApiSchemas } from '@/lib/api-types';
 import { API_MESSAGES } from '@/lib/constants';
 import { resolveJudgeIdentity } from '@/lib/evaluation/judge';
+import { assertWithinBudget } from '@/lib/guardrail/budget';
 import { evaluateGuardrailsSafely, QUALITY_RULE_KINDS } from '@/lib/guardrail/evaluate';
 import { runEvaluation } from '@/lib/evaluation/runner';
 import { resolveUpstreamTarget } from '@/lib/proxy/upstream';
@@ -54,7 +56,10 @@ export const GET = route(async ({ request, principal, repos }) => {
 //
 // **レート制限を掛ける。** 1 要求でケース数ぶん (最大 EVALUATION_SET_MAX_CASES × 2 回) の
 // 上流呼び出しが走るので、掛けないとプロキシに置いた課金の保護をこちらから迂回できる
-// (中継の代わりに評価を回せばよいことになる)。枠は `user:<id>` 単位 (rateLimitKeyFor)
+// (中継の代わりに評価を回せばよいことになる)。枠は `user:<id>` 単位 (rateLimitKeyFor)。
+//
+// **枠は `heavy`** — 中継と同じ枠 (毎分 600) では保護にならない。600 要求ぶんの枠は
+// この経路では上流呼び出し 24 万回ぶんの枠と同じ意味になるため (HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE)
 export const POST = route(
   async ({ request, principal, repos }) => {
     // execute 権限
@@ -69,6 +74,19 @@ export const POST = route(
     if (agent.status !== AgentStatus.active) {
       throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.agentNotActive);
     }
+    // **予算を確かめてから上流を呼ぶ** (中継経路と同じ関数・同じ 403)。
+    //
+    // **これが無いと予算の強制を「評価を回す」側から迂回できる** — 中継では当月の累計が
+    // 予算に達した時点で断られるのに、評価の実行は同じエージェントの provider / model と
+    // 同じ資格情報で上流を呼ぶので、1 要求でケース数ぶんの課金を積めてしまう (実測)。
+    //
+    // **ただし評価そのものの支出は予算に積まれない。** 評価の呼び出しを `UsageEvent` へ
+    // 書かないのは ADR-0009 の決定で (利用者の呼び出しと混ぜると日次集計とコスト超過ルールが
+    // 評価のたびに跳ねる)、累計を数えるのはその表だから。つまりここで効くのは
+    // 「中継で予算を使い切ったエージェントを評価に使わせない」ところまでで、評価の支出自体に
+    // 上限は掛からない。プラットフォーム側の支出台帳は ADR-0010 の宿題
+    await assertWithinBudget(repos, { tenantId, agent, now: new Date() });
+
     // 使う評価セット (同じく自テナントのものだけ)
     const set = await repos.evaluations.findSet(tenantId, input.setId);
     if (set === null) throw notFoundError();
@@ -154,5 +172,5 @@ export const POST = route(
     };
     return Response.json(body, { status: HTTP_STATUS.CREATED });
   },
-  { rateLimit: true },
+  { rateLimit: RATE_LIMIT_TIER.heavy },
 );

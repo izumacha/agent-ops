@@ -14,6 +14,7 @@ import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { ROUTE_HANDLER_BRAND, ROUTE_RATE_LIMIT_BRAND } from '@/lib/api/handler';
+import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
 
 // App Router の入口 (この下にある route.ts はすべて配信される)
@@ -202,13 +203,72 @@ describe('Route Handler の結線', () => {
         // レート制限の印を持つこと
         checked += 1;
         expect(
-          (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND] === true,
+          (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND] !== null,
           `${relativeToApp} の ${method} は上流を呼ぶのにレート制限が無い`,
         ).toBe(true);
       }
     }
     // 1 つも見ていなければ走査が壊れている
     expect(checked, 'レート制限を確かめた export が 0 件').toBeGreaterThan(0);
+  });
+
+  // **1 要求で何十回も上流へ出るルートは小さい枠 (heavy) で数える。**
+  //
+  // 回数だけを数える枠は、1 要求の重さが 2 桁違う経路には保護にならない — 中継と同じ
+  // 毎分 600 要求を許すと、評価の経路では上流呼び出し 24 万回ぶんを許すことになる
+  // (1 要求が最大 EVALUATION_SET_MAX_CASES 件 × 2 回)。
+  //
+  // **対象は import の連鎖から導く** — ケースを回して上流を呼ぶのは
+  // `src/lib/evaluation/runner.ts` の 1 か所なので、そこへ到達するルートが対象。
+  // 手書きの一覧だと、同じ形のルート (「まとめて回す」系) を足した人が追記を忘れたぶんだけ
+  // 網が静かに狭まる。**判定は枠の種類まで印から読む** — 真偽値だと heavy を standard へ
+  // 落とす変更が見えない。
+  //
+  // **残る境界**: この網が導けるのは「ケースを回す経路」だけ。応答を返す前に外部の往復を
+  // 待つ経路 (`POST /guardrails/run`) は連鎖から区別できない (通知のモジュールへ到達するのは
+  // 中継も同じで、あちらは待たずに投げる) ので、そちらは下の個別の検査が固定する。
+  it('ケースをまとめて回すルートは heavy の枠で数えている', async () => {
+    // src 全体の import グラフ
+    const graph = sourceImportGraph();
+    // ケースを回して上流を呼ぶモジュール
+    const runner = join(SRC_DIR, 'lib', 'evaluation', 'runner.ts');
+    // グラフに乗っていなければ走査が壊れている (fail-closed)
+    expect(graph.has(runner), '評価の実行モジュールを走査できていない').toBe(true);
+    // そこへ到達するルート
+    const fanOut = routeFiles.filter(({ full }) => reachesModule(graph, full, runner));
+    // 1 本も無ければ導出が壊れている (fail-closed)
+    expect(fanOut.length, 'ケースを回すルートを 1 本も見つけられない').toBeGreaterThan(0);
+    // 実際に印を確かめた数
+    let checked = 0;
+    for (const { full, relativeToApp } of fanOut) {
+      // モジュールを読み込む (綴りではなく値を見る)
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // GET は読み出しなので対象外 (一覧はケースを回さない)
+        if (method === 'GET') continue;
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // heavy の枠であること
+        checked += 1;
+        expect(
+          (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND],
+          `${relativeToApp} の ${method} は 1 要求で何十回も上流へ出るのに heavy の枠ではない`,
+        ).toBe(RATE_LIMIT_TIER.heavy);
+      }
+    }
+    // 1 つも見ていなければ走査が壊れている
+    expect(checked, 'heavy の枠を確かめた export が 0 件').toBeGreaterThan(0);
+  });
+
+  // 応答を返す前に通知の往復を待つ経路。連鎖からは中継と区別できないので個別に固定する
+  // (ここを standard へ落とすと、外部の応答時間を乗せた要求を毎分 600 回出せる)
+  it('通知の往復を待つ明示実行は heavy の枠で数えている', async () => {
+    // 明示実行のルート
+    const runRoute: Record<string, unknown> = await import('@/app/api/v1/guardrails/run/route');
+    // POST の印が heavy であること
+    const post = runRoute.POST as unknown as Record<symbol, unknown>;
+    expect(post[ROUTE_RATE_LIMIT_BRAND]).toBe(RATE_LIMIT_TIER.heavy);
   });
 
   // 契約に無いメソッドは、認可の網羅ガードの表にも載らないまま公開される

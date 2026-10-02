@@ -58,6 +58,8 @@ services:
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      # 上流へ費用を発生させる経路の 1 分あたりの上限 (空なら定数の既定値)
+      PROXY_RATE_LIMIT_PER_MINUTE: ${PROXY_RATE_LIMIT_PER_MINUTE:-}
       # 採点に使う judge の provider / model (未設定なら定数の既定値)
       JUDGE_PROVIDER: ${JUDGE_PROVIDER:-}
       JUDGE_MODEL: ${JUDGE_MODEL:-}

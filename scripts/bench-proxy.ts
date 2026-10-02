@@ -29,6 +29,7 @@ import { createPrismaClient } from '../src/lib/prisma-client';
 import { displayPrefix, hashSecret, issueSecret } from '../src/lib/tokens';
 import { upstreamEnvNames } from '../src/lib/proxy/upstream';
 import { Plan, Provider, RuleAction, RuleKind } from '../src/domain/types';
+import { MICRO_USD_MAX } from '../src/domain/money';
 import { GUARDRAIL_COST_THRESHOLD_MAX, PROXY_RATE_LIMIT_ENV } from '../src/lib/constants';
 
 // 負荷を掛ける秒数 (1 本あたり)
@@ -69,7 +70,12 @@ const BENCH_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
  * 毎回走る形になり、それが実際の追加遅延。
  *
  * **絶対に発火しないルールにする**（しきい値は金額の上限、動作は notify）— 発火すると
- * エージェントが止まって以降の中継が全部 403 になり、やはり測れなくなる
+ * エージェントが止まって以降の中継が全部 403 になり、やはり測れなくなる。
+ *
+ * **同じ理由でエージェントに予算を設定する。** 予算が未設定だと `assertWithinBudget` は
+ * 問い合わせを 1 つも投げないので（未設定のエージェントに費用を掛けない設計）、
+ * 「予算を持つエージェントの中継」という**新しい現実**を測れない。値は届かない額
+ * （`MICRO_USD_MAX`）にする — 到達すると以降の中継が全部 403 になる
  */
 const BENCH_RULE_WINDOW_MINUTES = 60;
 // アプリの起動を待つ上限 (ミリ秒)
@@ -174,9 +180,16 @@ async function seedApiKey(): Promise<string> {
     await client.$executeRaw`TRUNCATE TABLE "Tenant" CASCADE`;
     // テナント
     const tenant = await client.tenant.create({ data: { name: 'ベンチ', plan: Plan.free } });
-    // エージェント
+    // エージェント（**予算を持たせる**。理由は BENCH_RULE_WINDOW_MINUTES のコメント）
     const agent = await client.agent.create({
-      data: { tenantId: tenant.id, name: 'ベンチ用', provider: Provider.anthropic, model: MODEL },
+      data: {
+        tenantId: tenant.id,
+        name: 'ベンチ用',
+        provider: Provider.anthropic,
+        model: MODEL,
+        // 到達しない上限（中継ごとに当月の累計を 1 回引く形になる）
+        budgetMicroUsd: MICRO_USD_MAX,
+      },
     });
     // API キー (平文は発行時しか手に入らない)
     const secret = issueSecret('apiKey');

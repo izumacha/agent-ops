@@ -889,6 +889,8 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '503':
           description: 採点用モデルの設定が正しくない (中継できない)
           content:
@@ -1008,6 +1010,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -1293,9 +1297,13 @@ components:
     TooManyRequests:
       description: |
         要求が多すぎる。2 つの原因がある:
-        (a) **このサービスのレート制限** — 1 つの API キーが窓の中で出せる中継の回数
-        (src/lib/constants.ts の PROXY_RATE_LIMIT_PER_MINUTE) を超えた。Retry-After は
-        こちらが計算した秒数。上流へは 1 度も出ていないので課金も発生しない。
+        (a) **このサービスのレート制限** — 窓の中で出せる回数を超えた。数える単位は認証済みの
+        資格情報 (API キー / ユーザー / プラットフォーム管理者) で、枠は 2 つある:
+        対象のすべての経路が消費する枠 (src/lib/constants.ts の PROXY_RATE_LIMIT_PER_MINUTE。
+        環境変数 PROXY_RATE_LIMIT_PER_MINUTE で上書きできる) と、1 要求で何十回も外へ出る
+        重い経路 (評価の実行・ガードレールの明示実行) だけが追加で消費する小さい枠
+        (HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE)。Retry-After はこちらが計算した秒数で、
+        両方の枠が尽きている場合は長いほうを返す。上流へは 1 度も出ていないので課金も発生しない。
         (b) **上流の LLM プロバイダが混雑を返した** — 本文は定型文に差し替える (上流の本文には
         組織名やクォータの状況が載るため) が、上流が Retry-After を返した場合はその値だけ中継する
       headers:

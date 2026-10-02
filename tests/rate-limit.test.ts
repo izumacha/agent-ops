@@ -3,10 +3,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   configuredRateLimit,
+  enforceRateLimit,
+  heavyRateLimiter,
+  RATE_LIMIT_TIER,
   rateLimitKeyFor,
   rateLimitedError,
+  resetSharedRateLimiterForTesting,
+  sharedRateLimiter,
   SlidingWindowRateLimiter,
 } from '@/lib/api/rate-limit';
+import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { Provider, Role } from '@/domain/types';
 import { PROXY_RATE_LIMIT_ENV, PROXY_RATE_LIMIT_PER_MINUTE } from '@/lib/constants';
@@ -174,19 +180,116 @@ describe('レート制限のキー', () => {
 describe('ルートに載るレート制限の印', () => {
   // **印そのものの挙動を固定する。** この印は検出網 (tests/route-wrapping.test.ts) が
   // 「そのルートが制限を掛けているか」を綴りに頼らず読むための唯一の手がかりなので、
-  // 常に true を返すよう書き換えても**本番の挙動は変わらない**（実測で全件緑のまま通った）。
-  // 印が嘘をつく変異はここでしか落ちないので、両方の向きを直接確かめる
-  it('指定したときだけ true になる', async () => {
+  // 常に値を返すよう書き換えても**本番の挙動は変わらない**（実測で全件緑のまま通った）。
+  // 印が嘘をつく変異はここでしか落ちないので、向きをすべて直接確かめる
+  it('指定した枠をそのまま申告し、指定が無ければ null になる', async () => {
     // 包む対象は何でもよい（印は包んだ関数に載る）
     const { route, ROUTE_RATE_LIMIT_BRAND } = await import('@/lib/api/handler');
     // 何も指定しなければ「掛けない」側（既定は fail-open だが、印はそれを正しく申告する）
     const plain = route(async () => new Response(null)) as unknown as Record<symbol, unknown>;
-    expect(plain[ROUTE_RATE_LIMIT_BRAND]).toBe(false);
-    // 指定したときだけ true
-    const limited = route(async () => new Response(null), {
-      rateLimit: true,
-    }) as unknown as Record<symbol, unknown>;
-    expect(limited[ROUTE_RATE_LIMIT_BRAND]).toBe(true);
+    expect(plain[ROUTE_RATE_LIMIT_BRAND]).toBeNull();
+    // **枠の種類まで載る** — 真偽値だと、重い経路の指定を standard へ落とす変更が
+    // 検出網から見えない（印は「掛かっている」のままなので）
+    for (const tier of Object.values(RATE_LIMIT_TIER)) {
+      const limited = route(async () => new Response(null), {
+        rateLimit: tier,
+      }) as unknown as Record<symbol, unknown>;
+      expect(limited[ROUTE_RATE_LIMIT_BRAND]).toBe(tier);
+    }
+  });
+});
+
+describe('覗き見だけの判定 (inspect)', () => {
+  it('数えないので、何回呼んでも通し続ける', () => {
+    // 上限 3 の制限器
+    const limiter = new SlidingWindowRateLimiter({ limit: LIMIT, windowMs: WINDOW_MS });
+    // 上限より多く覗き見しても通る（覗き見は記録を増やさない）
+    for (let index = 0; index < LIMIT + 5; index += 1) {
+      expect(limiter.inspect('k', T0).allowed).toBe(true);
+    }
+    // 記録は 1 件も無い（キーごと表に無い）
+    expect(limiter.trackedKeys).toBe(0);
+  });
+
+  it('上限に達していれば check と同じ待ち時間を返す', () => {
+    // 上限 1 の制限器
+    const limiter = new SlidingWindowRateLimiter({ limit: 1, windowMs: WINDOW_MS });
+    // 1 件数える
+    expect(limiter.check('k', T0).allowed).toBe(true);
+    // 覗き見でも断り、待ち時間は窓の長さぶん（秒へ切り上げ）
+    const peeked = limiter.inspect('k', T0);
+    expect(peeked.allowed).toBe(false);
+    expect(peeked.retryAfterSeconds).toBe(WINDOW_MS / 1000);
+  });
+});
+
+describe('枠の組み合わせ (enforceRateLimit)', () => {
+  // 検査に使う主体（キーは `apiKey:<id>` になる）
+  const principal = {
+    kind: 'agent',
+    apiKeyId: 'key-1',
+    tenantId: 't1',
+    agent: { id: 'a1', status: 'active', provider: Provider.anthropic, model: 'm' },
+  } as unknown as Parameters<typeof enforceRateLimit>[0];
+
+  it('重い経路は小さい枠と共有の枠の両方を消費する', () => {
+    // 共有は 10、重いほうは 2 で作り直す
+    resetSharedRateLimiterForTesting(
+      { limit: 10, windowMs: WINDOW_MS },
+      { limit: 2, windowMs: WINDOW_MS },
+    );
+    // 重い経路を 2 回通す（小さい枠の上限まで）
+    enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0);
+    enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0);
+    // 3 回目は小さい枠で断られる
+    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0)).toThrow();
+    // **共有の枠も 2 件ぶん消費されている** — 置き換えだと、重い経路と中継を交互に叩くだけで
+    // 合計が共有の上限を超える。残りは 10 - 2 = 8 件なので、8 回は通って 9 回目で断られる
+    for (let index = 0; index < 8; index += 1) {
+      enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0);
+    }
+    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0)).toThrow();
+  });
+
+  it('断った要求はどちらの枠にも数えない', () => {
+    // 共有は 1、重いほうは 5（**共有のほうが先に尽きる**組み合わせ）
+    resetSharedRateLimiterForTesting(
+      { limit: 1, windowMs: WINDOW_MS },
+      { limit: 5, windowMs: WINDOW_MS },
+    );
+    // 共有の枠を使い切る
+    enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0);
+    // 重い経路は共有の枠で断られる
+    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0)).toThrow();
+    // **小さい枠は 1 件も数えていない** — 順に check を呼ぶ形だと、通った側だけが
+    // 数えてしまい、断られ続けるあいだ小さい枠が減り続ける
+    expect(heavyRateLimiter().trackedKeys).toBe(0);
+    // 共有の枠は使い切ったぶんだけ（断った要求で増えていない）
+    expect(sharedRateLimiter().trackedKeys).toBe(1);
+  });
+
+  it('断るときは待ち時間の長いほうを返す', () => {
+    // 共有は 1、重いほうも 1 で作り直す
+    resetSharedRateLimiterForTesting(
+      { limit: 1, windowMs: WINDOW_MS },
+      { limit: 1, windowMs: WINDOW_MS },
+    );
+    // 両方の枠を使い切る（共有は T0、小さい枠も T0）
+    enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0);
+    // 共有の枠だけをさらに古くするため、少し進めた時刻で中継を 1 回…は通らないので、
+    // ここでは「両方が断る」状況で例外の待ち時間が正の整数であることを確かめる
+    let thrown: unknown = null;
+    try {
+      enforceRateLimit(principal, RATE_LIMIT_TIER.heavy, T0 + 1_000);
+    } catch (error) {
+      thrown = error;
+    }
+    // 429 ＋ Retry-After が載る
+    expect(thrown).toBeInstanceOf(ApiError);
+    const headers = (thrown as ApiError).headers ?? {};
+    expect((thrown as ApiError).status).toBe(HTTP_STATUS.TOO_MANY_REQUESTS);
+    // 残り 59 秒（窓 60 秒 - 経過 1 秒）
+    expect(headers['Retry-After']).toBe('59');
   });
 });
 

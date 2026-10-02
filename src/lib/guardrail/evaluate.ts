@@ -335,10 +335,21 @@ export async function evaluateGuardrails(
     notifications.map((payload) => notifyGuardrailIncident(payload, env)),
   );
   // 待つかどうかは起点が決める（理由は `detachNotifications` のコメント）。
-  // **待たない側でも必ず `void` で受ける** — 浮いた Promise を放置すると、将来
-  // `notifyGuardrailIncident` が例外を出す形へ変わったときに unhandled rejection になる
-  if (trigger.detachNotifications === true) void sending;
-  else await sending;
+  //
+  // **待たない側では `catch` を必ず付ける。** `void p` は値を捨てるだけで**拒否は処理しない**ので、
+  // `notifyGuardrailIncident` が将来 1 か所でも throw する形へ変わると（payload に
+  // `JSON.stringify` できない値が混ざる・鍵の形が壊れて `createHmac` が投げる 等）
+  // unhandled rejection になり、Node の既定（`--unhandled-rejections=throw`）では
+  // **中継 1 回でサーバのプロセスが落ちる**。`void` だけで守れていると書いていたのは誤りだった。
+  if (trigger.detachNotifications === true) {
+    // 失敗は握り潰さずログに残す（通知は fail-open だが、黙って消さない。§6）
+    void sending.catch((error: unknown) => {
+      console.error('[guardrail] 通知の送信に失敗しました:', describeError(error));
+    });
+  } else {
+    // 待つ側は呼び出し元へそのまま伝える（`notifyGuardrailIncident` は例外を出さない設計）
+    await sending;
+  }
   // 判定した件数と発火したもの
   return { evaluated: rules.length, fired };
 }

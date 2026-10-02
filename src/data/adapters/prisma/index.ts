@@ -947,42 +947,37 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
       // prisma は too_many_rules を返す。API テストは memory で走るので、答えが割れると
       // ルートは片方の答えで書かれて本番だけ別のステータスになる
       if (input.agentId !== null) {
-        // 同テナントにそのエージェントが居るか (複合一意 (tenantId, id) を引く)
-        const agent = await tx.agent.findFirst({
-          where: { tenantId: input.tenantId, id: input.agentId },
-          select: { id: true },
-        });
+        // 同テナントにそのエージェントが居るか。**FOR KEY SHARE で押さえる** —
+        // 削除だけを待たせ、状態変更や他のルール作成は妨げない。押さえれば挿入は複合 FK
+        // (tenantId, agentId) を必ず満たすので、**FK 違反の翻訳に頼らずに済む**
+        // (`PrismaApiKeys.create` と同じ形。理由はそちらのコメント)
+        const agent = await tx.$queryRaw<
+          { id: string }[]
+        >`SELECT id FROM "Agent" WHERE "tenantId" = ${input.tenantId} AND id = ${input.agentId} FOR KEY SHARE`;
         // 居なければ作れない (他テナントのエージェントも「無い」と同じ扱いにして存在を隠す)
-        if (agent === null) return { status: 'agent_not_found' as const };
+        if (agent.length === 0) return { status: 'agent_not_found' as const };
       }
       // 現在のルール数を数える
       const existing = await tx.guardrailRule.count({ where: { tenantId: input.tenantId } });
       // 上限に達していれば作らない
       if (existing >= maxRulesPerTenant) return { status: 'too_many_rules' as const };
-      // 挿入を試みる
-      try {
-        // 作成した行をそのまま返す
-        const rule = await tx.guardrailRule.create({
-          data: {
-            tenantId: input.tenantId,
-            agentId: input.agentId,
-            kind: input.kind,
-            threshold: input.threshold,
-            windowMinutes: input.windowMinutes,
-            action: input.action,
-          },
-        });
-        // 作成できた
-        return { status: 'created' as const, rule };
-      } catch (error) {
-        // 複合 FK (tenantId, agentId) 違反 = 同テナントにそのエージェントが居ない。
-        // **上の確認を通ったあとの保険** — 確認と挿入の間にエージェントが消される競合が残るので、
-        // DB 側の判定も捨てずに同じ答えへ写す (fail-closed)
-        if (isPrismaError(error, FOREIGN_KEY_VIOLATION))
-          return { status: 'agent_not_found' as const };
-        // それ以外は握り潰さず投げ直す
-        throw error;
-      }
+      // 挿入する。**FK 違反 (P2003) を翻訳しない** — 2 本の FK (Tenant / Agent) のうち
+      // Tenant 側は上の FOR NO KEY UPDATE が、Agent 側は上の FOR KEY SHARE が削除を待たせるので、
+      // ここで FK 違反は起こらない。それでも起きたなら前提が崩れているので、別の原因を
+      // 「エージェントが見つからない」に化けさせずそのまま投げる (`PrismaApiKeys.create` と同じ規則。
+      // Prisma 7 のドライバアダプタ経由のエラーは「どの制約か」を安定した形で持たないため)
+      const rule = await tx.guardrailRule.create({
+        data: {
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          kind: input.kind,
+          threshold: input.threshold,
+          windowMinutes: input.windowMinutes,
+          action: input.action,
+        },
+      });
+      // 作成できた
+      return { status: 'created' as const, rule };
     });
   }
 

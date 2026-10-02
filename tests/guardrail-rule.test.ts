@@ -116,6 +116,61 @@ describe('ガードレールの集計窓', () => {
   });
 });
 
+describe('集計窓: 引き金の行を取り込む', () => {
+  it('引き金の行が窓の開始より前なら、その時刻まで広げる', () => {
+    // **DB の時計がアプリより遅れている状況** — 窓 1 分に対して 90 秒前の行が引き金。
+    // 広げないと、しきい値を越えさせた当の支出が集計に入らない（発火しない fail-open。
+    // `evaluationBasisTime` が塞ぐのは DB が「進んでいる」向きだけ）
+    const now = new Date('2026-10-02T12:00:00.000Z');
+    const recordedAt = new Date(now.getTime() - 90_000);
+    const window = guardrailWindow(
+      now,
+      1,
+      GUARDRAIL_WINDOW_MIN_MINUTES,
+      GUARDRAIL_WINDOW_MAX_MINUTES,
+      recordedAt,
+    );
+    // 開始は引き金の行の時刻（含む）まで下がる
+    expect(window?.start.getTime()).toBe(recordedAt.getTime());
+    // 終端は変わらない
+    expect(window?.endExclusive.toISOString()).toBe('2026-10-02T12:00:00.001Z');
+  });
+
+  it('引き金の行が窓の中なら窓は変わらない (無駄に広げない)', () => {
+    // 窓 15 分に対して 1 分前の行（もともと窓の中）
+    const now = new Date('2026-10-02T12:00:00.000Z');
+    const inside = new Date(now.getTime() - 60_000);
+    const widened = guardrailWindow(
+      now,
+      15,
+      GUARDRAIL_WINDOW_MIN_MINUTES,
+      GUARDRAIL_WINDOW_MAX_MINUTES,
+      inside,
+    );
+    const plain = guardrailWindow(
+      now,
+      15,
+      GUARDRAIL_WINDOW_MIN_MINUTES,
+      GUARDRAIL_WINDOW_MAX_MINUTES,
+    );
+    expect(widened?.start.toISOString()).toBe(plain?.start.toISOString());
+  });
+
+  it('範囲外の長さなら引き金を渡しても窓は作らない (判定しない側に倒す)', () => {
+    // 広げる処理が範囲の判定より先に走ると、不正な長さの窓が作れてしまう
+    const now = new Date('2026-10-02T12:00:00.000Z');
+    expect(
+      guardrailWindow(
+        now,
+        GUARDRAIL_WINDOW_MAX_MINUTES + 1,
+        GUARDRAIL_WINDOW_MIN_MINUTES,
+        GUARDRAIL_WINDOW_MAX_MINUTES,
+        new Date(now.getTime() - 1_000),
+      ),
+    ).toBeNull();
+  });
+});
+
 describe('しきい値の範囲', () => {
   it('コストはマイクロ USD の上限まで、割合の種別は 0〜1', () => {
     // コストは金額なので上限が大きい

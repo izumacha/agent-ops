@@ -832,6 +832,11 @@ class MemoryGuardrailRules implements GuardrailRulesPort {
     input: CreateGuardrailRuleInput,
     maxRulesPerTenant: number,
   ): Promise<CreateGuardrailRuleResult> {
+    // **テナントが実在することを確かめる** (prisma 側は Tenant 行を FOR NO KEY UPDATE で
+    // 押さえ、0 行なら同じ答えを返す)。ここで見ていなかった頃は、存在しないテナント id ＋
+    // agentId: null の入力で memory だけが `created` を返していた — API テストは memory で
+    // 走るので、アダプタで答えが割れると本番だけ別のステータスになる (ADR-0006 の死角)
+    if (!this.store.tenants.has(input.tenantId)) return { status: 'agent_not_found' };
     // 対象エージェントの指定があれば、同テナントに居ることを確かめる (本番では複合 FK が同じ判定をする)
     if (input.agentId !== null) {
       // 指定されたエージェントを引く

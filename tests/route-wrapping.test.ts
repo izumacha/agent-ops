@@ -50,6 +50,12 @@ const spec = parse(readFileSync(join(process.cwd(), 'openapi', 'openapi.yaml'), 
   paths: Record<string, Record<string, unknown>>;
 };
 
+// src 全体の import グラフ。**モジュール評価時に 1 度だけ作る** —
+// `parseSourceFiles()` が src 配下の全 .ts/.tsx を TypeScript パーサで読むので、テストごとに
+// 作り直すとその走査が丸ごと二重になる（`reachesModule` が graph を引数で受ける形も
+// 「1 度作って使い回す」ことを前提にしている）
+const importGraph = sourceImportGraph();
+
 describe('Route Handler の結線', () => {
   // 走査が壊れて 0 件になったら落とす (fail-closed)
   it('Route Handler を 1 つ以上見つけている', () => {
@@ -183,8 +189,8 @@ describe('Route Handler の結線', () => {
   // (同じモジュールの GET は一覧の読み出しで上流を呼ばない)。上流を呼ぶ GET を足すと
   // この網からは外れるので、そのときはここを広げること。
   it('上流 LLM を呼ぶルートの非 GET はレート制限を掛けている', async () => {
-    // src 全体の import グラフ (1 度だけ作る)
-    const graph = sourceImportGraph();
+    // src 全体の import グラフ (モジュール評価時に 1 度だけ作ったもの)
+    const graph = importGraph;
     // 上流を呼ぶモジュール (到達を調べる相手)
     const upstream = join(SRC_DIR, 'lib', 'proxy', 'upstream.ts');
     // グラフに乗っていなければ走査が壊れている (fail-closed)
@@ -232,8 +238,8 @@ describe('Route Handler の結線', () => {
   // 待つ経路 (`POST /guardrails/run`、枠は `outbound`) は連鎖から区別できない (通知のモジュールへ
   // 到達するのは中継も同じで、あちらは待たずに投げる) ので、そちらは下の個別の検査が固定する。
   it('ケースをまとめて回すルートは fanOut の枠で数えている', async () => {
-    // src 全体の import グラフ
-    const graph = sourceImportGraph();
+    // src 全体の import グラフ (上と同じインスタンス)
+    const graph = importGraph;
     // ケースを回して上流を呼ぶモジュール
     const runner = join(SRC_DIR, 'lib', 'evaluation', 'runner.ts');
     // グラフに乗っていなければ走査が壊れている (fail-closed)

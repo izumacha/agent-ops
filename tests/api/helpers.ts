@@ -3,6 +3,7 @@
 import { afterEach, beforeEach } from 'vitest';
 import { setReposForTesting } from '@/data';
 import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
+import { PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, ApiKeyRecord, UserRecord, UserTokenRecord } from '@/data';
 import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
@@ -114,7 +115,7 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
 // setupSeed 前の環境変数 (teardownSeed で戻す)
 let platformTokenBefore: string | undefined;
 let auditSecretBefore: string | undefined;
-// 通知の設定の退避（キーごとに元の値を覚える）
+// 空にした設定の退避（キーごとに元の値を覚える）
 const notifyBefore = new Map<string, string | undefined>();
 
 /**
@@ -136,6 +137,20 @@ const NOTIFY_ENV_NAMES = [
   'NOTIFY_SIGNING_SECRET',
 ] as const;
 
+/**
+ * **レート制限の上限も実行環境から切り離す。**
+ *
+ * `resetSharedRateLimiterForTesting()` を引数なしで呼ぶと `configuredRateLimit()` が
+ * `process.env.PROXY_RATE_LIMIT_PER_MINUTE` を読む。シェルや CI でこれが小さい値
+ * （`PROXY_RATE_LIMIT_PER_MINUTE=1` 等）になっていると、1 テストの中で中継や評価を 2 回以上
+ * 呼ぶテストが**一斉に 429 で落ちる** — 通知の宛先を空にしたのと同じ理由（テストの結果が
+ * 開発機の環境変数で変わってはいけない）。空にすると既定値（定数）が使われる。
+ */
+const RATE_LIMIT_ENV_NAMES = [PROXY_RATE_LIMIT_ENV] as const;
+
+// 上の 2 組を合わせた「setupSeed が空にする設定」
+const BLANKED_ENV_NAMES = [...NOTIFY_ENV_NAMES, ...RATE_LIMIT_ENV_NAMES] as const;
+
 // memory アダプタへ差し替え、テナント A / B を seed する (各テストの beforeEach で呼ぶ。afterEach で teardownSeed を対にする)
 function setupSeed(): Seed {
   // 新しい表で memory アダプタを作る
@@ -152,8 +167,8 @@ function setupSeed(): Seed {
   // 監査ログの鍵を設定する (無いと人の操作で状態を変えるルートが 503 になる。理由は AUDIT_SECRET)
   auditSecretBefore = process.env.AUDIT_HMAC_SECRET;
   process.env.AUDIT_HMAC_SECRET = AUDIT_SECRET;
-  // 通知の設定を空にする (理由は NOTIFY_ENV_NAMES のコメント)
-  for (const name of NOTIFY_ENV_NAMES) {
+  // 通知とレート制限の設定を空にする (理由は各一覧のコメント)
+  for (const name of BLANKED_ENV_NAMES) {
     notifyBefore.set(name, process.env[name]);
     process.env[name] = '';
   }
@@ -175,8 +190,8 @@ function teardownSeed(): void {
   else process.env.PLATFORM_ADMIN_TOKEN = platformTokenBefore;
   if (auditSecretBefore === undefined) delete process.env.AUDIT_HMAC_SECRET;
   else process.env.AUDIT_HMAC_SECRET = auditSecretBefore;
-  // 通知の設定も元へ戻す (元が未設定なら消す)
-  for (const name of NOTIFY_ENV_NAMES) {
+  // 空にした設定を元へ戻す (元が未設定なら消す)
+  for (const name of BLANKED_ENV_NAMES) {
     const before = notifyBefore.get(name);
     if (before === undefined) delete process.env[name];
     else process.env[name] = before;

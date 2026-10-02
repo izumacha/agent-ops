@@ -179,6 +179,9 @@ async function recordUsageAndEvaluate(
     // 窓の終端（基準時刻の 1 ミリ秒後）が書いた行より前になり、**しきい値を越えさせた当の支出が
     // 集計に入らない**（発火せず、以降の呼び出しが来なければ止まらない fail-open）
     now: evaluationBasisTime(recordedAt, new Date()),
+    // **引き金の行の時刻も渡す** — DB の時計が遅れていると、窓の開始がこの行より後になって
+    // 当の支出が集計から落ちる（`evaluationBasisTime` は進んでいる向きだけを塞ぐ）
+    triggeredBy: recordedAt ?? undefined,
     // 自動発火なので操作主体は居ない（API キーはユーザーではない）
     actorId: null,
     // **通知は待たない。** 受け手の応答時間は外部で決まるので、待つとその時間が中継の

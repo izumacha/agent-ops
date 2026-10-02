@@ -2,6 +2,7 @@
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
 import { AgentStatus, Provider, Role, RuleKind } from '@/domain/types';
+import { RATIO_MAX } from '@/domain/guardrail/rule';
 
 // アプリ名 (画面タイトル等で使う)
 export const APP_NAME = 'Agent Ops';
@@ -224,9 +225,11 @@ export const API_MESSAGES = {
   apiKeyNotBoundToAgent:
     'この API キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
   agentNotActive: 'このエージェントは停止中です。復帰させてから呼び出してください。',
-  guardrailThresholdOutOfRange:
-    'しきい値が種別ごとの範囲外です (コストは 0 以上の整数、エラー率と品質は 0.0〜1.0)。',
-  guardrailWindowOutOfRange: '集計窓は 1 分以上 7 日以内の整数で指定してください。',
+  // **範囲の数値は定数から埋める。** 書き写すと、定数を動かしたときに文言だけが古くなり、
+  // 利用者は「通る値を弾かれた」と読む（§6 の一元管理。入力検証・DB の CHECK・判定の 3 か所が
+  // 同じ定数を読んでいるのに、4 か所目の文言だけが写しだった）
+  guardrailThresholdOutOfRange: `しきい値が種別ごとの範囲外です (コストは 0 以上の整数、エラー率と品質は 0 以上 ${RATIO_MAX} 以下)。`,
+  guardrailWindowOutOfRange: `集計窓は ${GUARDRAIL_WINDOW_MIN_MINUTES} 分以上 ${GUARDRAIL_WINDOW_MAX_MINUTES} 分以内の整数で指定してください。`,
   guardrailRuleLimit:
     'ガードレールのルール数が上限に達しています。不要なルールを削除してください。',
   guardrailRuleHasIncidents:

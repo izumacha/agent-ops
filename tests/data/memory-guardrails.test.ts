@@ -142,6 +142,24 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     expect(result.status).toBe('agent_not_found');
   });
 
+  it('存在しないテナントには作れない (prisma のテナント行ロックと同じ答え)', async () => {
+    // **エージェント指定が無い形**がこの検査の要点 — agentId: null だとエージェントの判定を
+    // 通らないので、テナントを見ていないと memory だけが `created` を返す（prisma は
+    // Tenant 行を FOR NO KEY UPDATE で押さえて 0 行なら agent_not_found）
+    const created = await repos.guardrailRules.create(
+      {
+        tenantId: 'tenant_does_not_exist',
+        agentId: null,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      RULES_MAX,
+    );
+    expect(created.status).toBe('agent_not_found');
+  });
+
   it('ルール数の上限を超えて作れない', async () => {
     // 上限 1 件で 1 件目は通る
     await makeRule(RuleKind.cost, RuleAction.notify, false);

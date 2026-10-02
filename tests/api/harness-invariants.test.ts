@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { seedEachTest } from './helpers';
+import { PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 
 // 設定の雛形（通知の設定名の正本）
 const EXAMPLE = readFileSync(join(process.cwd(), '.env.example'), 'utf8');
@@ -32,5 +33,17 @@ describe('API テストの土台', () => {
       // 空文字であること（未設定でも「宛先なし」だが、開発機の値が残っていると送ってしまう）
       expect(process.env[name], `${name} が空でない (テストが本物の宛先へ POST しうる)`).toBe('');
     }
+  });
+});
+
+describe('API テストの土台: レート制限', () => {
+  // 土台を各テストの前に用意する（これ自体が検査対象）
+  seedEachTest();
+
+  it('レート制限の上限を空にして、実行環境の設定で結果が変わらないようにする', () => {
+    // **これが無いとテストの結果が開発機・CI の環境変数で変わる** —
+    // `PROXY_RATE_LIMIT_PER_MINUTE=1` が export されていると、1 テストの中で中継や評価を
+    // 2 回以上呼ぶテストが一斉に 429 で落ちる（通知の宛先を空にしたのと同じ理由）
+    expect(process.env[PROXY_RATE_LIMIT_ENV], `${PROXY_RATE_LIMIT_ENV} が空でない`).toBe('');
   });
 });

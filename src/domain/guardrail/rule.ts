@@ -32,7 +32,7 @@ export interface ThresholdRange {
 }
 
 // 割合 (0〜1) で表す種別の上限。エラー率・品質スコアはどちらも 0〜1 の比率
-const RATIO_MAX = 1;
+export const RATIO_MAX = 1;
 
 // 逸脱スコアが最良のときの値 (0.0〜1.0 で低いほど良いので、1 から引くと「高いほど良い」へ直せる)。
 // **裸の 1 を書かない** — RATIO_MAX と同じ値だが意味が違う (あちらは割合の上限、こちらは反転の基点)
@@ -95,12 +95,20 @@ export function isValidWindowMinutes(windowMinutes: number, min: number, max: nu
  * 二重に入る／どちらにも入らないのを防ぐため。こちらは「末尾がいまの移動窓」で隣の窓が
  * 無いので、その理由は上端には当てはまらない。**開始側は半開のまま**（`start` を含み、
  * `start` の 1 ミリ秒前は含まない）。
+ *
+ * **`includeFrom` を渡すと、その時刻まで開始側を広げる。** 判定の引き金になった行の時刻を
+ * 渡すためのもので、**DB の時計がアプリより遅れているときに引き金の行が窓から落ちるのを防ぐ**。
+ * `createdAt` は DB の `now()` が入れる値なので、遅れが窓の長さを超えると（たとえば窓 1 分で
+ * 90 秒の遅れ）その行は `start` より前になり、しきい値を越えさせた当の支出が集計に入らない
+ * （発火しない fail-open）。終了側を遅いほうに合わせるだけでは**この向きは塞げない**
+ * （`evaluationBasisTime` が塞ぐのは DB が進んでいる向きだけ）。
  */
 export function guardrailWindow(
   now: Date,
   windowMinutes: number,
   min: number,
   max: number,
+  includeFrom?: Date,
 ): GuardrailWindow | null {
   // 範囲外の長さでは窓を作らない (呼び出し側が「判定できない」として扱う)
   if (!isValidWindowMinutes(windowMinutes, min, max)) return null;
@@ -109,7 +117,11 @@ export function guardrailWindow(
   // **ミリ秒を足すのは精度の都合**で、タイムスタンプが同じミリ秒に収まる限り不可避
   const endExclusive = new Date(now.getTime() + 1);
   // 開始はそこから窓の長さだけ戻した時刻 (含む)
-  const start = new Date(endExclusive.getTime() - windowMinutes * MILLIS_PER_MINUTE);
+  const nominalStart = endExclusive.getTime() - windowMinutes * MILLIS_PER_MINUTE;
+  // 引き金の行がそれより前なら、その時刻まで広げる (理由は上のコメント)
+  const start = new Date(
+    includeFrom === undefined ? nominalStart : Math.min(nominalStart, includeFrom.getTime()),
+  );
   // 半開区間として返す
   return { start, endExclusive };
 }

@@ -164,6 +164,8 @@ export const POST = route(
       // 進んでいると、窓の終端 (基準時刻の 1 ミリ秒後) が保存した行より前になり、
       // いま採点した結果が集計に入らない (品質ルールが発火しない fail-open)
       now: evaluationBasisTime(saved.run.createdAt, new Date()),
+      // 引き金の行（いま保存した実行）の時刻も渡す（理由は `triggeredBy` のコメント）
+      triggeredBy: saved.run.createdAt,
       // 評価を走らせたユーザーを操作主体として残す（自動発火だが起点は人の操作）
       actorId: user.id,
     });

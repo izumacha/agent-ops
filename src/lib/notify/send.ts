@@ -194,15 +194,18 @@ export async function notifyGuardrailIncident(
       }
       continue;
     }
-    // 署名鍵が無い・短いとき (宛先は設定されているので、運用者は送るつもりでいる)
+    // 署名鍵が無い・短いとき (宛先は設定されているので、運用者は送るつもりでいる)。
+    // **必要な長さの値を文言へ書き写さない** — ログの実引数は文字列リテラルに限られている
+    // (`tests/error-logging.test.ts`) ので補間もできず、写すと定数を変えたときに案内だけが
+    // 誤りになる。代わりに**定数の名前**を書く (`evaluate.ts` が環境変数の名前を書くのと同じ形)
     if (result.status === 'unsigned') {
       if (isWebhook) {
         console.error(
-          '[notify] NOTIFY_SIGNING_SECRET が未設定か短すぎるため NOTIFY_WEBHOOK_URL へ送りませんでした (32 文字以上が必要)',
+          '[notify] NOTIFY_SIGNING_SECRET が未設定か短いため NOTIFY_WEBHOOK_URL へ送りませんでした (必要な長さは src/lib/constants.ts の NOTIFY_SIGNING_SECRET_MIN_LENGTH)',
         );
       } else {
         console.error(
-          '[notify] NOTIFY_SIGNING_SECRET が未設定か短すぎるため NOTIFY_MAIL_WEBHOOK_URL へ送りませんでした (32 文字以上が必要)',
+          '[notify] NOTIFY_SIGNING_SECRET が未設定か短いため NOTIFY_MAIL_WEBHOOK_URL へ送りませんでした (必要な長さは src/lib/constants.ts の NOTIFY_SIGNING_SECRET_MIN_LENGTH)',
         );
       }
       continue;

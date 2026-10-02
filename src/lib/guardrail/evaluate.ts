@@ -40,6 +40,18 @@ export interface GuardrailTrigger {
   kinds: readonly RuleKind[];
   // 判定の基準時刻（集計窓の終端。含まない）
   now: Date;
+  /**
+   * 判定の引き金になった行の時刻（`UsageEvent` / `EvaluationRun` の `createdAt`）。
+   *
+   * **渡すと集計窓がその時刻まで広がる。** `createdAt` は DB の `now()` が入れる値なので、
+   * DB の時計がアプリより遅れていて、その遅れが窓の長さを超えると（窓 1 分で 90 秒の遅れ 等）
+   * **引き金の行が窓の開始より前になり、しきい値を越えさせた当の支出が集計に入らない**
+   * （発火しない fail-open）。基準時刻を遅いほうに合わせる `evaluationBasisTime` が塞ぐのは
+   * DB が**進んでいる**向きだけなので、もう一方はここで塞ぐ。
+   *
+   * 省略できるのは、引き金の行が無い起点（明示実行）があるため
+   */
+  triggeredBy?: Date;
   // 監査ログに残す操作主体。自動発火は null（人が起点の明示実行ではそのユーザー）
   actorId: string | null;
   /**
@@ -144,6 +156,8 @@ async function measureFor(
     rule.windowMinutes,
     GUARDRAIL_WINDOW_MIN_MINUTES,
     GUARDRAIL_WINDOW_MAX_MINUTES,
+    // 引き金の行があれば、その時刻まで開始側を広げる（理由は `triggeredBy` のコメント）
+    trigger.triggeredBy,
   );
   // 窓が作れなければこのルールは判定できない（呼び出し側がログに残す）
   if (window === null) return null;

@@ -249,6 +249,22 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     expect(all.anchorHash).toBeNull();
   });
 
+  it('存在しないテナントには作れない (memory 側と同じ答え)', async () => {
+    // **エージェント指定が無い形**での答えを揃える（memory 側にも同じ検査がある）
+    const created = await repos.guardrailRules.create(
+      {
+        tenantId: 'tenant_does_not_exist',
+        agentId: null,
+        kind: RuleKind.cost,
+        threshold: 1,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      RULES_MAX,
+    );
+    expect(created.status).toBe('agent_not_found');
+  });
+
   it('ルール数が上限に達したら作れない (判定と挿入が同じトランザクション)', async () => {
     // テナントとエージェント
     const a = await makeTenantWithAgent(repos, 'a');

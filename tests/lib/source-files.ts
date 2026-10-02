@@ -68,8 +68,18 @@ export function resolveSourceSpecifier(fromFile: string, specifier: string): str
       : null;
   // パッケージ名は対象外
   if (base === null) return null;
-  // 拡張子は書かれないので、ファイルかディレクトリの index かを順に試す
-  for (const candidate of [`${base}.ts`, `${base}.tsx`, join(base, 'index.ts')]) {
+  // 拡張子は書かれないので、ファイルかディレクトリの index かを順に試す。
+  // **`index.tsx` も候補に入れる** — 入れていなかった頃は、モジュールがディレクトリ化されて
+  // 入口が `index.tsx`（Client Component を含む束ね）になった瞬間に解決できなくなり、
+  // import の連鎖から導く検出網（レート制限の掛け忘れ・`fanOut` の枠）がそのルートを
+  // **黙って対象から外したまま緑になる**（`costly.length > 0` の fail-closed は他のルートで
+  // 満たされるので発火しない）。Next.js は `.tsx` の index を普通に解決する
+  for (const candidate of [
+    `${base}.ts`,
+    `${base}.tsx`,
+    join(base, 'index.ts'),
+    join(base, 'index.tsx'),
+  ]) {
     // 実在する最初の候補を採る
     if (existsSync(candidate)) return candidate;
   }

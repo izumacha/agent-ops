@@ -54,6 +54,14 @@ export interface FiredGuardrail {
   incidentId: string;
   // このルールでエージェントを停止したか（手動停止中は塗り替えないので false になりうる）
   suspended: boolean;
+  /**
+   * 新しいインシデントを作ったか。既に開いている同じルールのインシデントがあれば false。
+   *
+   * **false のときは監査ログも通知も出さない**（超過が続くあいだ記録が増え続けるのを防ぐ。
+   * ただし `suspended` が真なら「止めた」という出来事は残す。理由は
+   * `src/data/ports/guardrails.ts` の `RaisedIncident.created` のコメント）
+   */
+  created: boolean;
 }
 
 /** 判定の結果 */
@@ -251,7 +259,19 @@ export async function evaluateGuardrails(
       action: rule.action,
       incidentId: raised.incident.id,
       suspended: raised.suspended,
+      created: raised.created,
     });
+    // **何も新しく起きていなければ、ここで次のルールへ。**
+    //
+    // 超過は「しきい値を下げる・窓が過ぎる・使用量が減る」まで続くので、判定のたびに発火する。
+    // 記録と通知をそのたびに行うと、1 本のルールで中継のたびにインシデント・監査ログ・通知 2 通が
+    // 増え続ける（`action` が notify のルールは停止しないので条件が自己収束しない。実測で
+    // 明示実行 5 回がインシデント 5 件・監査行 5 件になった）。
+    //
+    // **残すのは「新しいインシデントを作った」か「状態を実際に止めた」とき**だけにする。
+    // 後者を入れるのは、開いているインシデントがあるあいだに復帰させられたエージェントを
+    // 再び止めた、という**記録すべき出来事**を落とさないため
+    if (!raised.created && !raised.suspended) continue;
     // 監査ログを書く。**失敗しても停止は取り消さない** — 鍵が未設定なら `recordAudit` は 503 を
     // 投げるが、そこで中断すると「超過しても止まらない」状態になる。止める側を優先し、
     // 記録できなかったことをサーバログに残す（運用者が鍵を設定すれば次回から記録される）

@@ -46,6 +46,8 @@ export const POST = route(async ({ request, principal, repos }) => {
       action: row.action,
       incidentId: row.incidentId,
       suspended: row.suspended,
+      // 新しい行を作ったか（false なら incidentId は既に開いていた行を指す）
+      created: row.created,
     })),
   };
   return Response.json(body);

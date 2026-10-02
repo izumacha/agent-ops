@@ -336,6 +336,95 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     expect(agent?.status).toBe(AgentStatus.suspended);
   });
 
+  it('同じルールで開いているインシデントがあれば新しい行を作らない (実 DB)', async () => {
+    // **memory 側と対にする検査** (ADR-0006 の死角対策)。超過は解消するまで続くので、
+    // 判定のたびに行を作ると記録と通知が溢れる
+    const a = await makeTenantWithAgent(repos, 'a');
+    // notify のルール (停止しないので条件が自己収束しない = いちばん溢れる形)
+    const created = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      RULES_MAX,
+    );
+    if (created.status !== 'created') throw new Error('ルールを作れませんでした');
+    // 同じ発火を 3 回
+    const raises = [];
+    for (let round = 0; round < 3; round += 1) {
+      raises.push(
+        await repos.incidents.raise({
+          tenantId: a.tenantId,
+          agentId: a.agent.id,
+          ruleId: created.rule.id,
+          summary: 'コストが上限を超えました',
+          suspendAgent: false,
+        }),
+      );
+    }
+    // 1 回目だけが新規で、以降は同じ行を指す
+    expect(raises.map((raised) => raised?.created)).toEqual([true, false, false]);
+    expect(new Set(raises.map((raised) => raised?.incident.id)).size).toBe(1);
+    // 実 DB の行も 1 件だけ
+    const listed = await repos.incidents.list(a.tenantId, { limit: 10 });
+    expect(listed.items).toHaveLength(1);
+    // 解決すれば次はまた新しい行を作る
+    await repos.incidents.resolve(a.tenantId, listed.items[0].id);
+    const afterResolve = await repos.incidents.raise({
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      ruleId: created.rule.id,
+      summary: 'コストが上限を超えました',
+      suspendAgent: false,
+    });
+    expect(afterResolve?.created).toBe(true);
+    expect((await repos.incidents.list(a.tenantId, { limit: 10 })).items).toHaveLength(2);
+  });
+
+  it('重複排除は停止を止めない (実 DB。開いている間に復帰させたら再び止める)', async () => {
+    // **ここを一緒に抑えると「超過しているのに動いている」状態が残る**
+    const a = await makeTenantWithAgent(repos, 'a');
+    const created = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.stop,
+      },
+      RULES_MAX,
+    );
+    if (created.status !== 'created') throw new Error('ルールを作れませんでした');
+    // 1 回目: 記録して停止
+    const first = await repos.incidents.raise({
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      ruleId: created.rule.id,
+      summary: '超過',
+      suspendAgent: true,
+    });
+    expect(first).toMatchObject({ created: true, suspended: true });
+    // 人が復帰させる (インシデントは開いたまま)
+    await repos.agents.setStatus(a.tenantId, a.agent.id, AgentStatus.active);
+    // 2 回目: 行は作らないが停止はやり直す
+    const second = await repos.incidents.raise({
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      ruleId: created.rule.id,
+      summary: '超過',
+      suspendAgent: true,
+    });
+    expect(second).toMatchObject({ created: false, suspended: true });
+    expect((await repos.agents.findById(a.tenantId, a.agent.id))?.status).toBe(
+      AgentStatus.suspended,
+    );
+  });
+
   it('手動停止中のエージェントは自動停止で状態を塗り替えない', async () => {
     // テナントとエージェント
     const a = await makeTenantWithAgent(repos, 'a');

@@ -345,6 +345,59 @@ describe('ガードレールの判定', () => {
     expect((await repos.agents.findById(tenantId, agentId))?.status).toBe(AgentStatus.active);
   });
 
+  it('超過が続いても記録と通知は増えない（重複排除）', async () => {
+    // **これが無いと溢れる。** 超過は「しきい値を下げる・窓が過ぎる・使用量が減る」まで続くので、
+    // 判定のたびにインシデント・監査ログ・通知が増える。notify のルールは停止しないので
+    // 条件が自己収束せず、実測で明示実行 5 回がインシデント 5 件・監査行 5 件になった
+    await makeRule(RuleKind.cost, 1_000, RuleAction.notify);
+    await recordUsage(1_500n);
+    const sent = stubNotify();
+    // 同じ超過のまま 5 回判定する
+    for (let round = 0; round < 5; round += 1) {
+      const result = await evaluateGuardrails(
+        repos,
+        { tenantId, agentId, kinds: USAGE_RULE_KINDS, now: basisTime(), actorId: null },
+        env(),
+      );
+      // 毎回「発火した」とは返る（判定の答えは隠さない）
+      expect(result.fired).toHaveLength(1);
+      // 新しい行を作ったのは 1 回目だけ
+      expect(result.fired[0].created).toBe(round === 0);
+    }
+    // インシデント・監査ログ・通知はいずれも 1 件だけ
+    expect(store.incidents.size).toBe(1);
+    expect((await repos.auditLogs.readChain(tenantId, 100)).rows).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('開いている間に復帰させたら、再び止めて記録も残す', async () => {
+    // **停止は重複排除の対象にしない** — 抑えると「超過しているのに動いている」状態が残る。
+    // 一方で「止めた」という出来事は記録すべきなので、監査ログと通知もそのときは出す
+    await makeRule(RuleKind.cost, 1_000, RuleAction.stop);
+    await recordUsage(1_500n);
+    const sent = stubNotify();
+    // 1 回目: 記録して停止
+    const first = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: USAGE_RULE_KINDS, now: basisTime(), actorId: null },
+      env(),
+    );
+    expect(first.fired[0]).toMatchObject({ created: true, suspended: true });
+    // 人が復帰させる（インシデントは開いたまま）
+    await repos.agents.setStatus(tenantId, agentId, AgentStatus.active);
+    // 2 回目: 行は作らないが停止はやり直し、記録も通知も出る
+    const second = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: USAGE_RULE_KINDS, now: basisTime(), actorId: null },
+      env(),
+    );
+    expect(second.fired[0]).toMatchObject({ created: false, suspended: true });
+    // インシデントは 1 件のまま、記録と通知は 2 件（止めた回数ぶん）
+    expect(store.incidents.size).toBe(1);
+    expect((await repos.auditLogs.readChain(tenantId, 100)).rows).toHaveLength(2);
+    expect(sent).toHaveLength(2);
+  });
+
   it('発火は監査ログに判断の根拠付きで残る', async () => {
     // コスト超過で発火させる
     const rule = await makeRule(RuleKind.cost, 1_000, RuleAction.stop);

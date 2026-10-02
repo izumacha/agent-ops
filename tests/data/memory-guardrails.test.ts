@@ -247,6 +247,97 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     expect(second?.suspended).toBe(false);
   });
 
+  it('同じルールで開いているインシデントがあれば新しい行を作らない', async () => {
+    // **これが無いと超過が続くあいだ行が増え続ける。** notify のルールは停止しないので
+    // 条件が自己収束せず、判定のたびにインシデント・監査ログ・通知が増える
+    const rule = await makeRule(RuleKind.cost, RuleAction.notify, true);
+    // 1 回目は作る
+    const first = await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: rule.id,
+      summary: '発火',
+      suspendAgent: false,
+    });
+    expect(first?.created).toBe(true);
+    // 2 回目は作らず、既に開いている行を返す
+    const second = await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: rule.id,
+      summary: '発火',
+      suspendAgent: false,
+    });
+    expect(second?.created).toBe(false);
+    expect(second?.incident.id).toBe(first?.incident.id);
+    // 表の行は 1 件だけ
+    const listed = await repos.incidents.list(tenantId, { limit: 10 });
+    expect(listed.items).toHaveLength(1);
+    // 解決すれば次の発火はまた新しい行を作る (「開いているものが無い」ので抑制されない)
+    await repos.incidents.resolve(tenantId, first?.incident.id ?? '');
+    const third = await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: rule.id,
+      summary: '発火',
+      suspendAgent: false,
+    });
+    expect(third?.created).toBe(true);
+    expect(third?.incident.id).not.toBe(first?.incident.id);
+  });
+
+  it('重複排除は停止を止めない (開いている間に復帰させたら再び止める)', async () => {
+    // **ここを一緒に抑えると「超過しているのに動いている」状態が残る**
+    const rule = await makeRule(RuleKind.cost, RuleAction.stop, true);
+    // 1 回目: 記録して停止する
+    const first = await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: rule.id,
+      summary: '発火',
+      suspendAgent: true,
+    });
+    expect(first).toMatchObject({ created: true, suspended: true });
+    // 人が復帰させる (インシデントは開いたまま)
+    await repos.agents.setStatus(tenantId, agentId, AgentStatus.active);
+    // 2 回目: 行は作らないが、停止はやり直す
+    const second = await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: rule.id,
+      summary: '発火',
+      suspendAgent: true,
+    });
+    expect(second).toMatchObject({ created: false, suspended: true });
+    expect((await repos.agents.findById(tenantId, agentId))?.status).toBe(AgentStatus.suspended);
+  });
+
+  it('別のルール・別のエージェントの発火は抑制しない', async () => {
+    // 同じエージェントに 2 本のルール
+    const first = await makeRule(RuleKind.cost, RuleAction.notify, true);
+    const second = await makeRule(RuleKind.error_rate, RuleAction.notify, true);
+    // それぞれ発火させる
+    const a = await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: first.id,
+      summary: '発火',
+      suspendAgent: false,
+    });
+    const b = await repos.incidents.raise({
+      tenantId,
+      agentId,
+      ruleId: second.id,
+      summary: '発火',
+      suspendAgent: false,
+    });
+    // どちらも新しい行 (ルールごとに独立。「50% で通知、80% で停止」が両方残る)
+    expect(a?.created).toBe(true);
+    expect(b?.created).toBe(true);
+    const listed = await repos.incidents.list(tenantId, { limit: 10 });
+    expect(listed.items).toHaveLength(2);
+  });
+
   it('インシデントの解決は 1 度だけ成功する (prisma の条件付き更新と同じ)', async () => {
     // 発火させる
     const rule = await makeRule(RuleKind.cost, RuleAction.notify, true);

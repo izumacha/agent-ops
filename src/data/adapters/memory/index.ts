@@ -876,27 +876,45 @@ class MemoryIncidents implements IncidentsPort {
     const rule = this.store.guardrailRules.get(input.ruleId);
     // 同テナントに無ければ記録しない
     if (!rule || rule.tenantId !== input.tenantId) return null;
-    // 新しいインシデント (発火日時は表の時計から取る)
-    const row: IncidentRecord = {
-      id: this.store.nextId('incident'),
-      tenantId: input.tenantId,
-      agentId: input.agentId,
-      ruleId: input.ruleId,
-      status: IncidentStatus.open,
-      summary: input.summary,
-      createdAt: this.store.now(),
-      resolvedAt: null,
-    };
-    // 表へ入れる
-    this.store.incidents.set(row.id, row);
+    // **同じルール・同じエージェントで既に開いているインシデントを探す。**
+    // 見つかれば新しい行は作らない (理由は Port の `created` のコメント)
+    const open = [...this.store.incidents.values()]
+      .filter(
+        (candidate) =>
+          candidate.tenantId === input.tenantId &&
+          candidate.agentId === input.agentId &&
+          candidate.ruleId === input.ruleId &&
+          candidate.status === IncidentStatus.open,
+      )
+      // 複数あれば最も古いものを採る (prisma 側の orderBy と同じ順。表の並びに依存させない)
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )[0];
+    // 開いている行が無ければ作る
+    const row =
+      open ??
+      ({
+        id: this.store.nextId('incident'),
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        ruleId: input.ruleId,
+        status: IncidentStatus.open,
+        summary: input.summary,
+        createdAt: this.store.now(),
+        resolvedAt: null,
+      } satisfies IncidentRecord);
+    // 新しく作ったときだけ表へ入れる
+    if (open === undefined) this.store.incidents.set(row.id, row);
     // 停止を要求されていて、かつ今が稼働中なら suspended にする。
     // **既に stopped / suspended のときは状態を変えない** — 手動停止を自動停止で塗り替えると、
-    // 復帰の判断 (誰が止めたのか) が読めなくなる
+    // 復帰の判断 (誰が止めたのか) が読めなくなる。
+    // **重複排除とは独立に判定する** (理由は Port の `created` のコメント)
     const suspended = input.suspendAgent && agent.status === AgentStatus.active;
     // 状態を変えるときだけ書き戻す
     if (suspended) this.store.agents.set(agent.id, { ...agent, status: AgentStatus.suspended });
-    // 記録と「実際に止めたか」を返す
-    return { incident: clone(row), suspended };
+    // 記録・新規かどうか・「実際に止めたか」を返す
+    return { incident: clone(row), suspended, created: open === undefined };
   }
 
   // インシデントを一覧する (テナント内、createdAt 昇順。絞り込みは任意)

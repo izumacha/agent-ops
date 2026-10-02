@@ -2072,7 +2072,7 @@ components:
             $ref: '#/components/schemas/FiredGuardrail'
     FiredGuardrail:
       type: object
-      required: [ruleId, kind, action, incidentId, suspended]
+      required: [ruleId, kind, action, incidentId, suspended, created]
       properties:
         ruleId:
           type: string
@@ -2087,6 +2087,13 @@ components:
           description: |
             このルールでエージェントを停止したか。action が stop でも、**手動停止中 (stopped) の
             エージェントは状態を塗り替えない**ので false になりうる (「誰が止めたか」を保つため)
+        created:
+          type: boolean
+          description: |
+            新しいインシデントを作ったか。**既に開いている同じルールのインシデントがあれば false**
+            で、`incidentId` はその既存の行を指す。超過は解消するまで続くので、判定のたびに行を
+            増やすと記録と通知が溢れる (notify のルールは停止しないので自己収束しない)。
+            false のときは監査ログも通知も出さない (停止が実際に起きた場合を除く)
     Incident:
       type: object
       required: [id, tenantId, agentId, ruleId, status, summary, createdAt, resolvedAt]

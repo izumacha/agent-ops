@@ -1049,18 +1049,35 @@ class PrismaIncidents implements IncidentsPort {
       if (locked.length === 0) return null;
       // 記録を試みる (ルールが同テナントに無ければ複合 FK 違反になる)
       try {
-        // インシデントを作る
-        const incident = await tx.incident.create({
-          data: {
+        // **同じルール・同じエージェントで既に開いているインシデントを探す。**
+        // 見つかれば新しい行は作らない (超過が続くあいだ行が増え続けるのを防ぐ。理由は Port の
+        // `created` のコメント)。エージェント行をロックしてから読むので、同時の 2 件が
+        // どちらも「無い」を見て 2 行作ることは起きない
+        const open = await tx.incident.findFirst({
+          where: {
             tenantId: input.tenantId,
             agentId: input.agentId,
             ruleId: input.ruleId,
-            summary: input.summary,
+            status: IncidentStatus.open,
           },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         });
+        // 開いている行が無ければ作る (あればそれを使う)
+        const incident =
+          open ??
+          (await tx.incident.create({
+            data: {
+              tenantId: input.tenantId,
+              agentId: input.agentId,
+              ruleId: input.ruleId,
+              summary: input.summary,
+            },
+          }));
         // 停止を要求されていて、かつ今が稼働中なら suspended にする。
         // **既に stopped / suspended のときは状態を変えない** — 手動停止を自動停止で塗り替えると、
-        // 復帰の判断 (誰が止めたのか) が読めなくなる
+        // 復帰の判断 (誰が止めたのか) が読めなくなる。
+        // **重複排除とは独立に判定する** — 開いているインシデントがあっても、その間に復帰させた
+        // エージェントは再び止める (止めないと「超過しているのに動いている」状態が残る)
         const suspended = input.suspendAgent && locked[0].status === AgentStatus.active;
         // 状態を変えるときだけ更新する
         if (suspended) {
@@ -1069,8 +1086,8 @@ class PrismaIncidents implements IncidentsPort {
             data: { status: AgentStatus.suspended },
           });
         }
-        // 記録と「実際に止めたか」を返す
-        return { incident, suspended };
+        // 記録・新規かどうか・「実際に止めたか」を返す
+        return { incident, suspended, created: open === null };
       } catch (error) {
         // 複合 FK (tenantId, ruleId) 違反 = 同テナントにそのルールが無い
         if (isPrismaError(error, FOREIGN_KEY_VIOLATION)) return null;

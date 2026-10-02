@@ -28,6 +28,12 @@ tags:
     description: 利用量・コストの集計 (Step2)
   - name: evaluations
     description: 品質評価 (LLM-as-judge による採点と回帰比較。Step3)
+  - name: guardrails
+    description: ガードレールのルールと明示実行 (しきい値超過の検知と自動停止。Step4)
+  - name: incidents
+    description: ガードレールの発火記録と解決 (Step4)
+  - name: audit-logs
+    description: 監査ログの閲覧とハッシュ連鎖の検証 (Step4)
 security:
   - bearerAuth: []
 paths:
@@ -911,6 +917,227 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /guardrails:
+    get:
+      tags: [guardrails]
+      operationId: listGuardrailRules
+      summary: ガードレールのルール一覧 (view 権限)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRuleList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [guardrails]
+      operationId: createGuardrailRule
+      summary: ガードレールのルール登録 (admin ロール限定)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailRuleCreate'
+      responses:
+        '201':
+          description: 登録した
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRule'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+  /guardrails/run:
+    post:
+      tags: [guardrails]
+      operationId: runGuardrails
+      summary: |
+        ガードレールの明示実行 (stop 権限)。cron から定期的に、または運用者が任意のタイミングで
+        全種別を判定する。通常は中継と評価実行の直後に自動で走るので、この経路は取りこぼしの
+        保険と運用の確認に使う
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailRunRequest'
+      responses:
+        '200':
+          description: 判定した
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRunResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+  /guardrails/{ruleId}:
+    parameters:
+      - $ref: '#/components/parameters/RuleId'
+    delete:
+      tags: [guardrails]
+      operationId: deleteGuardrailRule
+      summary: |
+        ガードレールのルール削除 (admin ロール限定)。発火記録 (インシデント) を持つルールは
+        削除できない (409) — 記録からルールを辿れなくなると、何がなぜ止めたのかが読めなくなる
+      responses:
+        '204':
+          description: 削除した
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /incidents:
+    get:
+      tags: [incidents]
+      operationId: listIncidents
+      summary: インシデント一覧 (view 権限)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: agentId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/IncidentStatus'
+      responses:
+        '200':
+          description: 一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /incidents/{incidentId}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/IncidentId'
+    post:
+      tags: [incidents]
+      operationId: resolveIncident
+      summary: |
+        インシデントを解決済みにする (admin ロール限定)。**エージェントの復帰は別操作**
+        (POST /agents/{agentId}/resume) — 「原因に対処した」と「また動かしてよい」は別の判断で、
+        まとめると片方だけ行いたい運用ができなくなる。既に解決済みなら 409
+      responses:
+        '200':
+          description: 解決後
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Incident'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /audit-logs:
+    get:
+      tags: [audit-logs]
+      operationId: listAuditLogs
+      summary: 監査ログ一覧 (view 権限。追記専用なので更新・削除の操作は無い)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /audit-logs/verify:
+    get:
+      tags: [audit-logs]
+      operationId: verifyAuditLogs
+      summary: |
+        監査ログのハッシュ連鎖を検証する (admin ロール限定)。テナントの全行を連番順に読み、
+        記録されたハッシュを鍵付きで再計算して突き合わせる。壊れていれば**最初に壊れた連番と
+        その理由**を返す。鍵 (AUDIT_HMAC_SECRET) が未設定・短すぎるときは 503
+      responses:
+        '200':
+          description: 検証した (壊れていても 200。壊れているかは本文の ok で示す)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditChainVerification'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 components:
   securitySchemes:
     bearerAuth:
@@ -973,6 +1200,18 @@ components:
         type: string
     RunId:
       name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+    RuleId:
+      name: ruleId
+      in: path
+      required: true
+      schema:
+        type: string
+    IncidentId:
+      name: incidentId
       in: path
       required: true
       schema:
@@ -1043,8 +1282,12 @@ components:
               - $ref: '#/components/schemas/RelayedUpstreamError'
     TooManyRequests:
       description: |
-        上流の LLM プロバイダが混雑を返した。本文は定型文に差し替える (上流の本文には組織名や
-        クォータの状況が載るため) が、上流が Retry-After を返した場合はその値だけ中継する
+        要求が多すぎる。2 つの原因がある:
+        (a) **このサービスのレート制限** — 1 つの API キーが窓の中で出せる中継の回数
+        (src/lib/constants.ts の PROXY_RATE_LIMIT_PER_MINUTE) を超えた。Retry-After は
+        こちらが計算した秒数。上流へは 1 度も出ていないので課金も発生しない。
+        (b) **上流の LLM プロバイダが混雑を返した** — 本文は定型文に差し替える (上流の本文には
+        組織名やクォータの状況が載るため) が、上流が Retry-After を返した場合はその値だけ中継する
       headers:
         Retry-After:
           description: 再試行までの待ち時間 (上流が指示した場合のみ)
@@ -1133,6 +1376,19 @@ components:
     Provider:
       type: string
       enum: [anthropic, openai]
+    RuleKind:
+      type: string
+      description: |
+        ガードレールの種別。cost と error_rate は**しきい値を上回ったら**発火、quality は
+        **下回ったら**発火する (向きの正本は src/domain/guardrail/rule.ts の RULE_COMPARISON)
+      enum: [cost, error_rate, quality]
+    RuleAction:
+      type: string
+      description: 発火したときの動作 (notify = 記録と通知だけ、stop = それに加えて自動停止)
+      enum: [notify, stop]
+    IncidentStatus:
+      type: string
+      enum: [open, resolved]
     Tenant:
       type: object
       required: [id, name, plan, createdAt]
@@ -1723,3 +1979,210 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DailyUsage'
+    GuardrailRule:
+      type: object
+      required: [id, tenantId, agentId, kind, threshold, windowMinutes, action, enabled, createdAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        agentId:
+          description: 対象エージェント。null はテナント全体へ掛かるルール
+          type: [string, 'null']
+        kind:
+          $ref: '#/components/schemas/RuleKind'
+        threshold:
+          type: number
+          description: |
+            しきい値。cost はマイクロ USD の整数 (上限は 2^53-1 = 倍精度で正確に表せる範囲)、
+            error_rate と quality は 0.0〜1.0 の比率
+        windowMinutes:
+          type: integer
+          description: 集計窓の長さ (分)。quality は窓を使わない (直近の評価実行を見る)
+        action:
+          $ref: '#/components/schemas/RuleAction'
+        enabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+    GuardrailRuleCreate:
+      type: object
+      additionalProperties: false
+      required: [kind, threshold, windowMinutes, action]
+      properties:
+        agentId:
+          description: 対象エージェント。省略・null はテナント全体へ掛かる
+          type: [string, 'null']
+        kind:
+          $ref: '#/components/schemas/RuleKind'
+        threshold:
+          type: number
+          minimum: 0
+          description: |
+            しきい値。種別ごとに上限が違う (cost は 9007199254740991、error_rate と quality は 1)。
+            範囲外は 422。規則の正本は src/domain/guardrail/rule.ts の thresholdRangeFor
+        windowMinutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+          description: 集計窓の長さ (分)。1 分〜7 日。無制限の窓は全件走査になるので許さない (§8 / §9)
+        action:
+          $ref: '#/components/schemas/RuleAction'
+    GuardrailRuleList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GuardrailRule'
+        nextCursor:
+          type: string
+    GuardrailRunRequest:
+      type: object
+      additionalProperties: false
+      required: [agentId]
+      properties:
+        agentId:
+          type: string
+          description: 判定対象のエージェント (自テナントのもの。見つからなければ 404)
+    GuardrailRunResult:
+      type: object
+      required: [evaluated, fired]
+      properties:
+        evaluated:
+          type: integer
+          description: 判定したルールの件数 (0 ならそのエージェントに掛かる有効なルールが無い)
+        fired:
+          type: array
+          description: 発火したルール (しきい値を越えなかったものは含まない)
+          items:
+            $ref: '#/components/schemas/FiredGuardrail'
+    FiredGuardrail:
+      type: object
+      required: [ruleId, kind, action, incidentId, suspended]
+      properties:
+        ruleId:
+          type: string
+        kind:
+          $ref: '#/components/schemas/RuleKind'
+        action:
+          $ref: '#/components/schemas/RuleAction'
+        incidentId:
+          type: string
+        suspended:
+          type: boolean
+          description: |
+            このルールでエージェントを停止したか。action が stop でも、**手動停止中 (stopped) の
+            エージェントは状態を塗り替えない**ので false になりうる (「誰が止めたか」を保つため)
+    Incident:
+      type: object
+      required: [id, tenantId, agentId, ruleId, status, summary, createdAt, resolvedAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        agentId:
+          type: string
+        ruleId:
+          type: string
+        status:
+          $ref: '#/components/schemas/IncidentStatus'
+        summary:
+          type: string
+          description: 発火理由の 1 行 (実測値としきい値だけを含む。機微情報は入れない)
+        createdAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: [string, 'null']
+          format: date-time
+    IncidentList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Incident'
+        nextCursor:
+          type: string
+    AuditLog:
+      type: object
+      required: [id, tenantId, seq, actorId, action, targetType, targetId, payload, createdAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        seq:
+          type: string
+          description: |
+            テナントごとの連番 (1 始まり)。BigInt を JSON で安全に運ぶため文字列。
+            連鎖の順序はこの値が決める (createdAt は同一ミリ秒で前後が定まらない)
+        actorId:
+          description: 操作したユーザー。ガードレールの自動発火など人が起点でない操作は null
+          type: [string, 'null']
+        action:
+          type: string
+          description: 操作名 (語彙は src/domain/audit/action.ts)
+        targetType:
+          type: string
+        targetId:
+          type: string
+        payload:
+          description: |
+            操作の詳細 (平坦な辞書。機微情報は入れない)。ハッシュの計算に入るので、
+            値の並べ替え以外の加工はしない
+          type: [object, 'null']
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    AuditLogList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+        nextCursor:
+          type: string
+    AuditChainVerification:
+      type: object
+      required: [ok, verified, reachedLimit]
+      properties:
+        ok:
+          type: boolean
+          description: 連鎖が無傷か
+        verified:
+          type: integer
+          description: |
+            検証できた行数。**壊れていた場合はその手前までの件数**で、読んだ件数ではない
+            (読んだ件数を返すと「全部確かめた」と誤読される)
+        reachedLimit:
+          type: boolean
+          description: |
+            1 回に読む上限 (src/lib/constants.ts の AUDIT_CHAIN_VERIFY_MAX_ROWS) に達したか。
+            true なら続きの行は検証していない (連鎖は先頭から順にしか辿れないのでページ送りが無い)
+        brokenSeq:
+          type: string
+          description: 最初に壊れた行の連番 (ok が false のときだけ。BigInt なので文字列)
+        reason:
+          type: string
+          description: |
+            壊れ方。hash_mismatch = 値の書き換え、prev_hash_mismatch = 行の差し込み・並べ替え、
+            seq_not_sequential = 行の削除、payload_not_canonical = payload が平坦な辞書でない、
+            tenant_mismatch = 別テナントの行が混ざった (取り出すクエリが壊れている)
+          enum:
+            [
+              hash_mismatch,
+              prev_hash_mismatch,
+              seq_not_sequential,
+              payload_not_canonical,
+              tenant_mismatch,
+            ]

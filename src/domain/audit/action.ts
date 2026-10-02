@@ -11,6 +11,8 @@ export const AuditAction = {
   guardrail_fired: 'guardrail.fired',
   // 予算の上限を超えたので中継を断った
   agent_budget_exceeded: 'agent.budget_exceeded',
+  // インシデントを解決済みにした（人の操作）
+  incident_resolved: 'incident.resolved',
 } as const;
 /** AuditAction の値の型 */
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];

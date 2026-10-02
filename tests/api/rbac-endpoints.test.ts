@@ -38,6 +38,16 @@ import {
 import { GET as getEvaluationSet } from '@/app/api/v1/evaluation-sets/[setId]/route';
 import { GET as listEvaluationRuns, POST as runEvaluation } from '@/app/api/v1/evaluations/route';
 import { GET as getEvaluationRun } from '@/app/api/v1/evaluations/[runId]/route';
+import {
+  GET as listGuardrailRules,
+  POST as createGuardrailRule,
+} from '@/app/api/v1/guardrails/route';
+import { DELETE as deleteGuardrailRule } from '@/app/api/v1/guardrails/[ruleId]/route';
+import { POST as runGuardrails } from '@/app/api/v1/guardrails/run/route';
+import { GET as listIncidents } from '@/app/api/v1/incidents/route';
+import { POST as resolveIncident } from '@/app/api/v1/incidents/[incidentId]/resolve/route';
+import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
+import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
 import { canPerform, type Action } from '@/domain/rbac';
 import { Role } from '@/domain/types';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
@@ -244,6 +254,46 @@ const ENDPOINTS: Record<
     requires: 'view',
     invoke: async (t) =>
       (await call(getEvaluationRun, { token: t, params: { runId: seed.a.id } })).status,
+  },
+  listGuardrailRules: {
+    requires: 'view',
+    invoke: async (t) => (await call(listGuardrailRules, { token: t })).status,
+  },
+  createGuardrailRule: {
+    requires: 'admin',
+    invoke: async (t) => (await call(createGuardrailRule, { token: t, body: {} })).status,
+  },
+  deleteGuardrailRule: {
+    requires: 'admin',
+    invoke: async (t) =>
+      (
+        await call(deleteGuardrailRule, {
+          token: t,
+          method: 'DELETE',
+          params: { ruleId: 'missing' },
+        })
+      ).status,
+  },
+  runGuardrails: {
+    requires: 'stop',
+    invoke: async (t) => (await call(runGuardrails, { token: t, body: {} })).status,
+  },
+  listIncidents: {
+    requires: 'view',
+    invoke: async (t) => (await call(listIncidents, { token: t })).status,
+  },
+  resolveIncident: {
+    requires: 'admin',
+    invoke: async (t) =>
+      (await call(resolveIncident, { token: t, params: { incidentId: 'missing' } })).status,
+  },
+  listAuditLogs: {
+    requires: 'view',
+    invoke: async (t) => (await call(listAuditLogs, { token: t })).status,
+  },
+  verifyAuditLogs: {
+    requires: 'admin',
+    invoke: async (t) => (await call(verifyAuditLogs, { token: t })).status,
   },
 };
 

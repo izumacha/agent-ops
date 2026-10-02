@@ -205,6 +205,14 @@ export const API_MESSAGES = {
   apiKeyNotBoundToAgent:
     'この API キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
   agentNotActive: 'このエージェントは停止中です。復帰させてから呼び出してください。',
+  guardrailThresholdOutOfRange:
+    'しきい値が種別ごとの範囲外です (コストは 0 以上の整数、エラー率と品質は 0.0〜1.0)。',
+  guardrailWindowOutOfRange: '集計窓は 1 分以上 7 日以内の整数で指定してください。',
+  guardrailRuleLimit:
+    'ガードレールのルール数が上限に達しています。不要なルールを削除してください。',
+  guardrailRuleHasIncidents:
+    '発火記録があるルールは削除できません (記録からルールを辿れなくなるため)。',
+  incidentAlreadyResolved: 'このインシデントは既に解決済みです。',
   rateLimited: '要求が多すぎます。Retry-After 秒だけ待ってからやり直してください。',
   budgetExceeded:
     'このエージェントの予算 (当月) を超えました。予算を見直すか、翌月まで待ってから呼び出してください。',

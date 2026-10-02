@@ -27,6 +27,7 @@ import { evaluationRunCreateSchema, evaluationSetCreateSchema } from '@/lib/vali
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
+import { guardrailRuleCreateSchema, guardrailRunSchema } from '@/lib/validations/guardrail';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 
@@ -87,6 +88,8 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   EvaluationRunCreate: evaluationRunCreateSchema,
   'PUT /users/{userId}/role': userRoleSchema,
   ProxyRequest: proxyRequestSchema,
+  GuardrailRuleCreate: guardrailRuleCreateSchema,
+  GuardrailRunRequest: guardrailRunSchema,
 };
 
 // **未知キーを許すことが意図である本文の除外表 (理由付き)。**

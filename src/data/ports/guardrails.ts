@@ -91,7 +91,7 @@ export interface IncidentsPort {
   // **発火を記録し、必要なら同じトランザクションでエージェントを停止する。**
   // 1 つの操作にするのは、片方だけ成立した状態 (止まったが記録が無い等) を作らないため
   raise(input: RaiseIncidentInput): Promise<RaisedIncident | null>;
-  // インシデントを一覧する (テナント内、triggeredAt 昇順。絞り込みは任意)
+  // インシデントを一覧する (テナント内、createdAt 昇順。絞り込みは任意)
   list(tenantId: string, query: PageQuery, filter?: IncidentFilter): Promise<Page<IncidentRecord>>;
   // インシデントを引く (他テナントのものは null)
   findById(tenantId: string, incidentId: string): Promise<IncidentRecord | null>;

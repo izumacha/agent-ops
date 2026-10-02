@@ -127,9 +127,15 @@ async function sendTo(
       redirect: 'manual',
       signal: controller.signal,
     });
-    // 応答本文は上限まで読んで捨てる (読まないと接続が滞留する実装もあるため、読んでから捨てる)
+    // 応答本文は上限まで読んで捨てる (読まないと接続が滞留する実装もあるため、読んでから捨てる)。
+    // **上限を超えたら下層も解放する** (cancelOnOverflow) — 読むのをやめるだけだと応答ボディが
+    // 未消費のまま残り、ソケットと fd がタイムアウトまで解放されない (上流の応答を読む
+    // src/lib/proxy/upstream.ts と同じ事情で、そちらは実測で確認済み)。受け手が毎回 64KiB を
+    // 超える本文を返すと、発火 1 件ごとに 2 本ずつ fd が積まれる
     if (response.body !== null) {
-      await readStreamWithinByteLimit(response.body, NOTIFY_MAX_RESPONSE_BYTES);
+      await readStreamWithinByteLimit(response.body, NOTIFY_MAX_RESPONSE_BYTES, {
+        cancelOnOverflow: true,
+      });
     }
     // 2xx 以外は届かなかったものとして扱う (3xx も「追わない」ので失敗)
     return response.ok ? { status: 'delivered', channel } : { status: 'failed', channel };
@@ -171,12 +177,12 @@ export async function notifyGuardrailIncident(
     // Webhook の宛先が駄目だったとき
     if (result.channel === NotifyChannel.webhook) {
       console.error(
-        '[notify] NOTIFY_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL とフラグメントは不可)',
+        '[notify] NOTIFY_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
       );
     } else {
       // メール中継の宛先が駄目だったとき
       console.error(
-        '[notify] NOTIFY_MAIL_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL とフラグメントは不可)',
+        '[notify] NOTIFY_MAIL_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
       );
     }
   }

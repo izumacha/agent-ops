@@ -160,6 +160,28 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     expect(second.status).toBe('too_many_rules');
   });
 
+  it('上限に達していて、かつエージェント id も誤っているときはエージェント優先で答える', async () => {
+    // **prisma アダプタと答えを揃えるための検査** (対になる検査が
+    // tests/data/guardrails.contract.prisma.test.ts にある)。
+    // どちらの判定を先に行うかで答えが割れ、API テストは memory で走るので、
+    // 割れたままだとルートは片方の答えで書かれて本番だけ別のステータスになる
+    await makeRule(RuleKind.cost, RuleAction.notify, false);
+    // 上限に達した状態で、存在しないエージェントを指して作ろうとする
+    const result = await repos.guardrailRules.create(
+      {
+        tenantId,
+        agentId: 'ag-does-not-exist',
+        kind: RuleKind.quality,
+        threshold: 0.7,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      1,
+    );
+    // エージェントの不在を先に答える
+    expect(result.status).toBe('agent_not_found');
+  });
+
   it('有効なルールの取得はエージェント指定とテナント全体の和集合になる', async () => {
     // エージェント指定のルールとテナント全体のルール
     const forAgent = await makeRule(RuleKind.cost, RuleAction.stop, true);

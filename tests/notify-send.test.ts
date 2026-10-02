@@ -251,12 +251,29 @@ describe('ガードレールの通知', () => {
     }
   });
 
-  it('応答本文が大きくても読み切って捨てる (メモリを食わない)', async () => {
-    // 上限を超える本文を返す
-    stubFetch(() => new Response('x'.repeat(1_000_000), { status: 200 }));
+  it('上限を超える応答本文は読むのをやめ、下層のストリームも解放する', async () => {
+    // **「2xx なら delivered」だけを見てはいけない** — 下層を解放しない書き方でも同じ結果になる。
+    // 受け手が毎回大きい本文を返すと、解放しないと発火 1 件ごとに fd が積まれる (§8)
+    let cancelled = 0;
+    // 上限を超えるまで送り続け、解放されたら数える作り物のストリーム
+    const hugeBody = () =>
+      new ReadableStream<Uint8Array>({
+        // 読まれるたびに 16KiB を渡す (上限 64KiB をすぐ超える)
+        pull(controller) {
+          controller.enqueue(new Uint8Array(16 * 1024));
+        },
+        // 打ち切られたら記録する (これが呼ばれないと fd が滞留する)
+        cancel() {
+          cancelled += 1;
+        },
+      });
+    // どちらの宛先にも大きい本文を返す
+    stubFetch(() => new Response(hugeBody(), { status: 200 }));
     // 送る
     const results = await notifyGuardrailIncident(PAYLOAD, env());
     // 応答の中身は使わないので、2xx なら届いた扱い
     expect(results.every((r) => r.status === 'delivered')).toBe(true);
+    // **2 つの宛先ぶん、どちらも下層が解放されている**
+    expect(cancelled).toBe(2);
   });
 });

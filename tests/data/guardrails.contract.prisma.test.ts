@@ -11,7 +11,12 @@
 // RUN_PRISMA_CONTRACT=1 のときだけ走り、beforeEach で全テーブルを TRUNCATE するため開発 DB を指さない
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Repositories } from '@/data/ports';
-import { auditRowHash, verifyAuditChain, type StoredAuditRow } from '@/domain/audit/chain';
+import {
+  auditRowHash,
+  verifyAuditChain,
+  type AuditPayload,
+  type StoredAuditRow,
+} from '@/domain/audit/chain';
 import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import { secretsEqual, userTokenExpiresAt } from '@/lib/tokens';
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
@@ -29,6 +34,19 @@ const RULES_MAX = 50;
 const SECRET = 'contract-test-audit-secret-0123456789';
 // 連鎖を読むときの上限
 const CHAIN_LIMIT = 1_000;
+// 監査ログに入れる payload。**キーを辞書順でない並びにし、型も混ぜる**。
+// 正規化がキーを並べ替えなくなると、JSONB はキーの順序を保存しないので保存して読み直した
+// ハッシュが**不定に**揺れる。単一キー・文字列だけの payload では、実 DB を通してもその退行が
+// 一度も踏まれない (読み書きの順序が偶然一致するため)。`a|b` のキーは、正規化を区切り文字の
+// 連結へ戻したときに隣の項目と境界がずれる形をここでも踏ませるために置いている
+const AUDIT_PAYLOAD: AuditPayload = {
+  threshold: 1_000,
+  kind: 'cost',
+  observed: 1234.5,
+  suspended: true,
+  note: null,
+  'a|b': 'c',
+};
 // ロックの存在を確かめるときの待ち時間 (これだけ待っても終わらなければ「待たされている」)
 const LOCK_TEST_WAIT_MS = 500;
 // ロックを掴んだままにするトランザクションの上限 (既定の 5 秒だと待ちの間に時間切れになる)
@@ -94,7 +112,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         action,
         targetType: 'Agent',
         targetId: 'ag-dummy',
-        payload: { kind: 'cost' },
+        payload: AUDIT_PAYLOAD,
         createdAt,
       },
       // ドメインのハッシュ計算をそのまま使う (本番と同じ関数)
@@ -107,7 +125,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
           action,
           targetType: 'Agent',
           targetId: 'ag-dummy',
-          payload: { kind: 'cost' },
+          payload: AUDIT_PAYLOAD,
           createdAt,
           prevHash,
         }),
@@ -166,6 +184,60 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     );
     // 複合 FK (tenantId, agentId) が拒否する
     expect(result.status).toBe('agent_not_found');
+  });
+
+  it('上限に達していて、かつエージェント id も誤っているときはエージェント優先で答える', async () => {
+    // **memory アダプタと答えを揃えるための検査** (ADR-0006 の構造的な死角)。
+    // 挿入時の FK 違反だけでエージェントの不在を知る形だと、件数の判定が先に返るので
+    // prisma は too_many_rules・memory は agent_not_found を返し、答えが割れる。
+    // API テストは memory で走るため、割れたままだと本番だけ別のステータスになる
+    const a = await makeTenantWithAgent(repos, 'a');
+    // 上限 1 件としてまず 1 件作って上限まで埋める
+    const filled = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: null,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      1,
+    );
+    expect(filled.status).toBe('created');
+    // 上限に達した状態で、存在しないエージェントを指して作ろうとする
+    const result = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: 'ag-does-not-exist',
+        kind: RuleKind.quality,
+        threshold: 0.7,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      1,
+    );
+    // エージェントの不在を先に答える (そちらの方が利用者にとって直せる情報)
+    expect(result.status).toBe('agent_not_found');
+  });
+
+  it('連鎖の読み出しは上限に達したことを伝える', async () => {
+    // **上限の判定は 1 件多く取って比べる形**なので、take を上限ちょうどに戻すと
+    // reachedLimit が永久に false になる。そうなると検証の API は、実際には
+    // AUDIT_CHAIN_VERIFY_MAX_ROWS で切り詰められた連鎖に対して「全部確かめて無傷」と答える
+    const a = await makeTenantWithAgent(repos, 'a');
+    // 3 行追記する
+    await appendAudit(a.tenantId, 'a1');
+    await appendAudit(a.tenantId, 'a2');
+    await appendAudit(a.tenantId, 'a3');
+    // 上限 2 件で読むと 2 件だけ返り、続きがあることが分かる
+    const limited = await repos.auditLogs.readChain(a.tenantId, 2);
+    expect(limited.rows).toHaveLength(2);
+    expect(limited.reachedLimit).toBe(true);
+    // 上限に届かない読み出しでは false (件数は 3 件)
+    const all = await repos.auditLogs.readChain(a.tenantId, CHAIN_LIMIT);
+    expect(all.rows).toHaveLength(3);
+    expect(all.reachedLimit).toBe(false);
   });
 
   it('ルール数が上限に達したら作れない (判定と挿入が同じトランザクション)', async () => {

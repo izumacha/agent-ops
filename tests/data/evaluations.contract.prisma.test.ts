@@ -394,6 +394,64 @@ describe.skipIf(!ENABLED)('評価の契約', () => {
     expect((await repos.evaluations.findPreviousRun(tenantId, latest))?.id).toBe(oldest.id);
   });
 
+  it('品質ルールが読む「最新の completed」は failed を飛ばし、同時刻は id で決める', async () => {
+    // **品質低下ルールの唯一の入力**なので、memory と同じ行を選ばないと本番だけ判定が変わる
+    // (対になる検査が tests/data/memory-evaluations.test.ts にある)。
+    // failed を混ぜてはいけないのは、採点 0 件の実行はスコアが null で、それを
+    // 「品質が落ちた」と読むのが誤判定だから (採点できていないことと品質が低いことは別)
+    const { tenantId, agent, set } = await makeTenantWithSet(repos, 'q');
+    // 1 回分を保存して実行の行を返す
+    const runOnce = async (status: EvaluationRunStatus): Promise<EvaluationRunRecord> => {
+      // failed の実行は採点 0 件なので平均は null (CHECK 制約と同じ規律)
+      const scored = status === EvaluationRunStatus.completed;
+      const saved = await repos.evaluations.createRun({
+        tenantId,
+        agentId: agent.id,
+        setId: set.set.id,
+        accuracy: scored ? 0.5 : null,
+        safety: scored ? 1 : null,
+        deviation: scored ? 0 : null,
+        status,
+        scoredCases: scored ? set.cases.length : 0,
+        excludedCases: scored ? 0 : set.cases.length,
+        judgeProvider: Provider.anthropic,
+        judgeModel: 'claude-haiku-4-5',
+        results: set.cases.map((row) => ({
+          caseId: row.id,
+          accuracy: scored ? 0.5 : null,
+          safety: scored ? 1 : null,
+          deviation: scored ? 0 : null,
+          excludedReason: scored ? null : EvaluationExclusionReason.judge_unavailable,
+        })),
+      });
+      // 保存できている前提 (できていなければテストとして落とす)
+      expect(saved).not.toBeNull();
+      return saved!.run;
+    };
+    // 1 件も無ければ測れていない
+    expect(await repos.evaluations.findLatestCompletedRun(tenantId, agent.id)).toBeNull();
+    // completed → completed → failed の順に実行する
+    const first = await runOnce(EvaluationRunStatus.completed);
+    const second = await runOnce(EvaluationRunStatus.completed);
+    await runOnce(EvaluationRunStatus.failed);
+    // 最新の completed は、後から入った failed ではなく 2 件目の completed
+    expect((await repos.evaluations.findLatestCompletedRun(tenantId, agent.id))?.id).toBe(
+      second.id,
+    );
+    // **同じ瞬間に 2 件入った場合の前後を固定する** — createdAt だけで並べると順序が定まらず、
+    // 品質ルールが読むスコアが同じ入力でも揺れる。2 件の作成日時を揃えてから確かめる
+    const sameMoment = new Date('2026-10-02T00:00:00.000Z');
+    const touched =
+      await client.$executeRaw`UPDATE "EvaluationRun" SET "createdAt" = ${sameMoment} WHERE id IN (${first.id}, ${second.id})`;
+    // 2 行とも揃ったことを確かめる (0 行だと以降の検査が何も言っていない)
+    expect(touched).toBe(2);
+    // id が大きい方 (= 辞書順で後ろ) が最新
+    const higherId = [first.id, second.id].sort().at(-1);
+    expect((await repos.evaluations.findLatestCompletedRun(tenantId, agent.id))?.id).toBe(higherId);
+    // 他テナントから同じエージェント id を指しても見えない (テナント条件が効いている)
+    expect(await repos.evaluations.findLatestCompletedRun('tn-other', agent.id)).toBeNull();
+  });
+
   it('同じケースの結果を 2 つ持つ実行は一意制約が拒否する', async () => {
     // テナントとセットを用意する
     const { tenantId, agent, set } = await makeTenantWithSet(repos, 'p');

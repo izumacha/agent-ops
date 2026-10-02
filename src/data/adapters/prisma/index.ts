@@ -941,6 +941,20 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
       >`SELECT id FROM "Tenant" WHERE id = ${input.tenantId} FOR NO KEY UPDATE`;
       // テナントが無ければ作れない (エージェントが見つからないのと同じ扱いで存在を隠す)
       if (locked.length === 0) return { status: 'agent_not_found' as const };
+      // **対象エージェントの確認は件数の判定より前に行う** — memory アダプタと答えを揃えるため
+      // (ADR-0006 の構造的な死角)。挿入時の FK 違反だけに頼ると「上限に達していて、かつ
+      // エージェント id も誤っている」要求で件数の判定が先に返り、memory は agent_not_found・
+      // prisma は too_many_rules を返す。API テストは memory で走るので、答えが割れると
+      // ルートは片方の答えで書かれて本番だけ別のステータスになる
+      if (input.agentId !== null) {
+        // 同テナントにそのエージェントが居るか (複合一意 (tenantId, id) を引く)
+        const agent = await tx.agent.findFirst({
+          where: { tenantId: input.tenantId, id: input.agentId },
+          select: { id: true },
+        });
+        // 居なければ作れない (他テナントのエージェントも「無い」と同じ扱いにして存在を隠す)
+        if (agent === null) return { status: 'agent_not_found' as const };
+      }
       // 現在のルール数を数える
       const existing = await tx.guardrailRule.count({ where: { tenantId: input.tenantId } });
       // 上限に達していれば作らない
@@ -961,7 +975,9 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
         // 作成できた
         return { status: 'created' as const, rule };
       } catch (error) {
-        // 複合 FK (tenantId, agentId) 違反 = 同テナントにそのエージェントが居ない
+        // 複合 FK (tenantId, agentId) 違反 = 同テナントにそのエージェントが居ない。
+        // **上の確認を通ったあとの保険** — 確認と挿入の間にエージェントが消される競合が残るので、
+        // DB 側の判定も捨てずに同じ答えへ写す (fail-closed)
         if (isPrismaError(error, FOREIGN_KEY_VIOLATION))
           return { status: 'agent_not_found' as const };
         // それ以外は握り潰さず投げ直す

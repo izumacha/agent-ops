@@ -114,6 +114,27 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
 // setupSeed 前の環境変数 (teardownSeed で戻す)
 let platformTokenBefore: string | undefined;
 let auditSecretBefore: string | undefined;
+// 通知の設定の退避（キーごとに元の値を覚える）
+const notifyBefore = new Map<string, string | undefined>();
+
+/**
+ * テスト中に通知が**外へ出ない**ことを保証するため、通知の設定を空にする。
+ *
+ * **これが無いと開発機の環境変数次第でテストが本物の受け手へ POST する。**
+ * `notifyGuardrailIncident` の `env` は既定で `process.env` で、Route Handler は
+ * `evaluateGuardrails` に env を渡さない。シェルに `NOTIFY_WEBHOOK_URL`（https）と
+ * 32 文字以上の `NOTIFY_SIGNING_SECRET` を export した状態で `npm run test` を実行すると、
+ * ガードレールの発火を伴う API テストが署名付き JSON を実際に送る。
+ * `scripts/bench-proxy.ts` が子プロセスへ空値を明示的に渡しているのと同じ手当て（最小権限）。
+ *
+ * **宛先が空なら送信そのものが起きない**（`src/lib/notify/send.ts` が未設定を「送らない」
+ * 側へ倒す）ので、空にするだけで足りる。
+ */
+const NOTIFY_ENV_NAMES = [
+  'NOTIFY_WEBHOOK_URL',
+  'NOTIFY_MAIL_WEBHOOK_URL',
+  'NOTIFY_SIGNING_SECRET',
+] as const;
 
 // memory アダプタへ差し替え、テナント A / B を seed する (各テストの beforeEach で呼ぶ。afterEach で teardownSeed を対にする)
 function setupSeed(): Seed {
@@ -131,6 +152,11 @@ function setupSeed(): Seed {
   // 監査ログの鍵を設定する (無いと人の操作で状態を変えるルートが 503 になる。理由は AUDIT_SECRET)
   auditSecretBefore = process.env.AUDIT_HMAC_SECRET;
   process.env.AUDIT_HMAC_SECRET = AUDIT_SECRET;
+  // 通知の設定を空にする (理由は NOTIFY_ENV_NAMES のコメント)
+  for (const name of NOTIFY_ENV_NAMES) {
+    notifyBefore.set(name, process.env[name]);
+    process.env[name] = '';
+  }
   // 2 テナント分を seed する
   return {
     store: repos.store,
@@ -149,6 +175,13 @@ function teardownSeed(): void {
   else process.env.PLATFORM_ADMIN_TOKEN = platformTokenBefore;
   if (auditSecretBefore === undefined) delete process.env.AUDIT_HMAC_SECRET;
   else process.env.AUDIT_HMAC_SECRET = auditSecretBefore;
+  // 通知の設定も元へ戻す (元が未設定なら消す)
+  for (const name of NOTIFY_ENV_NAMES) {
+    const before = notifyBefore.get(name);
+    if (before === undefined) delete process.env[name];
+    else process.env[name] = before;
+  }
+  notifyBefore.clear();
 }
 
 /**

@@ -1,7 +1,7 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
-import { AgentStatus, IncidentStatus, Provider, Role, RuleAction, RuleKind } from '@/domain/types';
+import { AgentStatus, Provider, Role, RuleKind } from '@/domain/types';
 
 // アプリ名 (画面タイトル等で使う)
 export const APP_NAME = 'Agent Ops';
@@ -27,17 +27,9 @@ export const RULE_KIND_LABELS: Readonly<Record<RuleKind, string>> = {
   [RuleKind.quality]: '品質低下', // quality
 };
 
-// ルール発火時の動作の日本語ラベル
-export const RULE_ACTION_LABELS: Readonly<Record<RuleAction, string>> = {
-  [RuleAction.notify]: '通知のみ', // notify
-  [RuleAction.stop]: '通知して自動停止', // stop
-};
-
-// インシデント状態の日本語ラベル
-export const INCIDENT_STATUS_LABELS: Readonly<Record<IncidentStatus, string>> = {
-  [IncidentStatus.open]: '発生中', // open
-  [IncidentStatus.resolved]: '解決済み', // resolved
-};
+// **`RuleAction` / `IncidentStatus` の日本語ラベルは置いていない。** 参照する場所がまだ無く
+// （API は enum の値をそのまま JSON へ出し、画面は Step5）、置くと「使われない値」が増えるだけ
+// （§6 デッドコードを残さない）。画面で必要になったときに、使う側と一緒に足す
 
 // ─────────────────────────────────────────────
 // API (Step1) の上限値と利用者向けエラー文言。Route Handler はここから引き、直書きしない
@@ -103,19 +95,26 @@ export const PROXY_RATE_LIMIT_PER_MINUTE = 600;
 // (src/lib/api/rate-limit.ts は読み込み時に共有インスタンスを作る) は取り込めない。
 // 綴りをベンチへ書き写すと写しが 2 つになるので、定数だけのこのファイルを共有する
 export const PROXY_RATE_LIMIT_ENV = 'PROXY_RATE_LIMIT_PER_MINUTE';
-// **重い経路だけに掛ける、より小さい上限.** 中継 1 回と「1 要求で何十回も外へ出る経路」を
-// 同じ枠で数えると、上の 600 は後者にとって保護にならない:
-//   - `POST /evaluations` は 1 要求で最大 EVALUATION_SET_MAX_CASES 件 × (生成 + 採点) の
-//     往復を起こすので、600 要求ぶんの枠は上流呼び出し 24 万回ぶんの枠と同じ意味になる
-//   - `POST /guardrails/run` は 1 要求でルート数ぶんの集計クエリを出し、発火すれば
-//     通知の往復 (**この経路は応答を返す前に待つ**) まで含む
-// したがって回数ではなく「1 要求の重さ」で枠を分ける。**上の枠と置き換えるのではなく両方を
-// 消費する** — 置き換えだと重い経路と中継を交互に叩くだけで合計が上の上限を超える。
-// 値は「人が画面から押す操作としては十分、自動化された連打には届かない」ところに置いた
-// (cron から回す用途は 1 分あたり 1〜2 回で足りる)。**環境変数では上げ下げできない** —
-// 上げたくなるのは「評価を連続で回したい」ときで、それは 1 要求のケース数を増やすか
-// 間隔を空ける方で解く (枠を広げると上の根拠がそのまま崩れる)
-export const HEAVY_ROUTE_RATE_LIMIT_PER_MINUTE = 6;
+// **重い経路には、上の枠に加えてもう 1 つ小さい枠を掛ける.** 回数だけを数える 1 つの枠では、
+// 1 要求の重さが 2 桁違う経路を同じ上限で守れない。**ただし「重い」の中身は経路によって違い、
+// 中身が違えば妥当な上限も違う**ので、理由ごとに枠を分ける（1 つに束ねると、どちらかの経路に
+// とって必ず不適切な値になる）。
+//
+// (1) **上流へ扇状に出る経路**（`POST /evaluations`）。1 要求で最大
+// EVALUATION_SET_MAX_CASES 件 × (生成 + 採点) の往復が走るので、600 要求ぶんの枠は
+// 上流呼び出し 24 万回ぶんの枠と同じ意味になる。守りたいのは**ベンダーへの課金**なので、
+// 「人が画面から押す操作としては十分、自動化された連打には届かない」ところに置く。
+// **環境変数では上げ下げできない** — 上げたくなるのは「評価を連続で回したい」ときで、
+// それは 1 要求のケース数を増やすか間隔を空ける方で解く（枠を広げると上の根拠が崩れる）
+export const FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE = 6;
+// (2) **応答を返す前に外部の往復を待つ経路**（`POST /guardrails/run`）。**上流 LLM は呼ばないので
+// 課金は増えない** — 重いのは「ルート数ぶんの集計クエリ」と「待っている通知の往復」で、
+// 守りたいのは外部の応答時間がこの API の応答時間に乗ることと DB の負荷。(1) と同じ値にすると
+// cron からの定期掃きが成り立たない（`POST /guardrails/run` は 1 要求 1 エージェントなので、
+// エージェントが 20 件あるテナントの毎分の掃きは 20 要求になり、6 件で止まると残りは
+// **その回は一度も判定されない** = backstop が静かに効かなくなる）。この経路の費用に見合う
+// 高さに置き、1 要求 1 エージェントという形を変えるとき（テナント一括の受け口）に見直す
+export const OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE = 60;
 // レート制限の窓の長さ (ミリ秒)。1 分 = 上の定数の「1 分」の定義
 export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。
@@ -262,9 +261,10 @@ export const API_MESSAGES = {
   // 監査ログの鍵が未設定・短すぎるとき。**何が足りないかは外へ出さない** (§9 の「内部詳細を漏らさない」)。
   // 503 にするのは「設定が無いので今はできない」側の事情だから (上流未設定と同じ扱い)
   auditNotConfigured: '監査ログの設定が正しくありません。',
-  // 監査ログの検証で連鎖が壊れていたとき。**壊れていること自体は隠さない** —
-  // 隠すと改ざんが運用に伝わらず、改ざん検知を置いた意味が無くなる
-  auditChainBroken: '監査ログの連鎖が壊れています。運用担当者に連絡してください。',
+  // **連鎖が壊れていたときの文言は置いていない。** `GET /audit-logs/verify` は壊れていても
+  // 200 ＋ `{ ok: false, reason, brokenSeq }` を返す設計（壊れたことは隠さないが、
+  // 「検証できた」という操作そのものは成功しているのでエラーにしない）。文言を置くと
+  // 「壊れたらこのメッセージが返る」と読めてしまい、実装と食い違う
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;
 

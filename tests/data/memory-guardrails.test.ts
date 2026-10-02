@@ -377,6 +377,47 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     });
   });
 
+  it('payload は呼び出し側のオブジェクトを共有しない (追記専用を参照の共有で破らない)', async () => {
+    // **これが無いと、追記専用のはずの行が外から書き換えられる。** 書き換えても `hash` は
+    // 再計算されないので、その行は検証で hash_mismatch になる（prisma 側は DB のトリガが
+    // UPDATE を拒むので起こらない = ADR-0006 の死角）
+    const payload: Record<string, string> = { status: 'active' };
+    // 記録日時（ハッシュの入力にも入るので 1 つの値を使い回す）
+    const createdAt = new Date();
+    // この payload で 1 行追記する
+    const appended = await repos.auditLogs.append(
+      {
+        tenantId,
+        actorId: null,
+        action: 'agent_stopped',
+        targetType: 'Agent',
+        targetId: agentId,
+        payload,
+        createdAt,
+      },
+      ({ seq, prevHash, id }) =>
+        auditRowHash(SECRET, {
+          id,
+          tenantId,
+          seq,
+          actorId: null,
+          action: 'agent_stopped',
+          targetType: 'Agent',
+          targetId: agentId,
+          payload,
+          createdAt,
+          prevHash,
+        }),
+    );
+    // **呼び出し側のオブジェクトを後から書き換える**（本番の呼び出し元は毎回新しい
+    // リテラルを作るが、参照を共有していれば「いつか起きる」形）
+    payload.status = 'stopped';
+    // 戻り値も表の中身も影響を受けない
+    expect((appended.payload as Record<string, string>).status).toBe('active');
+    const { rows } = await repos.auditLogs.readChain(tenantId, CHAIN_LIMIT);
+    expect((rows[0]?.payload as Record<string, string>).status).toBe('active');
+  });
+
   it('表を直接書き換えると連鎖の検証が落ちる (prisma 側でトリガを外した場合と同じ結果)', async () => {
     // 3 行追記する
     await appendAudit('a1');

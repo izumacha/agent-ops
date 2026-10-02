@@ -77,6 +77,35 @@ function clone<T>(row: T): T {
   return { ...row };
 }
 
+/**
+ * 監査ログの `payload` を複製する。
+ *
+ * `clone` は行を浅く複製するだけなので、**`payload` は呼び出し側と同じオブジェクトのまま**に
+ * なる。追記専用の表で参照を共有してはいけない — 呼び出し側が渡したオブジェクトを後から
+ * 書き換えると、保存済みの行の中身が変わるのに `hash` は再計算されないので、その行は検証で
+ * `hash_mismatch` になる（prisma 側は DB のトリガが UPDATE を拒むので起こらない。memory 側にも
+ * 同じ規律を置かないと、API テストだけが「書き換えられる世界」で通る。ADR-0006 の死角）。
+ *
+ * **1 段の複製で足りる** — この表へ値が入る経路は `append` だけで、そこへ渡せるのは
+ * `AuditPayload`（値はプリミティブだけ。入れ子を許さない形を `isAuditPayload` が実行時に
+ * 強制する）なので、入れ子をたどる必要が無い。引数の型が `unknown` なのは
+ * `AuditLogRecord.payload` が `unknown` だから（DB の列は `Json?` で、形の保証はドメイン側）。
+ */
+function cloneAuditPayload(payload: unknown): unknown {
+  // オブジェクトでなければそのまま返す（プリミティブと null は共有しても書き換えられない）
+  if (payload === null || typeof payload !== 'object') return payload;
+  // 配列も別の実体にする（`AuditPayload` には現れないが、DB から読んだ行には混ざりうる）
+  if (Array.isArray(payload)) return [...payload];
+  // キーと値を写した別のオブジェクトにする
+  return { ...(payload as Record<string, unknown>) };
+}
+
+// 監査ログの 1 行を複製する (`payload` は別のオブジェクトにする。他の列はプリミティブと Date)
+function cloneAuditLog(row: AuditLogRecord): AuditLogRecord {
+  // 浅い複製のうえで payload を差し替える
+  return { ...row, payload: cloneAuditPayload(row.payload) };
+}
+
 // テナント Port の memory 実装
 class MemoryTenants implements TenantsPort {
   // 共有の表を受け取る
@@ -988,15 +1017,16 @@ class MemoryAuditLogs implements AuditLogsPort {
       action: input.action,
       targetType: input.targetType,
       targetId: input.targetId,
-      payload: input.payload,
+      // **深く複製して持つ** (呼び出し側のオブジェクトを参照のまま保存しない。理由は関数のコメント)
+      payload: cloneAuditPayload(input.payload),
       createdAt: input.createdAt,
       seq,
       prevHash,
       hash,
     };
-    // 表へ入れて複製を返す
+    // 表へ入れて複製を返す (戻り値の payload も表とは別の実体にする)
     this.store.auditLogs.set(row.id, row);
-    return clone(row);
+    return cloneAuditLog(row);
   }
 
   // 一覧する (テナント内、createdAt 昇順)
@@ -1016,7 +1046,7 @@ class MemoryAuditLogs implements AuditLogsPort {
       .filter((row) => row.tenantId === tenantId)
       .sort((left, right) => (left.seq < right.seq ? -1 : left.seq > right.seq ? 1 : 0));
     // 上限までに切る
-    const rows = all.slice(0, limit).map((row) => clone(row));
+    const rows = all.slice(0, limit).map((row) => cloneAuditLog(row));
     // 上限に達したか (呼び出し側が「まだ続きがある」と伝えられるようにする)
     return { rows, reachedLimit: all.length > limit };
   }

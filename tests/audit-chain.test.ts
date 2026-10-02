@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AuditChainBreak,
   auditRowHash,
+  isAuditPayload,
   nextAuditSeq,
   verifyAuditChain,
   type AuditChainRow,
@@ -17,6 +18,8 @@ import { secretsEqual } from '@/lib/tokens';
 
 // 検査で使う鍵 (長さの下限を満たす固定値)
 const SECRET = 'test-audit-hmac-secret-0123456789abcdef';
+// 検査で使うテナント (row() の既定と verifyAuditChain に渡す値を揃える)
+const TENANT = 't1';
 // 別の鍵 (鍵が違えばハッシュも違うことの確認用)
 const OTHER_SECRET = 'test-audit-hmac-secret-fedcba9876543210';
 
@@ -30,7 +33,8 @@ function env(values: Record<string, string | undefined> = {}): NodeJS.ProcessEnv
 function row(overrides: Partial<AuditChainRow> = {}): AuditChainRow {
   // 既定値はテナント t1 の 1 件目
   return {
-    tenantId: 't1',
+    id: 'audit-1',
+    tenantId: TENANT,
     seq: 1n,
     actorId: 'u1',
     action: 'agent.suspend',
@@ -54,6 +58,7 @@ function chainOf(secret: string, rows: readonly AuditChainRow[]): StoredAuditRow
     // 連番は 1 始まりで振り直し、prevHash は直前のハッシュにする
     const linked: AuditChainRow = {
       ...source,
+      id: `audit-${index + 1}`,
       seq: BigInt(index + 1),
       prevHash: previousHash,
     };
@@ -84,6 +89,7 @@ describe('監査ログのハッシュ連鎖', () => {
     const base = auditRowHash(SECRET, row());
     // 列ごとに 1 つだけ変えた行を作る (**ここに挙がっていない列は連鎖で守られていない**)
     const variants: Partial<AuditChainRow>[] = [
+      { id: 'audit-other' },
       { tenantId: 't2' },
       { seq: 2n },
       { actorId: 'u2' },
@@ -130,12 +136,12 @@ describe('監査ログのハッシュ連鎖', () => {
     // 3 件の連鎖
     const rows = chainOf(SECRET, [row(), row({ action: 'agent.resume' }), row({ action: 'x' })]);
     // 検証は通り、見た件数も返る
-    expect(verifyAuditChain(SECRET, rows, secretsEqual)).toEqual({ ok: true, checked: 3 });
+    expect(verifyAuditChain(SECRET, TENANT, rows, secretsEqual)).toEqual({ ok: true, verified: 3 });
   });
 
   it('空の連鎖は ok を返す (まだ 1 件も記録が無いテナント)', () => {
     // 行が無い状態
-    expect(verifyAuditChain(SECRET, [], secretsEqual)).toEqual({ ok: true, checked: 0 });
+    expect(verifyAuditChain(SECRET, TENANT, [], secretsEqual)).toEqual({ ok: true, verified: 0 });
   });
 
   it('改ざん検知: 値を書き換えた行は hash_mismatch で落ちる', () => {
@@ -145,9 +151,9 @@ describe('監査ログのハッシュ連鎖', () => {
       item.seq === 2n ? { ...item, action: 'agent.resume' } : item,
     );
     // 2 件目で落ちる
-    expect(verifyAuditChain(SECRET, tampered, secretsEqual)).toEqual({
+    expect(verifyAuditChain(SECRET, TENANT, tampered, secretsEqual)).toEqual({
       ok: false,
-      checked: 3,
+      verified: 1,
       brokenSeq: 2n,
       reason: AuditChainBreak.hash_mismatch,
     });
@@ -158,9 +164,9 @@ describe('監査ログのハッシュ連鎖', () => {
     const rows = chainOf(SECRET, [row(), row(), row()]);
     const removed = rows.filter((item) => item.seq !== 2n);
     // 2 件目の位置に来た 3 件目で落ちる (連番が 1 の次に 3 になっている)
-    expect(verifyAuditChain(SECRET, removed, secretsEqual)).toEqual({
+    expect(verifyAuditChain(SECRET, TENANT, removed, secretsEqual)).toEqual({
       ok: false,
-      checked: 2,
+      verified: 1,
       brokenSeq: 3n,
       reason: AuditChainBreak.seq_not_sequential,
     });
@@ -178,9 +184,9 @@ describe('監査ログのハッシュ連鎖', () => {
       { ...rows[1]!, seq: 3n },
     ];
     // 差し込んだ行で落ちる
-    expect(verifyAuditChain(SECRET, withInjection, secretsEqual)).toEqual({
+    expect(verifyAuditChain(SECRET, TENANT, withInjection, secretsEqual)).toEqual({
       ok: false,
-      checked: 3,
+      verified: 1,
       brokenSeq: 2n,
       reason: AuditChainBreak.prev_hash_mismatch,
     });
@@ -191,9 +197,9 @@ describe('監査ログのハッシュ連鎖', () => {
     const rows = chainOf(SECRET, [row()]);
     const forged: StoredAuditRow[] = [{ ...rows[0]!, prevHash: 'deadbeef' }];
     // 先頭で落ちる (「前があったはず」の痕跡を消して作り直した形)
-    expect(verifyAuditChain(SECRET, forged, secretsEqual)).toEqual({
+    expect(verifyAuditChain(SECRET, TENANT, forged, secretsEqual)).toEqual({
       ok: false,
-      checked: 1,
+      verified: 0,
       brokenSeq: 1n,
       reason: AuditChainBreak.prev_hash_mismatch,
     });
@@ -203,11 +209,53 @@ describe('監査ログのハッシュ連鎖', () => {
     // 鍵を知らない相手が連鎖を作り直した形 (値もハッシュも整合しているが鍵が違う)
     const forged = chainOf(OTHER_SECRET, [row(), row()]);
     // 正しい鍵で検証すると先頭から落ちる
-    expect(verifyAuditChain(SECRET, forged, secretsEqual)).toEqual({
+    expect(verifyAuditChain(SECRET, TENANT, forged, secretsEqual)).toEqual({
       ok: false,
-      checked: 2,
+      verified: 0,
       brokenSeq: 1n,
       reason: AuditChainBreak.hash_mismatch,
+    });
+  });
+
+  it('改ざん検知: 別テナントの行が混ざっていたら tenant_mismatch で落ちる', () => {
+    // t1 の連鎖を作り、検証だけ t2 に対して行う。
+    // **この経路が無いと偽の合格が成立する** — 取り出すクエリのテナント条件が壊れて
+    // 「t2 の監査ログ」として t1 の行が返ったとき、行に載っている tenantId を信じるだけだと
+    // 連鎖は端から端まで整合しているので ok を返し、t2 は 1 行も見ていないのに「無傷」と報告される
+    const rows = chainOf(SECRET, [row(), row()]);
+    // 別テナントとして検証すると先頭で落ちる
+    expect(verifyAuditChain(SECRET, 't2', rows, secretsEqual)).toEqual({
+      ok: false,
+      verified: 0,
+      brokenSeq: 1n,
+      reason: AuditChainBreak.tenant_mismatch,
+    });
+  });
+
+  it('改ざん検知: 正規化できない payload は payload_not_canonical で落ちる', () => {
+    // 入れ子の payload を持つ行を作る (DB の列は Json なので、型注釈をすり抜けて入りうる)
+    const rows = chainOf(SECRET, [row()]);
+    const nested: StoredAuditRow = { ...rows[0]!, payload: { detail: { b: 2, a: 1 } } };
+    // ハッシュを再計算できないので「検証できない行」として落とす
+    // (素通しすると JSONB の内部順序に依存してハッシュが揺れ、誰も触っていない行が不定に赤くなる)
+    expect(verifyAuditChain(SECRET, TENANT, [nested], secretsEqual)).toEqual({
+      ok: false,
+      verified: 0,
+      brokenSeq: 1n,
+      reason: AuditChainBreak.payload_not_canonical,
+    });
+  });
+
+  it('verified は壊れた行の手前まで (渡した件数ではない)', () => {
+    // 5 件の連鎖を作り、4 件目を書き換える
+    const rows = chainOf(SECRET, [row(), row(), row(), row(), row()]);
+    const tampered = rows.map((item) => (item.seq === 4n ? { ...item, action: 'x' } : item));
+    // 確かめ終えたのは 3 件。**渡した 5 件を返すと「5 件すべて確かめた」と誤読される**
+    // (実際には 5 件目は 1 度も見ていない)
+    expect(verifyAuditChain(SECRET, TENANT, tampered, secretsEqual)).toMatchObject({
+      ok: false,
+      verified: 3,
+      brokenSeq: 4n,
     });
   });
 
@@ -216,6 +264,30 @@ describe('監査ログのハッシュ連鎖', () => {
     expect(nextAuditSeq(null)).toBe(1n);
     // 2 件目以降
     expect(nextAuditSeq(41n)).toBe(42n);
+  });
+});
+
+describe('payload の形の実行時検査', () => {
+  it('平坦な原始値だけの辞書を受け付ける', () => {
+    // 文字列・数値・真偽値・null はすべて許す
+    expect(isAuditPayload({ a: 'x', b: 1, c: true, d: null })).toBe(true);
+    // 空の辞書も平坦
+    expect(isAuditPayload({})).toBe(true);
+  });
+
+  it('入れ子・配列・辞書以外を拒否する', () => {
+    // **型注釈では守れないので実行時に見る** (DB の列は Json で、読み出した値は型の保証が無い)
+    for (const broken of [
+      { a: { b: 1 } }, // 入れ子の辞書
+      { a: [1, 2] }, // 配列の値
+      [1, 2], // 配列そのもの
+      null, // null
+      'text', // 文字列
+      42, // 数値
+      { a: undefined }, // undefined (JSON.stringify が配列内で null に化けるので null と区別できない)
+    ]) {
+      expect(isAuditPayload(broken)).toBe(false);
+    }
   });
 });
 

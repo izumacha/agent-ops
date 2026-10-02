@@ -50,11 +50,34 @@ export interface GuardrailWindow {
 const MILLIS_PER_MINUTE = 60 * 1000;
 
 /**
- * 「いまから過去 windowMinutes 分」の集計窓を作る。
+ * 集計窓の長さとして受け付けられる値かを判定する。**入力検証・DB の CHECK 制約・
+ * 窓の組み立てがこの 1 つの述語を共有する** (上限の写しを作らない)。
+ *
+ * 範囲外を弾くのは fail-open を防ぐため: 0 分の窓は幅ゼロの半開区間になって 1 件も拾わないので、
+ * 呼び出し回数 0・料金 0 と測れて**どの種別も永久に発火しない**（止めるべき状況で止まらない）。
+ * 負の値は start が end より後になって同じ結果になり、NaN は Invalid Date になって
+ * 入力検証ではなくクエリの境界で落ちる。
+ */
+export function isValidWindowMinutes(windowMinutes: number, min: number, max: number): boolean {
+  // 整数でなければ受け付けない (小数の分は DB の Int 列に入らない)
+  if (!Number.isInteger(windowMinutes)) return false;
+  // 下限と上限の内側であること
+  return windowMinutes >= min && windowMinutes <= max;
+}
+
+/**
+ * 「いまから過去 windowMinutes 分」の集計窓を作る。範囲外の長さなら **null**。
  * **終了は now を含まない**半開区間にして、日次集計 (`src/domain/usage-window.ts`) と約束を揃える
  * (境界の 1 件が両方の窓に入る・どちらにも入らない、という取りこぼしを作らないため)。
  */
-export function guardrailWindow(now: Date, windowMinutes: number): GuardrailWindow {
+export function guardrailWindow(
+  now: Date,
+  windowMinutes: number,
+  min: number,
+  max: number,
+): GuardrailWindow | null {
+  // 範囲外の長さでは窓を作らない (呼び出し側が「判定できない」として扱う)
+  if (!isValidWindowMinutes(windowMinutes, min, max)) return null;
   // 終了は呼び出し時刻そのもの (含まない)
   const endExclusive = new Date(now.getTime());
   // 開始はそこから窓の長さだけ戻した時刻 (含む)
@@ -119,45 +142,71 @@ export type RuleEvaluation = { fired: false } | { fired: true; observation: Rule
 const NOT_FIRED: RuleEvaluation = { fired: false };
 
 /**
+ * 窓の中で「その種別が測った値」を取り出す。**測れていなければ null。**
+ *
+ * 「測れない」と「悪い」は別。呼び出しが 0 件の窓をエラー率 0% とも 100% とも読めないし、
+ * 採点 0 件の評価を「品質最低」と読むのは誤判定。測れないときに止めると、使われていない
+ * エージェントが勝手に suspended になる (UC-08 が止めたいのは「悪化したエージェント」)。
+ */
+function observe(kind: RuleKind, measurement: GuardrailMeasurement): RuleObservation | null {
+  // 種別ごとに測る対象が違うので分岐する
+  switch (kind) {
+    case RuleKind.cost:
+      // 料金の合計は常に測れている (0 円も「0 円だった」という測定結果)
+      return { kind, costMicroUsd: measurement.costMicroUsd };
+    case RuleKind.error_rate:
+      // 呼び出しが 1 件も無い窓ではエラー率を定義できない (0/0)。
+      // **分母が 0 のまま割らない**のが要点 — `3 / 0` は Infinity になり、
+      // どんなしきい値でも必ず発火する (集計の分母と分子の整合が崩れたときに全件停止する)
+      return measurement.requests <= 0
+        ? null
+        : { kind, rate: measurement.errorRequests / measurement.requests };
+    case RuleKind.quality:
+      // 品質は測れていないことがある (評価を 1 度も走らせていない・採点 0 件)
+      return measurement.worstQualityScore === null
+        ? null
+        : { kind, score: measurement.worstQualityScore };
+  }
+}
+
+// 実測値を 1 つの数値 (比較できる形) にする。コストだけは BigInt のまま返す —
+// **Number() を挟むと 2^53 を超える額で「超えていない」ことになる**
+// (JS の関係演算子は BigInt と Number を数学的に正しく比べるので、変換しなければ正確)
+function observedValue(observation: RuleObservation): number | bigint {
+  // 種別ごとに項目名が違うので取り出し方を分ける
+  switch (observation.kind) {
+    case RuleKind.cost:
+      return observation.costMicroUsd;
+    case RuleKind.error_rate:
+      return observation.rate;
+    case RuleKind.quality:
+      return observation.score;
+  }
+}
+
+/**
  * 1 つのルールが発火するかを判定する。
  *
- * **測れていないものは発火させない (fail-safe)。** 「測れない」と「悪い」は別で、
- * 呼び出しが 0 件の窓をエラー率 0% とも 100% とも読めないし、採点 0 件の評価を
- * 「品質最低」と読むのは誤判定。測れないときに止めると、使われていないエージェントが
- * 勝手に suspended になる (UC-08 が止めたいのは「悪化したエージェント」)。
+ * **向きは `RULE_COMPARISON` の表から引く。** 種別ごとに `>` / `<` を書き下すと、
+ * 表と実装が食い違っても誰も気付かない飾りの表になる (実測で、表の品質の向きを逆にしても
+ * 全テストが緑のまま通った)。表を読むことで、表を書き換えれば挙動が変わる = 検出網が効く。
  */
 export function evaluateRule(
   kind: RuleKind,
   threshold: number,
   measurement: GuardrailMeasurement,
 ): RuleEvaluation {
-  // 種別ごとに測る対象と向きが違うので分岐する
-  switch (kind) {
-    case RuleKind.cost: {
-      // 料金は BigInt と数値を直接比べる (JS の関係演算子は BigInt と Number を数学的に正しく比べる)
-      if (!(measurement.costMicroUsd > threshold)) return NOT_FIRED;
-      // 超過した料金を実測値として返す
-      return { fired: true, observation: { kind, costMicroUsd: measurement.costMicroUsd } };
-    }
-    case RuleKind.error_rate: {
-      // 呼び出しが 1 件も無い窓ではエラー率を定義できない (0/0。測れないので発火させない)
-      if (measurement.requests <= 0) return NOT_FIRED;
-      // 失敗の割合を求める
-      const rate = measurement.errorRequests / measurement.requests;
-      // しきい値を超えていなければ発火しない
-      if (!(rate > threshold)) return NOT_FIRED;
-      // 超過した割合を実測値として返す
-      return { fired: true, observation: { kind, rate } };
-    }
-    case RuleKind.quality: {
-      // 品質スコアを取り出す
-      const score = measurement.worstQualityScore;
-      // 測れていなければ発火しない (採点 0 件・評価を 1 度も走らせていない場合)
-      if (score === null) return NOT_FIRED;
-      // 品質だけは「下回ったら発火」
-      if (!(score < threshold)) return NOT_FIRED;
-      // 下回ったスコアを実測値として返す
-      return { fired: true, observation: { kind, score } };
-    }
-  }
+  // その種別が窓の中で測った値 (測れていなければ null)
+  const observation = observe(kind, measurement);
+  // 測れていなければ発火させない (fail-safe)
+  if (observation === null) return NOT_FIRED;
+  // 比較できる形にした実測値
+  const value = observedValue(observation);
+  // 種別ごとの向き (コスト・エラー率は上回ったら、品質は下回ったら発火)
+  const exceeded =
+    RULE_COMPARISON[kind] === RuleComparison.above ? value > threshold : value < threshold;
+  // しきい値を越えていなければ発火しない (ちょうどの値は発火させない)
+  if (!exceeded) return NOT_FIRED;
+  // 越えたので、実測値を添えて発火を返す
+  return { fired: true, observation };
 }

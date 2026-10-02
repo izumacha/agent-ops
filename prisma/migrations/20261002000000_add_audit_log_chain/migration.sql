@@ -66,8 +66,12 @@ BEGIN
     -- 宣言があるので削除を通す (BEFORE DELETE では OLD を返すと削除が進む)
     RETURN OLD;
   END IF;
-  -- ここには来ない (トリガは UPDATE と DELETE にだけ張る)。保険として素通りさせる
-  RETURN NEW;
+  -- **ここには来ない** (トリガは UPDATE と DELETE にだけ張っており、両方とも上で処理済み)。
+  -- それでも `RETURN NEW` で素通りさせず例外にするのは 2 つの理由から:
+  -- (1) 将来この関数を INSERT や TRUNCATE にも張ったとき、意図を決めずに通してしまわない (fail-closed)。
+  -- (2) **BEFORE DELETE では NEW が NULL** で、行トリガが NULL を返すとその行の操作は
+  --     「素通り」ではなく**取り消される**。つまり `RETURN NEW` は書いてあるつもりの動作をしない。
+  RAISE EXCEPTION 'AuditLog の追記専用トリガが想定外の操作 (%) で呼ばれました', TG_OP;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -75,3 +79,36 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER "AuditLog_append_only"
 BEFORE UPDATE OR DELETE ON "AuditLog"
 FOR EACH ROW EXECUTE FUNCTION "audit_log_append_only"();
+
+
+-- ─────────────────────────────────────────────
+-- ここも手書き。**ガードレールのルールが「判定できない値」を持てないようにする。**
+--
+-- 集計窓としきい値の範囲はアプリ側 (src/domain/guardrail/rule.ts と入力検証) でも確かめるが、
+-- DB に置くのは「アプリを通らない経路で入った行」でも規律が保たれるようにするため
+-- (生 SQL・psql・将来の別クライアント)。範囲外の値が入ったときの壊れ方は **fail-open** で、
+-- そこが置く理由そのもの:
+--   * windowMinutes = 0 → 幅ゼロの半開区間になり 1 件も拾わないので、呼び出し 0 件・料金 0 と
+--     測れて**どの種別も永久に発火しない**（止めるべき状況で止まらない）
+--   * windowMinutes < 0 → start が end より後になって同じ結果
+--   * threshold < 0 → コストは必ず超過し、割合の種別も必ず超過する（常時発火）
+--   * 割合の種別で threshold > 1 → エラー率は 1 を超えないので永久に発火しない
+-- 上限 10080 分 (7 日) の根拠は src/lib/constants.ts の GUARDRAIL_WINDOW_MAX_MINUTES
+-- （判定は中継 1 回ごとに走るので、窓が伸びるほど毎回の集計が重くなる。§8 / §9）
+-- ─────────────────────────────────────────────
+
+-- 集計窓は 1 分以上 7 日以下
+ALTER TABLE "GuardrailRule" ADD CONSTRAINT "GuardrailRule_window_minutes_in_range" CHECK (
+  "windowMinutes" >= 1 AND "windowMinutes" <= 10080
+);
+
+-- しきい値は種別ごとに範囲が違う。割合で表す 2 種 (エラー率・品質) は 0〜1、コストは 0 以上。
+-- コストの上限 9007199254740991 は 2^53-1 で、`threshold` が倍精度浮動小数なので
+-- そこを超えると「設定した額」と「保存された額」が静かにずれる (src/lib/constants.ts の
+-- GUARDRAIL_COST_THRESHOLD_MAX と同じ値。約 90 億 USD 相当なので実用上の制約にはならない)
+ALTER TABLE "GuardrailRule" ADD CONSTRAINT "GuardrailRule_threshold_in_range" CHECK (
+  CASE "kind"
+    WHEN 'cost' THEN "threshold" >= 0 AND "threshold" <= 9007199254740991
+    ELSE "threshold" >= 0 AND "threshold" <= 1
+  END
+);

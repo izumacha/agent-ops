@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateRule,
   guardrailWindow,
+  isValidWindowMinutes,
   RULE_COMPARISON,
   RuleComparison,
   thresholdRangeFor,
@@ -14,7 +15,11 @@ import {
   type GuardrailMeasurement,
 } from '@/domain/guardrail/rule';
 import { RuleKind } from '@/domain/types';
-import { GUARDRAIL_COST_THRESHOLD_MAX } from '@/lib/constants';
+import {
+  GUARDRAIL_COST_THRESHOLD_MAX,
+  GUARDRAIL_WINDOW_MAX_MINUTES,
+  GUARDRAIL_WINDOW_MIN_MINUTES,
+} from '@/lib/constants';
 
 // 測定値の素材 (必要な項目だけ上書きできるようにする)
 function measurement(overrides: Partial<GuardrailMeasurement> = {}): GuardrailMeasurement {
@@ -33,10 +38,15 @@ describe('ガードレールの集計窓', () => {
     // 基準時刻
     const now = new Date('2026-10-02T12:00:00.000Z');
     // 15 分の窓
-    const window = guardrailWindow(now, 15);
+    const window = guardrailWindow(
+      now,
+      15,
+      GUARDRAIL_WINDOW_MIN_MINUTES,
+      GUARDRAIL_WINDOW_MAX_MINUTES,
+    );
     // 開始は 15 分前、終了は基準時刻そのもの
-    expect(window.start.toISOString()).toBe('2026-10-02T11:45:00.000Z');
-    expect(window.endExclusive.toISOString()).toBe('2026-10-02T12:00:00.000Z');
+    expect(window?.start.toISOString()).toBe('2026-10-02T11:45:00.000Z');
+    expect(window?.endExclusive.toISOString()).toBe('2026-10-02T12:00:00.000Z');
   });
 
   it('渡した Date を書き換えない (呼び出し側の時刻が動かない)', () => {
@@ -44,9 +54,38 @@ describe('ガードレールの集計窓', () => {
     const now = new Date('2026-10-02T12:00:00.000Z');
     const before = now.toISOString();
     // 窓を作る
-    guardrailWindow(now, 60);
+    guardrailWindow(now, 60, GUARDRAIL_WINDOW_MIN_MINUTES, GUARDRAIL_WINDOW_MAX_MINUTES);
     // 元の Date は変わっていない
     expect(now.toISOString()).toBe(before);
+  });
+
+  it('範囲外の長さでは窓を作らない (fail-open を防ぐ)', () => {
+    // 基準時刻
+    const now = new Date('2026-10-02T12:00:00.000Z');
+    // 窓を作ろうとする値と、それが駄目な理由
+    const rejected = [
+      0, // 幅ゼロ。1 件も拾わないので**どの種別も永久に発火しない**
+      -5, // start が end より後になり同じ結果
+      GUARDRAIL_WINDOW_MAX_MINUTES + 1, // 上限超え。判定は中継 1 回ごとに走るので全件走査になる
+      1.5, // 整数でない (DB の Int 列に入らない)
+      Number.NaN, // Invalid Date になり、入力検証ではなくクエリの境界で落ちる
+    ];
+    // どれも null を返す (呼び出し側が「判定できない」として扱う)
+    for (const minutes of rejected) {
+      expect(
+        guardrailWindow(now, minutes, GUARDRAIL_WINDOW_MIN_MINUTES, GUARDRAIL_WINDOW_MAX_MINUTES),
+      ).toBeNull();
+    }
+  });
+
+  it('境界ちょうどの長さは受け付ける', () => {
+    // 下限と上限はどちらも「含む」
+    expect(
+      isValidWindowMinutes(GUARDRAIL_WINDOW_MIN_MINUTES, 1, GUARDRAIL_WINDOW_MAX_MINUTES),
+    ).toBe(true);
+    expect(
+      isValidWindowMinutes(GUARDRAIL_WINDOW_MAX_MINUTES, 1, GUARDRAIL_WINDOW_MAX_MINUTES),
+    ).toBe(true);
   });
 });
 

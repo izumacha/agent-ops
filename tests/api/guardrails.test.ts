@@ -491,6 +491,138 @@ describe('インシデント', () => {
   });
 });
 
+describe('人の操作は監査ログを書けないなら状態も変えない', () => {
+  // **ここが「状態変更 → 記録」の順序の検査。** 変えてから記録に失敗すると、記録の無い変更が
+  // 残り、しかも再試行は「既にその状態だ」で永久に失敗する（実測で resolve がそうなっていた:
+  // 503 を返しながら incident は resolved になり、鍵を設定して再試行しても 409 が返り続けた）。
+  // UC-09 の事後条件「監査ログに残る」が**恒久的に達成不能**になる形なので、両方を固定する。
+
+  it('インシデントの解決: 鍵が無ければ 503 で、状態は open のまま', async () => {
+    // 発火を 1 件作る
+    const { incident } = await raiseIncident();
+    // 鍵を外す
+    vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    // 解決を呼ぶと 503
+    const refused = await call(resolveIncident, {
+      token: seed.a.tokens.admin,
+      params: { incidentId: incident.id },
+    });
+    expect(refused.status).toBe(503);
+    // **状態は変わっていない**（ここが要点。変わっていると下の再試行が 409 になる）
+    const stored = await seed.repos.incidents.findById(seed.a.id, incident.id);
+    expect(stored?.status).toBe(IncidentStatus.open);
+    // 鍵を戻せば成功する（恒久的に失敗しない）
+    vi.stubEnv('AUDIT_HMAC_SECRET', AUDIT_SECRET);
+    const retried = await call(resolveIncident, {
+      token: seed.a.tokens.admin,
+      params: { incidentId: incident.id },
+    });
+    expect(retried.status).toBe(200);
+    // 記録も残っている
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    expect((logs.json as { items: { action: string }[] }).items.map((row) => row.action)).toContain(
+      AuditAction.incident_resolved,
+    );
+  });
+
+  it('ルールの登録: 鍵が無ければ 503 で、ルールは作られない', async () => {
+    // 鍵を外す
+    vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    // 登録を呼ぶと 503
+    const refused = await call(createGuardrailRule, {
+      token: seed.a.tokens.admin,
+      body: {
+        agentId: seed.a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: WINDOW_MINUTES,
+        action: RuleAction.notify,
+      },
+    });
+    expect(refused.status).toBe(503);
+    // **「誰が入れたか分からないルール」が残っていない**
+    expect(seed.store.guardrailRules.size).toBe(0);
+  });
+
+  it('ルールの削除: 鍵が無ければ 503 で、ルールは消えない', async () => {
+    // 発火記録を持たないルールを 1 件作る（記録があると 409 になって順序を試せない）
+    const rule = await makeRule({});
+    // 鍵を外す
+    vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    // 削除を呼ぶと 503
+    const refused = await call(deleteGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { ruleId: rule.id },
+    });
+    expect(refused.status).toBe(503);
+    // **行は残っている**（消えていると「いつ誰が外したか」が永久に分からない）
+    expect(seed.store.guardrailRules.has(rule.id)).toBe(true);
+  });
+});
+
+describe('ルールの設定変更は監査ログに残る', () => {
+  it('登録は設定の中身を payload に残す', async () => {
+    // admin で 1 件作る
+    const created = await call(createGuardrailRule, {
+      token: seed.a.tokens.admin,
+      body: {
+        agentId: seed.a.agent.id,
+        kind: RuleKind.error_rate,
+        threshold: 0.5,
+        windowMinutes: WINDOW_MINUTES,
+        action: RuleAction.stop,
+      },
+    });
+    expect(created.status).toBe(201);
+    // 監査ログに「登録」が残り、判断の根拠になる設定を持つ
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    const row = (
+      logs.json as {
+        items: {
+          action: string;
+          targetType: string;
+          targetId: string;
+          actorId: string | null;
+          payload: Record<string, unknown> | null;
+        }[];
+      }
+    ).items.find((item) => item.action === AuditAction.guardrail_rule_created);
+    // 操作主体は作った admin 自身
+    expect(row?.actorId).toBe(seed.a.users.admin.id);
+    expect(row?.targetType).toBe('GuardrailRule');
+    expect(row?.targetId).toBe((created.json as { id: string }).id);
+    expect(row?.payload).toEqual({
+      agentId: seed.a.agent.id,
+      kind: RuleKind.error_rate,
+      threshold: 0.5,
+      windowMinutes: WINDOW_MINUTES,
+      action: RuleAction.stop,
+    });
+  });
+
+  it('削除は対象の id を残す（中身は作成時の記録が持っている）', async () => {
+    // 発火記録を持たないルールを作って消す
+    const rule = await makeRule({});
+    const deleted = await call(deleteGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'DELETE',
+      params: { ruleId: rule.id },
+    });
+    expect(deleted.status).toBe(204);
+    // 監査ログに「削除」が残る
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    const row = (
+      logs.json as {
+        items: { action: string; targetId: string; payload: Record<string, unknown> | null }[];
+      }
+    ).items.find((item) => item.action === AuditAction.guardrail_rule_deleted);
+    expect(row?.targetId).toBe(rule.id);
+    // 消えた行の設定は残せないので payload は無い
+    expect(row?.payload).toBeNull();
+  });
+});
+
 describe('監査ログと連鎖の検証', () => {
   // 監査ログを 1 行追記する（API 経由の操作で増やす）
   async function appendViaResolve() {

@@ -17,7 +17,9 @@ import {
   PAGE_CURSOR_MAX_LENGTH,
   SHORT_TEXT_MAX_LENGTH,
 } from '@/lib/constants';
-import { call, seedEachTest } from './helpers';
+import { AUDIT_SECRET, call, seedEachTest } from './helpers';
+import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
+import { AuditAction } from '@/domain/audit/action';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
 const seed = seedEachTest();
@@ -621,6 +623,73 @@ describe('PATCH /agents/{agentId}', () => {
       body: { name: seed.a.agent.name },
     });
     expect(result.status).toBe(422);
+  });
+});
+
+describe('停止・復帰の監査ログ', () => {
+  // 監査ログを読む（admin 権限で一覧する）
+  async function auditRows() {
+    // 一覧を取って行だけ返す
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    return (
+      logs.json as {
+        items: {
+          action: string;
+          actorId: string | null;
+          targetType: string;
+          targetId: string;
+          payload: Record<string, unknown> | null;
+        }[];
+      }
+    ).items;
+  }
+
+  it('stop と resume はそれぞれ別の操作名で、誰が行ったかを残す', async () => {
+    // 停止 → 復帰
+    const params = { agentId: seed.a.agent.id };
+    await call(stopAgent, { token: seed.a.tokens.admin, method: 'POST', params });
+    await call(resumeAgent, { token: seed.a.tokens.admin, method: 'POST', params });
+    // 2 行とも残り、操作名が分かれている（まとめると「誰が止めて誰が戻したか」が読めない）
+    const rows = await auditRows();
+    expect(rows.map((row) => row.action)).toEqual([
+      AuditAction.agent_stopped,
+      AuditAction.agent_resumed,
+    ]);
+    // 対象はエージェントで、操作主体は呼んだユーザー
+    for (const row of rows) {
+      expect(row.targetType).toBe('Agent');
+      expect(row.targetId).toBe(seed.a.agent.id);
+      expect(row.actorId).toBe(seed.a.users.admin.id);
+    }
+    // payload は変更後の状態だけ
+    expect(rows[0].payload).toEqual({ status: AgentStatus.stopped });
+    expect(rows[1].payload).toEqual({ status: AgentStatus.active });
+  });
+
+  it('同じ状態への再実行も 1 行残す（「誰が要求したか」が記録の対象）', async () => {
+    // 2 回続けて停止する（2 回目は状態が動かない）
+    const params = { agentId: seed.a.agent.id };
+    await call(stopAgent, { token: seed.a.tokens.admin, method: 'POST', params });
+    await call(stopAgent, { token: seed.a.tokens.admin, method: 'POST', params });
+    // 記録は 2 行（状態が動いたかではなく、要求があったかを残す）
+    expect((await auditRows()).map((row) => row.action)).toEqual([
+      AuditAction.agent_stopped,
+      AuditAction.agent_stopped,
+    ]);
+  });
+
+  it('鍵が無ければ 503 で、状態も変わらない', async () => {
+    // **変えてから記録に失敗すると「記録の無い停止」が残る。** 順序を固定する
+    vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    const params = { agentId: seed.a.agent.id };
+    const refused = await call(stopAgent, { token: seed.a.tokens.admin, method: 'POST', params });
+    expect(refused.status).toBe(503);
+    // 状態は active のまま
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+    // 鍵を戻せば成功する（恒久的に失敗しない）
+    vi.stubEnv('AUDIT_HMAC_SECRET', AUDIT_SECRET);
+    const retried = await call(stopAgent, { token: seed.a.tokens.admin, method: 'POST', params });
+    expect(retried.status).toBe(200);
   });
 });
 

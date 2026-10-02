@@ -6,7 +6,7 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { toIncidentDto } from '@/lib/api/serializers';
 import { API_MESSAGES } from '@/lib/constants';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
-import { recordAudit } from '@/lib/audit/record';
+import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
 
 /**
  * POST /incidents/{incidentId}/resolve (resolveIncident)
@@ -21,6 +21,10 @@ import { recordAudit } from '@/lib/audit/record';
 export const POST = route<{ incidentId: string }>(async ({ params, principal, repos }) => {
   // admin ロールであること (復帰の判断と同じ重さの操作)
   const { tenantId, user } = requireAdminRole(principal);
+  // **状態を変える前に「監査ログを書ける状態か」を確かめる。** 変えてから記録に失敗すると、
+  // 解決済みなのに記録が無く、再試行は 409 `already_resolved` で永久に成功しない
+  // (理由は assertAuditConfigured のコメント)
+  assertAuditConfigured();
   // 自テナント内で解決する
   const result = await repos.incidents.resolve(tenantId, params.incidentId);
   // 他テナントの id・存在しない id は 404

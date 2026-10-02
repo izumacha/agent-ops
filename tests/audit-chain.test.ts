@@ -310,3 +310,55 @@ describe('監査ログの HMAC 鍵の読み出し', () => {
     }
   });
 });
+
+describe('監査ログを書く前の設定の確認', () => {
+  it('鍵が読めるかだけを確かめ、読めなければ 503 を投げる', async () => {
+    // **人の操作では状態を変える前にこれを呼ぶ。** 変えてから記録に失敗すると、記録の無い
+    // 変更が残り、しかも再試行は「既にその状態だ」で永久に失敗する（実測で resolve がそうだった）
+    const { assertAuditConfigured } = await import('@/lib/audit/record');
+    // 下限を満たす鍵なら何も起きない（値は返さない。読めることだけを確かめる関数）
+    expect(assertAuditConfigured(env({ [AUDIT_HMAC_SECRET_ENV]: SECRET }))).toBeUndefined();
+    // 未設定なら 503
+    expect(() => assertAuditConfigured(env({}))).toThrowError(
+      expect.objectContaining({ status: 503 }) as Error,
+    );
+  });
+});
+
+describe('監査ログの payload の実行時検査', () => {
+  it('入れ子の payload は追記の入口で止める（ハッシュが不定に揺れる形を保存させない）', async () => {
+    // **列の型は `Json?` なので型注釈では守れない。** 入れ子が混ざると正規化がその階層を
+    // 並べ替えないため、JSONB の内部順序に依存してハッシュが揺れ、**保存して読み直しただけで
+    // 検証に失敗しうる**。追記してからでは直せない（追記専用なので行を消せない）ので入口で落とす
+    const { recordAudit } = await import('@/lib/audit/record');
+    // 追記が呼ばれたら分かるようにしておく（呼ばれてはいけない）
+    let appended = 0;
+    // 必要な Port だけを持つ最小の偽物（他のメソッドはこのテストでは呼ばれない）
+    const repos = {
+      auditLogs: {
+        append: async () => {
+          appended += 1;
+          throw new Error('追記されてはいけない');
+        },
+      },
+    } as unknown as Parameters<typeof recordAudit>[0];
+    // 入れ子を持つ payload で呼ぶ（型注釈は通ってしまうので any ではなく cast で作る）
+    await expect(
+      recordAudit(
+        repos,
+        {
+          tenantId: TENANT,
+          actorId: null,
+          action: 'guardrail.fired' as never,
+          targetType: 'Incident' as never,
+          // 平坦でない payload（`isAuditPayload` が false を返す形）
+          targetId: 'inc_1',
+          payload: { nested: { deep: 1 } } as never,
+        },
+        env({ [AUDIT_HMAC_SECRET_ENV]: SECRET }),
+      ),
+    ).rejects.toThrowError(expect.objectContaining({ status: 500 }) as Error);
+    // 1 度も追記していないこと（「書いてから気付く」形にしない）
+    expect(appended).toBe(0);
+  });
+});

@@ -4,6 +4,8 @@ import { requireAdminRole } from '@/lib/api/guard';
 import { noContent, route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES } from '@/lib/constants';
+import { AuditAction, AuditTargetType } from '@/domain/audit/action';
+import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
 
 /**
  * DELETE /guardrails/{ruleId} (deleteGuardrailRule)
@@ -14,7 +16,10 @@ import { API_MESSAGES } from '@/lib/constants';
  */
 export const DELETE = route<{ ruleId: string }>(async ({ params, principal, repos }) => {
   // admin ロールであること (作成と同じ理由)
-  const { tenantId } = requireAdminRole(principal);
+  const { tenantId, user } = requireAdminRole(principal);
+  // **消す前に「監査ログを書ける状態か」を確かめる** — 消してから記録に失敗すると、
+  // ルールも記録も残らず「いつ誰が外したか」が辿れない (理由は assertAuditConfigured)
+  assertAuditConfigured();
   // 自テナント内で削除する
   const result = await repos.guardrailRules.delete(tenantId, params.ruleId);
   // 他テナントの id・存在しない id は 404
@@ -23,6 +28,17 @@ export const DELETE = route<{ ruleId: string }>(async ({ params, principal, repo
   if (result === 'restricted') {
     throw new ApiError(HTTP_STATUS.CONFLICT, API_MESSAGES.guardrailRuleHasIncidents);
   }
+  // **削除も「止まる条件」の変更なので記録する。** 消えた行の設定はもう読めないので、
+  // 少なくとも「誰がどの id を外したか」を残す (ルールの中身は作成時の記録が持っている)
+  await recordAudit(repos, {
+    tenantId,
+    actorId: user.id,
+    action: AuditAction.guardrail_rule_deleted,
+    targetType: AuditTargetType.guardrailRule,
+    targetId: params.ruleId,
+    // 削除では残す値が無い (対象は targetId が指す)
+    payload: null,
+  });
   // 本文無し
   return noContent();
 });

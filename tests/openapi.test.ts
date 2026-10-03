@@ -48,7 +48,7 @@ type Operation = {
   operationId?: string;
   tags?: string[];
   responses?: Record<string, unknown>;
-  parameters?: { name?: string; in?: string; $ref?: string }[];
+  parameters?: ParameterRef[];
   security?: unknown[];
   requestBody?: {
     content?: Record<
@@ -57,7 +57,12 @@ type Operation = {
     >;
   };
 };
-type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
+type ParameterRef = { name?: string; in?: string; $ref?: string };
+// パスごとの定義。**パス単位の parameters も読む** — OpenAPI では共通の引数をここに置けて、
+// このファイルも実際にそうしている (置き場所の違いで検査から外れないようにする)
+type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>> & {
+  parameters?: ParameterRef[];
+};
 type SchemaObject = {
   type?: unknown;
   maxLength?: number;
@@ -224,8 +229,34 @@ function objectBranches(schema: SchemaObject): SchemaObject[] {
 
 // 全オペレーションを (パス, メソッド, 定義) の並びに平坦化する
 const operations = Object.entries(spec.paths).flatMap(([path, item]) =>
-  HTTP_METHODS.flatMap((method) => (item[method] ? [{ path, method, op: item[method]! }] : [])),
+  HTTP_METHODS.flatMap((method) =>
+    item[method]
+      ? [
+          {
+            path,
+            method,
+            op: item[method]!,
+            // **パス単位と操作単位の引数を合わせたもの。** 片方しか見ないと、同じ引数を
+            // どちらに書いたかで検査に入るかが変わる (このファイルは両方の置き方を使っている)
+            parameters: [...(item.parameters ?? []), ...(item[method]!.parameters ?? [])],
+          },
+        ]
+      : [],
+  ),
 );
+
+// その引数がクエリ引数か ($ref は components.parameters を引いて `in` を見る)。
+// **`in === 'query'` まで確かめる** — `name` があるかだけで決めると、共有のパス引数
+// (`RuleId` など 9 件) をクエリと誤認し、返しようのない 422 を要求することになる
+function isQueryParameter(parameter: ParameterRef): boolean {
+  // 直接書かれていれば in をそのまま見る
+  if (parameter.$ref === undefined) return parameter.in === 'query';
+  // $ref なら components.parameters から引く (読めなければクエリではないと扱う)
+  const name = parameter.$ref.startsWith('#/components/parameters/')
+    ? parameter.$ref.slice('#/components/parameters/'.length)
+    : undefined;
+  return name === undefined ? false : spec.components.parameters[name]?.in === 'query';
+}
 
 describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   // 受け入れ基準「定義が存在する」を最低限の中身込みで固定する
@@ -435,14 +466,9 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   it('クエリ引数を宣言したオペレーションは 422 を宣言している', () => {
     // 確かめた数 (0 件なら走査が壊れている)
     let checked = 0;
-    for (const { path, method, op } of operations) {
-      // そのオペレーションが宣言したクエリ引数 ($ref は components.parameters の共有定義)
-      const hasQuery = (op.parameters ?? []).some(
-        (parameter) =>
-          parameter.in === 'query' ||
-          (parameter.$ref?.startsWith('#/components/parameters/') === true &&
-            spec.components.parameters[parameter.$ref.split('/').pop() ?? '']?.name !== undefined),
-      );
+    for (const { path, method, op, parameters } of operations) {
+      // そのオペレーションに効くクエリ引数 (パス単位と操作単位の両方を見る)
+      const hasQuery = parameters.some(isQueryParameter);
       // クエリを取らなければ宣言は要らない
       if (!hasQuery) continue;
       // 422 を宣言していること

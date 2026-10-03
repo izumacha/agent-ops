@@ -947,6 +947,90 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     expect(totals).toEqual({ requests: 3, errorRequests: 1, costMicroUsd: 3_000n });
   });
 
+  // **停止を伴わない判定で既に開いている記録があるときは、エージェント行を押さえない。**
+  // `notify` のルールは超過が解消するまで自分では止まらないので、窓のあいだ中継 1 回ごとに
+  // `raise` へ来る。毎回ロックを取ると同じエージェントへの中継が 1 件ずつ直列化して
+  // スループットが「DB の往復 1 回ぶん」に落ちる (しかも結果は毎回 created: false で捨てられる)。
+  // ロックの有無は結果に現れないので、**別のトランザクションで同じ行を掴んだまま呼んで
+  // 「待たされないこと」**を見る (上のロックの存在を見る検査と逆向きの手口)
+  it('開いている記録があるなら、エージェント行を掴まれていても待たされない (notify の中継経路)', async () => {
+    // テナント・エージェント・ルール
+    const a = await makeTenantWithAgent(repos, 'fast');
+    const created = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      LIMITS,
+    );
+    expect(created.status).toBe('created');
+    if (created.status !== 'created') return;
+    // 1 度発火させて「開いている記録」を作る (停止はしない)
+    const first = await repos.incidents.raise({
+      tenantId: a.tenantId,
+      agentId: a.agent.id,
+      ruleId: created.rule.id,
+      summary: '1 回目',
+      suspendAgent: false,
+    });
+    expect(first?.created).toBe(true);
+    // ロックを離す合図
+    let release = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // 掴んだ合図
+    let signalHeld = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    // 別のトランザクションでエージェント行を掴んだまま待つ
+    const holding = client.$transaction(
+      async (tx) => {
+        // `raise` のトランザクションが取るのと同じ行・同じ強さのロック
+        await tx.$queryRaw`SELECT status FROM "Agent" WHERE "tenantId" = ${a.tenantId} AND id = ${a.agent.id} FOR NO KEY UPDATE`;
+        // 掴めたことを知らせる
+        signalHeld();
+        // 合図が来るまで保持する
+        await released;
+      },
+      { timeout: LOCK_TEST_TRANSACTION_TIMEOUT_MS },
+    );
+    // 掴むまで始めない
+    await held;
+    try {
+      // 2 回目 (近道が効いていればロックを待たずに返る)
+      const again = repos.incidents.raise({
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        ruleId: created.rule.id,
+        summary: '2 回目',
+        suspendAgent: false,
+      });
+      // **待たされないこと** (近道が無ければ時間切れの方が先に返る)
+      const finishedFirst = await Promise.race([
+        again.then(() => 'returned' as const),
+        new Promise<'blocked'>((resolve) =>
+          setTimeout(() => resolve('blocked'), LOCK_TEST_WAIT_MS),
+        ),
+      ]);
+      expect(finishedFirst).toBe('returned');
+      // 答えは下の経路と同じ (新しい行は作らず、停止もしない)
+      expect(await again).toMatchObject({ created: false, suspended: false });
+    } finally {
+      // 失敗しても必ず離す (掴んだまま抜けると次のテストの TRUNCATE が道連れで落ちる)
+      release();
+      await holding;
+    }
+    // 行は 1 件のまま
+    const listed = await repos.incidents.list(a.tenantId, { limit: 10 });
+    expect(listed.items).toHaveLength(1);
+  });
+
   // 上のテストは追記が直列に流れるため、**採番のロック句を落としても緑のまま通る** (実測で 19 件すべて緑)。
   // そこで「同じテナント行を別のトランザクションが掴んでいる間、追記が待たされる」ことを決定的に確かめる —
   // ロックが無ければ待たずに終わるので、ロック句の削除がここで赤くなる

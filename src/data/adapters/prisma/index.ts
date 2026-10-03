@@ -1088,6 +1088,31 @@ class PrismaIncidents implements IncidentsPort {
   // 1 つの操作にするのは、片方だけ成立した状態 (止まったが記録が無い / 記録はあるが止まっていない) を
   // 作らないため。受け入れ基準「発火から停止まで ≦ 3 秒」も、記録と停止が同じ往復で終わることで満たす
   async raise(input: RaiseIncidentInput): Promise<RaisedIncident | null> {
+    // **停止を伴わない判定で、既に開いている記録があるなら何も書かない。**
+    // この経路はロックもトランザクションも取らない — `notify` のルールは超過が解消するまで
+    // 自分では止まらないので、窓のあいだ**中継 1 回ごとに**ここへ来る。毎回エージェント行を
+    // `FOR NO KEY UPDATE` で押さえていると、同じエージェントへの中継が 1 件ずつ直列化して
+    // スループットが「DB の往復 1 回ぶん」に落ちる (しかも結果は毎回 created: false で
+    // 呼び出し側が捨てる = 何も書かないための待ち合わせ)。
+    //
+    // **先読みなので取り逃しは起きる** (読んだ直後に別の要求が作る)。そのときは下の経路へ
+    // 落ちて同じ答えになるだけで、重複排除はトランザクションの中の判定が担保する。
+    // **停止を伴う判定ではこの近道を使わない** — 開いている記録があっても、その間に
+    // 復帰させられたエージェントは再び止める必要がある (重複排除と停止は独立)
+    if (!input.suspendAgent) {
+      // 同じルール・同じエージェントで開いている記録 (テナント条件込み)
+      const open = await this.db.incident.findFirst({
+        where: {
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          ruleId: input.ruleId,
+          status: IncidentStatus.open,
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+      // 見つかれば書き込みも停止も要らない (下の経路と同じ答えを返す)
+      if (open !== null) return { incident: open, suspended: false, created: false };
+    }
     // 1 つのトランザクションで「記録 → 必要なら停止」を行う
     return this.db.$transaction(async (tx) => {
       // 対象エージェントの状態をロックして読む (停止の判定とこの後の更新を直列化する)

@@ -329,6 +329,8 @@ describe('ガードレールの判定', () => {
     // （ルールを無効にするまで抜け出せない）
     await makeRule(RuleKind.quality, 0.9, RuleAction.stop, 60);
     const run = await recordRun(0.1);
+    // 保存できていなければ仕込みが壊れている
+    if (run === null) throw new Error('実行を保存できません');
     // 実行の記録日時を窓（60 分）より古くする
     const old = store.evaluationRuns.get(run.run.id);
     if (old === undefined) throw new Error('実行を仕込めません');
@@ -354,6 +356,8 @@ describe('ガードレールの判定', () => {
     // 同じ古さの実行でも、窓を 1 日にすれば中に入る（窓を見ていることの裏側の検査）
     await makeRule(RuleKind.quality, 0.9, RuleAction.stop, 24 * 60);
     const run = await recordRun(0.1);
+    // 保存できていなければ仕込みが壊れている
+    if (run === null) throw new Error('実行を保存できません');
     const old = store.evaluationRuns.get(run.run.id);
     if (old === undefined) throw new Error('実行を仕込めません');
     store.evaluationRuns.set(run.run.id, {
@@ -377,6 +381,8 @@ describe('ガードレールの判定', () => {
     await makeRule(RuleKind.quality, 0.9, RuleAction.notify, 60);
     await makeRule(RuleKind.quality, 0.9, RuleAction.notify, 24 * 60);
     const run = await recordRun(0.1);
+    // 保存できていなければ仕込みが壊れている
+    if (run === null) throw new Error('実行を保存できません');
     const old = store.evaluationRuns.get(run.run.id);
     if (old === undefined) throw new Error('実行を仕込めません');
     store.evaluationRuns.set(run.run.id, {

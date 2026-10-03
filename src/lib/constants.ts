@@ -1,7 +1,8 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
-import { AgentStatus, Provider, Role } from '@/domain/types';
+import { AgentStatus, Provider, Role, RuleKind } from '@/domain/types';
+import { RATIO_MAX } from '@/domain/guardrail/rule';
 
 // アプリ名 (画面タイトル等で使う)
 export const APP_NAME = 'Agent Ops';
@@ -19,6 +20,17 @@ export const AGENT_STATUS_LABELS: Readonly<Record<AgentStatus, string>> = {
   [AgentStatus.stopped]: '停止中', // stopped
   [AgentStatus.suspended]: '自動停止', // suspended
 };
+
+// ガードレールのルール種別の日本語ラベル (インシデントの要約文と画面で使う)
+export const RULE_KIND_LABELS: Readonly<Record<RuleKind, string>> = {
+  [RuleKind.cost]: 'コスト超過', // cost
+  [RuleKind.error_rate]: 'エラー率', // error_rate
+  [RuleKind.quality]: '品質低下', // quality
+};
+
+// **`RuleAction` / `IncidentStatus` の日本語ラベルは置いていない。** 参照する場所がまだ無く
+// （API は enum の値をそのまま JSON へ出し、画面は Step5）、置くと「使われない値」が増えるだけ
+// （§6 デッドコードを残さない）。画面で必要になったときに、使う側と一緒に足す
 
 // ─────────────────────────────────────────────
 // API (Step1) の上限値と利用者向けエラー文言。Route Handler はここから引き、直書きしない
@@ -42,6 +54,86 @@ export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;
 export const USER_TOKEN_MAX_TTL_DAYS = 365;
 // プラットフォーム管理者トークン (環境変数) に要求する最小長。短い値は設定ミスとみなして使わない (fail-closed)
 export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
+// ガードレールの集計窓の下限 (分)。0 や負の窓は「期間が無い」ので判定できない
+export const GUARDRAIL_WINDOW_MIN_MINUTES = 1;
+// ガードレールの集計窓の上限 (分 = 7 日)。**無制限の窓を許さない** (§8 / §9) —
+// ルールの判定はプロキシの中継 1 回ごとに走るので、窓が伸びるほど毎回の集計が重くなる。
+// 7 日を超える傾向は Step5 のダッシュボードが扱う領域で、即時の自動停止の材料ではない
+export const GUARDRAIL_WINDOW_MAX_MINUTES = 60 * 24 * 7;
+// コスト超過ルールのしきい値の上限 (マイクロ USD)。**`GuardrailRule.threshold` は倍精度浮動小数**
+// なので、整数として正確に表せる範囲 (2^53-1) までに絞る。これを超えると「設定した額」と
+// 「保存された額」が静かにずれる (約 90 億 USD 相当なので実用上の制約にはならない)
+export const GUARDRAIL_COST_THRESHOLD_MAX = Number.MAX_SAFE_INTEGER;
+// 1 テナントが持てるガードレールのルールの上限。**判定は中継 1 回ごとに走る**ので、
+// ルールが増えるほど 1 回の呼び出しで回す集計が増える (§8 / §9)。
+// 50 件は「種別 3 × エージェント十数件 ＋ テナント全体のルール」を十分に収める大きさ
+export const GUARDRAIL_RULES_MAX_PER_TENANT = 50;
+// 1 テナントが持てるガードレールのルールの**行数**の上限 (有効・無効を問わない)。
+// **有効なルールの上限だけでは総行数が縛れない** — 無効化した行は上の上限に数えないので
+// (発火済みのルールは削除できず、数えると枠が永久に空かない)、「作る → 無効化する」を繰り返すと
+// 行が無制限に増える。有効な上限の 4 倍を行数の天井にして、どちらかに達したら 409 を返す
+// (§9 のリソース枯渇の防止)。無効で発火記録も無い行は削除できるので、通常の運用で当たることはない
+export const GUARDRAIL_RULE_ROWS_MAX_PER_TENANT = GUARDRAIL_RULES_MAX_PER_TENANT * 4;
+// 連鎖の検証で 1 回に読む監査ログの上限。検証は 1 行目から順にたどるので途中から始められず、
+// ページ送りができない。代わりに読む件数を区切り、上限に達したかを応答で伝える (§8)
+export const AUDIT_CHAIN_VERIFY_MAX_ROWS = 10_000;
+// 通知 1 回の待ち時間の上限 (ミリ秒)。**発火から停止までの計測には入らない** (通知は停止より後)
+// が、受け手が黙り込んだときに発火の処理そのものが長引かないよう区切る
+export const NOTIFY_TIMEOUT_MS = 5_000;
+// 通知の応答本文を読む上限 (バイト)。受け手の応答に意味は無いので読んで捨てるだけ。
+// 読まずに捨てると接続が滞留する実装があるので読むが、無制限に読むとメモリを食う
+export const NOTIFY_MAX_RESPONSE_BYTES = 64 * 1024;
+// 通知に付ける署名のヘッダ名。受け手が検証に使う (値は `sha256=<16 進>`)
+export const NOTIFY_SIGNATURE_HEADER = 'x-agent-ops-signature';
+// 通知の署名鍵 (環境変数 NOTIFY_SIGNING_SECRET) に要求する最小長。
+// 短い鍵は総当たりで求められ、求められたら任意の通知を偽装できる
+export const NOTIFY_SIGNING_SECRET_MIN_LENGTH = 32;
+// プロキシ経路のレート制限: 1 つの API キーが窓の中で出せる中継の回数。
+//
+// 根拠は ADR-0007 の実測「本文を最悪の形に詰めた要求でも 1 通あたり 3.3ms」。1 分 600 回でも
+// 1 プロセスあたり約 2 秒ぶんの計算量に収まる一方、上流の課金は 600 回ぶん発生するので、
+// 「壊れたクライアントの暴走を止める」には十分に効く。正当な使い方（1 件ずつ中継する
+// エージェント）には届かない高さに置いてある
+export const PROXY_RATE_LIMIT_PER_MINUTE = 600;
+// 上限を上書きできる環境変数の名前。**既定は上の定数**で、配備先ごとに上げ下げできる。
+// 用途は (a) 運用者の調整、(b) ベンチ (scripts/bench-proxy.ts) が計測を妨げられないようにすること。
+// **名前を定数にしてここに置くのは、ベンチが取り込めるようにするため** — ベンチの import は
+// 許可リストで絞ってあり (tests/gate-scripts.test.ts)、実行時の副作用を持つモジュール
+// (src/lib/api/rate-limit.ts は読み込み時に共有インスタンスを作る) は取り込めない。
+// 綴りをベンチへ書き写すと写しが 2 つになるので、定数だけのこのファイルを共有する
+export const PROXY_RATE_LIMIT_ENV = 'PROXY_RATE_LIMIT_PER_MINUTE';
+// **重い経路には、上の枠に加えてもう 1 つ小さい枠を掛ける.** 回数だけを数える 1 つの枠では、
+// 1 要求の重さが 2 桁違う経路を同じ上限で守れない。**ただし「重い」の中身は経路によって違い、
+// 中身が違えば妥当な上限も違う**ので、理由ごとに枠を分ける（1 つに束ねると、どちらかの経路に
+// とって必ず不適切な値になる）。
+//
+// (1) **上流へ扇状に出る経路**（`POST /evaluations`）。1 要求で最大
+// EVALUATION_SET_MAX_CASES 件 × (生成 + 採点) の往復が走るので、600 要求ぶんの枠は
+// 上流呼び出し 24 万回ぶんの枠と同じ意味になる。守りたいのは**ベンダーへの課金**なので、
+// 「人が画面から押す操作としては十分、自動化された連打には届かない」ところに置く。
+// **環境変数では上げ下げできない** — 上げたくなるのは「評価を連続で回したい」ときで、
+// それは 1 要求のケース数を増やすか間隔を空ける方で解く（枠を広げると上の根拠が崩れる）
+export const FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE = 6;
+// (2) **応答を返す前に外部の往復を待つ経路**（`POST /guardrails/run`）。**上流 LLM は呼ばないので
+// 課金は増えない** — 重いのは「ルート数ぶんの集計クエリ」と「待っている通知の往復」で、
+// 守りたいのは外部の応答時間がこの API の応答時間に乗ることと DB の負荷。(1) と同じ値にすると
+// cron からの定期掃きが成り立たない（`POST /guardrails/run` は 1 要求 1 エージェントなので、
+// エージェントが 20 件あるテナントの毎分の掃きは 20 要求になり、6 件で止まると残りは
+// **その回は一度も判定されない** = backstop が静かに効かなくなる）。この経路の費用に見合う
+// 高さに置き、1 要求 1 エージェントという形を変えるとき（テナント一括の受け口）に見直す
+export const OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE = 60;
+// (3) **1 要求で大量の行を読んで計算し直す経路**（`GET /audit-logs/verify`）。上流も外部も
+// 呼ばないが、1 回で最大 AUDIT_CHAIN_VERIFY_MAX_ROWS 行を読み、その件数ぶん HMAC を計算し直す
+// （一覧の上限 PAGE_LIMIT_MAX の 50 倍）。**費用は DB の読み取りと CPU** なので (1)(2) とは
+// 性質が違う。検証は「運用者が確かめる」「日次の cron が区間ごとに回す」操作で、毎分の連打を
+// 必要としない。10 件あれば 10 万行ぶんの区間を 1 分で確かめられるので、運用の都合には足りる
+export const HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE = 10;
+// レート制限の窓の長さ (ミリ秒)。1 分 = 上の定数の「1 分」の定義
+export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+// 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。
+// 短い鍵は総当たりで求められ、求められた鍵があれば連鎖をまるごと作り直せるので検知の意味が消える。
+// プラットフォーム管理者トークンと同じ 32 文字以上を要求する (別の値にする理由が無いので値も揃える)
+export const AUDIT_HMAC_SECRET_MIN_LENGTH = 32;
 // テナント作成時に最初の admin へ発行するログイントークンの用途名 (UserToken.name に保存され一覧に出る)
 export const USER_TOKEN_BOOTSTRAP_NAME = '初期管理者トークン';
 // 開発用 CLI (scripts/issue-user-token.ts) が発行するトークンの既定の用途名 (--name 省略時)
@@ -145,6 +237,22 @@ export const API_MESSAGES = {
   apiKeyNotBoundToAgent:
     'この API キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
   agentNotActive: 'このエージェントは停止中です。復帰させてから呼び出してください。',
+  // **範囲の数値は定数から埋める。** 書き写すと、定数を動かしたときに文言だけが古くなり、
+  // 利用者は「通る値を弾かれた」と読む（§6 の一元管理。入力検証・DB の CHECK・判定の 3 か所が
+  // 同じ定数を読んでいるのに、4 か所目の文言だけが写しだった）
+  guardrailThresholdOutOfRange: `しきい値が種別ごとの範囲外です (コストは 0 以上の整数、エラー率と品質は 0 以上 ${RATIO_MAX} 以下)。`,
+  guardrailWindowOutOfRange: `集計窓は ${GUARDRAIL_WINDOW_MIN_MINUTES} 分以上 ${GUARDRAIL_WINDOW_MAX_MINUTES} 分以内の整数で指定してください。`,
+  guardrailRuleLimit:
+    'ガードレールのルール数が上限に達しています。不要なルールを削除してください。',
+  guardrailRuleRowLimit: `ガードレールのルールの総数 (無効化したものを含む) が上限 ${GUARDRAIL_RULE_ROWS_MAX_PER_TENANT} 件に達しています。不要なルールを削除してください。`,
+  guardrailRunPartiallyFailed:
+    '一部のルールを判定できませんでした。時間をおいてやり直してください (発火したぶんは記録されています)。',
+  guardrailRuleHasIncidents:
+    '発火記録があるルールは削除できません (記録からルールを辿れなくなるため)。',
+  incidentAlreadyResolved: 'このインシデントは既に解決済みです。',
+  rateLimited: '要求が多すぎます。Retry-After 秒だけ待ってからやり直してください。',
+  budgetExceeded:
+    'このエージェントの予算 (当月) を超えました。予算を見直すか、翌月まで待ってから呼び出してください。',
   unsupportedModel:
     '料金表に無いモデルです。対応モデルを指定してください (計測できない呼び出しは中継しません)。',
   streamingNotSupported: 'ストリーミング (stream: true) には未対応です。',
@@ -168,6 +276,17 @@ export const API_MESSAGES = {
   evaluationSetEmpty: '評価ケースを 1 件以上指定してください。',
   evaluationSetTooLarge: `評価ケースは最大 ${EVALUATION_SET_MAX_CASES} 件までです。`,
   judgeNotConfigured: '採点用モデルの設定が正しくありません。',
+  // 監査ログの鍵が未設定・短すぎるとき。**何が足りないかは外へ出さない** (§9 の「内部詳細を漏らさない」)。
+  // 503 にするのは「設定が無いので今はできない」側の事情だから (上流未設定と同じ扱い)
+  auditNotConfigured: '監査ログの設定が正しくありません。',
+  // 連鎖の検証の fromSeq が 10 進の整数でない・1 未満のとき (422)
+  auditFromSeqInvalid: 'fromSeq は 1 以上の整数を指定してください。',
+  auditFromSeqBeyondEnd:
+    'fromSeq が監査ログの末尾を越えています (その連番以降に行がありません)。nextFromSeq を渡し直すか、省略して先頭から検証してください。',
+  // **連鎖が壊れていたときの文言は置いていない。** `GET /audit-logs/verify` は壊れていても
+  // 200 ＋ `{ ok: false, reason, brokenSeq }` を返す設計（壊れたことは隠さないが、
+  // 「検証できた」という操作そのものは成功しているのでエラーにしない）。文言を置くと
+  // 「壊れたらこのメッセージが返る」と読めてしまい、実装と食い違う
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;
 

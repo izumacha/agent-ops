@@ -87,3 +87,50 @@ export function resolveUsageWindow(
   // ここまで通れば期間として使える
   return { ok: true, window: { start: from, endExclusive, days } };
 }
+
+/**
+ * その時刻が属する **UTC の暦月**の半開区間を返す（予算の「当月」の定義）。
+ *
+ * **日境界と同じ理由で UTC に固定する。** 月境界をサーバのローカル時刻にすると、配備先の
+ * タイムゾーンが変わるだけで「当月いくら使ったか」が変わり、予算の判定が環境依存になる。
+ *
+ * **`setUTCMonth` の繰り上がりに頼らない。** 月初の 0 時から組み立てるので
+ * 「1 月 31 日 + 1 か月 = 3 月 3 日」のような日数のずれが起きない（`Date.UTC` に月 12 を
+ * 渡すと翌年 1 月になるのは仕様どおりの繰り上がりで、こちらは意図している）。
+ */
+export function utcMonthWindow(now: Date): { start: Date; endExclusive: Date } {
+  // その月の 1 日 0 時（UTC）
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  // 翌月の 1 日 0 時（UTC）。月に 12 を渡せば翌年 1 月になる
+  const endExclusive = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  // 半開区間（開始を含み、終了を含まない）
+  return { start, endExclusive };
+}
+
+/**
+ * 判定の基準時刻を決める。**「いま」と「判定の引き金になった行の時刻」の遅いほう**を返す。
+ *
+ * **これが無いと、DB の時計がアプリの時計より進んでいるときに引き金の行が窓から落ちる。**
+ * `UsageEvent.createdAt` / `EvaluationRun.createdAt` は DB の `now()` が入れる値で、集計窓の
+ * 終端はアプリの時計から組み立てる（`guardrailWindow` は基準時刻の 1 ミリ秒後を終端にする）。
+ * 2 つの時計が 1 ミリ秒以上ずれていると、書いたばかりの行が `createdAt < 終端` を満たさず、
+ * **しきい値を越えさせた当の支出が集計に入らない**。そのため発火せず、以降の呼び出しが
+ * 来なければエージェントは止まらないまま残る（受け入れ基準「発火から停止まで ≦ 3 秒」が
+ * 破れる fail-open。マネージドな PostgreSQL の NTP ドリフトで現実に起こりうる）。
+ *
+ * 遅いほうを採るので、**DB が進んでいる**向きでは引き金の行が必ず窓に入る。
+ *
+ * **逆向き（DB が遅れている）はこの関数では塞がらない。** 行の時刻は「いま」より前になるので
+ * 終端の側は問題ないが、**遅れが窓の長さを超えると窓の開始より前になって落ちる**（窓 1 分で
+ * 90 秒の遅れ 等）。そちらは窓の開始を引き金の行まで広げる側で塞ぐ
+ * （`guardrailWindow` の `includeFrom`。起点は `GuardrailTrigger.triggeredBy` で渡す）。
+ *
+ * @param recordedAt 引き金になった行の時刻（記録できなかった場合は null）
+ * @param now アプリの時計の「いま」
+ */
+export function evaluationBasisTime(recordedAt: Date | null, now: Date): Date {
+  // 記録できていなければアプリの時計をそのまま使う
+  if (recordedAt === null) return now;
+  // 遅いほうを基準にする（同じならどちらでも同じ値）
+  return recordedAt.getTime() > now.getTime() ? recordedAt : now;
+}

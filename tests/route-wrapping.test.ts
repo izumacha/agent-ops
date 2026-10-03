@@ -13,7 +13,14 @@ import { forEachNode, parseSourceFiles } from './lib/source-files';
 import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
-import { ROUTE_HANDLER_BRAND } from '@/lib/api/handler';
+import {
+  ROUTE_HANDLER_BRAND,
+  ROUTE_RATE_LIMIT_BRAND,
+  ROUTE_REQUIRED_ACTION_BRAND,
+  ROUTE_REQUIRED_ROLE_BRAND,
+} from '@/lib/api/handler';
+import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
+import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
 
 // App Router の入口 (この下にある route.ts はすべて配信される)
 const APP_DIR = join(process.cwd(), 'src', 'app');
@@ -43,6 +50,12 @@ const routeFiles = findRouteFiles(APP_DIR).map((full) => ({
 const spec = parse(readFileSync(join(process.cwd(), 'openapi', 'openapi.yaml'), 'utf8')) as {
   paths: Record<string, Record<string, unknown>>;
 };
+
+// src 全体の import グラフ。**モジュール評価時に 1 度だけ作る** —
+// `parseSourceFiles()` が src 配下の全 .ts/.tsx を TypeScript パーサで読むので、テストごとに
+// 作り直すとその走査が丸ごと二重になる（`reachesModule` が graph を引数で受ける形も
+// 「1 度作って使い回す」ことを前提にしている）
+const importGraph = sourceImportGraph();
 
 describe('Route Handler の結線', () => {
   // 走査が壊れて 0 件になったら落とす (fail-closed)
@@ -156,6 +169,156 @@ describe('Route Handler の結線', () => {
     }
     // 1 つも見ていなければ走査が壊れている
     expect(checked).toBeGreaterThan(0);
+  });
+
+  // **上流 LLM を呼ぶルートはレート制限を掛ける。**
+  //
+  // `rateLimit` は既定が「掛けない」なので、付け忘れは 429 ではなく**制限なし**に倒れる
+  // (handler.ts のコメントが認めている fail-open)。掛ける対象は「外部へ費用を発生させる経路」で、
+  // それは **import の連鎖から導ける** — 上流を実際に呼ぶのは `src/lib/proxy/upstream.ts` の
+  // 1 か所だけ (judge も同じ結線を共有する。ADR-0009) なので、そこへ到達するルートが対象。
+  //
+  // **手書きの一覧にしない** — 一覧だと、上流を呼ぶルートを新しく足した人が一覧への追記を
+  // 忘れたぶんだけ検出網が静かに狭まる (この repo が繰り返し避けている形)。実測でも、
+  // POST /evaluations は 1 要求で最大 400 回の課金対象の呼び出しを出すのに制限が無く、
+  // プロキシに置いた保護を「中継の代わりに評価を回す」だけで迂回できた。
+  //
+  // **判定は印 (ROUTE_RATE_LIMIT_BRAND) を実体から読む** — ソースの綴りを見る形は
+  // 設定を変数へ出す・展開する・別名で渡すといった書き方がすべて死角になる。
+  //
+  // **残る境界**: 粒度はモジュール単位なので、見るのは非 GET の export に限る
+  // (同じモジュールの GET は一覧の読み出しで上流を呼ばない)。上流を呼ぶ GET を足すと
+  // この網からは外れるので、そのときはここを広げること。
+  it('上流 LLM を呼ぶルートの非 GET はレート制限を掛けている', async () => {
+    // src 全体の import グラフ (モジュール評価時に 1 度だけ作ったもの)
+    const graph = importGraph;
+    // 上流を呼ぶモジュール (到達を調べる相手)
+    const upstream = join(SRC_DIR, 'lib', 'proxy', 'upstream.ts');
+    // グラフに乗っていなければ走査が壊れている (fail-closed)
+    expect(graph.has(upstream), '上流を呼ぶモジュールを走査できていない').toBe(true);
+    // 上流へ到達するルート
+    const costly = routeFiles.filter(({ full }) => reachesModule(graph, full, upstream));
+    // 1 本も無ければ導出が壊れている (fail-closed。黙って「対象ゼロ＝緑」にしない)
+    expect(costly.length, '上流へ到達するルートを 1 本も見つけられない').toBeGreaterThan(0);
+    // 実際に印を確かめた数
+    let checked = 0;
+    for (const { full, relativeToApp } of costly) {
+      // モジュールを読み込む (綴りではなく値を見る)
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // GET は読み出しなので対象外 (上の「残る境界」)
+        if (method === 'GET') continue;
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // レート制限の印を持つこと
+        checked += 1;
+        expect(
+          (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND] !== null,
+          `${relativeToApp} の ${method} は上流を呼ぶのにレート制限が無い`,
+        ).toBe(true);
+      }
+    }
+    // 1 つも見ていなければ走査が壊れている
+    expect(checked, 'レート制限を確かめた export が 0 件').toBeGreaterThan(0);
+  });
+
+  // **1 要求で何十回も上流へ出るルートは専用の小さい枠 (fanOut) で数える。**
+  //
+  // 回数だけを数える枠は、1 要求の重さが 2 桁違う経路には保護にならない — 中継と同じ
+  // 毎分 600 要求を許すと、評価の経路では上流呼び出し 24 万回ぶんを許すことになる
+  // (1 要求が最大 EVALUATION_SET_MAX_CASES 件 × 2 回)。
+  //
+  // **対象は import の連鎖から導く** — ケースを回して上流を呼ぶのは
+  // `src/lib/evaluation/runner.ts` の 1 か所なので、そこへ到達するルートが対象。
+  // 手書きの一覧だと、同じ形のルート (「まとめて回す」系) を足した人が追記を忘れたぶんだけ
+  // 網が静かに狭まる。**判定は枠の種類まで印から読む** — 真偽値だと fanOut を standard へ
+  // 落とす変更が見えない。
+  //
+  // **残る境界**: この網が導けるのは「ケースを回す経路」だけ。応答を返す前に外部の往復を
+  // 待つ経路 (`POST /guardrails/run`、枠は `outbound`) は連鎖から区別できない (通知のモジュールへ
+  // 到達するのは中継も同じで、あちらは待たずに投げる) ので、そちらは下の個別の検査が固定する。
+  it('ケースをまとめて回すルートは fanOut の枠で数えている', async () => {
+    // src 全体の import グラフ (上と同じインスタンス)
+    const graph = importGraph;
+    // ケースを回して上流を呼ぶモジュール
+    const runner = join(SRC_DIR, 'lib', 'evaluation', 'runner.ts');
+    // グラフに乗っていなければ走査が壊れている (fail-closed)
+    expect(graph.has(runner), '評価の実行モジュールを走査できていない').toBe(true);
+    // そこへ到達するルート
+    const fanOut = routeFiles.filter(({ full }) => reachesModule(graph, full, runner));
+    // 1 本も無ければ導出が壊れている (fail-closed)
+    expect(fanOut.length, 'ケースを回すルートを 1 本も見つけられない').toBeGreaterThan(0);
+    // 実際に印を確かめた数
+    let checked = 0;
+    for (const { full, relativeToApp } of fanOut) {
+      // モジュールを読み込む (綴りではなく値を見る)
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // GET は読み出しなので対象外 (一覧はケースを回さない)
+        if (method === 'GET') continue;
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // fanOut の枠であること
+        checked += 1;
+        expect(
+          (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND],
+          `${relativeToApp} の ${method} は 1 要求で何十回も上流へ出るのに fanOut の枠ではない`,
+        ).toBe(RATE_LIMIT_TIER.fanOut);
+      }
+    }
+    // 1 つも見ていなければ走査が壊れている
+    expect(checked, 'fanOut の枠を確かめた export が 0 件').toBeGreaterThan(0);
+  });
+
+  // **追加の枠を持つルートは、レート制限より前に認可する。**
+  //
+  // レート制限は認証の後・本体の前に掛かるので、`route()` の側で認可しないと**権限の無い
+  // 利用者がテナント全体の小さい枠を使い切れる** — view しか持たない利用者が
+  // `POST /evaluations` を 6 回投げると、どれも本体で 403 になるのに枠は消費され、同じテナントの
+  // operator / admin が窓のあいだ 429 になる。枠はベンダーへの課金を抑えるためのものなので、
+  // **上流へ 1 度も出ない要求で消費されるのは誤り**。
+  //
+  // **対象は印から導く** — 追加の枠を持つ種類（`EXTRA_FRAME_LIMIT` が上限を持つもの）を
+  // 1 つでも指定しているルートが対象なので、新しく重い枠を足した人が宣言を忘れたら落ちる
+  it('追加の枠を持つルートはレート制限より前に認可している', async () => {
+    // 確かめた数（0 件なら印の読み取りか走査が壊れている）
+    let checked = 0;
+    for (const { full, relativeToApp } of routeFiles) {
+      // モジュールを読み込む（綴りではなく値を見る）
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // 枠の種類を印から読む
+        const brands = exported as unknown as Record<symbol, unknown>;
+        const tier = brands[ROUTE_RATE_LIMIT_BRAND];
+        // 追加の枠を持たない種類（未指定・standard）は対象外
+        if (tier === null || tier === undefined || tier === RATE_LIMIT_TIER.standard) continue;
+        // **操作かロールのどちらかが宣言されていること。** admin 限定のルートは
+        // `requiredAction` では表せない（RBAC の許可表に「admin だけが持つ操作」が無く、
+        // `view` は 3 役割すべてが持つので viewer が枠を使い切れる）
+        checked += 1;
+        expect(
+          brands[ROUTE_REQUIRED_ACTION_BRAND] ?? brands[ROUTE_REQUIRED_ROLE_BRAND],
+          `${relativeToApp} の ${method} は追加の枠を持つのに requiredAction / requiredRole を宣言していない`,
+        ).not.toBeNull();
+      }
+    }
+    // 1 つも見ていなければ走査が壊れている（fail-closed。「対象ゼロ＝緑」にしない）
+    expect(checked, '追加の枠を持つ export が 0 件').toBeGreaterThan(0);
+  });
+
+  // 応答を返す前に通知の往復を待つ経路。連鎖からは中継と区別できないので個別に固定する
+  // (ここを standard へ落とすと、外部の応答時間を乗せた要求を毎分 600 回出せる)
+  it('通知の往復を待つ明示実行は outbound の枠で数えている', async () => {
+    // 明示実行のルート
+    const runRoute: Record<string, unknown> = await import('@/app/api/v1/guardrails/run/route');
+    // POST の印が outbound であること
+    const post = runRoute.POST as unknown as Record<symbol, unknown>;
+    expect(post[ROUTE_RATE_LIMIT_BRAND]).toBe(RATE_LIMIT_TIER.outbound);
   });
 
   // 契約に無いメソッドは、認可の網羅ガードの表にも載らないまま公開される

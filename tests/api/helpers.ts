@@ -2,6 +2,8 @@
 // Route Handler を HTTP を介さずに直接呼ぶ (本番と同じ認証・認可・検証の経路を通す)
 import { afterEach, beforeEach } from 'vitest';
 import { setReposForTesting } from '@/data';
+import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
+import { PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, ApiKeyRecord, UserRecord, UserTokenRecord } from '@/data';
 import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
@@ -10,6 +12,15 @@ import { issueSecret, issueUserToken, userTokenCreateInput } from '@/lib/tokens'
 
 // テストで使うプラットフォーム管理者トークン (32 文字以上)
 export const PLATFORM_TOKEN = 'test-platform-admin-token-0123456789abcdef';
+/**
+ * テストで使う監査ログの HMAC 鍵 (32 文字以上)。
+ *
+ * **API テスト全体で設定する。** 人の操作で状態を変えるルート (停止・復帰・インシデントの解決・
+ * ルールの登録と削除) は鍵が無いと 503 で**何も変えずに**断る (fail-closed) ので、設定しないと
+ * 「本番では通る操作」をテストから一度も通せない。鍵が無い側の挙動は、その経路を主題にした
+ * テストが `vi.stubEnv` で明示的に消して確かめる
+ */
+export const AUDIT_SECRET = 'test-audit-hmac-secret-0123456789abcdef';
 // seed するトークンの有効期間 (日)
 const SEED_TOKEN_TTL_DAYS = 30;
 
@@ -103,6 +114,42 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
 
 // setupSeed 前の環境変数 (teardownSeed で戻す)
 let platformTokenBefore: string | undefined;
+let auditSecretBefore: string | undefined;
+// 空にした設定の退避（キーごとに元の値を覚える）
+const notifyBefore = new Map<string, string | undefined>();
+
+/**
+ * テスト中に通知が**外へ出ない**ことを保証するため、通知の設定を空にする。
+ *
+ * **これが無いと開発機の環境変数次第でテストが本物の受け手へ POST する。**
+ * `notifyGuardrailIncident` の `env` は既定で `process.env` で、Route Handler は
+ * `evaluateGuardrails` に env を渡さない。シェルに `NOTIFY_WEBHOOK_URL`（https）と
+ * 32 文字以上の `NOTIFY_SIGNING_SECRET` を export した状態で `npm run test` を実行すると、
+ * ガードレールの発火を伴う API テストが署名付き JSON を実際に送る。
+ * `scripts/bench-proxy.ts` が子プロセスへ空値を明示的に渡しているのと同じ手当て（最小権限）。
+ *
+ * **宛先が空なら送信そのものが起きない**（`src/lib/notify/send.ts` が未設定を「送らない」
+ * 側へ倒す）ので、空にするだけで足りる。
+ */
+const NOTIFY_ENV_NAMES = [
+  'NOTIFY_WEBHOOK_URL',
+  'NOTIFY_MAIL_WEBHOOK_URL',
+  'NOTIFY_SIGNING_SECRET',
+] as const;
+
+/**
+ * **レート制限の上限も実行環境から切り離す。**
+ *
+ * `resetSharedRateLimiterForTesting()` を引数なしで呼ぶと `configuredRateLimit()` が
+ * `process.env.PROXY_RATE_LIMIT_PER_MINUTE` を読む。シェルや CI でこれが小さい値
+ * （`PROXY_RATE_LIMIT_PER_MINUTE=1` 等）になっていると、1 テストの中で中継や評価を 2 回以上
+ * 呼ぶテストが**一斉に 429 で落ちる** — 通知の宛先を空にしたのと同じ理由（テストの結果が
+ * 開発機の環境変数で変わってはいけない）。空にすると既定値（定数）が使われる。
+ */
+const RATE_LIMIT_ENV_NAMES = [PROXY_RATE_LIMIT_ENV] as const;
+
+// 上の 2 組を合わせた「setupSeed が空にする設定」
+const BLANKED_ENV_NAMES = [...NOTIFY_ENV_NAMES, ...RATE_LIMIT_ENV_NAMES] as const;
 
 // memory アダプタへ差し替え、テナント A / B を seed する (各テストの beforeEach で呼ぶ。afterEach で teardownSeed を対にする)
 function setupSeed(): Seed {
@@ -113,6 +160,21 @@ function setupSeed(): Seed {
   // プラットフォーム管理者トークンを設定する (元の値は後始末で戻す)
   platformTokenBefore = process.env.PLATFORM_ADMIN_TOKEN;
   process.env.PLATFORM_ADMIN_TOKEN = PLATFORM_TOKEN;
+  // 監査ログの鍵を設定する (無いと人の操作で状態を変えるルートが 503 になる。理由は AUDIT_SECRET)
+  auditSecretBefore = process.env.AUDIT_HMAC_SECRET;
+  process.env.AUDIT_HMAC_SECRET = AUDIT_SECRET;
+  // 通知とレート制限の設定を空にする (理由は各一覧のコメント)
+  for (const name of BLANKED_ENV_NAMES) {
+    notifyBefore.set(name, process.env[name]);
+    process.env[name] = '';
+  }
+  // **レート制限の表を作り直すのは、設定を空にした後。** 表はプロセスの寿命いっぱい残るので、
+  // 作り直さないと「前のテストが使った枠」が次のテストへ漏れ、同じファイルの後ろのテストだけが
+  // 429 になる（実行順に依存した赤になり、原因が分かりにくい）。**順序が逆だと上限を
+  // 開発機・CI の環境変数から読む** — `PROXY_RATE_LIMIT_PER_MINUTE=1` を設定した環境で
+  // 中継・評価・E2E の 6 件が 429 で落ちた（実測）。しかも値を見張るテストは
+  // 「テスト本体の中で空であること」しか見ないので、その状態でも緑のまま通る
+  resetSharedRateLimiterForTesting();
   // 2 テナント分を seed する
   return {
     store: repos.store,
@@ -129,6 +191,15 @@ function teardownSeed(): void {
   // 環境変数を元の値へ (元が未設定なら消す)
   if (platformTokenBefore === undefined) delete process.env.PLATFORM_ADMIN_TOKEN;
   else process.env.PLATFORM_ADMIN_TOKEN = platformTokenBefore;
+  if (auditSecretBefore === undefined) delete process.env.AUDIT_HMAC_SECRET;
+  else process.env.AUDIT_HMAC_SECRET = auditSecretBefore;
+  // 空にした設定を元へ戻す (元が未設定なら消す)
+  for (const name of BLANKED_ENV_NAMES) {
+    const before = notifyBefore.get(name);
+    if (before === undefined) delete process.env[name];
+    else process.env[name] = before;
+  }
+  notifyBefore.clear();
 }
 
 /**

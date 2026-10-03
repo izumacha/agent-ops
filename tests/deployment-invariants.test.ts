@@ -224,6 +224,55 @@ describe('.env.example', () => {
     // 引用符の有無・種類は本質でないのでどれも許す (安全な書き方を赤くしない)
     expect(example).toMatch(/^PLATFORM_ADMIN_TOKEN=(?:""|'')?\s*$/m);
   });
+
+  // **雛形にある設定は compose の app サービスへ素通しする。**
+  //
+  // 渡し忘れた設定は「アプリが読もうとしても未設定」として fail-closed に倒れるので、
+  // `docker compose up` の配備でだけ機能が丸ごと死ぬのに、lint もテストも CI も緑のまま通る
+  // (実測: `AUDIT_HMAC_SECRET` を渡していなかったため Docker 経路では発火の監査ログが
+  // 一度も書けず、/audit-logs/verify も常に 503 だった。上流 LLM のキーも同じ状態で、
+  // Docker で起動したアプリは中継も採点も一切できなかった)。
+  //
+  // **期待は `.env.example` から導く** — 一覧をここに書き写すと、設定を足した人が
+  // compose への追記を忘れてもこの検査が増えない。**例外は理由付きの表にだけ登録する**
+  // (この repo の他の除外表と同じエスケープハッチなので、**エントリが増える差分は理由の
+  // 妥当性をレビューで必ず確認する**)
+  const NOT_PASSED_TO_APP: Readonly<Record<string, string>> = {
+    DATABASE_URL:
+      'compose が db サービスを指す値を自分で与える (雛形の値は localhost 向けなので素通しすると壊れる)',
+  };
+
+  it('雛形にある設定を compose の app サービスへ素通ししている', () => {
+    // 雛形に現れる設定名 (`NAME=...` の形の行の先頭)
+    const names = [...example.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map((matched) => matched[1]);
+    // 1 件も読めなければ走査が壊れている (fail-closed)
+    expect(names.length, '雛形から設定名を 1 件も読めない').toBeGreaterThan(0);
+    // compose の app サービス (override も重ねた集合のうち名前が app のもの)。
+    // **収集は共有のヘルパーから呼び直す** — 上の describe のローカル変数を参照できないので、
+    // 同じ 1 か所 (collectComposeServices) を使って走査の仕方の写しを作らない
+    const appServices = collectComposeServices().filter(({ name }) => name === 'app');
+    // 1 つも無ければ走査が壊れている (fail-closed)
+    expect(appServices.length, 'compose に app サービスが無い').toBeGreaterThan(0);
+    // app が渡している設定名
+    const passed = new Set(
+      appServices.flatMap(({ service }) =>
+        environmentEntries(service.environment).map(([key]) => key),
+      ),
+    );
+    for (const name of names) {
+      // 理由を書いたものは素通ししなくてよい
+      if (name in NOT_PASSED_TO_APP) continue;
+      expect(
+        passed.has(name),
+        `docker-compose の app が ${name} を渡していない (Docker 配備でだけ未設定になる)`,
+      ).toBe(true);
+    }
+    // 除外表のキーが実在すること (古い登録が黙って残らないように) と、理由が空でないこと
+    for (const [name, why] of Object.entries(NOT_PASSED_TO_APP)) {
+      expect(names.includes(name), `${name} は雛形に無い (除外表が古い)`).toBe(true);
+      expect(why.trim().length, `${name} の除外に理由が無い`).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('.dockerignore', () => {
@@ -278,6 +327,7 @@ const NOT_DUPLICATED_IN_CI: Record<string, { kind: 'byOtherInvocation' | 'byCost
     },
     'npm run bench:proxy': { kind: 'byCost', why: '同上 (プロキシの追加遅延の計測)' },
     'npm run bench:evaluation': { kind: 'byCost', why: '同上 (採点の再現率の計測)' },
+    'npm run bench:guardrail': { kind: 'byCost', why: '同上 (発火から停止までの計測)' },
   };
 
 describe('CI ワークフロー', () => {

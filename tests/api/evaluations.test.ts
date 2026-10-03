@@ -19,9 +19,18 @@ import {
   EvaluationExclusionReason,
   EvaluationRunStatus,
   Provider,
+  RuleAction,
+  RuleKind,
 } from '@/domain/types';
-import { API_MESSAGES, EVALUATION_SET_MAX_CASES } from '@/lib/constants';
+import {
+  API_MESSAGES,
+  EVALUATION_SET_MAX_CASES,
+  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
+  GUARDRAIL_RULES_MAX_PER_TENANT,
+} from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
+import { AuditAction } from '@/domain/audit/action';
+import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -462,5 +471,274 @@ describe('評価の実行', () => {
       query: `setId=${other.id}`,
     });
     expect((miss.json as { items: unknown[] }).items).toHaveLength(0);
+  });
+});
+
+describe('評価の実行のレート制限', () => {
+  // 検査用の小さい上限（本番の既定まで叩くのは遅い）。確かめたいのは「上限に達したら断る」挙動
+  const TEST_LIMIT = 2;
+  // 窓は 1 分（境界そのものは tests/rate-limit.test.ts が決定的に固定している）
+  const TEST_WINDOW_MS = 60_000;
+
+  // 各テストの前に小さい上限で作り直す（seedEachTest も作り直すので、この順で上書きする）
+  beforeEach(() => {
+    resetSharedRateLimiterForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
+  });
+
+  it('権限の無い要求は枠を消費しない (403 が先に出る)', async () => {
+    // **これが要点** — レート制限は認証の後・本体の前に掛かるので、`route()` の側で認可しないと
+    // view しか持たない利用者が**テナント全体の枠**を使い切れる（どれも本体で 403 になるのに
+    // 枠は減り、同じテナントの operator が窓のあいだ 429 になる）。枠はベンダーへの課金を
+    // 抑えるためのものなので、上流へ 1 度も出ない要求で消費されるのは誤り
+    stubHealthyUpstream();
+    const set = await createSet();
+    // viewer で上限ぶん叩く（すべて 403）
+    for (let index = 0; index < TEST_LIMIT + 2; index += 1) {
+      const denied = await call(runEvaluation, {
+        token: seed.a.tokens.viewer,
+        body: { agentId: seed.a.agent.id, setId: set.id },
+      });
+      expect(denied.status).toBe(403);
+    }
+    // **枠は減っていない** — operator は上限ぶん通る
+    for (let index = 0; index < TEST_LIMIT; index += 1) {
+      const ok = await call(runEvaluation, {
+        token: seed.a.tokens.operator,
+        body: { agentId: seed.a.agent.id, setId: set.id },
+      });
+      expect(ok.status, JSON.stringify(ok.json)).toBe(201);
+    }
+  });
+
+  it('上限を超えた実行は 429 で断り、上流を呼ばない', async () => {
+    // **ここが制限を置いた目的** — 1 要求でケース数ぶんの課金対象の呼び出しが走るので、
+    // 中継だけを守っても「評価を回す」側から同じ費用を発生させられる（実測で制限が無かった）
+    stubHealthyUpstream();
+    const set = await createSet();
+    // 上限までは通る
+    for (let index = 0; index < TEST_LIMIT; index += 1) {
+      const ok = await call(runEvaluation, {
+        token: seed.a.tokens.operator,
+        body: { agentId: seed.a.agent.id, setId: set.id },
+      });
+      expect(ok.status, JSON.stringify(ok.json)).toBe(201);
+    }
+    // ここまでの上流呼び出しの回数を覚える
+    const callsBefore = (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls
+      .length;
+    // 次は断られる
+    const limited = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(limited.status).toBe(429);
+    // Retry-After は整数の秒数（RFC 9110 の delay-seconds）
+    expect(limited.headers.get('Retry-After')).toMatch(/^\d+$/);
+    // 文言は利用者向けの日本語
+    expect(limited.json).toMatchObject({ message: API_MESSAGES.rateLimited });
+    // **上流へは 1 度も出ていない**（先に実行してから断る実装では緑にならない）
+    expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(
+      callsBefore,
+    );
+  });
+});
+
+describe('評価の実行の予算の強制', () => {
+  // そのエージェントに予算を設定する（表を直接書き換える）
+  function setBudget(budgetMicroUsd: bigint | null): void {
+    // 既存の行を取り出す
+    const agent = seed.store.agents.get(seed.a.agent.id);
+    // 無ければテストとして落とす
+    if (!agent) throw new Error('エージェントの行が見つかりません');
+    // 予算だけを差し替える
+    seed.store.agents.set(agent.id, { ...agent, budgetMicroUsd });
+  }
+
+  // 当月の利用を 1 件記録する（createdAt は表の時計 = いまなので当月に入る）
+  async function spend(costMicroUsd: bigint): Promise<void> {
+    // 料金だけが意味を持つ 1 行
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: seed.a.agent.id,
+      provider: seed.a.agent.provider,
+      model: seed.a.agent.model,
+      inputTokens: 1,
+      outputTokens: 1,
+      costMicroUsd,
+      latencyMs: 1,
+      statusCode: 200,
+    });
+  }
+
+  it('予算に達したエージェントの評価は 403 で断り、上流を呼ばない', async () => {
+    // **ここが大事な点** — 中継では断られるのに評価では通ると、予算の強制を
+    // 「中継の代わりに評価を回す」だけで迂回できる（1 要求でケース数ぶんの課金になる）
+    stubHealthyUpstream();
+    const set = await createSet();
+    setBudget(1_000n);
+    await spend(1_000n);
+    // 上流呼び出しの回数を覚える
+    const callsBefore = (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls
+      .length;
+    // 403 で断られる（中継経路と同じ文言）
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status).toBe(403);
+    expect(result.json).toMatchObject({ message: API_MESSAGES.budgetExceeded });
+    // **上流へは 1 度も出ていない**（実行してから断る実装では緑にならない）
+    expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(
+      callsBefore,
+    );
+  });
+
+  it('予算に届いていなければ実行できる', async () => {
+    // 予算 1000 に対して 400 だけ使った状態
+    stubHealthyUpstream();
+    const set = await createSet();
+    setBudget(1_000n);
+    await spend(400n);
+    // まだ余っているので通る
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status, JSON.stringify(result.json)).toBe(201);
+  });
+
+  it('予算が未設定なら当月の集計を引かない', async () => {
+    // **設定していないエージェントの実行に 1 クエリ増やさない**（中継経路と同じ扱い）
+    stubHealthyUpstream();
+    const set = await createSet();
+    setBudget(null);
+    const windowTotals = vi.spyOn(seed.repos.usageEvents, 'windowTotals');
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status, JSON.stringify(result.json)).toBe(201);
+    expect(windowTotals).not.toHaveBeenCalled();
+  });
+});
+
+describe('評価実行の直後のガードレール判定', () => {
+  // judge が「依頼されたケースを低いスコアで返す」上流（品質ルールを発火させる）
+  function stubLowQualityUpstream(score: number): void {
+    // judge には低いスコアを、エージェントには応答を返す
+    stubUpstream((body) =>
+      isJudgeRequest(body)
+        ? new Response(
+            anthropicBody(
+              JSON.stringify({
+                results: requestedCaseIds(body).map((caseId) => ({
+                  caseId,
+                  accuracy: score,
+                  safety: score,
+                  deviation: 0,
+                })),
+              }),
+            ),
+            { status: 200 },
+          )
+        : new Response(anthropicBody('エージェントの応答'), { status: 200 }),
+    );
+  }
+
+  // 品質ルールを 1 件作る（発火したら停止する）
+  async function makeQualityRule(threshold: number) {
+    // そのエージェント向けのルール
+    const created = await seed.repos.guardrailRules.create(
+      {
+        tenantId: seed.a.id,
+        agentId: seed.a.agent.id,
+        kind: RuleKind.quality,
+        threshold,
+        windowMinutes: 60,
+        action: RuleAction.stop,
+      },
+      { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
+    );
+    // 作れていなければテストとして落とす
+    if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);
+  }
+
+  // 監査ログの鍵を設定する
+  beforeEach(() => {
+    vi.stubEnv('AUDIT_HMAC_SECRET', 'evaluations-test-audit-secret-0123');
+  });
+
+  it('品質が下回ったら実行の直後に発火してエージェントを停止する', async () => {
+    // **cron 間隔に依存せず、保存の直後に判定する**のが要点（UC-08）。
+    // しきい値 0.9 に対して 0.2 で採点させる
+    await makeQualityRule(0.9);
+    stubLowQualityUpstream(0.2);
+    const set = await createSet();
+    // 実行する
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    // 実行そのものは成功して保存されている（201）
+    expect(result.status, JSON.stringify(result.json)).toBe(201);
+    // **応答を返した時点でもう停止している**
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    // インシデントが 1 件できている
+    expect(seed.store.incidents.size).toBe(1);
+  });
+
+  it('品質がしきい値を上回っていれば発火しない', async () => {
+    // しきい値 0.5 に対して満点で採点させる
+    await makeQualityRule(0.5);
+    stubHealthyUpstream();
+    const set = await createSet();
+    // 実行する
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    expect(result.status).toBe(201);
+    // 停止もインシデントも起きない
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+    expect(seed.store.incidents.size).toBe(0);
+  });
+
+  it('判定が失敗しても保存済みの実行を 500 で隠さない', async () => {
+    // **実行はすでに保存されている**ので、判定の失敗で 500 にすると
+    // 「保存された実行が利用者からは失敗に見える」ことになる
+    await makeQualityRule(0.9);
+    stubLowQualityUpstream(0.2);
+    const set = await createSet();
+    // ルールの取得が必ず失敗するようにする
+    vi.spyOn(seed.repos.guardrailRules, 'findActiveRules').mockRejectedValue(
+      new Error('DB が落ちている'),
+    );
+    // 実行する
+    const result = await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    // 201 のまま
+    expect(result.status).toBe(201);
+    // 判定できなかったので停止もしていない
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+  });
+
+  it('発火は監査ログに「誰が起点か」付きで残る', async () => {
+    // 自動発火だが起点は人の操作なので、評価を走らせたユーザーを操作主体として残す
+    await makeQualityRule(0.9);
+    stubLowQualityUpstream(0.2);
+    const set = await createSet();
+    await call(runEvaluation, {
+      token: seed.a.tokens.operator,
+      body: { agentId: seed.a.agent.id, setId: set.id },
+    });
+    // 監査ログが 1 行あり、operator が操作主体として入っている
+    const rows = [...seed.store.auditLogs.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: AuditAction.guardrail_fired,
+      actorId: seed.a.users.operator.id,
+    });
   });
 });

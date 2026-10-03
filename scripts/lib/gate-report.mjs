@@ -28,24 +28,33 @@ const IDENTIFIER_CHARACTER = /[A-Za-z0-9._-]/;
  * ように一方が他方の接頭辞になる綴りがあり、部分一致だけだと `gpt-5` のテストが 1 件も
  * 無くても `gpt-5-mini` のテストが代わりに当たってしまう（実測で、ゲートは緑のまま
  * `gpt-5` の「誤差 0」を一度も確かめずに通った。`gpt-4.1` と `gpt-4.1-mini` も同じ）。
- * そこで needle の直後が「識別子を続けられない文字」（空白・文末など）であることまで求める。
+ * そこで needle の**前後**が「識別子を続けられない文字」（空白・文末など）であることまで求める。
+ *
+ * **後ろだけでは足りない。** 一方が他方の**接尾辞**になる綴りも実在する — 連鎖の壊れ方には
+ * `hash_mismatch` と `prev_hash_mismatch` があり、後ろだけを見る版では `hash_mismatch` の
+ * テストが 1 件も無くても `prev_hash_mismatch` のテストが代わりに当たった（直後が空白なので
+ * 境界を満たしてしまう）。接頭辞側と鏡像の穴なので、同じ 1 か所で両側を見る。
  * @param {string} name テストのフルネーム
  * @param {string} needle 期待する項目の名前
  * @returns {boolean} 項目として含んでいれば true
  */
 function namesCase(name, needle) {
-  // 出現位置をすべて見る（後ろの出現で境界を満たすことがある）
+  // 出現位置をすべて見る（別の出現で境界を満たすことがある）
   for (let at = name.indexOf(needle); at >= 0; at = name.indexOf(needle, at + 1)) {
+    // needle の直前の 1 文字（先頭なら undefined）
+    const previous = name[at - 1];
     // needle の直後の 1 文字（文末なら undefined）
     const next = name[at + needle.length];
-    // 続きが無いか、識別子を続けられない文字なら「項目として」含んでいる
-    if (next === undefined || !IDENTIFIER_CHARACTER.test(next)) return true;
+    // 前後どちらも「識別子の続き」でなければ、その項目を名指ししている
+    const startsItem = previous === undefined || !IDENTIFIER_CHARACTER.test(previous);
+    const endsItem = next === undefined || !IDENTIFIER_CHARACTER.test(next);
+    if (startsItem && endsItem) return true;
   }
   // どの出現も別の項目の一部だった
   return false;
 }
 
-function missingPassedCases(report, expected, needleOf, labelOf) {
+function missingPassedCases(report, expected, needlesOf, labelOf) {
   // 全テストの (フルネーム, 結果) を平坦化する
   const results = (report.testResults ?? []).flatMap((file) =>
     (file.assertionResults ?? []).map((test) => ({ name: test.fullName, status: test.status })),
@@ -54,12 +63,17 @@ function missingPassedCases(report, expected, needleOf, labelOf) {
   const missing = [];
   // 期待する項目をすべて見る
   for (const item of expected) {
-    // その項目に対応するテスト名の一部
-    const needle = needleOf(item);
-    // 名前にそれを含む pass したテストがあるか (**部分一致では終わらせない**。下記)
+    // その項目に対応するテスト名の手がかり (**複数あれば全部を含むことを求める**)。
+    // 1 本しか渡せない形だと、名前の中で離れている 2 つの手がかり — 改ざん検知の
+    // 「接頭辞」と「壊れ方の綴り」のように — をまとめて要求できず、どちらか片方だけを
+    // 見ることになる (接頭辞だけなら壊れ方の網羅が消え、綴りだけなら別の無関係なテストが当たる)
+    const needles = needlesOf(item);
+    // 名前にそれらすべてを含む pass したテストがあるか (**部分一致では終わらせない**。下記)
     const hit = results.find(
       (test) =>
-        typeof test.name === 'string' && namesCase(test.name, needle) && test.status === 'passed',
+        typeof test.name === 'string' &&
+        needles.every((needle) => namesCase(test.name, needle)) &&
+        test.status === 'passed',
     );
     // 無ければ不足として記録する
     if (!hit) missing.push(labelOf(item));
@@ -81,7 +95,7 @@ export function missingMatrixCases(report, { roles, actions, matrixPrefix }) {
   return missingPassedCases(
     report,
     pairs,
-    ({ role, action }) => `${matrixPrefix}${role} × ${action}`,
+    ({ role, action }) => [`${matrixPrefix}${role} × ${action}`],
     ({ role, action }) => `${role} × ${action}`,
   );
 }
@@ -99,7 +113,7 @@ export function missingPriceCases(report, { models, pricePrefix }) {
   return missingPassedCases(
     report,
     models,
-    ({ provider, model }) => `${pricePrefix}${provider} ${model}`,
+    ({ provider, model }) => [`${pricePrefix}${provider} ${model}`],
     ({ provider, model }) => `${provider} ${model}`,
   );
 }
@@ -195,7 +209,7 @@ export function missingExclusionCases(report, { reasons, exclusionPrefix }) {
   return missingPassedCases(
     report,
     reasons,
-    (reason) => `${exclusionPrefix}${reason}`,
+    (reason) => [`${exclusionPrefix}${reason}`],
     (reason) => reason,
   );
 }
@@ -330,6 +344,123 @@ export function benchOutputProblems({ label, status, stdout, valueField, limitFi
     failures.push(
       `ベンチ ${label} の ${limitField} が受け入れ基準と違います (${JSON.stringify(result[limitField])} ≠ ${limit})`,
     );
+  // 判定結果
+  return failures;
+}
+
+/**
+ * ルールの種別それぞれについて、pass した「発火: <種別>」のテストが見つからないものを返す。
+ * **期待するテスト名は種別の一覧 (正本の enum) から導く** — 一覧をここに書き写すと、種別を
+ * 足した人がテストを書き忘れてもゲートは緑のままになる (料金表・除外理由と同じ形)。
+ * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
+ * @param {{ kinds: string[], firingPrefix: string }} firing 種別の一覧とテスト名の接頭辞
+ * @returns {string[]} 見つからなかった種別の配列 (すべて揃っていれば空)
+ */
+export function missingFiringCases(report, { kinds, firingPrefix }) {
+  // 「発火: <種別>」を含む pass したテストがあるか
+  return missingPassedCases(
+    report,
+    kinds,
+    (kind) => [`${firingPrefix}${kind}`],
+    (kind) => kind,
+  );
+}
+
+/**
+ * 連鎖の壊れ方それぞれについて、pass した改ざん検知のテストが見つからないものを返す。
+ *
+ * **手がかりを 2 つ渡す**のがここだけの違い: テスト名は
+ * 「改ざん検知: 値を書き換えた行は hash_mismatch で落ちる」のように、接頭辞と壊れ方の綴りが
+ * 名前の中で離れている。接頭辞だけを見ると壊れ方の網羅が消え、綴りだけを見ると改ざんと
+ * 関係のないテスト (壊れ方の名前に触れるだけのもの) が代わりに当たる。
+ * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
+ * @param {{ breaks: string[], tamperPrefix: string }} tamper 壊れ方の一覧とテスト名の接頭辞
+ * @returns {string[]} 見つからなかった壊れ方の配列 (すべて揃っていれば空)
+ */
+export function missingTamperCases(report, { breaks, tamperPrefix }) {
+  // 「改ざん検知: 」と壊れ方の綴りの**両方**を含む pass したテストがあるか
+  return missingPassedCases(
+    report,
+    breaks,
+    (reason) => [tamperPrefix, reason],
+    (reason) => reason,
+  );
+}
+
+/**
+ * Step4 の受け入れ基準のうち、テストレポートから判定できるぶんを見る。
+ * Step3 までの基準は**引き継ぐ** — ゲートは常に最新 Step のものだけを回すので、
+ * ここで引き継がないと前の Step の基準が誰にも見られなくなる。
+ * 発火から停止までの時間はテストではなくベンチ (scripts/bench-guardrail.ts) が測るので扱わない。
+ * @param {object} input 判定材料 (Step3 のものに種別・壊れ方・E2E のテスト名を足したもの)
+ * @param {number} input.testStatus `npm run test` の終了コード
+ * @param {object} input.report vitest の JSON レポート
+ * @param {number} input.requiredPassedTests pass したテストの下限
+ * @param {string[]} input.roles 役割の一覧
+ * @param {string[]} input.actions 操作の一覧
+ * @param {string} input.matrixPrefix RBAC 行列テストの名前の接頭辞
+ * @param {{ provider: string, model: string }[]} input.models 料金表のモデル一覧
+ * @param {string} input.pricePrefix 料金テストの名前の接頭辞
+ * @param {string[]} input.reasons 除外理由の一覧
+ * @param {string} input.exclusionPrefix 除外テストの名前の接頭辞
+ * @param {string[]} input.kinds ルールの種別の一覧 (正本の enum から導く)
+ * @param {string} input.firingPrefix 発火テストの名前の接頭辞
+ * @param {string[]} input.breaks 連鎖の壊れ方の一覧 (正本の定数から導く)
+ * @param {string} input.tamperPrefix 改ざん検知テストの名前の接頭辞
+ * @param {string} input.e2eTestName E2E テストの名前
+ * @returns {string[]} 失敗の理由 (基準を満たしていれば空)
+ */
+export function evaluateStep4Report({
+  testStatus,
+  report,
+  requiredPassedTests,
+  roles,
+  actions,
+  matrixPrefix,
+  models,
+  pricePrefix,
+  reasons,
+  exclusionPrefix,
+  kinds,
+  firingPrefix,
+  breaks,
+  tamperPrefix,
+  e2eTestName,
+}) {
+  // Step3 までの基準をそのまま引き継ぐ
+  const failures = evaluateStep3Report({
+    testStatus,
+    report,
+    requiredPassedTests,
+    roles,
+    actions,
+    matrixPrefix,
+    models,
+    pricePrefix,
+    reasons,
+    exclusionPrefix,
+  });
+  // 種別を 1 件も読めなければ、照合が空振りしている (fail-closed)
+  if (kinds.length === 0) failures.push('ルールの種別を 1 件も読めません');
+  // 全種類の種別に、pass した発火テストがあること (受け入れ基準 1 の「発火」側)
+  const missingFiring = missingFiringCases(report, { kinds, firingPrefix });
+  if (missingFiring.length > 0)
+    failures.push(`発火のテストが不足/失敗: ${missingFiring.join(', ')}`);
+  // 壊れ方を 1 件も読めなければ、照合が空振りしている (fail-closed)
+  if (breaks.length === 0) failures.push('連鎖の壊れ方を 1 件も読めません');
+  // 全種類の壊れ方に、pass した改ざん検知テストがあること (受け入れ基準 2)
+  const missingTamper = missingTamperCases(report, { breaks, tamperPrefix });
+  if (missingTamper.length > 0)
+    failures.push(`改ざん検知のテストが不足/失敗: ${missingTamper.join(', ')}`);
+  // E2E が pass していること (受け入れ基準 3)。**名前を 1 本だけ探す** —
+  // 「登録→実行→超過→停止→復帰」は 1 本のテストで順に通す約束なので、照合も 1 本で足りる
+  const missingE2e = missingPassedCases(
+    report,
+    [e2eTestName],
+    (name) => [name],
+    (name) => name,
+  );
+  if (missingE2e.length > 0) failures.push(`E2E のテストが不足/失敗: ${missingE2e.join(', ')}`);
   // 判定結果
   return failures;
 }

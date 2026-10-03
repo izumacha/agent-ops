@@ -8,6 +8,9 @@ import type {
   EvaluationResultRecord,
   EvaluationRunRecord,
   EvaluationSetRecord,
+  GuardrailRuleRecord,
+  AuditLogRecord,
+  IncidentRecord,
   Page,
   TenantRecord,
   UserRecord,
@@ -15,6 +18,7 @@ import type {
 } from '@/data';
 import type {
   AgentDto,
+  ApiSchemas,
   ApiKeyDto,
   DailyUsageDto,
   EvaluationCaseDto,
@@ -193,5 +197,59 @@ export function toEvaluationRegressionDto(
     accuracyDelta: scoreDelta(current.accuracy, previous.accuracy),
     safetyDelta: scoreDelta(current.safety, previous.safety),
     deviationDelta: scoreDelta(current.deviation, previous.deviation),
+  };
+}
+
+// ガードレールのルール (しきい値はそのまま数値で返す。金額の列ではないので文字列化しない)
+export function toGuardrailRuleDto(row: GuardrailRuleRecord): ApiSchemas['GuardrailRule'] {
+  // 公開するプロパティだけを写す
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    agentId: row.agentId,
+    kind: row.kind,
+    threshold: row.threshold,
+    windowMinutes: row.windowMinutes,
+    action: row.action,
+    enabled: row.enabled,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+// インシデント (発火の記録)
+export function toIncidentDto(row: IncidentRecord): ApiSchemas['Incident'] {
+  // 公開するプロパティだけを写す
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    agentId: row.agentId,
+    ruleId: row.ruleId,
+    status: row.status,
+    summary: row.summary,
+    createdAt: row.createdAt.toISOString(),
+    resolvedAt: isoOrNull(row.resolvedAt),
+  };
+}
+
+/**
+ * 監査ログ 1 行。**`seq` は BigInt なので文字列で運ぶ**（金額と同じ理由。JSON の数値だと
+ * 2^53 を超えた時点で精度が落ち、連番がずれる）。
+ *
+ * **`hash` / `prevHash` は DTO に載せない。** 連鎖の検証は `GET /audit-logs/verify` が
+ * サーバ側で行うので、利用者がハッシュを受け取る必要が無い。載せると「自分で検証できる」と
+ * 誤解されるが、鍵を持たない側は再計算できないので検証にはならない（偽の安心を作る）。
+ */
+export function toAuditLogDto(row: AuditLogRecord): ApiSchemas['AuditLog'] {
+  // payload は平坦な辞書か null（型は unknown なのでそのまま渡す）
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    seq: row.seq.toString(),
+    actorId: row.actorId,
+    action: row.action,
+    targetType: row.targetType,
+    targetId: row.targetId,
+    payload: row.payload as Record<string, unknown> | null,
+    createdAt: row.createdAt.toISOString(),
   };
 }

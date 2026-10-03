@@ -46,6 +46,30 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/agent_ops
       # プラットフォーム管理者トークン (.env から渡す。空なら未設定 = テナント作成は誰もできない)
       PLATFORM_ADMIN_TOKEN: ${PLATFORM_ADMIN_TOKEN:-}
+      # **以下は `.env.example` にある設定を 1 つずつ素通しする。** 渡し忘れた設定は
+      # `docker compose up` の配備でだけ「未設定」として fail-closed に倒れ、しかも
+      # lint もテストも緑のまま通る (実測: AUDIT_HMAC_SECRET を渡していなかったため、
+      # Docker 経路では発火の監査ログが常に書けず /audit-logs/verify も常に 503 だった)。
+      # 渡し忘れは tests/deployment-invariants.test.ts が `.env.example` から導いて落とす。
+      # 既定値はすべて空にする (リポジトリに書かれた資格情報で動く配備を作らない)
+      #
+      # 上流 LLM の接続先と資格情報 (プロキシと評価の judge が使う)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      # 上流へ費用を発生させる経路の 1 分あたりの上限 (空なら定数の既定値)
+      PROXY_RATE_LIMIT_PER_MINUTE: ${PROXY_RATE_LIMIT_PER_MINUTE:-}
+      # 採点に使う judge の provider / model (未設定なら定数の既定値)
+      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-}
+      JUDGE_MODEL: ${JUDGE_MODEL:-}
+      # 監査ログの HMAC 鍵 (Step4)。鍵が無いと `auditHmacSecret()` は 503 を投げ、
+      # 発火の記録は握られてログだけに残り、/audit-logs/verify は常に 503 になる
+      AUDIT_HMAC_SECRET: ${AUDIT_HMAC_SECRET:-}
+      # ガードレールの通知先と署名鍵 (Step4)。空なら通知を送らず記録と停止だけを行う
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      NOTIFY_MAIL_WEBHOOK_URL: ${NOTIFY_MAIL_WEBHOOK_URL:-}
+      NOTIFY_SIGNING_SECRET: ${NOTIFY_SIGNING_SECRET:-}
     # db のヘルスチェックが green になってから起動する
     depends_on:
       db:

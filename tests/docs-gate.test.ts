@@ -26,6 +26,8 @@ import {
   EVALUATION_AGREEMENT_MIN_PERCENT,
   EVALUATION_BENCH_CASE_COUNT,
 } from '../scripts/lib/step3-criteria.mjs';
+// Step4 のベンチのしきい値 (同じくロードマップの散文と突き合わせる)
+import { GUARDRAIL_STOP_MAX_MS } from '../scripts/lib/step4-criteria.mjs';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -191,6 +193,19 @@ describe('Step0 の設計成果物', () => {
     // 再現率の下限 (散文は「再現率 ≧ 90%」)
     expect(stepRow, '再現率の下限がずれている').toMatch(
       new RegExp(`(?<![0-9])${EVALUATION_AGREEMENT_MIN_PERCENT}%`),
+    );
+  });
+
+  // Step4 の受け入れ基準のうち、ベンチが測る 1 つ (発火から停止まで) を散文と突き合わせる。
+  // Step2 / Step3 と同じ理由 — 値はベンチとロードマップの 2 か所に現れるので、
+  // 「ベンチのしきい値だけを緩めて緑にする」変更をここで落とす
+  it('Step4 のベンチのしきい値がロードマップと一致する', () => {
+    // ロードマップの Step4 の行
+    const stepRow = roadmapStepRow(4);
+    // 発火から停止までの上限 (散文は「≦ 3 秒」。定数はミリ秒なので秒へ直す。
+    // 数字の途中への一致は許さない — 「30 秒」へ緩める差分を「3 秒」が拾わないようにする)
+    expect(stepRow, '発火から停止までの上限がずれている').toMatch(
+      new RegExp(`(?<![0-9])${GUARDRAIL_STOP_MAX_MS / 1_000} 秒`),
     );
   });
 

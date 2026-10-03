@@ -5,9 +5,12 @@ import type {
   AgentStatus,
   EvaluationExclusionReason,
   EvaluationRunStatus,
+  IncidentStatus,
   Plan,
   Provider,
   Role,
+  RuleAction,
+  RuleKind,
 } from '@/domain/types';
 
 // カーソルが指す位置 (createdAt, id)。符号化・復号の規則は src/data/page.ts
@@ -168,4 +171,59 @@ export interface EvaluationResultRecord {
   safety: number | null;
   deviation: number | null;
   excludedReason: EvaluationExclusionReason | null;
+}
+
+// ガードレールのルール (しきい値と発火時の動作。Step4)
+export interface GuardrailRuleRecord {
+  id: string;
+  tenantId: string;
+  // 対象エージェント (null ならテナント全体)
+  agentId: string | null;
+  // 監視する指標
+  kind: RuleKind;
+  // しきい値 (単位は kind により異なる。cost はマイクロ USD、他は 0〜1 の比率)
+  threshold: number;
+  // 集計窓 (分)
+  windowMinutes: number;
+  // 発火時の動作
+  action: RuleAction;
+  // 有効フラグ (無効化は削除ではなくこれを false にする)
+  enabled: boolean;
+  createdAt: Date;
+}
+
+// インシデント (ルール発火の記録。Step4)
+export interface IncidentRecord {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  ruleId: string;
+  status: IncidentStatus;
+  // 発火理由の要約 (通知本文にも使う。機微情報は入れない)
+  summary: string;
+  // 発火日時 (= 行の作成日時)。**名前を createdAt にそろえる**のは、一覧のカーソル
+  // (src/data/page.ts) が「(createdAt, id) の組」を位置として符号化する唯一の規則だから
+  createdAt: Date;
+  resolvedAt: Date | null;
+}
+
+// 監査ログ (追記専用＋ハッシュ連鎖。Step4)。**payload は `unknown`** —
+// DB の列は `Json?` で、形の保証はドメイン側の `isAuditPayload` が実行時に行う
+// (型アサーションで「平坦な辞書である」と言い切ると、入れ子が混ざった行で検証が不定に揺れる)
+export interface AuditLogRecord {
+  id: string;
+  tenantId: string;
+  // 操作したユーザー (システム操作なら null)
+  actorId: string | null;
+  action: string;
+  targetType: string;
+  targetId: string;
+  payload: unknown;
+  createdAt: Date;
+  // テナントごとの連番 (1 始まり。連鎖の順序はこれだけが決める)
+  seq: bigint;
+  // 直前の行のハッシュ (テナントの最初の行だけ null)
+  prevHash: string | null;
+  // この行のハッシュ (HMAC-SHA256)
+  hash: string;
 }

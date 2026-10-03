@@ -3,7 +3,7 @@
 //   1. Step0 の項目 (gen / db:generate / lint / format:check / typecheck) が通る
 //   2. Step1 の基準を引き継ぐ: テスト 60 件以上 pass (失敗 0) と RBAC 行列 3 × 3
 //   3. 料金計算のテストが**料金表の全モデル分**あり pass (受け入れ基準「ベンダー公表単価と誤差 0」)
-//   4. `npm audit --audit-level=high` が high 0
+//   4. `npm audit --audit-level=high --omit=dev` が high 0 (本番依存のみ。理由は ADR-0004)
 //   5. 本番ビルドが通る (ベンチがその成果物を使う)
 //   6. ベンチ: 1 万件投入で集計 ≦ 1 秒 / プロキシの追加遅延 ≦ 50ms
 //
@@ -132,7 +132,7 @@ console.log(
 
 // 4. npm audit で high 以上が 0 件であること
 banner('npm audit (high 0)');
-if (runNpm(['audit', '--audit-level=high']) !== 0) {
+if (runNpm(['audit', '--audit-level=high', '--omit=dev']) !== 0) {
   console.error('[gate:step2] 失敗: npm audit で high 以上の脆弱性があります');
   process.exit(1);
 }

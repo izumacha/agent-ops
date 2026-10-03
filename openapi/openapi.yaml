@@ -28,6 +28,12 @@ tags:
     description: 利用量・コストの集計 (Step2)
   - name: evaluations
     description: 品質評価 (LLM-as-judge による採点と回帰比較。Step3)
+  - name: guardrails
+    description: ガードレールのルールと明示実行 (しきい値超過の検知と自動停止。Step4)
+  - name: incidents
+    description: ガードレールの発火記録と解決 (Step4)
+  - name: audit-logs
+    description: 監査ログの閲覧とハッシュ連鎖の検証 (Step4)
 security:
   - bearerAuth: []
 paths:
@@ -498,6 +504,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /agents/{agentId}/resume:
@@ -520,6 +528,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /api-keys:
@@ -879,6 +889,8 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '503':
           description: 採点用モデルの設定が正しくない (中継できない)
           content:
@@ -909,6 +921,320 @@ paths:
           $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /guardrails:
+    get:
+      tags: [guardrails]
+      operationId: listGuardrailRules
+      summary: ガードレールのルール一覧 (view 権限)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRuleList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [guardrails]
+      operationId: createGuardrailRule
+      summary: ガードレールのルール登録 (admin ロール限定)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailRuleCreate'
+      responses:
+        '201':
+          description: 登録した
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRule'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+  /guardrails/run:
+    post:
+      tags: [guardrails]
+      operationId: runGuardrails
+      summary: |
+        ガードレールの明示実行 (stop 権限)。cron から定期的に、または運用者が任意のタイミングで
+        全種別を判定する。通常は中継と評価実行の直後に自動で走るので、この経路は取りこぼしの
+        保険と運用の確認に使う
+
+        **1 本でも判定できなかったルールがあれば 500。** 判定できなかったことを 200 で隠すと
+        「何も超過していない」と見分けが付かず、運用者は上限内だと読む (発火して停止したぶんは
+        記録に残っているので、そのまま再実行してよい)。evaluated は判定しきった件数
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailRunRequest'
+      responses:
+        '200':
+          description: 判定した
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRunResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+  /guardrails/{ruleId}:
+    parameters:
+      - $ref: '#/components/parameters/RuleId'
+    patch:
+      tags: [guardrails]
+      operationId: updateGuardrailRule
+      summary: |
+        ガードレールのルールの有効・無効を切り替える (admin ロール限定)。
+
+        **発火記録 (インシデント) を持つルールは削除できない**ので、設定を誤ったルールを止める
+        手段はこれだけ。無効にしたルールは判定の対象から外れ (findActiveRules が enabled を見る)、
+        テナントのルール数上限にも数えない (数えると、発火済みのルールがたまったテナントが
+        二度とルールを作れなくなる)。しきい値や種別は変更できない — **判定の条件を書き換えると、
+        過去のインシデントが「どの条件で発火したか」を指さなくなる**ので、条件を変えるときは
+        無効にして新しいルールを作る。
+
+        **有効へ戻すときは有効なルールの上限を数え直す (上限に達していれば 409)。** 数えないと
+        「上限まで作る → 全部無効化する → また上限まで作る → 最初の分を有効へ戻す」で有効な
+        ルールが上限を超え、中継 1 回ごとの集計がその倍数まで重くなる
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailRuleUpdate'
+      responses:
+        '200':
+          description: 切り替えた (冪等。同じ値を 2 度送っても 200)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      tags: [guardrails]
+      operationId: deleteGuardrailRule
+      summary: |
+        ガードレールのルール削除 (admin ロール限定)。発火記録 (インシデント) を持つルールは
+        削除できない (409) — 記録からルールを辿れなくなると、何がなぜ止めたのかが読めなくなる
+      responses:
+        '204':
+          description: 削除した
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /incidents:
+    get:
+      tags: [incidents]
+      operationId: listIncidents
+      summary: インシデント一覧 (view 権限)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: agentId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/IncidentStatus'
+      responses:
+        '200':
+          description: 一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /incidents/{incidentId}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/IncidentId'
+    post:
+      tags: [incidents]
+      operationId: resolveIncident
+      summary: |
+        インシデントを解決済みにする (admin ロール限定)。**エージェントの復帰は別操作**
+        (POST /agents/{agentId}/resume) — 「原因に対処した」と「また動かしてよい」は別の判断で、
+        まとめると片方だけ行いたい運用ができなくなる。既に解決済みなら 409
+      responses:
+        '200':
+          description: 解決後
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Incident'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /audit-logs:
+    get:
+      tags: [audit-logs]
+      operationId: listAuditLogs
+      summary: 監査ログ一覧 (view 権限。追記専用なので更新・削除の操作は無い)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一覧
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /audit-logs/verify:
+    get:
+      tags: [audit-logs]
+      operationId: verifyAuditLogs
+      summary: |
+        監査ログのハッシュ連鎖を検証する (admin ロール限定)。テナントの行を連番順に読み、
+        記録されたハッシュを鍵付きで再計算して突き合わせる。壊れていれば**最初に壊れた連番と
+        その理由**を返す。鍵 (AUDIT_HMAC_SECRET) が未設定・短すぎるときは 503。
+
+        1 回に読む件数には上限 (src/lib/constants.ts の AUDIT_CHAIN_VERIFY_MAX_ROWS) があり、
+        続きがあるときは reachedLimit: true と nextFromSeq を返す。**その値を fromSeq に渡して
+        続きを検証する** — 渡さないと毎回最古の区間だけを検証することになり、それ以降の行は
+        一度も確かめられない
+
+        **この API でいちばん重い読み取り**（1 回で最大 10,000 行を読み、その件数ぶん HMAC を
+        計算し直す = 一覧の上限の 50 倍）なので、テナントあたりの小さい枠が掛かる (超過は 429)
+      parameters:
+        - name: fromSeq
+          in: query
+          required: false
+          description: |
+            読み始める行の連番 (1 以上の整数。既定は先頭)。前の区間の応答の nextFromSeq を渡す。
+            **壊れているとき (ok: false) は nextFromSeq を返さない** — 壊れた位置から区間の
+            終わりまでは検証できていないので、カーソルを追うと その範囲が永久に飛ばされる。
+            片付けてから brokenSeq の続きを自分で指す。
+
+            **区間の継ぎ目も検証される** (1 つ前の行のハッシュを錨にして、最初の行の
+            prevHash と突き合わせる) ので、区間に分けても連鎖の強さは落ちない。
+
+            **末尾を越えた連番 (その連番以降に行が無い) は 422。** 0 件を検証して
+            「ok: true / verified: 0」を返すと、古いカーソルを握った監視が「連鎖は健全」と
+            報告し続ける (このパラメータが防ぐはずだった fail-open そのもの)。
+            行が 1 件も無いテナントは 200 (検証すべきものが無い)
+          schema:
+            type: string
+            pattern: '^[0-9]+$'
+      responses:
+        '200':
+          description: 検証した (壊れていても 200。壊れているかは本文の ok で示す)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditChainVerification'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 components:
@@ -973,6 +1299,18 @@ components:
         type: string
     RunId:
       name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+    RuleId:
+      name: ruleId
+      in: path
+      required: true
+      schema:
+        type: string
+    IncidentId:
+      name: incidentId
       in: path
       required: true
       schema:
@@ -1043,8 +1381,18 @@ components:
               - $ref: '#/components/schemas/RelayedUpstreamError'
     TooManyRequests:
       description: |
-        上流の LLM プロバイダが混雑を返した。本文は定型文に差し替える (上流の本文には組織名や
-        クォータの状況が載るため) が、上流が Retry-After を返した場合はその値だけ中継する
+        要求が多すぎる。2 つの原因がある:
+        (a) **このサービスのレート制限** — 窓の中で出せる回数を超えた。数える単位は
+        **テナント** (プラットフォーム管理者トークンだけは単一の枠。API キーやユーザーを
+        増やしても枠は増えない) で、枠は重さの理由ごとに分かれている:
+        対象のすべての経路が消費する枠 (src/lib/constants.ts の PROXY_RATE_LIMIT_PER_MINUTE。
+        同名の環境変数で上書きできる) に加えて、評価の実行は
+        FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE、ガードレールの明示実行は
+        OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE の小さい枠も消費する。
+        Retry-After はこちらが計算した秒数で、複数の枠が尽きている場合は長いほうを返す。
+        上流へは 1 度も出ていないので課金も発生しない。
+        (b) **上流の LLM プロバイダが混雑を返した** — 本文は定型文に差し替える (上流の本文には
+        組織名やクォータの状況が載るため) が、上流が Retry-After を返した場合はその値だけ中継する
       headers:
         Retry-After:
           description: 再試行までの待ち時間 (上流が指示した場合のみ)
@@ -1133,6 +1481,27 @@ components:
     Provider:
       type: string
       enum: [anthropic, openai]
+    RuleKind:
+      type: string
+      description: |
+        ガードレールの種別。cost と error_rate は**しきい値を上回ったら**発火、quality は
+        **下回ったら**発火する (向きの正本は src/domain/guardrail/rule.ts の RULE_COMPARISON)。
+
+        **測れていない窓では発火しない**: 呼び出しが 0 件の窓 (cost / error_rate)、採点が 0 件の
+        評価 (quality)、そして **error_rate は窓の中の呼び出しが
+        GUARDRAIL_ERROR_RATE_MIN_REQUESTS 件に届かない場合**。最後の 1 つがあるのは、1 件だけ
+        呼んで失敗した窓が 1/1 = 100% になり、しきい値をどう置いても必ず発火してしまうため
+        (失敗には送り主自身のペイロードの誤り = 4xx も入るので、低トラフィックのエージェントが
+        1 回のミスで自動停止する)。低トラフィックのエージェントに error_rate を設定しても
+        発火しないのはこの理由で、窓を長くすると分母が増えて発火するようになる
+      enum: [cost, error_rate, quality]
+    RuleAction:
+      type: string
+      description: 発火したときの動作 (notify = 記録と通知だけ、stop = それに加えて自動停止)
+      enum: [notify, stop]
+    IncidentStatus:
+      type: string
+      enum: [open, resolved]
     Tenant:
       type: object
       required: [id, name, plan, createdAt]
@@ -1723,3 +2092,233 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DailyUsage'
+    GuardrailRule:
+      type: object
+      required: [id, tenantId, agentId, kind, threshold, windowMinutes, action, enabled, createdAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        agentId:
+          description: 対象エージェント。null はテナント全体へ掛かるルール
+          type: [string, 'null']
+        kind:
+          $ref: '#/components/schemas/RuleKind'
+        threshold:
+          type: number
+          description: |
+            しきい値。cost はマイクロ USD の整数 (上限は 2^53-1 = 倍精度で正確に表せる範囲)、
+            error_rate と quality は 0.0〜1.0 の比率
+        windowMinutes:
+          type: integer
+          description: 集計窓の長さ (分)。**どの種別も窓を見る** — quality は窓の中の最新の評価実行だけを見るので、短すぎる窓にすると「その間に評価が無い」で一度も発火しない
+        action:
+          $ref: '#/components/schemas/RuleAction'
+        enabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+    GuardrailRuleUpdate:
+      type: object
+      required: [enabled]
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            true で判定の対象に戻し、false で外す。**この 1 項目だけを受け付ける** —
+            しきい値・種別・集計窓を変えられるようにすると、過去のインシデントが
+            「どの条件で発火したか」を指さなくなる (条件を変えるときは無効にして作り直す)
+    GuardrailRuleCreate:
+      type: object
+      additionalProperties: false
+      required: [kind, threshold, windowMinutes, action]
+      properties:
+        agentId:
+          description: 対象エージェント。省略・null はテナント全体へ掛かる
+          type: [string, 'null']
+        kind:
+          $ref: '#/components/schemas/RuleKind'
+        threshold:
+          type: number
+          minimum: 0
+          description: |
+            しきい値。種別ごとに上限が違う (cost は 9007199254740991、error_rate と quality は 1)。
+            範囲外は 422。規則の正本は src/domain/guardrail/rule.ts の thresholdRangeFor
+        windowMinutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+          description: 集計窓の長さ (分)。1 分〜7 日。無制限の窓は全件走査になるので許さない (§8 / §9)
+        action:
+          $ref: '#/components/schemas/RuleAction'
+    GuardrailRuleList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GuardrailRule'
+        nextCursor:
+          type: string
+    GuardrailRunRequest:
+      type: object
+      additionalProperties: false
+      required: [agentId]
+      properties:
+        agentId:
+          type: string
+          description: 判定対象のエージェント (自テナントのもの。見つからなければ 404)
+    GuardrailRunResult:
+      type: object
+      required: [evaluated, fired]
+      properties:
+        evaluated:
+          type: integer
+          description: 判定したルールの件数 (0 ならそのエージェントに掛かる有効なルールが無い)
+        fired:
+          type: array
+          description: 発火したルール (しきい値を越えなかったものは含まない)
+          items:
+            $ref: '#/components/schemas/FiredGuardrail'
+    FiredGuardrail:
+      type: object
+      required: [ruleId, kind, action, incidentId, suspended, created]
+      properties:
+        ruleId:
+          type: string
+        kind:
+          $ref: '#/components/schemas/RuleKind'
+        action:
+          $ref: '#/components/schemas/RuleAction'
+        incidentId:
+          type: string
+        suspended:
+          type: boolean
+          description: |
+            このルールでエージェントを停止したか。action が stop でも、**手動停止中 (stopped) の
+            エージェントは状態を塗り替えない**ので false になりうる (「誰が止めたか」を保つため)
+        created:
+          type: boolean
+          description: |
+            新しいインシデントを作ったか。**既に開いている同じルールのインシデントがあれば false**
+            で、`incidentId` はその既存の行を指す。超過は解消するまで続くので、判定のたびに行を
+            増やすと記録と通知が溢れる (notify のルールは停止しないので自己収束しない)。
+            false のときは監査ログも通知も出さない (停止が実際に起きた場合を除く)
+    Incident:
+      type: object
+      required: [id, tenantId, agentId, ruleId, status, summary, createdAt, resolvedAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        agentId:
+          type: string
+        ruleId:
+          type: string
+        status:
+          $ref: '#/components/schemas/IncidentStatus'
+        summary:
+          type: string
+          description: 発火理由の 1 行 (実測値としきい値だけを含む。機微情報は入れない)
+        createdAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: [string, 'null']
+          format: date-time
+    IncidentList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Incident'
+        nextCursor:
+          type: string
+    AuditLog:
+      type: object
+      required: [id, tenantId, seq, actorId, action, targetType, targetId, payload, createdAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        seq:
+          type: string
+          description: |
+            テナントごとの連番 (1 始まり)。BigInt を JSON で安全に運ぶため文字列。
+            連鎖の順序はこの値が決める (createdAt は同一ミリ秒で前後が定まらない)
+        actorId:
+          description: 操作したユーザー。ガードレールの自動発火など人が起点でない操作は null
+          type: [string, 'null']
+        action:
+          type: string
+          description: 操作名 (語彙は src/domain/audit/action.ts)
+        targetType:
+          type: string
+        targetId:
+          type: string
+        payload:
+          description: |
+            操作の詳細 (平坦な辞書。機微情報は入れない)。ハッシュの計算に入るので、
+            値の並べ替え以外の加工はしない
+          type: [object, 'null']
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    AuditLogList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+        nextCursor:
+          type: string
+    AuditChainVerification:
+      type: object
+      required: [ok, verified, reachedLimit]
+      properties:
+        ok:
+          type: boolean
+          description: 連鎖が無傷か
+        verified:
+          type: integer
+          description: |
+            検証できた行数。**壊れていた場合はその手前までの件数**で、読んだ件数ではない
+            (読んだ件数を返すと「全部確かめた」と誤読される)
+        reachedLimit:
+          type: boolean
+          description: |
+            1 回に読む上限 (src/lib/constants.ts の AUDIT_CHAIN_VERIFY_MAX_ROWS) に達したか。
+            true なら続きの行は検証していないので、nextFromSeq を fromSeq に渡して続きを検証する
+        nextFromSeq:
+          type: string
+          description: |
+            続きの区間を検証するために fromSeq へ渡す連番 (reachedLimit が true のときだけ。
+            BigInt なので文字列)。これを渡さずに呼び直すと、同じ最古の区間を検証し続ける
+        brokenSeq:
+          type: string
+          description: 最初に壊れた行の連番 (ok が false のときだけ。BigInt なので文字列)
+        reason:
+          type: string
+          description: |
+            壊れ方。hash_mismatch = 値の書き換え、prev_hash_mismatch = 行の差し込み・並べ替え、
+            seq_not_sequential = 行の削除、payload_not_canonical = payload が平坦な辞書でない、
+            tenant_mismatch = 別テナントの行が混ざった (取り出すクエリが壊れている)
+          enum:
+            [
+              hash_mismatch,
+              prev_hash_mismatch,
+              seq_not_sequential,
+              payload_not_canonical,
+              tenant_mismatch,
+            ]

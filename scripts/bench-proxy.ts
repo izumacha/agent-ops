@@ -28,7 +28,9 @@ import { intFromEnv, runBench } from './lib/bench-criteria.mjs';
 import { createPrismaClient } from '../src/lib/prisma-client';
 import { displayPrefix, hashSecret, issueSecret } from '../src/lib/tokens';
 import { upstreamEnvNames } from '../src/lib/proxy/upstream';
-import { Plan, Provider } from '../src/domain/types';
+import { Plan, Provider, RuleAction, RuleKind } from '../src/domain/types';
+import { MICRO_USD_MAX } from '../src/domain/money';
+import { GUARDRAIL_COST_THRESHOLD_MAX, PROXY_RATE_LIMIT_ENV } from '../src/lib/constants';
 
 // 負荷を掛ける秒数 (1 本あたり)
 const DURATION_SECONDS = intFromEnv('BENCH_DURATION', 10, 1);
@@ -47,6 +49,35 @@ const CONNECTIONS = intFromEnv('BENCH_CONNECTIONS', 1, 1);
 const WARMUP_REQUESTS = intFromEnv('BENCH_WARMUP', 200, 0);
 // 中継するモデル (料金表にある値)
 const MODEL = 'claude-sonnet-4-6';
+/**
+ * 計測中はレート制限を実質的に外す上限。
+ *
+ * **制限は「運用の方針」で、測りたい「中継 1 件の追加遅延」の一部ではない**（判定はインメモリの
+ * Map を 1 回引くだけでマイクロ秒）。既定の上限（1 分 600 件）のままだと 1 接続・毎秒数百件の
+ * 計測トラフィックの 9 割近くが 429 になり、測れるのは「429 を返す速さ」になる
+ * （実測: 3516 件のうち 3116 件が 429。ベンチの「2xx 以外があれば失敗」の門番が正しく落とした）。
+ *
+ * **有限の値では機械の速さ次第で足りなくなる**ので、到達しない値を置く。
+ * この上書きが効くのは**ベンチが起動する子プロセスだけ**で、本番の既定は変わらない
+ */
+const BENCH_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
+/**
+ * 計測の仕込みに置くガードレールのルールの集計窓（分）。
+ *
+ * **ルールを 1 件置くのが要点。** Step4 でガードレールの判定を中継の直後へ結線したので、
+ * 「ルールが無い中継」を測ると**新しい現実を測っていない**（有効ルールの取得で止まり、
+ * 窓の集計まで行かない）。1 件置くと `findActiveRules` と `windowTotals` の両方が
+ * 毎回走る形になり、それが実際の追加遅延。
+ *
+ * **絶対に発火しないルールにする**（しきい値は金額の上限、動作は notify）— 発火すると
+ * エージェントが止まって以降の中継が全部 403 になり、やはり測れなくなる。
+ *
+ * **同じ理由でエージェントに予算を設定する。** 予算が未設定だと `assertWithinBudget` は
+ * 問い合わせを 1 つも投げないので（未設定のエージェントに費用を掛けない設計）、
+ * 「予算を持つエージェントの中継」という**新しい現実**を測れない。値は届かない額
+ * （`MICRO_USD_MAX`）にする — 到達すると以降の中継が全部 403 になる
+ */
+const BENCH_RULE_WINDOW_MINUTES = 60;
 // アプリの起動を待つ上限 (ミリ秒)
 const STARTUP_TIMEOUT_MS = 30_000;
 // 起動待ちの確認間隔 (ミリ秒)
@@ -149,9 +180,16 @@ async function seedApiKey(): Promise<string> {
     await client.$executeRaw`TRUNCATE TABLE "Tenant" CASCADE`;
     // テナント
     const tenant = await client.tenant.create({ data: { name: 'ベンチ', plan: Plan.free } });
-    // エージェント
+    // エージェント（**予算を持たせる**。理由は BENCH_RULE_WINDOW_MINUTES のコメント）
     const agent = await client.agent.create({
-      data: { tenantId: tenant.id, name: 'ベンチ用', provider: Provider.anthropic, model: MODEL },
+      data: {
+        tenantId: tenant.id,
+        name: 'ベンチ用',
+        provider: Provider.anthropic,
+        model: MODEL,
+        // 到達しない上限（中継ごとに当月の累計を 1 回引く形になる）
+        budgetMicroUsd: MICRO_USD_MAX,
+      },
     });
     // API キー (平文は発行時しか手に入らない)
     const secret = issueSecret('apiKey');
@@ -162,6 +200,18 @@ async function seedApiKey(): Promise<string> {
         prefix: displayPrefix(secret.secret),
         keyHash: hashSecret(secret.secret),
         name: 'ベンチ用キー',
+      },
+    });
+    // **ガードレールのルールを 1 件置く**（理由は BENCH_RULE_WINDOW_MINUTES のコメント）
+    await client.guardrailRule.create({
+      data: {
+        tenantId: tenant.id,
+        agentId: agent.id,
+        kind: RuleKind.cost,
+        // 到達しないしきい値（発火するとエージェントが止まって以降が測れない）
+        threshold: GUARDRAIL_COST_THRESHOLD_MAX,
+        windowMinutes: BENCH_RULE_WINDOW_MINUTES,
+        action: RuleAction.notify,
       },
     });
     // 平文を返す
@@ -202,6 +252,11 @@ async function startApp(port: number, upstreamPort: number, caPath: string): Pro
       ...stubUpstreamEnv(upstreamPort),
       // 計測はテナント管理 API を使わないので、開発機の .env にある値を子へ渡さない (最小権限)
       PLATFORM_ADMIN_TOKEN: '',
+      // **計測中だけレート制限を外す**（理由は BENCH_RATE_LIMIT のコメント）
+      [PROXY_RATE_LIMIT_ENV]: String(BENCH_RATE_LIMIT),
+      // 通知の宛先は置かない（発火しないルールなので送られないが、設定を子へ漏らさない）
+      NOTIFY_WEBHOOK_URL: '',
+      NOTIFY_MAIL_WEBHOOK_URL: '',
       // スタブの自己署名証明書を信頼させる (この 1 枚だけ)
       NODE_EXTRA_CA_CERTS: caPath,
     },

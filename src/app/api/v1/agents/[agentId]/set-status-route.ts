@@ -4,17 +4,50 @@ import { notFoundError } from '@/lib/api/errors';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { toAgentDto } from '@/lib/api/serializers';
-import type { AgentStatus } from '@/domain/types';
+import { AgentStatus } from '@/domain/types';
+import { AuditAction, AuditTargetType } from '@/domain/audit/action';
+import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
+
+/**
+ * この経路で人が指定できる状態。**`suspended` は入らない** — 自動停止はガードレールの判定が
+ * アダプタの中で行うもので、人が API から直接その状態へ持っていく操作は存在しない
+ * (入れてしまうと「誰かが手で suspended にした」記録と自動停止の記録が区別できなくなる)
+ */
+export type SettableAgentStatus = typeof AgentStatus.active | typeof AgentStatus.stopped;
+
+// その状態変更を表す監査ログの操作名。**表で持つのは、指定できる状態を足したときに
+// typecheck が落ちるから** (条件分岐で書くと、新しい状態が既定の分岐へ黙って落ちて
+// 別の操作名で記録される)
+const AUDIT_ACTION_BY_STATUS: Readonly<Record<SettableAgentStatus, AuditAction>> = {
+  // 止まっていたものを戻した (UC-09。手動停止と自動停止のどちらからでも active へ戻す)
+  [AgentStatus.active]: AuditAction.agent_resumed,
+  // 手で止めた
+  [AgentStatus.stopped]: AuditAction.agent_stopped,
+};
 
 // 指定した状態へ変える Route Handler を作る
-export function setAgentStatusRoute(status: AgentStatus) {
+export function setAgentStatusRoute(status: SettableAgentStatus) {
   // 認証は route() が、認可はこの中で行う
   return route<{ agentId: string }>(async ({ params, principal, repos }) => {
     // stop 権限
-    const { tenantId } = requireAction(principal, 'stop');
+    const { tenantId, user } = requireAction(principal, 'stop');
+    // **状態を変える前に「監査ログを書ける状態か」を確かめる** (理由は assertAuditConfigured)
+    assertAuditConfigured();
     // 自テナント内で状態を変える (他テナントは 404。同じ状態への再実行も 200 で冪等)
     const agent = await repos.agents.setStatus(tenantId, params.agentId, status);
     if (!agent) throw notFoundError();
+    // **操作として記録する。** 同じ状態への再実行でも 1 行残す — 監査ログが残すのは
+    // 「誰がいつ何を要求したか」で、状態が動いたかどうかはその payload が持つ情報ではない
+    // (「止まっているはずのエージェントに誰が resume を打ったか」は追跡したい事実そのもの)
+    await recordAudit(repos, {
+      tenantId,
+      actorId: user.id,
+      action: AUDIT_ACTION_BY_STATUS[status],
+      targetType: AuditTargetType.agent,
+      targetId: agent.id,
+      // 変更後の状態だけを残す (機微情報を入れない)
+      payload: { status: agent.status },
+    });
     // 変更後を返す
     return Response.json(toAgentDto(agent));
   });

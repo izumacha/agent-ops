@@ -21,12 +21,15 @@ describe('memory アダプタの評価', () => {
   let tenantId: string;
   // 評価対象エージェントの id
   let agentId: string;
+  // 表そのもの (同じ時刻の並びを作るために直接触る)
+  let store: MemoryStore;
   // 評価セット (ケースごと)
   let set: Awaited<ReturnType<Repositories['evaluations']['createSet']>>;
 
   beforeEach(async () => {
     // 表を作り直す (テストごとに独立させる)
-    repos = createMemoryRepos(new MemoryStore());
+    store = new MemoryStore();
+    repos = createMemoryRepos(store);
     // テナントと初期 admin
     const created = await repos.tenants.createWithAdmin({
       name: 'テナント',
@@ -91,6 +94,77 @@ describe('memory アダプタの評価', () => {
     expect(saved).not.toBeNull();
     return saved!.run;
   }
+
+  it('品質ルールが読む「最新の completed」は failed を飛ばして選ぶ', async () => {
+    // **品質低下ルールの唯一の入力なので、両アダプタで同じ行を選ばないと本番だけ判定が変わる**
+    // (対になる検査が tests/data/evaluations.contract.prisma.test.ts にある)。
+    // failed を混ぜてはいけないのは、採点 0 件の実行はスコアが null で、
+    // それを「品質が落ちた」と読むのが誤判定だから
+    expect(await repos.evaluations.findLatestCompletedRun(tenantId, agentId)).toBeNull();
+    // completed → failed の順に実行する
+    const completed = await runOnce(EvaluationRunStatus.completed);
+    await runOnce(EvaluationRunStatus.failed);
+    // 最新の completed は間に挟まった failed ではなく、その前の completed
+    expect((await repos.evaluations.findLatestCompletedRun(tenantId, agentId))?.id).toBe(
+      completed.id,
+    );
+    // 別のエージェントの実行は選ばない (エージェントごとに判定するため)
+    const other = await repos.agents.create({
+      tenantId,
+      name: 'bot-2',
+      description: null,
+      provider: Provider.anthropic,
+      model: MODEL,
+      budgetMicroUsd: null,
+    });
+    expect(await repos.evaluations.findLatestCompletedRun(tenantId, other.id)).toBeNull();
+    // **since より前の実行は見えない** (品質ルールの集計窓。prisma 側と同じ答え)
+    expect(
+      await repos.evaluations.findLatestCompletedRun(
+        tenantId,
+        agentId,
+        new Date(Date.now() + 60_000),
+      ),
+    ).toBeNull();
+    // 窓の中なら見える
+    expect(
+      await repos.evaluations.findLatestCompletedRun(
+        tenantId,
+        agentId,
+        new Date(Date.now() - 60_000),
+      ),
+    ).not.toBeNull();
+    // 他テナントから同じエージェント id を指しても見えない (テナント条件が効いている)
+    expect(await repos.evaluations.findLatestCompletedRun('tn-other', agentId)).toBeNull();
+  });
+
+  it('同じ時刻の 2 件は id の大きい方を最新とする (並びが揺れない)', async () => {
+    // **同じミリ秒に 2 件入ると createdAt だけでは前後が決まらない。**
+    // id の比較を落とすと、どちらが「最新」になるかが表の走査順で決まって揺れ、
+    // 品質ルールが読むスコアが同じ入力でも変わる
+    const first = await runOnce(EvaluationRunStatus.completed);
+    const second = await runOnce(EvaluationRunStatus.completed);
+    // id の小さい方・大きい方 (辞書順。比較はこの順序で行われる)
+    const [lowerId, higherId] = [first.id, second.id].sort();
+    // 2 件の作成日時を同じ瞬間へ揃える (表を直接書き換える)
+    const sameMoment = new Date('2026-10-02T00:00:00.000Z');
+    // **表の並びを id の順と逆にする** — ここが要点。日時だけで並べる実装は Array.sort が
+    // 安定なので表の並びをそのまま残し、「最後の要素」が id の小さい方になる。
+    // 表の並びと id の順が一致していると、id の比較を落とした実装でも同じ答えになって
+    // テストが何も確かめない (実測で素通りした)
+    for (const id of [higherId, lowerId]) {
+      // 既にある行を取り出す
+      const row = store.evaluationRuns.get(id);
+      // 無ければテストとして落とす
+      if (!row) throw new Error(`実行の行が見つかりません: ${id}`);
+      // いったん消してから入れ直して末尾へ移し、日時も揃える
+      store.evaluationRuns.delete(id);
+      store.evaluationRuns.set(id, { ...row, createdAt: sameMoment });
+    }
+    // 表の並びでは lowerId が最後に居るが、最新と選ばれるのは id の大きい方
+    const latest = await repos.evaluations.findLatestCompletedRun(tenantId, agentId);
+    expect(latest?.id).toBe(higherId);
+  });
 
   it('実行が使ったセットの外のケースを指す結果は保存できない (prisma の複合 FK と同じ答え)', async () => {
     // 同じテナントにもう 1 つセットを作る

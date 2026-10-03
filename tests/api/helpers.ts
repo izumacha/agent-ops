@@ -157,10 +157,6 @@ function setupSeed(): Seed {
   const repos = createMemoryRepos();
   // Composition Root を差し替える
   setReposForTesting(repos);
-  // **レート制限の表も作り直す。** 表はプロセスの寿命いっぱい残るので、作り直さないと
-  // 「前のテストが使った枠」が次のテストへ漏れ、同じファイルの後ろのテストだけが 429 になる
-  // （実行順に依存した赤になり、原因が分かりにくい）
-  resetSharedRateLimiterForTesting();
   // プラットフォーム管理者トークンを設定する (元の値は後始末で戻す)
   platformTokenBefore = process.env.PLATFORM_ADMIN_TOKEN;
   process.env.PLATFORM_ADMIN_TOKEN = PLATFORM_TOKEN;
@@ -172,6 +168,13 @@ function setupSeed(): Seed {
     notifyBefore.set(name, process.env[name]);
     process.env[name] = '';
   }
+  // **レート制限の表を作り直すのは、設定を空にした後。** 表はプロセスの寿命いっぱい残るので、
+  // 作り直さないと「前のテストが使った枠」が次のテストへ漏れ、同じファイルの後ろのテストだけが
+  // 429 になる（実行順に依存した赤になり、原因が分かりにくい）。**順序が逆だと上限を
+  // 開発機・CI の環境変数から読む** — `PROXY_RATE_LIMIT_PER_MINUTE=1` を設定した環境で
+  // 中継・評価・E2E の 6 件が 429 で落ちた（実測）。しかも値を見張るテストは
+  // 「テスト本体の中で空であること」しか見ないので、その状態でも緑のまま通る
+  resetSharedRateLimiterForTesting();
   // 2 テナント分を seed する
   return {
     store: repos.store,

@@ -245,6 +245,8 @@ export const API_MESSAGES = {
   guardrailRuleLimit:
     'ガードレールのルール数が上限に達しています。不要なルールを削除してください。',
   guardrailRuleRowLimit: `ガードレールのルールの総数 (無効化したものを含む) が上限 ${GUARDRAIL_RULE_ROWS_MAX_PER_TENANT} 件に達しています。不要なルールを削除してください。`,
+  guardrailRunPartiallyFailed:
+    '一部のルールを判定できませんでした。時間をおいてやり直してください (発火したぶんは記録されています)。',
   guardrailRuleHasIncidents:
     '発火記録があるルールは削除できません (記録からルールを辿れなくなるため)。',
   incidentAlreadyResolved: 'このインシデントは既に解決済みです。',

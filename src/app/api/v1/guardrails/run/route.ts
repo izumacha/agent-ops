@@ -5,7 +5,9 @@
 // まったく同じ関数 (src/lib/guardrail/evaluate.ts) を通る — 別経路を書くと「cron では
 // 発火するのに中継では発火しない」ような食い違いが生まれる。
 import { readJsonBody } from '@/lib/api/body';
-import { notFoundError } from '@/lib/api/errors';
+import { ApiError, notFoundError } from '@/lib/api/errors';
+import { HTTP_STATUS } from '@/lib/api/http-status';
+import { API_MESSAGES } from '@/lib/constants';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
@@ -52,6 +54,16 @@ export const POST = route(
       // 人が起点の操作なので、その利用者を操作主体として監査ログへ残す
       actorId: user.id,
     });
+    // **1 本でも判定しきれなかったら 500。** 受け止めるのは「残りのルールを判定するため」で、
+    // 隠すためではない — 200 で返すと「何も超過していない」と見分けが付かず、運用者は
+    // 上限内だと読む（発火して停止したぶんは記録に残っているので、再実行は安全）。
+    // 文言に内部の事情は入れない（§9。詳細はサーバログに出ている）
+    if (result.failed > 0) {
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        API_MESSAGES.guardrailRunPartiallyFailed,
+      );
+    }
     // 判定した件数と発火したものを返す
     const body: ApiSchemas['GuardrailRunResult'] = {
       evaluated: result.evaluated,

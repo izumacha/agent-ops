@@ -189,7 +189,7 @@ describe('ガードレールの判定', () => {
       env(),
     );
     // 1 件も判定していない
-    expect(result).toEqual({ evaluated: 0, fired: [] });
+    expect(result).toEqual({ evaluated: 0, fired: [], failed: 0 });
     // 集計も評価実行の読み出しも 1 度も呼ばれていない
     expect(windowTotals).not.toHaveBeenCalled();
   });
@@ -745,7 +745,7 @@ describe('ガードレールの判定', () => {
       env(),
     );
     // 他テナントのルールは見えないので 1 件も判定しない
-    expect(result).toEqual({ evaluated: 0, fired: [] });
+    expect(result).toEqual({ evaluated: 0, fired: [], failed: 0 });
     expect((await repos.agents.findById(tenantId, agentId))?.status).toBe(AgentStatus.active);
   });
 });

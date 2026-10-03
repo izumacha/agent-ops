@@ -611,6 +611,23 @@ describe('ガードレールの明示実行', () => {
     expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
   });
 
+  it('1 本でも判定できなければ 500（「何も超過していない」と見分けが付く）', async () => {
+    // **受け止めるのは残りのルールを判定するためで、隠すためではない。** 200 で返すと
+    // `{ evaluated: 1, fired: [] }` が「上限内だった」と区別できず、運用者は安全だと読む
+    const rule = await makeRule({ threshold: 1_000, action: RuleAction.stop });
+    await spend(1_500n);
+    // 記録だけを失敗させる
+    vi.spyOn(seed.repos.incidents, 'raise').mockRejectedValue(new Error('直列化に失敗しました'));
+    const result = await call(runGuardrails, {
+      token: seed.a.tokens.admin,
+      body: { agentId: seed.a.agent.id },
+    });
+    expect(result.status).toBe(500);
+    expect(result.json).toMatchObject({ message: API_MESSAGES.guardrailRunPartiallyFailed });
+    // ルールは残っている（判定の失敗で設定が消えたりしない）
+    expect(seed.store.guardrailRules.has(rule.id)).toBe(true);
+  });
+
   it('ルールが無ければ judged 0 件で何も起きない', async () => {
     // ルールを作らずに実行する
     await spend(99_999n);

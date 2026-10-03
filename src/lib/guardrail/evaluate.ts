@@ -96,14 +96,22 @@ export interface FiredGuardrail {
 
 /** 判定の結果 */
 export interface GuardrailEvaluation {
-  // 判定したルールの件数（0 ならルールが無いか、この種別のルールが無い）
+  // **判定しきったルールの件数**（失敗したものは数えない。0 ならルールが無いか、この種別が無い）
   evaluated: number;
   // 発火したルール（しきい値を越えなかったものは含まない）
   fired: FiredGuardrail[];
+  /**
+   * **判定できなかったルールの件数**（例外で飛ばしたもの）。
+   *
+   * 残りのルールを判定し続けるために受け止めるが、**受け止めたことを呼び出し側へ必ず伝える** —
+   * 伝えないと `POST /guardrails/run` が「何も超過していない」と見分けの付かない 200 を返し、
+   * 運用者は上限内だと読む（あの経路は「判定できなかったことは隠さず 500 にする」と決めている）。
+   */
+  failed: number;
 }
 
 // 1 件も判定しなかったときの結果（毎回オブジェクトを作らない）
-const NOTHING_EVALUATED: GuardrailEvaluation = { evaluated: 0, fired: [] };
+const NOTHING_EVALUATED: GuardrailEvaluation = { evaluated: 0, fired: [], failed: 0 };
 
 /**
  * 中継の直後に見る種別（使用量から測れるもの）。品質だけは評価実行の表を見るので入れない —
@@ -256,6 +264,8 @@ export async function evaluateGuardrails(
   const qualityByWindow = new Map<number, number | null>();
   // 発火したものを貯める
   const fired: FiredGuardrail[] = [];
+  // 判定できなかったルールの件数（例外で飛ばしたもの）
+  let failed = 0;
   // 通知の材料を貯める（送るのは全件の記録と停止が終わってから）
   const notifications: NotifyPayload[] = [];
   // ルールを 1 つずつ判定する
@@ -374,6 +384,8 @@ export async function evaluateGuardrails(
       // 許可表を広げることになる。あの表は「静かに緩む口」としてこの repo が繰り返し
       // 見てきた形なので、表を増やさない側を採る（種別や実測値も同じ理由で書かない）
       console.error('[guardrail] ルールを判定できませんでした:', describeError(error));
+      // **数える** — 呼び出し側が「判定しきれなかった」ことを見分けられるようにする
+      failed += 1;
     }
   }
   // **通知はすべての記録と停止が終わってから**（受け手の応答時間を停止までの計測に入れない）。
@@ -397,8 +409,10 @@ export async function evaluateGuardrails(
     // 待つ側は呼び出し元へそのまま伝える（`notifyGuardrailIncident` は例外を出さない設計）
     await sending;
   }
-  // 判定した件数と発火したもの
-  return { evaluated: rules.length, fired };
+  // 判定しきった件数と発火したもの、判定できなかった件数。
+  // **失敗したルールを evaluated に数えない** — 数えると「10 件見た」と答えながら 1 件は
+  // 見ていない状態になり、件数だけでは取りこぼしが分からない
+  return { evaluated: rules.length - failed, fired, failed };
 }
 
 /**

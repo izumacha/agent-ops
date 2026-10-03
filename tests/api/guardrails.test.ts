@@ -1011,6 +1011,46 @@ describe('監査ログと連鎖の検証', () => {
     expect(broken.json).toMatchObject({ ok: false, brokenSeq: '2', reason: 'prev_hash_mismatch' });
   });
 
+  it('壊れていれば nextFromSeq を返さない（検証できていない範囲を飛ばさせない）', async () => {
+    // **壊れた位置から区間の終わりまでは検証できていない。** 「最後に読んだ行の次」を渡すと、
+    // カーソルを追う cron はその範囲を飛ばして次の区間へ進み、ok を返す — 飛ばされた範囲の
+    // 改ざんは二度と検知されない。
+    // 上限は 10,000 行なので実データでは `reachedLimit: true` を作れない。読み出しだけを
+    // 差し替えて「続きがあり、かつ壊れている」状態を作る
+    await appendViaResolve();
+    const rows = [...seed.store.auditLogs.values()].sort((x, y) => Number(x.seq - y.seq));
+    const head = rows[0];
+    if (!head) throw new Error('行が見つかりません');
+    vi.spyOn(seed.repos.auditLogs, 'readChain').mockResolvedValue({
+      // ハッシュを壊した 1 行（検証は必ず落ちる）
+      rows: [{ ...head, hash: 'deadbeef' }],
+      // **続きがある**と伝える（ここが要点）
+      reachedLimit: true,
+      anchorHash: null,
+    });
+    const broken = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
+    expect(broken.status).toBe(200);
+    // 壊れていることは返す
+    expect(broken.json).toMatchObject({ ok: false, reachedLimit: true, brokenSeq: '1' });
+    // **続きの連番は返さない**
+    expect(broken.json).not.toHaveProperty('nextFromSeq');
+  });
+
+  it('無傷で続きがあれば nextFromSeq を返す（区間に分けて検証できる）', async () => {
+    // 上の裏側: 壊れていなければカーソルを返す（返さないと続きを検証できない）
+    await appendViaResolve();
+    const rows = [...seed.store.auditLogs.values()].sort((x, y) => Number(x.seq - y.seq));
+    const head = rows[0];
+    if (!head) throw new Error('行が見つかりません');
+    vi.spyOn(seed.repos.auditLogs, 'readChain').mockResolvedValue({
+      rows: [head],
+      reachedLimit: true,
+      anchorHash: null,
+    });
+    const ok = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
+    expect(ok.json).toMatchObject({ ok: true, reachedLimit: true, nextFromSeq: '2' });
+  });
+
   it('fromSeq の形が違えば 422', async () => {
     // 連番は 1 以上の 10 進整数だけ（空文字・符号付き・小数・指数は弾く）
     for (const value of ['', '0', '-1', '1.5', '1e3', 'abc', ' 1']) {

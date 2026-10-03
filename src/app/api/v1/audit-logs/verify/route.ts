@@ -62,10 +62,18 @@ export const GET = route(
       secretsEqual,
       fromSeq === undefined ? undefined : { expectedSeq: fromSeq, previousHash: anchorHash },
     );
-    // 続きがあるなら次に渡す連番 (最後に読んだ行の次)。無ければ付けない
+    // 続きがあるなら次に渡す連番 (最後に読んだ行の次)。無ければ付けない。
+    //
+    // **壊れていたときは付けない。** 壊れた位置から区間の終わりまでは**検証できていない**ので、
+    // 「最後に読んだ行の次」を渡すとその範囲が永久に飛ばされる (壊れた行が 5,000 番で区間が
+    // 10,000 行なら、カーソルを追う cron は次に 10,001 番から検証して ok を返し、
+    // 5,000〜10,000 番は二度と確かめられない)。付けなければ、呼び出し側は壊れた位置を
+    // 片付けてから `brokenSeq` の続きを自分で指すことになる
     const lastSeq = rows[rows.length - 1]?.seq;
     const nextFromSeq =
-      reachedLimit && lastSeq !== undefined ? (lastSeq + 1n).toString() : undefined;
+      verification.ok && reachedLimit && lastSeq !== undefined
+        ? (lastSeq + 1n).toString()
+        : undefined;
     // 共通部分 (壊れていても検証できた件数は返す)
     const body: ApiSchemas['AuditChainVerification'] = verification.ok
       ? { ok: true, verified: verification.verified, reachedLimit, nextFromSeq }
@@ -73,7 +81,6 @@ export const GET = route(
           ok: false,
           verified: verification.verified,
           reachedLimit,
-          nextFromSeq,
           // 最初に壊れた連番 (BigInt なので文字列) とその理由
           brokenSeq: verification.brokenSeq.toString(),
           reason: verification.reason,

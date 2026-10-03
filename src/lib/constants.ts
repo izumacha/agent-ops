@@ -122,6 +122,12 @@ export const FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE = 6;
 // **その回は一度も判定されない** = backstop が静かに効かなくなる）。この経路の費用に見合う
 // 高さに置き、1 要求 1 エージェントという形を変えるとき（テナント一括の受け口）に見直す
 export const OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE = 60;
+// (3) **1 要求で大量の行を読んで計算し直す経路**（`GET /audit-logs/verify`）。上流も外部も
+// 呼ばないが、1 回で最大 AUDIT_CHAIN_VERIFY_MAX_ROWS 行を読み、その件数ぶん HMAC を計算し直す
+// （一覧の上限 PAGE_LIMIT_MAX の 50 倍）。**費用は DB の読み取りと CPU** なので (1)(2) とは
+// 性質が違う。検証は「運用者が確かめる」「日次の cron が区間ごとに回す」操作で、毎分の連打を
+// 必要としない。10 件あれば 10 万行ぶんの区間を 1 分で確かめられるので、運用の都合には足りる
+export const HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE = 10;
 // レート制限の窓の長さ (ミリ秒)。1 分 = 上の定数の「1 分」の定義
 export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。

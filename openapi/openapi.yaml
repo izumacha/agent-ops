@@ -1191,6 +1191,9 @@ paths:
         続きがあるときは reachedLimit: true と nextFromSeq を返す。**その値を fromSeq に渡して
         続きを検証する** — 渡さないと毎回最古の区間だけを検証することになり、それ以降の行は
         一度も確かめられない
+
+        **この API でいちばん重い読み取り**（1 回で最大 10,000 行を読み、その件数ぶん HMAC を
+        計算し直す = 一覧の上限の 50 倍）なので、テナントあたりの小さい枠が掛かる (超過は 429)
       parameters:
         - name: fromSeq
           in: query
@@ -1218,6 +1221,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':

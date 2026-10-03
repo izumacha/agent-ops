@@ -269,6 +269,30 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
     expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0)).toThrow();
   });
 
+  // **枠の種類を足した人が「実際に数えられるか」を確かめなくてよくならないようにする。**
+  // 上のテストは `fanOut` を名指しするので、種類を足して `EXTRA_FRAME_LIMIT` に書くだけでは
+  // 1 度も通らない（表に載っただけで枠が効いているかは誰も見ていない状態になる）
+  it.each(Object.values(RATE_LIMIT_TIER).filter((tier) => extraRateLimiter(tier) !== undefined))(
+    '追加の枠を持つ種類は共有の枠と独立に数える (%s)',
+    (tier) => {
+      // 共有は 10、追加の枠は 2 で作り直す
+      resetSharedRateLimiterForTesting(
+        { limit: 10, windowMs: WINDOW_MS },
+        { limit: 2, windowMs: WINDOW_MS },
+      );
+      // 追加の枠の上限まで通す
+      enforceRateLimit(principal, tier, T0);
+      enforceRateLimit(principal, tier, T0);
+      // 次は追加の枠で断られる（共有にはまだ 8 件の余裕がある）
+      expect(() => enforceRateLimit(principal, tier, T0)).toThrow();
+      // 共有の枠は 2 件ぶん減っている（置き換えではなく「加えて」消費する）
+      for (let index = 0; index < 8; index += 1) {
+        enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0);
+      }
+      expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0)).toThrow();
+    },
+  );
+
   it('断った要求はどちらの枠にも数えない', () => {
     // 共有は 1、重いほうは 5（**共有のほうが先に尽きる**組み合わせ）
     resetSharedRateLimiterForTesting(

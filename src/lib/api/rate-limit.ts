@@ -13,6 +13,7 @@ import { HTTP_STATUS } from './http-status';
 import {
   API_MESSAGES,
   FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE,
+  HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
   OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE,
   PROXY_RATE_LIMIT_ENV,
   PROXY_RATE_LIMIT_PER_MINUTE,
@@ -261,6 +262,7 @@ let shared = new SlidingWindowRateLimiter({
  * - `standard`: 上流へ 1 回ぶんの費用を出す経路（中継 2 本）。共有の枠だけを消費する
  * - `fanOut`: 1 要求で上流へ扇状に出る経路（評価の実行）
  * - `outbound`: 応答を返す前に外部の往復を待つ経路（ガードレールの明示実行）
+ * - `heavyRead`: 1 要求で大量の行を読んで計算し直す経路（監査ログの連鎖の検証）
  *
  * `standard` 以外は共有の枠**と**種類ごとの小さい枠の両方を消費する。
  * **「重い」をひとまとめにしない** — 重さの中身（ベンダーへの課金 / 外部の応答時間と DB 負荷）が
@@ -271,6 +273,7 @@ export const RATE_LIMIT_TIER = {
   standard: 'standard',
   fanOut: 'fanOut',
   outbound: 'outbound',
+  heavyRead: 'heavyRead',
 } as const;
 
 /** 枠の種類（`RouteOptions.rateLimit` に書く値） */
@@ -286,6 +289,7 @@ const EXTRA_FRAME_LIMIT: Readonly<Record<RateLimitTier, number | null>> = {
   standard: null,
   fanOut: FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE,
   outbound: OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE,
+  heavyRead: HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
 };
 
 // 種類ごとの追加の枠を作る（上の表から導くので、種類を足したら自動で増える）

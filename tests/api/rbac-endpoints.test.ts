@@ -42,7 +42,10 @@ import {
   GET as listGuardrailRules,
   POST as createGuardrailRule,
 } from '@/app/api/v1/guardrails/route';
-import { DELETE as deleteGuardrailRule } from '@/app/api/v1/guardrails/[ruleId]/route';
+import {
+  DELETE as deleteGuardrailRule,
+  PATCH as updateGuardrailRule,
+} from '@/app/api/v1/guardrails/[ruleId]/route';
 import { POST as runGuardrails } from '@/app/api/v1/guardrails/run/route';
 import { GET as listIncidents } from '@/app/api/v1/incidents/route';
 import { POST as resolveIncident } from '@/app/api/v1/incidents/[incidentId]/resolve/route';
@@ -262,6 +265,18 @@ const ENDPOINTS: Record<
   createGuardrailRule: {
     requires: 'admin',
     invoke: async (t) => (await call(createGuardrailRule, { token: t, body: {} })).status,
+  },
+  updateGuardrailRule: {
+    requires: 'admin',
+    invoke: async (t) =>
+      (
+        await call(updateGuardrailRule, {
+          token: t,
+          method: 'PATCH',
+          params: { ruleId: 'missing' },
+          body: { enabled: false },
+        })
+      ).status,
   },
   deleteGuardrailRule: {
     requires: 'admin',

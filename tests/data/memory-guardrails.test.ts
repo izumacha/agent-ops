@@ -178,6 +178,47 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     expect(second.status).toBe('too_many_rules');
   });
 
+  it('無効化したルールは上限に数えない (prisma の enabled 条件つき count と同じ)', async () => {
+    // 1 件作って無効化する
+    const first = await makeRule(RuleKind.cost, RuleAction.notify, false);
+    const disabled = await repos.guardrailRules.setEnabled(tenantId, first.id, false);
+    expect(disabled?.enabled).toBe(false);
+    // **上限 1 件でも次の 1 件が作れる** — 数え方を「有効なルールだけ」にしているから。
+    // 無効化した行も数えると、上限ぶん発火したテナントは「消せない・止めても枠が空かない」で
+    // ルールを 1 件も作れなくなる (発火記録を持つルールは削除できない)
+    const second = await repos.guardrailRules.create(
+      {
+        tenantId,
+        agentId: null,
+        kind: RuleKind.quality,
+        threshold: 0.7,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      1,
+    );
+    expect(second.status).toBe('created');
+  });
+
+  it('無効化と再有効化は切り替えた後の行を返し、他テナントの id は null (prisma と同じ)', async () => {
+    // 自テナントのルール
+    const rule = await makeRule(RuleKind.cost, RuleAction.notify, true);
+    // 外す
+    expect((await repos.guardrailRules.setEnabled(tenantId, rule.id, false))?.enabled).toBe(false);
+    // 表の行も変わっている
+    expect(store.guardrailRules.get(rule.id)?.enabled).toBe(false);
+    // 同じ値を 2 度送っても成功する (冪等)
+    expect((await repos.guardrailRules.setEnabled(tenantId, rule.id, false))?.enabled).toBe(false);
+    // 戻せる
+    expect((await repos.guardrailRules.setEnabled(tenantId, rule.id, true))?.enabled).toBe(true);
+    // **他テナントからは触れない** (テナント条件を落とすとクロステナントの書き込みになる)
+    expect(await repos.guardrailRules.setEnabled('tn-other', rule.id, false)).toBeNull();
+    // 存在しない id も null
+    expect(await repos.guardrailRules.setEnabled(tenantId, 'gr-does-not-exist', false)).toBeNull();
+    // 触れなかったので有効なまま
+    expect(store.guardrailRules.get(rule.id)?.enabled).toBe(true);
+  });
+
   it('上限に達していて、かつエージェント id も誤っているときはエージェント優先で答える', async () => {
     // **prisma アダプタと答えを揃えるための検査** (対になる検査が
     // tests/data/guardrails.contract.prisma.test.ts にある)。

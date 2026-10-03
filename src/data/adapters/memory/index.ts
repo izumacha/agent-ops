@@ -844,9 +844,9 @@ class MemoryGuardrailRules implements GuardrailRulesPort {
       // 他テナントのエージェント・存在しないエージェントは作成できない
       if (!agent || agent.tenantId !== input.tenantId) return { status: 'agent_not_found' };
     }
-    // そのテナントの現在のルール数
+    // そのテナントの**有効な**ルール数 (無効化したものは数えない。理由は Port のコメント)
     const existing = [...this.store.guardrailRules.values()].filter(
-      (row) => row.tenantId === input.tenantId,
+      (row) => row.tenantId === input.tenantId && row.enabled,
     ).length;
     // 上限に達していれば作らない (判定は中継 1 回ごとに走るので件数を縛る)
     if (existing >= maxRulesPerTenant) return { status: 'too_many_rules' };
@@ -872,6 +872,21 @@ class MemoryGuardrailRules implements GuardrailRulesPort {
     // テナントで絞ってから共通のページネーションに通す
     const rows = [...this.store.guardrailRules.values()].filter((row) => row.tenantId === tenantId);
     return paginate(rows, query);
+  }
+
+  // 有効・無効を切り替える (他テナントの id は null)。冪等 — 既に同じ値でも現在の行を返す
+  async setEnabled(
+    tenantId: string,
+    ruleId: string,
+    enabled: boolean,
+  ): Promise<GuardrailRuleRecord | null> {
+    // 対象行 (テナント境界内。他テナントの id は「無い」と同じ扱いにして存在を隠す)
+    const row = this.store.guardrailRules.get(ruleId);
+    if (!row || row.tenantId !== tenantId) return null;
+    // 値を書き換える (同じ値でも成功として扱う)
+    row.enabled = enabled;
+    // 複製を返す (表の行を呼び出し側へ渡さない)
+    return clone(row);
   }
 
   // ルールを消す (インシデントを持つルールは消せない = 本番の Restrict FK と同じ)

@@ -112,7 +112,11 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
   localhost:3000/api/v1/agents/<エージェントの id>/resume
 
-# 5. 監査ログと、その改ざん検知 (verify は admin 限定)
+# 5. しきい値を誤ったルールを止める (admin 限定。発火したルールは削除できないのでこれで止める)
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' localhost:3000/api/v1/guardrails/<ルールの id>
+
+# 6. 監査ログと、その改ざん検知 (verify は admin 限定)
 curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/audit-logs
 curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/audit-logs/verify
 # 続きがある (reachedLimit: true) なら、返ってきた nextFromSeq を渡して次の区間を検証する
@@ -124,8 +128,15 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 `nextFromSeq` を `?fromSeq=` に渡して続きを検証する（渡さずに呼び直すと**同じ最古の区間を
 検証し続ける**ことになり、それ以降の行は一度も確かめられない）。区間の継ぎ目も検証される。
 
+**発火したルールは削除できないので、止めるには無効化する。** 発火の記録からルールを辿れなくなると
+「何がなぜ止めたのか」が読めなくなるため、`Incident` を持つルールの `DELETE` は 409 になる。しきい値を
+誤った `stop` のルールは `PATCH /guardrails/{ruleId}` で `enabled: false` にして判定の対象から外す
+（インシデントを解決してエージェントを復帰させれば、以降は止まらない）。切り替えられるのは `enabled`
+だけで、しきい値や窓を変えたいときは作り直す（変えると過去のインシデントが「どの設定で発火したのか」を
+示さなくなる）。**無効化した行はルール数の上限（50 件）に数えない。**
+
 **`AUDIT_HMAC_SECRET`（32 文字以上）が必須。** 人が行う操作（停止・復帰・インシデントの解決・ルールの
-登録と削除）は、鍵が無いと **503 で何も変えずに**断る（変えてから記録に失敗すると、記録の無い変更が
+登録・無効化・削除）は、鍵が無いと **503 で何も変えずに**断る（変えてから記録に失敗すると、記録の無い変更が
 残り再試行も永久に失敗するため）。ガードレールの自動発火だけは例外で、記録できなくても停止は行う。
 
 **同じ超過で記録は重ねない。** 超過は解消するまで続くので、開いているインシデントが同じルールに

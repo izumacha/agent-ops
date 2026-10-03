@@ -11,7 +11,10 @@ import {
   GET as listGuardrailRules,
   POST as createGuardrailRule,
 } from '@/app/api/v1/guardrails/route';
-import { DELETE as deleteGuardrailRule } from '@/app/api/v1/guardrails/[ruleId]/route';
+import {
+  DELETE as deleteGuardrailRule,
+  PATCH as updateGuardrailRule,
+} from '@/app/api/v1/guardrails/[ruleId]/route';
 import { POST as runGuardrails } from '@/app/api/v1/guardrails/run/route';
 import { GET as listIncidents } from '@/app/api/v1/incidents/route';
 import { POST as resolveIncident } from '@/app/api/v1/incidents/[incidentId]/resolve/route';
@@ -282,6 +285,212 @@ describe('ガードレールのルール', () => {
     });
     expect(deleted.status).toBe(409);
     expect(deleted.json).toMatchObject({ message: API_MESSAGES.guardrailRuleHasIncidents });
+  });
+});
+
+describe('ガードレールのルールの無効化', () => {
+  // ルールの `enabled` を切り替える（admin 限定）。**発火記録を持つルールは削除できない**ので、
+  // しきい値を誤った `stop` のルールを止める手段はこれだけ（それが無かったあいだ、誤設定の
+  // ルールはインシデントを解決してエージェントを復帰させても次の中継で再び発火していた）
+  it('無効化すると判定の対象から外れる（停止が止まる）', async () => {
+    // しきい値 1000 に対して 1500 使った状態（この時点で発火する条件を満たしている）
+    const rule = await makeRule({ threshold: 1_000, action: RuleAction.stop });
+    await spend(1_500n);
+    // admin で無効化する
+    const patched = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rule.id },
+      body: { enabled: false },
+    });
+    expect(patched.status, JSON.stringify(patched.json)).toBe(200);
+    // 切り替えた後の行を返す
+    expect(patched.json).toMatchObject({ id: rule.id, enabled: false });
+    // 明示実行しても 1 件も判定されない（＝停止もしない）
+    const result = await call(runGuardrails, {
+      token: seed.a.tokens.admin,
+      body: { agentId: seed.a.agent.id },
+    });
+    expect(result.json).toMatchObject({ evaluated: 0, fired: [] });
+    // エージェントは動いたまま
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+  });
+
+  it('発火記録を持つルールでも無効化できる（削除は 409 なのでこれが唯一の止め方）', async () => {
+    // 発火記録を持つルールを用意する（削除は 409 になる状態）
+    const { rule } = await raiseIncident();
+    // 無効化は通る
+    const patched = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rule.id },
+      body: { enabled: false },
+    });
+    expect(patched.status, JSON.stringify(patched.json)).toBe(200);
+    expect(patched.json).toMatchObject({ enabled: false });
+    // **記録は残っている**（「何がなぜ止めたのか」を読める状態を壊さない）
+    expect(seed.store.guardrailRules.has(rule.id)).toBe(true);
+  });
+
+  it('再度有効にすると判定の対象へ戻る', async () => {
+    // 外してから戻す
+    const rule = await makeRule({ threshold: 1_000, action: RuleAction.stop });
+    await spend(1_500n);
+    await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rule.id },
+      body: { enabled: false },
+    });
+    const restored = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rule.id },
+      body: { enabled: true },
+    });
+    expect(restored.json).toMatchObject({ enabled: true });
+    // 戻した後は発火する
+    const result = await call(runGuardrails, {
+      token: seed.a.tokens.admin,
+      body: { agentId: seed.a.agent.id },
+    });
+    expect(result.json).toMatchObject({ evaluated: 1 });
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+  });
+
+  it('同じ値を 2 回送っても 200（冪等）', async () => {
+    // 2 度押し・再試行を 409 にしない（求めている状態はどちらも同じ）
+    const rule = await makeRule({ action: RuleAction.notify });
+    for (let i = 0; i < 2; i += 1) {
+      const patched = await call(updateGuardrailRule, {
+        token: seed.a.tokens.admin,
+        method: 'PATCH',
+        params: { ruleId: rule.id },
+        body: { enabled: false },
+      });
+      expect(patched.status).toBe(200);
+      expect(patched.json).toMatchObject({ enabled: false });
+    }
+  });
+
+  it('無効化したルールは件数の上限に数えない', async () => {
+    // **数え方を「有効なルールだけ」にしてある** — 無効化した行も数えると、上限ぶん発火して
+    // しまったテナントは「消せない・止めても枠が空かない」でルールを 1 件も作れなくなる
+    const rules = [];
+    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+      rules.push(await makeRule({ action: RuleAction.notify }));
+    }
+    // この時点では上限に達している
+    const refused = await call(createGuardrailRule, {
+      token: seed.a.tokens.admin,
+      body: {
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: WINDOW_MINUTES,
+        action: RuleAction.notify,
+      },
+    });
+    expect(refused.status).toBe(409);
+    // 1 件無効化すると枠が空く
+    await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rules[0].id },
+      body: { enabled: false },
+    });
+    const created = await call(createGuardrailRule, {
+      token: seed.a.tokens.admin,
+      body: {
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: WINDOW_MINUTES,
+        action: RuleAction.notify,
+      },
+    });
+    expect(created.status, JSON.stringify(created.json)).toBe(201);
+  });
+
+  it('他テナントのルールは無効化できない（404 で存在を隠す）', async () => {
+    // テナント b のルール
+    const otherRule = await makeRule({
+      tenantId: seed.b.id,
+      agentId: seed.b.agent.id,
+      action: RuleAction.notify,
+    });
+    // テナント a の admin からは触れない
+    const patched = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: otherRule.id },
+      body: { enabled: false },
+    });
+    expect(patched.status).toBe(404);
+    // 他テナントの行は有効なまま
+    expect(seed.store.guardrailRules.get(otherRule.id)?.enabled).toBe(true);
+  });
+
+  it('未知キーは 422（黙って剥がさない）', async () => {
+    // 契約に無い項目（しきい値の変更など）を混ぜても受け付けない
+    const rule = await makeRule({ action: RuleAction.notify });
+    const patched = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rule.id },
+      body: { enabled: false, threshold: 1 },
+    });
+    expect(patched.status).toBe(422);
+    // 無効化もされていない
+    expect(seed.store.guardrailRules.get(rule.id)?.enabled).toBe(true);
+  });
+
+  it('監査ログの鍵が無ければ 503 で、enabled は変わらない', async () => {
+    // 変えてから記録に失敗すると「いつ誰が止める条件を外したか」が辿れない
+    const rule = await makeRule({ action: RuleAction.notify });
+    vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    const refused = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rule.id },
+      body: { enabled: false },
+    });
+    expect(refused.status).toBe(503);
+    // 行は有効なまま
+    expect(seed.store.guardrailRules.get(rule.id)?.enabled).toBe(true);
+  });
+
+  it('無効化と再有効化は別の操作として監査ログに残る', async () => {
+    // 操作名を分けるのは、記録を読むとき「外した」と「戻した」が区別できる必要があるため
+    const rule = await makeRule({ action: RuleAction.notify });
+    for (const enabled of [false, true]) {
+      await call(updateGuardrailRule, {
+        token: seed.a.tokens.admin,
+        method: 'PATCH',
+        params: { ruleId: rule.id },
+        body: { enabled },
+      });
+    }
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    const items = (
+      logs.json as {
+        items: {
+          action: string;
+          actorId: string | null;
+          targetType: string;
+          targetId: string;
+          payload: Record<string, unknown> | null;
+        }[];
+      }
+    ).items;
+    // 外した記録
+    const disabled = items.find((item) => item.action === AuditAction.guardrail_rule_disabled);
+    expect(disabled?.actorId).toBe(seed.a.users.admin.id);
+    expect(disabled?.targetType).toBe('GuardrailRule');
+    expect(disabled?.targetId).toBe(rule.id);
+    expect(disabled?.payload).toEqual({ enabled: false });
+    // 戻した記録
+    const enabledRow = items.find((item) => item.action === AuditAction.guardrail_rule_enabled);
+    expect(enabledRow?.targetId).toBe(rule.id);
+    expect(enabledRow?.payload).toEqual({ enabled: true });
   });
 });
 

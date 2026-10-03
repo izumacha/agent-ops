@@ -1025,6 +1025,49 @@ paths:
   /guardrails/{ruleId}:
     parameters:
       - $ref: '#/components/parameters/RuleId'
+    patch:
+      tags: [guardrails]
+      operationId: updateGuardrailRule
+      summary: |
+        ガードレールのルールの有効・無効を切り替える (admin ロール限定)。
+
+        **発火記録 (インシデント) を持つルールは削除できない**ので、設定を誤ったルールを止める
+        手段はこれだけ。無効にしたルールは判定の対象から外れ (findActiveRules が enabled を見る)、
+        テナントのルール数上限にも数えない (数えると、発火済みのルールがたまったテナントが
+        二度とルールを作れなくなる)。しきい値や種別は変更できない — **判定の条件を書き換えると、
+        過去のインシデントが「どの条件で発火したか」を指さなくなる**ので、条件を変えるときは
+        無効にして新しいルールを作る
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuardrailRuleUpdate'
+      responses:
+        '200':
+          description: 切り替えた (冪等。同じ値を 2 度送っても 200)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuardrailRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     delete:
       tags: [guardrails]
       operationId: deleteGuardrailRule
@@ -2051,6 +2094,17 @@ components:
         createdAt:
           type: string
           format: date-time
+    GuardrailRuleUpdate:
+      type: object
+      required: [enabled]
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            true で判定の対象に戻し、false で外す。**この 1 項目だけを受け付ける** —
+            しきい値・種別・集計窓を変えられるようにすると、過去のインシデントが
+            「どの条件で発火したか」を指さなくなる (条件を変えるときは無効にして作り直す)
     GuardrailRuleCreate:
       type: object
       additionalProperties: false

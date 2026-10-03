@@ -239,7 +239,7 @@ erDiagram
 
 ### 削除の規則（参照整合性）
 
-- **履歴（`UsageEvent` / `EvaluationRun` / `Incident`）は親の削除で消さない（`Restrict`）。** コスト履歴は請求の根拠、インシデントは停止理由の記録なので、履歴を持つエージェントは削除できず `stop` で止める（`DELETE /agents/{id}` は 409）。実行履歴を持つ評価セット、発火済みのルールも同様（ルールは `enabled=false` で無効化する想定だが、**その API はまだ無い** — ADR-0010 の宿題で、Step5 の最初に入れる）。**そのため、しきい値を誤った `stop` ルールは発火後に API から止められない**（インシデントを解決して復帰させても次の中継で再び発火する）。回避策として、`stop` のルールは最初 `notify` で入れて挙動を確かめてから作り直す（発火していないルールは削除できる）。
+- **履歴（`UsageEvent` / `EvaluationRun` / `Incident`）は親の削除で消さない（`Restrict`）。** コスト履歴は請求の根拠、インシデントは停止理由の記録なので、履歴を持つエージェントは削除できず `stop` で止める（`DELETE /agents/{id}` は 409）。実行履歴を持つ評価セット、発火済みのルールも同様（発火済みのルールは削除せず `PATCH /guardrails/{ruleId}` で `enabled=false` にして止める）。**しきい値を誤った `stop` ルールはこの無効化だけが止める手段**で、無効化すれば次の中継から判定の対象に入らない（インシデントを解決してエージェントを復帰させれば動き続ける）。**無効化した行はルール数の上限（50 件）に数えない** — 数えると、上限ぶん発火してしまったテナントは「消せない・止めても枠が空かない」で新しいルールを 1 件も作れなくなる。
 - **設定（`ApiKey` / `GuardrailRule`）はエージェントと一緒に消える（`Cascade`）。** `ApiKey.agentId` を `SetNull` にすると削除で「テナント共通キー」へ黙って昇格し権限が広がるため、Cascade にする。
 - **監査ログの操作者（`AuditLog.actorId`）は `Restrict`。** 監査ログを持つユーザーは削除せず無効化する（`User.disabledAt`。`DELETE /users/{userId}` は無効化）。ユーザーのログイントークン（`UserToken`）は設定なので `Cascade`。テナント解約は `Cascade` でデータ一式を消す（テナント単位の消去要求に応えるため）。
 - **実行履歴を持つ評価セットのケースは変更・削除できない**（ケースの更新・削除 API を作らない。`EvaluationResult` → `EvaluationCase` も `Restrict`）。入力が動くと回帰比較が無意味になるため、変えたいときは新しいセットを作る（ADR-0009）。
@@ -291,6 +291,7 @@ erDiagram
 | GET      | `/evaluations/{runId}`     | `getEvaluationRun` | view         | 3    |
 | GET      | `/guardrails`              | `listGuardrailRules` | view       | 4    |
 | POST     | `/guardrails`              | `createGuardrailRule` | `admin` ロール限定 | 4 |
+| PATCH    | `/guardrails/{ruleId}`     | `updateGuardrailRule` | `admin` ロール限定 | 4 |
 | DELETE   | `/guardrails/{ruleId}`     | `deleteGuardrailRule` | `admin` ロール限定 | 4 |
 | POST     | `/guardrails/run`          | `runGuardrails`  | stop           | 4    |
 | GET      | `/incidents`               | `listIncidents`  | view           | 4    |

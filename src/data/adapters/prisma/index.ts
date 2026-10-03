@@ -957,8 +957,10 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
         // 居なければ作れない (他テナントのエージェントも「無い」と同じ扱いにして存在を隠す)
         if (agent.length === 0) return { status: 'agent_not_found' as const };
       }
-      // 現在のルール数を数える
-      const existing = await tx.guardrailRule.count({ where: { tenantId: input.tenantId } });
+      // 現在の**有効な**ルール数を数える (無効化したものは数えない。理由は Port のコメント)
+      const existing = await tx.guardrailRule.count({
+        where: { tenantId: input.tenantId, enabled: true },
+      });
       // 上限に達していれば作らない
       if (existing >= maxRulesPerTenant) return { status: 'too_many_rules' as const };
       // 挿入する。**FK 違反 (P2003) を翻訳しない** — 2 本の FK (Tenant / Agent) のうち
@@ -987,6 +989,23 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
     const rows = await this.db.guardrailRule.findMany(pageArgs(query, { tenantId }));
     // ページに整形する
     return toPage(rows, query.limit);
+  }
+
+  // 有効・無効を切り替える (他テナントの id は null)。冪等 — 既に同じ値でも現在の行を返す。
+  // **複合一意 (tenantId, id) の update 1 回**で済ませる (findById → update の 2 往復にしない。
+  // 間に消えると 500 になる)。P2025 は「無い」に翻訳する
+  async setEnabled(
+    tenantId: string,
+    ruleId: string,
+    enabled: boolean,
+  ): Promise<GuardrailRuleRecord | null> {
+    // テナント条件込みの複合一意で更新する
+    return updateOrNull(() =>
+      this.db.guardrailRule.update({
+        where: { tenantId_id: { tenantId, id: ruleId } },
+        data: { enabled },
+      }),
+    );
   }
 
   // ルールを消す (インシデントを持つルールは消せない = DB の Restrict FK)

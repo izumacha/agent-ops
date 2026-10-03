@@ -26,6 +26,11 @@ export const AuditAction = {
   guardrail_rule_created: 'guardrail.rule_created',
   // ガードレールのルールを削除した（同上）
   guardrail_rule_deleted: 'guardrail.rule_deleted',
+  // ガードレールのルールを有効に戻した（「止まる条件」の変更なので記録する）
+  guardrail_rule_enabled: 'guardrail.rule_enabled',
+  // ガードレールのルールを無効にした（**発火記録を持つルールを止める唯一の手段**なので、
+  // 「いつ誰が止める条件を外したか」が辿れるようにする）
+  guardrail_rule_disabled: 'guardrail.rule_disabled',
 } as const;
 /** AuditAction の値の型 */
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];

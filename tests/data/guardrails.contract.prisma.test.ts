@@ -296,6 +296,84 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     expect(second.status).toBe('too_many_rules');
   });
 
+  it('無効化したルールは上限に数えず、切り替えはテナント内に閉じる (memory 側と同じ答え)', async () => {
+    // テナント 2 つ
+    const a = await makeTenantWithAgent(repos, 'a');
+    const b = await makeTenantWithAgent(repos, 'b');
+    // 上限 1 件として 1 件作る
+    const first = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      1,
+    );
+    expect(first.status).toBe('created');
+    if (first.status !== 'created') return;
+    // **他テナントからは切り替えられない** (複合主キーの tenantId を落とすとクロステナントの書き込み)
+    expect(await repos.guardrailRules.setEnabled(b.tenantId, first.rule.id, false)).toBeNull();
+    // 存在しない id も null (404 で隠すためにアダプタ側で区別しない)
+    expect(
+      await repos.guardrailRules.setEnabled(a.tenantId, 'gr_does_not_exist', false),
+    ).toBeNull();
+    // 自テナントからは外せる
+    const disabled = await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, false);
+    expect(disabled?.enabled).toBe(false);
+    // **上限 1 件でも次の 1 件が作れる** — 件数を数えるのは有効なルールだけだから
+    // (無効化した行も数えると、発火して消せなくなったテナントはルールを増やせなくなる)
+    const second = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: null,
+        kind: RuleKind.quality,
+        threshold: 0.7,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      1,
+    );
+    expect(second.status).toBe('created');
+    // 同じ値を 2 度送っても成功し (冪等)、戻せる
+    expect((await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, false))?.enabled).toBe(
+      false,
+    );
+    expect((await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, true))?.enabled).toBe(
+      true,
+    );
+  });
+
+  it('無効化したルールは判定の対象から外れる (実 DB の enabled 条件)', async () => {
+    // テナントとエージェント
+    const a = await makeTenantWithAgent(repos, 'a');
+    // 1 件作って外す
+    const created = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.stop,
+      },
+      RULES_MAX,
+    );
+    expect(created.status).toBe('created');
+    if (created.status !== 'created') return;
+    await repos.guardrailRules.setEnabled(a.tenantId, created.rule.id, false);
+    // 有効なルールの取得に出てこない (＝評価の起点から見えない)
+    expect(
+      await repos.guardrailRules.findActiveRules(a.tenantId, { agentId: a.agent.id }),
+    ).toHaveLength(0);
+    // 一覧には残る (設定画面から戻せる必要がある)
+    const listed = await repos.guardrailRules.list(a.tenantId, { limit: 10 });
+    expect(listed.items).toHaveLength(1);
+    expect(listed.items[0]?.enabled).toBe(false);
+  });
+
   it('CHECK 制約が範囲外のしきい値と集計窓を拒否する', async () => {
     // テナントとエージェント
     const a = await makeTenantWithAgent(repos, 'a');

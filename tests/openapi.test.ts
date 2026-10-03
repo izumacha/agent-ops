@@ -29,7 +29,11 @@ import { evaluationRunCreateSchema, evaluationSetCreateSchema } from '@/lib/vali
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
-import { guardrailRuleCreateSchema, guardrailRunSchema } from '@/lib/validations/guardrail';
+import {
+  guardrailRuleCreateSchema,
+  guardrailRuleUpdateSchema,
+  guardrailRunSchema,
+} from '@/lib/validations/guardrail';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { ROUTE_RATE_LIMIT_BRAND } from '@/lib/api/handler';
@@ -92,6 +96,7 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   'PUT /users/{userId}/role': userRoleSchema,
   ProxyRequest: proxyRequestSchema,
   GuardrailRuleCreate: guardrailRuleCreateSchema,
+  GuardrailRuleUpdate: guardrailRuleUpdateSchema,
   GuardrailRunRequest: guardrailRunSchema,
 };
 

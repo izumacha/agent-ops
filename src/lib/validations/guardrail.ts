@@ -88,6 +88,18 @@ export const incidentListQuerySchema = pageQuerySchema.extend({
 });
 
 /**
+ * ルールの有効・無効の切り替えの本文。
+ *
+ * **`enabled` の 1 項目だけ**（`strictObject` なので他のキーは 422）。しきい値・種別・集計窓を
+ * 変えられるようにすると、過去のインシデントが「どの条件で発火したか」を指さなくなる
+ * （条件を変えるときは無効にして新しいルールを作る）。
+ */
+export const guardrailRuleUpdateSchema = z.strictObject({
+  // true で判定の対象に戻し、false で外す
+  enabled: z.boolean(),
+});
+
+/**
  * 連鎖の検証のクエリ。
  *
  * **`fromSeq` でその連番から検証できる**（省略時は先頭）。行数が 1 回の上限を超えるテナントでは
@@ -114,6 +126,8 @@ export const guardrailRunSchema = z.strictObject({
   agentId: resourceId,
 });
 
+/** 検証済みの有効・無効の切り替えの本文 */
+export type GuardrailRuleUpdateBody = z.infer<typeof guardrailRuleUpdateSchema>;
 /** 検証済みのルール登録の本文 */
 export type GuardrailRuleCreateBody = z.infer<typeof guardrailRuleCreateSchema>;
 /** 検証済みの明示実行の本文 */

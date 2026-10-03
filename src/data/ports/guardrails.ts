@@ -20,7 +20,10 @@ export interface CreateGuardrailRuleInput {
 // 「50% で通知、80% で停止」のような段階的な設定が自然で、禁じる理由が無い。
 // 代わりにテナントあたりの件数に上限を置く (判定は中継 1 回ごとに走るので、
 // ルールが増えるほど毎回の集計が増える。§8 / §9)。上限の判定は**作成と同じ原子的な操作**で行う —
-// 件数を数えてから挿入する形に分けると、同時に 2 件来たときに上限を超えられる
+// 件数を数えてから挿入する形に分けると、同時に 2 件来たときに上限を超えられる。
+// **数えるのは有効なルールだけ** (`enabled` が true) — 無効化したものまで数えると、発火済みで
+// 削除できないルールがたまったテナントが**二度とルールを作れなくなる** (無効化が唯一の
+// 後始末なのに、その結果が上限を食い続ける)。判定の費用も有効なルールにしか掛からない
 export type CreateGuardrailRuleResult =
   | { status: 'created'; rule: GuardrailRuleRecord }
   // 対象エージェントが同テナントに無い (他テナントの id を指した場合も含む)
@@ -91,8 +94,26 @@ export interface GuardrailRulesPort {
   ): Promise<CreateGuardrailRuleResult>;
   // ルールを一覧する (テナント内、createdAt 昇順)
   list(tenantId: string, query: PageQuery): Promise<Page<GuardrailRuleRecord>>;
-  // ルールを消す (インシデントを持つルールは 'restricted'。無効化は enabled を false にする)
+  // ルールを消す (インシデントを持つルールは 'restricted'。無効化は下の setEnabled)
   delete(tenantId: string, ruleId: string): Promise<DeleteGuardrailRuleResult>;
+  /**
+   * ルールの有効・無効を切り替える (他テナントの id は null)。
+   *
+   * **発火記録を持つルールは削除できないので、設定を誤ったルールを止める唯一の手段。**
+   * これが無かったあいだ、しきい値を誤った `stop` のルールはインシデントを解決して
+   * エージェントを復帰させても次の中継で再び発火し、回復には DB の直接操作が必要だった。
+   *
+   * **切り替えられるのは `enabled` だけ。** しきい値・種別・集計窓を変えられるようにすると、
+   * 過去のインシデントが「どの条件で発火したか」を指さなくなる (条件を変えるときは
+   * 無効にして新しいルールを作る)。
+   *
+   * **冪等**（既に同じ値でも成功して現在の行を返す）— 2 度押しや再試行で 409 にしない。
+   */
+  setEnabled(
+    tenantId: string,
+    ruleId: string,
+    enabled: boolean,
+  ): Promise<GuardrailRuleRecord | null>;
   // **判定の対象になる有効なルールを引く** (エージェント指定のものとテナント全体のものの和集合)。
   // ページ送りを持たないのは、これが中継 1 回ごとに走る経路で、
   // 「有効なルールは少数」という前提に立っているため (上限は API 側のルール数制限で担保する)

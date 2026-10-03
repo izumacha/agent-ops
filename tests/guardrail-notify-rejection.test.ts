@@ -76,7 +76,7 @@ describe('待たない経路での通知の拒否', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      50,
+      { maxEnabled: 50, maxRows: 200 },
     );
     if (rule.status !== 'created') throw new Error('ルールを作れません');
     // しきい値を超える利用イベント

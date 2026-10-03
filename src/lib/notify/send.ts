@@ -132,10 +132,20 @@ async function sendTo(
     // 未消費のまま残り、ソケットと fd がタイムアウトまで解放されない (上流の応答を読む
     // src/lib/proxy/upstream.ts と同じ事情で、そちらは実測で確認済み)。受け手が毎回 64KiB を
     // 超える本文を返すと、発火 1 件ごとに 2 本ずつ fd が積まれる
+    //
+    // **本文の読み取り失敗で「届かなかった」にしない。** 受け手が 2xx を返した時点で通知は
+    // 届いており、その後の切断や時間切れは配信の成否と無関係。`readStreamWithinByteLimit` は
+    // 読み取りの失敗を投げるので、囲まないと下の catch へ落ちて `failed` になり、届いた通知に
+    // 対して「受け手へ届きませんでした」と記録する (運用者が無い障害を追うことになる)
     if (response.body !== null) {
-      await readStreamWithinByteLimit(response.body, NOTIFY_MAX_RESPONSE_BYTES, {
-        cancelOnOverflow: true,
-      });
+      try {
+        await readStreamWithinByteLimit(response.body, NOTIFY_MAX_RESPONSE_BYTES, {
+          cancelOnOverflow: true,
+        });
+      } catch (error) {
+        // 読み捨てに失敗したことは残す (握り潰さない。§6) が、配信の判定には使わない
+        console.error('[notify] 応答本文を読み捨てられませんでした', describeError(error));
+      }
     }
     // 2xx 以外は届かなかったものとして扱う (3xx も「追わない」ので失敗)
     return response.ok ? { status: 'delivered', channel } : { status: 'failed', channel };

@@ -68,6 +68,12 @@ export const GUARDRAIL_COST_THRESHOLD_MAX = Number.MAX_SAFE_INTEGER;
 // ルールが増えるほど 1 回の呼び出しで回す集計が増える (§8 / §9)。
 // 50 件は「種別 3 × エージェント十数件 ＋ テナント全体のルール」を十分に収める大きさ
 export const GUARDRAIL_RULES_MAX_PER_TENANT = 50;
+// 1 テナントが持てるガードレールのルールの**行数**の上限 (有効・無効を問わない)。
+// **有効なルールの上限だけでは総行数が縛れない** — 無効化した行は上の上限に数えないので
+// (発火済みのルールは削除できず、数えると枠が永久に空かない)、「作る → 無効化する」を繰り返すと
+// 行が無制限に増える。有効な上限の 4 倍を行数の天井にして、どちらかに達したら 409 を返す
+// (§9 のリソース枯渇の防止)。無効で発火記録も無い行は削除できるので、通常の運用で当たることはない
+export const GUARDRAIL_RULE_ROWS_MAX_PER_TENANT = GUARDRAIL_RULES_MAX_PER_TENANT * 4;
 // 連鎖の検証で 1 回に読む監査ログの上限。検証は 1 行目から順にたどるので途中から始められず、
 // ページ送りができない。代わりに読む件数を区切り、上限に達したかを応答で伝える (§8)
 export const AUDIT_CHAIN_VERIFY_MAX_ROWS = 10_000;
@@ -232,6 +238,7 @@ export const API_MESSAGES = {
   guardrailWindowOutOfRange: `集計窓は ${GUARDRAIL_WINDOW_MIN_MINUTES} 分以上 ${GUARDRAIL_WINDOW_MAX_MINUTES} 分以内の整数で指定してください。`,
   guardrailRuleLimit:
     'ガードレールのルール数が上限に達しています。不要なルールを削除してください。',
+  guardrailRuleRowLimit: `ガードレールのルールの総数 (無効化したものを含む) が上限 ${GUARDRAIL_RULE_ROWS_MAX_PER_TENANT} 件に達しています。不要なルールを削除してください。`,
   guardrailRuleHasIncidents:
     '発火記録があるルールは削除できません (記録からルールを辿れなくなるため)。',
   incidentAlreadyResolved: 'このインシデントは既に解決済みです。',
@@ -266,6 +273,8 @@ export const API_MESSAGES = {
   auditNotConfigured: '監査ログの設定が正しくありません。',
   // 連鎖の検証の fromSeq が 10 進の整数でない・1 未満のとき (422)
   auditFromSeqInvalid: 'fromSeq は 1 以上の整数を指定してください。',
+  auditFromSeqBeyondEnd:
+    'fromSeq が監査ログの末尾を越えています (その連番以降に行がありません)。nextFromSeq を渡し直すか、省略して先頭から検証してください。',
   // **連鎖が壊れていたときの文言は置いていない。** `GET /audit-logs/verify` は壊れていても
   // 200 ＋ `{ ok: false, reason, brokenSeq }` を返す設計（壊れたことは隠さないが、
   // 「検証できた」という操作そのものは成功しているのでエラーにしない）。文言を置くと

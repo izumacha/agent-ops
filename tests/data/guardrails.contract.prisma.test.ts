@@ -30,6 +30,10 @@ const TOKEN_TTL_DAYS = 1;
 const MODEL = 'claude-sonnet-4-6';
 // ルール数の上限 (この検査では上限そのものは主題でないので十分大きい値を渡す)
 const RULES_MAX = 50;
+// 行数 (無効化したものを含む) の上限。有効なルールの上限だけでは総行数が縛れないので 2 つ渡す
+const ROWS_MAX = 200;
+// ほとんどのテストが使う上限の組 (件数の判定そのものを見るテストだけが別の値を渡す)
+const LIMITS = { maxEnabled: RULES_MAX, maxRows: ROWS_MAX };
 // 監査ログのハッシュ計算に使う鍵 (検査用の固定値)
 const SECRET = 'contract-test-audit-secret-0123456789';
 // 連鎖を読むときの上限
@@ -153,7 +157,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      RULES_MAX,
+      LIMITS,
     );
     // 作成できている
     expect(created.status).toBe('created');
@@ -180,7 +184,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      RULES_MAX,
+      LIMITS,
     );
     // 複合 FK (tenantId, agentId) が拒否する
     expect(result.status).toBe('agent_not_found');
@@ -202,7 +206,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     expect(filled.status).toBe('created');
     // 上限に達した状態で、存在しないエージェントを指して作ろうとする
@@ -215,7 +219,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     // エージェントの不在を先に答える (そちらの方が利用者にとって直せる情報)
     expect(result.status).toBe('agent_not_found');
@@ -260,7 +264,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     expect(created.status).toBe('agent_not_found');
   });
@@ -278,7 +282,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     expect(first.status).toBe('created');
     // 2 件目は上限に達しているので作れない
@@ -291,7 +295,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     expect(second.status).toBe('too_many_rules');
   });
@@ -310,7 +314,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     expect(first.status).toBe('created');
     if (first.status !== 'created') return;
@@ -334,7 +338,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     expect(second.status).toBe('created');
     // 同じ値を 2 度送っても成功し (冪等)、戻せる
@@ -344,6 +348,39 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     expect((await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, true))?.enabled).toBe(
       true,
     );
+  });
+
+  it('行数の上限に達したら作れない (無効化した行も数える天井。memory と同じ答え)', async () => {
+    // テナントとエージェント
+    const a = await makeTenantWithAgent(repos, 'a');
+    // 1 件作って無効化する (有効なルールは 0 件になる)
+    const first = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: a.agent.id,
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      LIMITS,
+    );
+    expect(first.status).toBe('created');
+    if (first.status !== 'created') return;
+    await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, false);
+    // 行数の天井 1 件に達しているので、有効側に余裕があっても作れない
+    const second = await repos.guardrailRules.create(
+      {
+        tenantId: a.tenantId,
+        agentId: null,
+        kind: RuleKind.quality,
+        threshold: 0.7,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      { maxEnabled: RULES_MAX, maxRows: 1 },
+    );
+    expect(second.status).toBe('too_many_rows');
   });
 
   it('無効化したルールは判定の対象から外れる (実 DB の enabled 条件)', async () => {
@@ -359,7 +396,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      RULES_MAX,
+      LIMITS,
     );
     expect(created.status).toBe('created');
     if (created.status !== 'created') return;
@@ -388,7 +425,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
           windowMinutes: 0,
           action: RuleAction.stop,
         },
-        RULES_MAX,
+        LIMITS,
       ),
     ).rejects.toThrow();
     // エラー率のしきい値 1.5 (エラー率は 1 を超えないので永久に発火しない)
@@ -402,7 +439,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
           windowMinutes: 60,
           action: RuleAction.stop,
         },
-        RULES_MAX,
+        LIMITS,
       ),
     ).rejects.toThrow();
   });
@@ -420,7 +457,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     // 発火させる
@@ -453,7 +490,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     // 同じ発火を 3 回
@@ -500,7 +537,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     // 1 回目: 記録して停止
@@ -543,7 +580,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     // 発火させる
@@ -573,7 +610,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     await repos.incidents.raise({
@@ -600,7 +637,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     const tenantWide = await repos.guardrailRules.create(
       {
@@ -611,7 +648,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (scoped.status !== 'created' || tenantWide.status !== 'created') {
       throw new Error('ルールを作れませんでした');
@@ -636,7 +673,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     await repos.incidents.raise({
@@ -663,7 +700,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     const raised = await repos.incidents.raise({
@@ -694,7 +731,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     if (created.status !== 'created') throw new Error('ルールを作れませんでした');
     const raised = await repos.incidents.raise({

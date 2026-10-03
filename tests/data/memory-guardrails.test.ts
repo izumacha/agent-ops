@@ -18,6 +18,10 @@ const SECRET = 'memory-test-audit-secret-0123456789ab';
 const CHAIN_LIMIT = 1_000;
 // ルール数の上限 (この検査では上限そのものは主題でないので十分大きい値を渡す)
 const RULES_MAX = 50;
+// 行数 (無効化したものを含む) の上限。有効なルールの上限だけでは総行数が縛れないので 2 つ渡す
+const ROWS_MAX = 200;
+// ほとんどのテストが使う上限の組 (件数の判定そのものを見るテストだけが別の値を渡す)
+const LIMITS = { maxEnabled: RULES_MAX, maxRows: ROWS_MAX };
 
 describe('memory アダプタ: ガードレールと監査ログ', () => {
   // 表とリポジトリ (テストごとに作り直す)
@@ -67,7 +71,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
         windowMinutes: 60,
         action,
       },
-      RULES_MAX,
+      LIMITS,
     );
     // 作れていなければ続けられない
     if (created.status !== 'created')
@@ -136,7 +140,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      RULES_MAX,
+      LIMITS,
     );
     // 拒否される
     expect(result.status).toBe('agent_not_found');
@@ -155,7 +159,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      RULES_MAX,
+      LIMITS,
     );
     expect(created.status).toBe('agent_not_found');
   });
@@ -173,7 +177,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     expect(second.status).toBe('too_many_rules');
   });
@@ -195,9 +199,29 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     expect(second.status).toBe('created');
+  });
+
+  it('行数の上限に達したら作れない (無効化した行も数える天井。prisma と同じ)', async () => {
+    // 行数の上限 1 件として 1 件作り、無効化して「有効なルールは 0 件」にする
+    const first = await makeRule(RuleKind.cost, RuleAction.notify, false);
+    await repos.guardrailRules.setEnabled(tenantId, first.id, false);
+    // 有効側の上限には達していないのに、行数の天井で断られる
+    const second = await repos.guardrailRules.create(
+      {
+        tenantId,
+        agentId: null,
+        kind: RuleKind.quality,
+        threshold: 0.7,
+        windowMinutes: 60,
+        action: RuleAction.notify,
+      },
+      { maxEnabled: RULES_MAX, maxRows: 1 },
+    );
+    // **有効側とは別の答えを返す** (ルートが別の文言を出すため)
+    expect(second.status).toBe('too_many_rows');
   });
 
   it('無効化と再有効化は切り替えた後の行を返し、他テナントの id は null (prisma と同じ)', async () => {
@@ -235,7 +259,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
         windowMinutes: 60,
         action: RuleAction.notify,
       },
-      1,
+      { maxEnabled: 1, maxRows: ROWS_MAX },
     );
     // エージェントの不在を先に答える
     expect(result.status).toBe('agent_not_found');

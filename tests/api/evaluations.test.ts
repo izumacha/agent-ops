@@ -25,6 +25,7 @@ import {
 import {
   API_MESSAGES,
   EVALUATION_SET_MAX_CASES,
+  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
   GUARDRAIL_RULES_MAX_PER_TENANT,
 } from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
@@ -656,7 +657,7 @@ describe('評価実行の直後のガードレール判定', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      GUARDRAIL_RULES_MAX_PER_TENANT,
+      { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
     );
     // 作れていなければテストとして落とす
     if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);

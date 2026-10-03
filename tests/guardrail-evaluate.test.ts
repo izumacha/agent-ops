@@ -108,7 +108,7 @@ describe('ガードレールの判定', () => {
     // 作成する（上限はこの検査の主題ではないので十分大きい値）
     const created = await repos.guardrailRules.create(
       { tenantId, agentId, kind, threshold, windowMinutes, action },
-      50,
+      { maxEnabled: 50, maxRows: 200 },
     );
     // 作れていなければ続けられない
     if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);
@@ -620,7 +620,7 @@ describe('ガードレールの判定', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      50,
+      { maxEnabled: 50, maxRows: 200 },
     );
     // 自テナントには料金の記録があるがルールは無い
     await recordUsage(1_500n);

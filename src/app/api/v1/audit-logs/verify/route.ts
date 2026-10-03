@@ -1,11 +1,13 @@
 // /api/v1/audit-logs/verify: 監査ログのハッシュ連鎖の検証 (admin ロール限定)。
 // Step4 の受け入れ基準「監査ログの改ざん検知」を運用から確かめる経路。
+import { ApiError } from '@/lib/api/errors';
 import { requireAdminRole } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
+import { HTTP_STATUS } from '@/lib/api/http-status';
 import type { ApiSchemas } from '@/lib/api-types';
 import { verifyAuditChain, type StoredAuditRow } from '@/domain/audit/chain';
 import { auditHmacSecret } from '@/lib/audit/secret';
-import { AUDIT_CHAIN_VERIFY_MAX_ROWS } from '@/lib/constants';
+import { API_MESSAGES, AUDIT_CHAIN_VERIFY_MAX_ROWS } from '@/lib/constants';
 import { parseQuery } from '@/lib/api/pagination';
 import { auditChainVerifyQuerySchema } from '@/lib/validations/guardrail';
 import { secretsEqual } from '@/lib/tokens';
@@ -38,6 +40,14 @@ export const GET = route(async ({ request, principal, repos }) => {
     AUDIT_CHAIN_VERIFY_MAX_ROWS,
     fromSeq,
   );
+  // **末尾を越えた `fromSeq` は 422 で断る。** 行が 1 件も返らないまま検証すると
+  // 「0 件を検証して ok」＝無傷と答えることになり、古いカーソルや打ち間違いを握ったまま
+  // 「連鎖は健全」と報告し続ける (このパラメータが防ぐはずだった fail-open そのもの)。
+  // **判定には錨を使う** — 錨があるのは「その連番より前に行がある」ときだけなので、
+  // 「行が無いテナント」(錨も無い＝検証すべきものが無いので ok が正しい) と区別できる
+  if (fromSeq !== undefined && rows.length === 0 && anchorHash !== null) {
+    throw new ApiError(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.auditFromSeqBeyondEnd);
+  }
   // **検証したいテナントを渡す。** 行の tenantId を信じるだけだと、取り出すクエリの条件が
   // 壊れて別テナントの行が返ったときに連鎖は整合しているので ok になり、対象テナントを
   // 1 行も見ていないのに「無傷」と報告される。

@@ -307,4 +307,21 @@ describe('ガードレールの通知', () => {
     // **2 つの宛先ぶん、どちらも下層が解放されている**
     expect(cancelled).toBe(2);
   });
+
+  it('2xx のあと応答本文が読めなくても届いた扱いにする (配信の成否と無関係)', async () => {
+    // **受け手が 2xx を返した時点で通知は届いている。** その後の切断や時間切れで failed に
+    // すると、届いた通知に対して「受け手へ届きませんでした」と記録し、運用者が無い障害を追う
+    const brokenBody = () =>
+      new ReadableStream<Uint8Array>({
+        // 読み始めた瞬間に失敗する (受け手が 200 を返した直後に切れた形)
+        pull() {
+          throw new Error('接続が切れました');
+        },
+      });
+    stubFetch(() => new Response(brokenBody(), { status: 200 }));
+    // 送る
+    const results = await notifyGuardrailIncident(PAYLOAD, env());
+    // どちらの宛先も「届いた」
+    expect(results.every((r) => r.status === 'delivered')).toBe(true);
+  });
 });

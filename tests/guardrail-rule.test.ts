@@ -10,8 +10,10 @@ import {
   guardrailWindow,
   isValidWindowMinutes,
   RULE_COMPARISON,
+  RULE_THRESHOLD_UNIT,
   RuleComparison,
   thresholdRangeFor,
+  ThresholdUnit,
   worstQualityScore,
   type GuardrailMeasurement,
 } from '@/domain/guardrail/rule';
@@ -187,6 +189,22 @@ describe('しきい値の範囲', () => {
       min: 0,
       max: 1,
     });
+  });
+
+  it('単位の表が全種別を覆い、範囲はその表から導かれる (三項演算子の暗黙の既定を作らない)', () => {
+    // **これが無いと種別を足したときに黙って 0〜1 の割合として扱われる** —
+    // 以前は `kind === cost ? 金額 : 割合` と書いていたので、lint も typecheck もテストも
+    // 何も言わないまま新しい種別が比率扱いになった (入力検証の文言も合わなくなる)
+    for (const kind of Object.values(RuleKind)) {
+      // 単位が決まっている
+      const unit = RULE_THRESHOLD_UNIT[kind];
+      expect(Object.values(ThresholdUnit)).toContain(unit);
+      // 範囲は単位から導かれる (表と範囲が食い違っていない)
+      expect(thresholdRangeFor(kind, GUARDRAIL_COST_THRESHOLD_MAX)).toEqual({
+        min: 0,
+        max: unit === ThresholdUnit.microUsd ? GUARDRAIL_COST_THRESHOLD_MAX : 1,
+      });
+    }
   });
 
   it('比べ方の表が全種別を覆っている (向きを決めずに種別を足せない)', () => {

@@ -21,6 +21,7 @@ import type {
   CreateGuardrailRuleInput,
   CreateGuardrailRuleResult,
   DeleteGuardrailRuleResult,
+  GuardrailRuleLimits,
   GuardrailRuleRecord,
   GuardrailRulesPort,
   IncidentFilter,
@@ -931,7 +932,7 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
   // (「最後の有効な admin」判定と同じ理由・同じ手口)
   async create(
     input: CreateGuardrailRuleInput,
-    maxRulesPerTenant: number,
+    limits: GuardrailRuleLimits,
   ): Promise<CreateGuardrailRuleResult> {
     // 1 つのトランザクションで「ロック → 数える → 挿入」を行う
     return this.db.$transaction(async (tx) => {
@@ -961,8 +962,14 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
       const existing = await tx.guardrailRule.count({
         where: { tenantId: input.tenantId, enabled: true },
       });
-      // 上限に達していれば作らない
-      if (existing >= maxRulesPerTenant) return { status: 'too_many_rules' as const };
+      // 有効なルールの上限に達していれば作らない
+      if (existing >= limits.maxEnabled) return { status: 'too_many_rules' as const };
+      // **行数 (有効・無効の両方) も数えて天井を掛ける** — 無効化した行を上の判定で
+      // 数えないぶん、これが無いと「作る → 無効化する」の繰り返しで行が無制限に増える。
+      // **同じトランザクションの中で数える** (上の判定と同じ理由。外に出すと同時の 2 件が天井を超える)
+      const rows = await tx.guardrailRule.count({ where: { tenantId: input.tenantId } });
+      // 行数の上限に達していれば作らない
+      if (rows >= limits.maxRows) return { status: 'too_many_rows' as const };
       // 挿入する。**FK 違反 (P2003) を翻訳しない** — 2 本の FK (Tenant / Agent) のうち
       // Tenant 側は上の FOR NO KEY UPDATE が、Agent 側は上の FOR KEY SHARE が削除を待たせるので、
       // ここで FK 違反は起こらない。それでも起きたなら前提が崩れているので、別の原因を

@@ -7,7 +7,11 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { pageQuerySchema, parseQuery } from '@/lib/api/pagination';
 import { toGuardrailRuleDto, toListDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
-import { API_MESSAGES, GUARDRAIL_RULES_MAX_PER_TENANT } from '@/lib/constants';
+import {
+  API_MESSAGES,
+  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
+  GUARDRAIL_RULES_MAX_PER_TENANT,
+} from '@/lib/constants';
 import { guardrailRuleCreateSchema } from '@/lib/validations/guardrail';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
@@ -51,13 +55,19 @@ export const POST = route(async ({ request, principal, repos }) => {
       windowMinutes: input.windowMinutes,
       action: input.action,
     },
-    GUARDRAIL_RULES_MAX_PER_TENANT,
+    { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
   );
   // 指定したエージェントが自テナントに無い (他テナントの id も同じ扱いで存在を隠す)
   if (created.status === 'agent_not_found') throw notFoundError();
   // ルール数の上限に達している (409: 状態が許さない)
   if (created.status === 'too_many_rules') {
     throw new ApiError(HTTP_STATUS.CONFLICT, API_MESSAGES.guardrailRuleLimit);
+  }
+  // 行数 (無効化したものを含む) の上限に達している。**別の文言を返す** —
+  // 「不要なルールを削除してください」だけだと、有効なルールが 0 件なのに作れない利用者が
+  // 何を消せばよいか分からない (消す対象は無効化した行の側)
+  if (created.status === 'too_many_rows') {
+    throw new ApiError(HTTP_STATUS.CONFLICT, API_MESSAGES.guardrailRuleRowLimit);
   }
   // **「止まる条件」の変更なので監査ログに残す。** ルールはこのシステムの制御そのものなので、
   // 誰がどの条件を入れたかが読めないと、発火の記録だけ見ても「なぜ止まったか」が辿れない

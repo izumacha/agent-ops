@@ -29,7 +29,26 @@ export type CreateGuardrailRuleResult =
   // 対象エージェントが同テナントに無い (他テナントの id を指した場合も含む)
   | { status: 'agent_not_found' }
   // テナントのルール数が上限に達している
-  | { status: 'too_many_rules' };
+  | { status: 'too_many_rules' }
+  // 行数 (無効化したものを含む) の上限に達している
+  | { status: 'too_many_rows' };
+
+/**
+ * ルール作成時に守る 2 つの上限。
+ *
+ * **2 つ要る。** `maxEnabled` だけだと総行数が縛れない — 無効化した行は数えないので
+ * (発火済みのルールは削除できず、数えると枠が永久に空かない)、「作る → 無効化する」を
+ * 繰り返して行を無制限に増やせる。`maxRows` が行数の天井で、§9 のリソース枯渇を防ぐ。
+ *
+ * **省略可にしない。** 既定値を持たせると、新しい呼び出し側が渡し忘れたぶんだけ上限が
+ * 静かに消える (fail-open)。値の正本は `src/lib/constants.ts`。
+ */
+export interface GuardrailRuleLimits {
+  // 同時に有効にできるルール数 (判定は中継 1 回ごとに走るので縛る)
+  maxEnabled: number;
+  // 行数 (有効・無効を問わない)
+  maxRows: number;
+}
 
 // ルールの削除結果 (インシデントを持つルールは消せない = Restrict)
 export type DeleteGuardrailRuleResult = 'deleted' | 'not_found' | 'restricted';
@@ -87,10 +106,11 @@ export interface IncidentFilter {
 
 // ガードレールのルール Port
 export interface GuardrailRulesPort {
-  // ルールを作る (上限に達していれば 'too_many_rules'、対象エージェントが無ければ 'agent_not_found')
+  // ルールを作る (有効なルールの上限なら 'too_many_rules'、行数の上限なら 'too_many_rows'、
+  // 対象エージェントが無ければ 'agent_not_found')
   create(
     input: CreateGuardrailRuleInput,
-    maxRulesPerTenant: number,
+    limits: GuardrailRuleLimits,
   ): Promise<CreateGuardrailRuleResult>;
   // ルールを一覧する (テナント内、createdAt 昇順)
   list(tenantId: string, query: PageQuery): Promise<Page<GuardrailRuleRecord>>;

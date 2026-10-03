@@ -130,8 +130,12 @@ export class SlidingWindowRateLimiter {
     const recent = (this.hits.get(key) ?? []).filter((at) => at > windowStart);
     // 上限に達していれば通さない
     if (recent.length >= this.limit) {
-      // 窓から最も古い記録が外れるまでの時間（それより前に試しても必ず断られる）
-      const oldest = recent[0] ?? now;
+      // 窓から最も古い記録が外れるまでの時間（それより前に試しても必ず断られる）。
+      // **先頭ではなく最小値を取る** — 配列は push 順なので「昇順に並んでいる」は
+      // `now` が単調増加することに依存する。呼び出し側は `Date.now()` を渡すので NTP の
+      // 時刻合わせで巻き戻りうる。先頭を信じると、巻き戻った幅のぶん Retry-After を
+      // 長く返し、素直に従うクライアントが必要以上に待つ
+      const oldest = recent.reduce((min, at) => (at < min ? at : min), now);
       // 秒へ切り上げる。**RFC 9110 の delay-seconds は整数**で、小数を送るとヘッダが
       // 無いのと同じ扱いになる。0 秒は「すぐ試してよい」に見えるので最低 1 秒にする
       const retryAfterSeconds = Math.max(

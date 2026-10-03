@@ -16,6 +16,7 @@ import type {
   CreateGuardrailRuleInput,
   CreateGuardrailRuleResult,
   DeleteGuardrailRuleResult,
+  GuardrailRuleLimits,
   GuardrailRuleRecord,
   GuardrailRulesPort,
   IncidentFilter,
@@ -830,7 +831,7 @@ class MemoryGuardrailRules implements GuardrailRulesPort {
   // ルールを作る (上限に達していれば作らない。prisma 側はこれを 1 トランザクションで行う)
   async create(
     input: CreateGuardrailRuleInput,
-    maxRulesPerTenant: number,
+    limits: GuardrailRuleLimits,
   ): Promise<CreateGuardrailRuleResult> {
     // **テナントが実在することを確かめる** (prisma 側は Tenant 行を FOR NO KEY UPDATE で
     // 押さえ、0 行なら同じ答えを返す)。ここで見ていなかった頃は、存在しないテナント id ＋
@@ -844,12 +845,17 @@ class MemoryGuardrailRules implements GuardrailRulesPort {
       // 他テナントのエージェント・存在しないエージェントは作成できない
       if (!agent || agent.tenantId !== input.tenantId) return { status: 'agent_not_found' };
     }
-    // そのテナントの**有効な**ルール数 (無効化したものは数えない。理由は Port のコメント)
-    const existing = [...this.store.guardrailRules.values()].filter(
-      (row) => row.tenantId === input.tenantId && row.enabled,
-    ).length;
-    // 上限に達していれば作らない (判定は中継 1 回ごとに走るので件数を縛る)
-    if (existing >= maxRulesPerTenant) return { status: 'too_many_rules' };
+    // そのテナントの行 (有効・無効の両方)
+    const rows = [...this.store.guardrailRules.values()].filter(
+      (row) => row.tenantId === input.tenantId,
+    );
+    // そのうち**有効な**ルール数 (無効化したものは数えない。理由は Port のコメント)
+    const existing = rows.filter((row) => row.enabled).length;
+    // 有効なルールの上限に達していれば作らない (判定は中継 1 回ごとに走るので件数を縛る)
+    if (existing >= limits.maxEnabled) return { status: 'too_many_rules' };
+    // **行数の上限にも達していれば作らない** — 無効化した行を数えないぶんの天井
+    // (prisma 側も同じ 2 段の判定を 1 トランザクションで行う)
+    if (rows.length >= limits.maxRows) return { status: 'too_many_rows' };
     // 新しい行 (作成日時は表の時計から取る)
     const row: GuardrailRuleRecord = {
       id: this.store.nextId('rule'),

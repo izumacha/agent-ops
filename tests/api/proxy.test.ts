@@ -19,6 +19,7 @@ import {
   API_MESSAGES,
   JSON_BODY_MAX_BYTES,
   JSON_BODY_MAX_DEPTH,
+  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
   GUARDRAIL_RULES_MAX_PER_TENANT,
   UPSTREAM_MAX_RESPONSE_BYTES,
 } from '@/lib/constants';
@@ -1228,7 +1229,7 @@ describe('中継の直後のガードレール判定', () => {
         windowMinutes,
         action: RuleAction.stop,
       },
-      GUARDRAIL_RULES_MAX_PER_TENANT,
+      { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
     );
     // 作れていなければテストとして落とす
     if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);

@@ -38,10 +38,33 @@ export const RATIO_MAX = 1;
 // **裸の 1 を書かない** — RATIO_MAX と同じ値だが意味が違う (あちらは割合の上限、こちらは反転の基点)
 const DEVIATION_BEST = 1;
 
+// しきい値の単位。**種別ごとに「どの単位で測るか」を網羅的な表で持つ** —
+// 三項演算子で「コスト以外は割合」と書くと、種別を足したときに新しい種別が黙って
+// 0〜1 の割合として扱われ、lint も typecheck もテストも何も言わない
+// (`src/lib/validations/guardrail.ts` は網羅性で守られていると書いているので、写しではなく表にする)
+export const ThresholdUnit = {
+  // マイクロ USD の整数 (上限は金額の上限)
+  microUsd: 'microUsd',
+  // 0〜1 の比率
+  ratio: 'ratio',
+} as const;
+export type ThresholdUnit = (typeof ThresholdUnit)[keyof typeof ThresholdUnit];
+
+// 種別ごとの単位。**`Record<RuleKind, …>` なので種別を足すと typecheck が落ちる**
+// (落ちた人は単位を決め、`thresholdRangeFor` の単位ごとの範囲と DB の CHECK 制約、
+//  `API_MESSAGES.guardrailThresholdOutOfRange` の文言を揃える)
+export const RULE_THRESHOLD_UNIT: Readonly<Record<RuleKind, ThresholdUnit>> = {
+  [RuleKind.cost]: ThresholdUnit.microUsd,
+  [RuleKind.error_rate]: ThresholdUnit.ratio,
+  [RuleKind.quality]: ThresholdUnit.ratio,
+};
+
 // 種別ごとのしきい値の範囲。コストはマイクロ USD の整数なので上限は金額の上限に合わせる
 export function thresholdRangeFor(kind: RuleKind, costMax: number): ThresholdRange {
-  // コストだけは金額の上限まで、割合の 2 種は 0〜1
-  return kind === RuleKind.cost ? { min: 0, max: costMax } : { min: 0, max: RATIO_MAX };
+  // その種別がどの単位で測るかを表から引く
+  const unit = RULE_THRESHOLD_UNIT[kind];
+  // 単位ごとの範囲 (金額は 0〜上限、比率は 0〜1)
+  return unit === ThresholdUnit.microUsd ? { min: 0, max: costMax } : { min: 0, max: RATIO_MAX };
 }
 
 /**

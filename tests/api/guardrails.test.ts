@@ -22,7 +22,11 @@ import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
 import { AuditAction } from '@/domain/audit/action';
 import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
-import { API_MESSAGES, GUARDRAIL_RULES_MAX_PER_TENANT } from '@/lib/constants';
+import {
+  API_MESSAGES,
+  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
+  GUARDRAIL_RULES_MAX_PER_TENANT,
+} from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
 
 // seed（2 テナント × 3 役割 + 既存エージェント）
@@ -51,7 +55,7 @@ async function makeRule(options: {
       windowMinutes: WINDOW_MINUTES,
       action: options.action ?? RuleAction.stop,
     },
-    GUARDRAIL_RULES_MAX_PER_TENANT,
+    { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
   );
   // 作れていなければテストとして落とす
   if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);
@@ -408,6 +412,39 @@ describe('ガードレールのルールの無効化', () => {
       },
     });
     expect(created.status, JSON.stringify(created.json)).toBe(201);
+  });
+
+  it('無効化を繰り返しても行数の上限で止まる（409・別の文言）', async () => {
+    // **有効なルールの上限だけでは総行数が縛れない** — 無効化した行を数えないので、
+    // 「作る → 無効化する」を繰り返すと行が無制限に増える (§9 のリソース枯渇)。
+    // 行数の天井まで埋めて、有効なルールが 0 件でも作れなくなることを見る
+    for (let i = 0; i < GUARDRAIL_RULE_ROWS_MAX_PER_TENANT; i += 1) {
+      const rule = await makeRule({ action: RuleAction.notify });
+      // すぐ無効化するので「有効なルール」は常に 0 件のまま行だけが増える
+      await call(updateGuardrailRule, {
+        token: seed.a.tokens.admin,
+        method: 'PATCH',
+        params: { ruleId: rule.id },
+        body: { enabled: false },
+      });
+    }
+    // 有効なルールは 0 件（有効側の上限には達していない）
+    expect(
+      await seed.repos.guardrailRules.findActiveRules(seed.a.id, { agentId: seed.a.agent.id }),
+    ).toHaveLength(0);
+    // それでも作れない
+    const refused = await call(createGuardrailRule, {
+      token: seed.a.tokens.admin,
+      body: {
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: WINDOW_MINUTES,
+        action: RuleAction.notify,
+      },
+    });
+    expect(refused.status).toBe(409);
+    // **文言は有効側の上限と別**（消す対象が「無効化した行」だと分かる必要がある）
+    expect(refused.json).toMatchObject({ message: API_MESSAGES.guardrailRuleRowLimit });
   });
 
   it('他テナントのルールは無効化できない（404 で存在を隠す）', async () => {
@@ -926,6 +963,29 @@ describe('監査ログと連鎖の検証', () => {
       });
       expect(result.status, `fromSeq=${value}`).toBe(422);
     }
+  });
+
+  it('fromSeq が末尾を越えていれば 422（0 件を「無傷」と答えない）', async () => {
+    // **これが無いと最悪の倒れ方になる** — 行を 1 件も読まずに ok: true / verified: 0 を返すので、
+    // 古いカーソルや打ち間違いを握った監視は「連鎖は健全」と報告し続ける
+    await appendViaResolve();
+    const beyond = await call(verifyAuditLogs, {
+      token: seed.a.tokens.admin,
+      query: 'fromSeq=1000',
+    });
+    expect(beyond.status).toBe(422);
+    expect(beyond.json).toMatchObject({ message: API_MESSAGES.auditFromSeqBeyondEnd });
+  });
+
+  it('行が 1 件も無いテナントは fromSeq を付けても 200（検証すべきものが無い）', async () => {
+    // **「末尾を越えた」と「そもそも行が無い」は区別する** — 行が無いテナントで 422 を返すと、
+    // 定期的に検証する運用スクリプトが新しいテナントで必ず失敗する
+    const empty = await call(verifyAuditLogs, {
+      token: seed.b.tokens.admin,
+      query: 'fromSeq=5',
+    });
+    expect(empty.status).toBe(200);
+    expect(empty.json).toMatchObject({ ok: true, verified: 0 });
   });
 
   it('鍵が未設定なら 503（鍵なしで「無傷」と答えない）', async () => {

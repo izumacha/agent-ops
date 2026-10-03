@@ -19,7 +19,10 @@ import { createPrismaClient } from '../src/lib/prisma-client';
 import { evaluateGuardrails } from '../src/lib/guardrail/evaluate';
 import { generateSecret } from '../src/lib/tokens';
 import { AgentStatus, Plan, Provider, RuleAction, RuleKind } from '../src/domain/types';
-import { GUARDRAIL_RULES_MAX_PER_TENANT } from '../src/lib/constants';
+import {
+  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
+  GUARDRAIL_RULES_MAX_PER_TENANT,
+} from '../src/lib/constants';
 
 // 仕込むルールの集計窓の長さ (分)。短すぎると投入した利用イベントが窓から外れる
 const RULE_WINDOW_MINUTES = 60;
@@ -96,7 +99,10 @@ async function main(): Promise<Record<string, unknown>> {
           windowMinutes: RULE_WINDOW_MINUTES,
           action: RuleAction.stop,
         },
-        GUARDRAIL_RULES_MAX_PER_TENANT,
+        {
+          maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT,
+          maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
+        },
       );
       // 作れていなければ仕込みが壊れている (fail-closed。判定より前に落とす)
       if (rule.status !== 'created') throw new Error(`ルールを作れません: ${rule.status}`);

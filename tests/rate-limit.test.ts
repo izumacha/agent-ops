@@ -77,6 +77,22 @@ describe('スライディングウィンドウのレート制限', () => {
     expect(rl.check('k', T0 + WINDOW_MS - 1).retryAfterSeconds).toBe(1);
   });
 
+  it('時計が巻き戻っても Retry-After は窓の長さを超えない', () => {
+    // **記録は push 順なので「昇順に並んでいる」は時刻が単調増加することに依存する。**
+    // 呼び出し側は Date.now() を渡すので NTP の時刻合わせで巻き戻りうる。先頭の記録を
+    // 「最も古い」と決めつけると、巻き戻った幅だけ待ち時間を長く返し、素直に従う
+    // クライアントが必要以上に待つ
+    const rl = limiter();
+    // まず新しい時刻で 1 件、そのあと巻き戻った時刻で上限まで使う
+    rl.check('k', T0 + WINDOW_MS / 2);
+    for (let i = 1; i < LIMIT; i += 1) rl.check('k', T0);
+    // 断られたときの待ち時間は、どの記録が先頭にあっても窓の長さ以内
+    const decision = rl.check('k', T0);
+    expect(decision.allowed).toBe(false);
+    expect(decision.retryAfterSeconds).toBeLessThanOrEqual(WINDOW_MS / 1_000);
+    expect(decision.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+  });
+
   it('キーごとに枠が独立している', () => {
     // 1 つのキーで使い切っても別のキーは通る
     const rl = limiter();

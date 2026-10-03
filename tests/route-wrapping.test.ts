@@ -17,6 +17,7 @@ import {
   ROUTE_HANDLER_BRAND,
   ROUTE_RATE_LIMIT_BRAND,
   ROUTE_REQUIRED_ACTION_BRAND,
+  ROUTE_REQUIRED_ROLE_BRAND,
 } from '@/lib/api/handler';
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
@@ -296,11 +297,13 @@ describe('Route Handler の結線', () => {
         const tier = brands[ROUTE_RATE_LIMIT_BRAND];
         // 追加の枠を持たない種類（未指定・standard）は対象外
         if (tier === null || tier === undefined || tier === RATE_LIMIT_TIER.standard) continue;
-        // 宣言されていること
+        // **操作かロールのどちらかが宣言されていること。** admin 限定のルートは
+        // `requiredAction` では表せない（RBAC の許可表に「admin だけが持つ操作」が無く、
+        // `view` は 3 役割すべてが持つので viewer が枠を使い切れる）
         checked += 1;
         expect(
-          brands[ROUTE_REQUIRED_ACTION_BRAND],
-          `${relativeToApp} の ${method} は追加の枠を持つのに requiredAction を宣言していない`,
+          brands[ROUTE_REQUIRED_ACTION_BRAND] ?? brands[ROUTE_REQUIRED_ROLE_BRAND],
+          `${relativeToApp} の ${method} は追加の枠を持つのに requiredAction / requiredRole を宣言していない`,
         ).not.toBeNull();
       }
     }

@@ -7,7 +7,7 @@ import { authenticate, authenticateApiKey, type Principal } from './auth';
 import { withPrivateCacheHeaders } from './cache-headers';
 import { ApiError, errorResponse, notFoundError, validationError } from './errors';
 import { enforceRateLimit, type RateLimitTier } from './rate-limit';
-import { requireAction } from './guard';
+import { requireAction, requireAdminRole } from './guard';
 import type { Action } from '@/domain/rbac';
 import { HTTP_STATUS } from './http-status';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
@@ -76,6 +76,19 @@ export interface RouteOptions {
    * ここの宣言を落としたときに認可が丸ごと消えないため。二重に呼んでも副作用は無い）
    */
   requiredAction?: Action;
+  /**
+   * レート制限を数える**前に** admin ロールを要求するか (省略時は route() では確かめない)。
+   *
+   * **admin 限定のルートに枠を掛けるときはこちらを使う。** `requiredAction` では表せない —
+   * RBAC の許可表に「admin だけが持つ操作」は無く（`view` は 3 役割すべてが持つ）、
+   * `requiredAction: 'view'` と書くと **viewer が枠を使い切れる**。実測で、viewer が
+   * `GET /audit-logs/verify` を 10 回投げると（どれも本体で 403 になるのに）
+   * `heavyRead` の枠が尽き、admin の改ざん確認が 1 分間 429 になった。
+   *
+   * 本体側の `requireAdminRole` は残す（`tenantId` と `user` を取り出すのに要るうえ、
+   * ここの宣言を落としたときに認可が丸ごと消えないため）
+   */
+  requiredRole?: 'admin';
 }
 
 // route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
@@ -102,6 +115,13 @@ export const ROUTE_RATE_LIMIT_BRAND = Symbol.for('agent-ops.routeRateLimit');
  * 印にするのは `ROUTE_RATE_LIMIT_BRAND` と同じ理由（綴りではなく結線を読む）。
  */
 export const ROUTE_REQUIRED_ACTION_BRAND = Symbol.for('agent-ops.routeRequiredAction');
+
+/**
+ * そのルートがレート制限より前に要求するロールを外から読むための印
+ * （要求しなければ `null`）。`ROUTE_REQUIRED_ACTION_BRAND` と同じ役目で、**admin 限定の
+ * ルートはこちら**（RBAC の許可表に「admin だけが持つ操作」が無いため。理由は `requiredRole`）
+ */
+export const ROUTE_REQUIRED_ROLE_BRAND = Symbol.for('agent-ops.routeRequiredRole');
 
 /**
  * URL の動的セグメント (パスに現れる id) の形を確かめる。形が違えばそんな資源は存在しないので 404。
@@ -162,6 +182,10 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
       if (options.requiredAction !== undefined) {
         requireAction(principal, options.requiredAction);
       }
+      // admin 限定のルートはロールそのものを確かめる（理由は requiredRole）
+      if (options.requiredRole === 'admin') {
+        requireAdminRole(principal);
+      }
       // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
       if (options.rateLimit !== undefined) {
         enforceRateLimit(principal, options.rateLimit, Date.now());
@@ -184,6 +208,9 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
   // レート制限より前に要求する操作も同じ形で載せる (検出網が結線そのものを読めるようにする)
   Object.defineProperty(wrapped, ROUTE_REQUIRED_ACTION_BRAND, {
     value: options.requiredAction ?? null,
+  });
+  Object.defineProperty(wrapped, ROUTE_REQUIRED_ROLE_BRAND, {
+    value: options.requiredRole ?? null,
   });
   // 包んだ関数を返す
   return wrapped;

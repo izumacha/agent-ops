@@ -92,8 +92,9 @@ export const GET = route(
     // この API でいちばん重い読み取り（一覧の上限の 50 倍）。上流も外部も呼ばないが、
     // 枠が無いと admin のトークン 1 本で 1 万行の走査を好きなだけ並べられる（§9）
     rateLimit: RATE_LIMIT_TIER.heavyRead,
-    // **枠を数える前に認可する** — 枠を持つルートの規約（view しか持たない利用者に
-    // テナント全体の小さい枠を使い切らせない）。本体の requireAdminRole は残す
-    requiredAction: 'view',
+    // **枠を数える前に認可する** — 枠を持つルートの規約。**ここは admin ロールそのもの**で、
+    // `requiredAction: 'view'` にすると viewer が枠を使い切れる（view は 3 役割すべてが
+    // 持つので、本体で 403 になる要求でも枠は減る）。本体の requireAdminRole は残す
+    requiredRole: 'admin',
   },
 );

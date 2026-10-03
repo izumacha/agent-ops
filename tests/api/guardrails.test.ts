@@ -26,7 +26,9 @@ import {
   API_MESSAGES,
   GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
   GUARDRAIL_RULES_MAX_PER_TENANT,
+  HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
 } from '@/lib/constants';
+import { extraRateLimiter, RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { call, seedEachTest } from './helpers';
 
 // seed（2 テナント × 3 役割 + 既存エージェント）
@@ -1026,6 +1028,23 @@ describe('監査ログと連鎖の検証', () => {
       query: 'fromSeq=2',
     });
     expect(broken.json).toMatchObject({ ok: false, brokenSeq: '2', reason: 'prev_hash_mismatch' });
+  });
+
+  it('viewer は連鎖の検証の枠を使い切れない（403 の要求で枠を消費させない）', async () => {
+    // **`requiredAction: 'view'` では守れない** — view は 3 役割すべてが持つので、viewer の
+    // 要求がレート制限を通ってから本体で 403 になる。実測で viewer が 10 回投げると
+    // heavyRead の枠が尽き、admin の改ざん確認が 1 分間 429 になった
+    const limit = HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE;
+    for (let index = 0; index < limit; index += 1) {
+      const refused = await call(verifyAuditLogs, { token: seed.a.tokens.viewer });
+      // 本体へ入る前に 403（枠は消費されない）
+      expect(refused.status, `${index + 1} 回目`).toBe(403);
+    }
+    // **枠は 1 つも使われていない**（印の種類ごとの表を直接覗く）
+    expect(extraRateLimiter(RATE_LIMIT_TIER.heavyRead)?.trackedKeys).toBe(0);
+    // admin はそのまま通る
+    const ok = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
   });
 
   it('壊れていれば nextFromSeq を返さない（検証できていない範囲を飛ばさせない）', async () => {

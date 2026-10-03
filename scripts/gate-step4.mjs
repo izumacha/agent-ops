@@ -5,7 +5,7 @@
 //   3. **発火のテストが RuleKind の全種類ぶん pass している** (受け入れ基準 1 の「発火」側)
 //   4. **改ざん検知のテストが連鎖の壊れ方の全種類ぶん pass している** (受け入れ基準 2)
 //   5. **E2E「登録→実行→超過→停止→復帰」が pass している** (受け入れ基準 3)
-//   6. `npm audit --audit-level=high` が high 0
+//   6. `npm audit --audit-level=high --omit=dev` が high 0 (本番依存のみ。理由は ADR-0004)
 //   7. 本番ビルドが通る (プロキシのベンチがその成果物を使う)
 //   8. ベンチ 4 本: 日次集計 ≦ 1 秒 / プロキシの追加遅延 ≦ 50ms / 採点の再現率 ≧ 90% /
 //      **発火から停止まで ≦ 3 秒** (受け入れ基準 1 の「停止まで」側)
@@ -172,7 +172,7 @@ console.log(
 
 // 6. npm audit で high 以上が 0 件であること
 banner('npm audit (high 0)');
-if (runNpm(['audit', '--audit-level=high']) !== 0) {
+if (runNpm(['audit', '--audit-level=high', '--omit=dev']) !== 0) {
   console.error('[gate:step4] 失敗: npm audit で high 以上の脆弱性があります');
   process.exit(1);
 }

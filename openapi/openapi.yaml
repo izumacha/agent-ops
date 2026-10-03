@@ -2099,7 +2099,7 @@ components:
             error_rate と quality は 0.0〜1.0 の比率
         windowMinutes:
           type: integer
-          description: 集計窓の長さ (分)。quality は窓を使わない (直近の評価実行を見る)
+          description: 集計窓の長さ (分)。**どの種別も窓を見る** — quality は窓の中の最新の評価実行だけを見るので、短すぎる窓にすると「その間に評価が無い」で一度も発火しない
         action:
           $ref: '#/components/schemas/RuleAction'
         enabled:

@@ -29,7 +29,8 @@ function formatPercent(rate: number): string {
  *
  * @param observation 発火したときの実測値（種別ごとに単位が違う判別可能な共用体）
  * @param threshold そのルールのしきい値
- * @param windowMinutes 集計窓の長さ（分）。品質ルールは窓を使わないので文に出さない
+ * @param windowMinutes 集計窓の長さ（分）。**どの種別も文に出す** — 品質も窓の中の評価実行だけを
+ *   見るので、出さないと「1 分の窓を見たのか 7 日の窓を見たのか」が記録から読めない
  */
 export function guardrailIncidentSummary(
   observation: RuleObservation,
@@ -47,7 +48,8 @@ export function guardrailIncidentSummary(
       // エラー率は百分率で見せる（0.453 より 45.3% のほうが読み取りやすい）
       return `${label}: 直近 ${windowMinutes} 分の失敗率 ${formatPercent(observation.rate)} がしきい値 ${formatPercent(threshold)} を超えました`;
     case RuleKind.quality:
-      // 品質は「下回ったら発火」なので文も下回った側で書く。窓ではなく「直近の評価」を見ている
-      return `${label}: 直近の評価の最低スコア ${observation.score.toFixed(SCORE_FRACTION_DIGITS)} がしきい値 ${threshold.toFixed(SCORE_FRACTION_DIGITS)} を下回りました`;
+      // 品質は「下回ったら発火」なので文も下回った側で書く。**窓も出す** —
+      // 見たのは「窓の中の最新の評価」なので、窓を伏せると判断の根拠が読めない
+      return `${label}: 直近 ${windowMinutes} 分の評価の最低スコア ${observation.score.toFixed(SCORE_FRACTION_DIGITS)} がしきい値 ${threshold.toFixed(SCORE_FRACTION_DIGITS)} を下回りました`;
   }
 }

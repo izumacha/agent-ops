@@ -140,6 +140,14 @@ export function isValidWindowMinutes(windowMinutes: number, min: number, max: nu
  * 90 秒の遅れ）その行は `start` より前になり、しきい値を越えさせた当の支出が集計に入らない
  * （発火しない fail-open）。終了側を遅いほうに合わせるだけでは**この向きは塞げない**
  * （`evaluationBasisTime` が塞ぐのは DB が進んでいる向きだけ）。
+ *
+ * **広げ幅は窓の長さまでに縛る（＝窓は最大で 2 倍）。** 縛らないと遅れの幅がそのまま窓の
+ * 長さになり、たとえば 90 秒の遅れが続くと「1 分の窓」が毎回 90 秒ぶんを集計する — 設定した
+ * 上限を超えていないエージェントが 1.5 倍（1 時間の遅れなら 60 倍）の合計で発火して停止し、
+ * しかもインシデントと通知の文は「直近 1 分」と書くので、記録が測ったものを偽る。
+ * **遅れが窓の長さを超えるほど大きいときは引き金の行を取り込めない**ので、その判定では
+ * 発火しないことがある（窓の長さは正しいまま）。どちらに倒すかの取り決めで、
+ * 「測った範囲と記録した範囲が食い違う」より「その 1 回は取りこぼす」ほうを選んでいる。
  */
 export function guardrailWindow(
   now: Date,
@@ -156,9 +164,13 @@ export function guardrailWindow(
   const endExclusive = new Date(now.getTime() + 1);
   // 開始はそこから窓の長さだけ戻した時刻 (含む)
   const nominalStart = endExclusive.getTime() - windowMinutes * MILLIS_PER_MINUTE;
-  // 引き金の行がそれより前なら、その時刻まで広げる (理由は上のコメント)
+  // 広げてよい下限 (窓の長さだけ手前まで = 窓は最大で 2 倍。理由は上のコメント)
+  const widestStart = nominalStart - windowMinutes * MILLIS_PER_MINUTE;
+  // 引き金の行がそれより前なら、その時刻まで広げる。**ただし上の下限で止める**
   const start = new Date(
-    includeFrom === undefined ? nominalStart : Math.min(nominalStart, includeFrom.getTime()),
+    includeFrom === undefined
+      ? nominalStart
+      : Math.max(widestStart, Math.min(nominalStart, includeFrom.getTime())),
   );
   // 半開区間として返す
   return { start, endExclusive };

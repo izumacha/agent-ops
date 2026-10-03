@@ -159,6 +159,35 @@ describe('集計窓: 引き金の行を取り込む', () => {
     expect(widened?.start.toISOString()).toBe(plain?.start.toISOString());
   });
 
+  it('広げるのは窓の長さまで（遅れの幅がそのまま窓の長さにならない）', () => {
+    // **縛らないと遅れの幅がそのまま窓になる** — 90 秒の遅れが続くと「1 分の窓」が毎回
+    // 90 秒ぶんを集計し、上限を超えていないエージェントが 1.5 倍の合計で発火して停止する
+    // （1 時間の遅れなら 60 倍）。しかも文は「直近 1 分」と書くので記録が測ったものを偽る
+    const now = new Date('2026-10-02T12:00:00.000Z');
+    // 窓 1 分に対して 150 秒前の引き金（遅れが 2 分を超えている）
+    const window = guardrailWindow(
+      now,
+      1,
+      1,
+      GUARDRAIL_WINDOW_MAX_MINUTES,
+      new Date(now.getTime() - 150_000),
+    );
+    if (window === null) throw new Error('窓が作れません');
+    // 幅は窓のちょうど 2 倍で止まる（終端の 1 ミリ秒は nominalStart 側に入っている）。
+    // 縛らなければ 150 秒ぶんになる
+    expect(window.endExclusive.getTime() - window.start.getTime()).toBe(2 * 60_000);
+  });
+
+  it('引き金が広げ幅の内側なら、その時刻まで広げる（取りこぼしを防ぐ本来の働き）', () => {
+    // 窓 1 分・90 秒前の引き金（2 倍の内側なので取り込める）
+    const now = new Date('2026-10-02T12:00:00.000Z');
+    const triggeredBy = new Date(now.getTime() - 90_000);
+    const window = guardrailWindow(now, 1, 1, GUARDRAIL_WINDOW_MAX_MINUTES, triggeredBy);
+    if (window === null) throw new Error('窓が作れません');
+    // 引き金の行が窓に入っている
+    expect(window.start.getTime()).toBe(triggeredBy.getTime());
+  });
+
   it('範囲外の長さなら引き金を渡しても窓は作らない (判定しない側に倒す)', () => {
     // 広げる処理が範囲の判定より先に走ると、不正な長さの窓が作れてしまう
     const now = new Date('2026-10-02T12:00:00.000Z');

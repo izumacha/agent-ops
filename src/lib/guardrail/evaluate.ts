@@ -19,6 +19,7 @@ import type { AuditPayload } from '@/domain/audit/chain';
 import {
   evaluateRule,
   guardrailWindow,
+  RULE_ACTION_SUSPENDS,
   worstQualityScore,
   type GuardrailMeasurement,
   type RuleObservation,
@@ -259,104 +260,121 @@ export async function evaluateGuardrails(
   const notifications: NotifyPayload[] = [];
   // ルールを 1 つずつ判定する
   for (const rule of rules) {
-    // 測定値をそろえる（窓が範囲外なら null）
-    const measurement = await measureFor(repos, trigger, rule, usageByWindow, qualityByWindow);
-    // 窓が作れないルールは判定できない。**DB の CHECK 制約があるので通常は起きない**ので、
-    // 起きたら設定が壊れている（制約を入れる前の行が残っている等）。黙って飛ばさずログに残す
-    if (measurement === null) {
-      console.error('[guardrail] 集計窓の長さが範囲外のルールを判定できませんでした');
-      continue;
-    }
-    // しきい値を越えたか（向きは RULE_COMPARISON の表が決める）
-    const evaluation = evaluateRule(rule.kind, rule.threshold, measurement);
-    // 越えていなければ次のルールへ
-    if (!evaluation.fired) continue;
-    // 発火理由の 1 行（インシデントと通知が同じ文を使う）
-    const summary = guardrailIncidentSummary(
-      evaluation.observation,
-      rule.threshold,
-      rule.windowMinutes,
-    );
-    // **インシデントの記録と自動停止を 1 トランザクションで行う**（アダプタが担保する）
-    const raised = await repos.incidents.raise({
-      tenantId: trigger.tenantId,
-      agentId: trigger.agentId,
-      ruleId: rule.id,
-      summary,
-      // 停止するのは action が stop のルールだけ（notify は記録と通知のみ）
-      suspendAgent: rule.action === RuleAction.stop,
-    });
-    // エージェントかルールが（並行して）消えていれば記録できない。握り潰さずログに残す
-    if (raised === null) {
-      console.error('[guardrail] インシデントを記録できませんでした (対象が見つかりません)');
-      continue;
-    }
-    // 発火として数える
-    fired.push({
-      ruleId: rule.id,
-      kind: rule.kind,
-      action: rule.action,
-      incidentId: raised.incident.id,
-      suspended: raised.suspended,
-      created: raised.created,
-    });
-    // **何も新しく起きていなければ、ここで次のルールへ。**
-    //
-    // 超過は「しきい値を下げる・窓が過ぎる・使用量が減る」まで続くので、判定のたびに発火する。
-    // 記録と通知をそのたびに行うと、1 本のルールで中継のたびにインシデント・監査ログ・通知 2 通が
-    // 増え続ける（`action` が notify のルールは停止しないので条件が自己収束しない。実測で
-    // 明示実行 5 回がインシデント 5 件・監査行 5 件になった）。
-    //
-    // **残すのは「新しいインシデントを作った」か「状態を実際に止めた」とき**だけにする。
-    // 後者を入れるのは、開いているインシデントがあるあいだに復帰させられたエージェントを
-    // 再び止めた、という**記録すべき出来事**を落とさないため
-    if (!raised.created && !raised.suspended) continue;
-    // 監査ログを書く。**失敗しても停止は取り消さない** — 鍵が未設定なら `recordAudit` は 503 を
-    // 投げるが、そこで中断すると「超過しても止まらない」状態になる。止める側を優先し、
-    // 記録できなかったことをサーバログに残す（運用者が鍵を設定すれば次回から記録される）
+    // **1 本のルールの失敗で判定全体を止めない。** 例外がループの外へ出ると、その後ろの
+    // ルール（`stop` を含む）が 1 本も判定されないまま終わる — 中継の経路は
+    // `evaluateGuardrailsSafely` が 1 行のログに畳むので、エージェントは超過したまま
+    // 動き続け、同じ並び順である限り次の中継でも同じ所で止まる（`raise` は
+    // エージェント行を押さえて更新するので、ルール作成の `FOR KEY SHARE` と競って
+    // 直列化の失敗が返ることがある）。**残りのルールの fail-closed を守るため、
+    // 失敗したルールだけを飛ばす**
     try {
-      await recordAudit(
-        repos,
-        {
-          tenantId: trigger.tenantId,
-          actorId: trigger.actorId,
-          action: AuditAction.guardrail_fired,
-          targetType: AuditTargetType.incident,
-          targetId: raised.incident.id,
-          payload: auditPayloadFor(rule, evaluation.observation, raised.suspended),
-        },
-        env,
+      // 測定値をそろえる（窓が範囲外なら null）
+      const measurement = await measureFor(repos, trigger, rule, usageByWindow, qualityByWindow);
+      // 窓が作れないルールは判定できない。**DB の CHECK 制約があるので通常は起きない**ので、
+      // 起きたら設定が壊れている（制約を入れる前の行が残っている等）。黙って飛ばさずログに残す
+      if (measurement === null) {
+        console.error('[guardrail] 集計窓の長さが範囲外のルールを判定できませんでした');
+        continue;
+      }
+      // しきい値を越えたか（向きは RULE_COMPARISON の表が決める）
+      const evaluation = evaluateRule(rule.kind, rule.threshold, measurement);
+      // 越えていなければ次のルールへ
+      if (!evaluation.fired) continue;
+      // 発火理由の 1 行（インシデントと通知が同じ文を使う）
+      const summary = guardrailIncidentSummary(
+        evaluation.observation,
+        rule.threshold,
+        rule.windowMinutes,
       );
-    } catch (error) {
-      // 鍵の未設定（503）も DB の障害も同じ扱い。**どの環境変数を直せばよいかを文言に書く**。
+      // **インシデントの記録と自動停止を 1 トランザクションで行う**（アダプタが担保する）
+      const raised = await repos.incidents.raise({
+        tenantId: trigger.tenantId,
+        agentId: trigger.agentId,
+        ruleId: rule.id,
+        summary,
+        // 停止するかは**網羅的な表**が決める（書き下すと、action を足したときに
+        // 新しい値が黙って「通知だけ」へ落ちる。理由は `RULE_ACTION_SUSPENDS`）
+        suspendAgent: RULE_ACTION_SUSPENDS[rule.action],
+      });
+      // エージェントかルールが（並行して）消えていれば記録できない。握り潰さずログに残す
+      if (raised === null) {
+        console.error('[guardrail] インシデントを記録できませんでした (対象が見つかりません)');
+        continue;
+      }
+      // 発火として数える
+      fired.push({
+        ruleId: rule.id,
+        kind: rule.kind,
+        action: rule.action,
+        incidentId: raised.incident.id,
+        suspended: raised.suspended,
+        created: raised.created,
+      });
+      // **何も新しく起きていなければ、ここで次のルールへ。**
       //
-      // 環境変数の名前を定数（`AUDIT_HMAC_SECRET_ENV`）から置換で埋めないのは、
-      // `tests/error-logging.test.ts` の許可表へ 1 件足すことになるため。あの表は
-      // 「静かに緩む口」としてこの repo が繰り返し見てきた形なので、文言の中へ直接書いて
-      // 表を増やさない側を採る（通知の `src/lib/notify/send.ts` と同じ判断）。
-      // **値ではなく名前なので、これは正本の写しではない**（値は secret.ts が読む）
-      console.error(
-        '[guardrail] 発火の監査ログを書けませんでした (AUDIT_HMAC_SECRET の設定を確認してください):',
-        describeError(error),
-      );
+      // 超過は「しきい値を下げる・窓が過ぎる・使用量が減る」まで続くので、判定のたびに発火する。
+      // 記録と通知をそのたびに行うと、1 本のルールで中継のたびにインシデント・監査ログ・通知 2 通が
+      // 増え続ける（`action` が notify のルールは停止しないので条件が自己収束しない。実測で
+      // 明示実行 5 回がインシデント 5 件・監査行 5 件になった）。
+      //
+      // **残すのは「新しいインシデントを作った」か「状態を実際に止めた」とき**だけにする。
+      // 後者を入れるのは、開いているインシデントがあるあいだに復帰させられたエージェントを
+      // 再び止めた、という**記録すべき出来事**を落とさないため
+      if (!raised.created && !raised.suspended) continue;
+      // 監査ログを書く。**失敗しても停止は取り消さない** — 鍵が未設定なら `recordAudit` は 503 を
+      // 投げるが、そこで中断すると「超過しても止まらない」状態になる。止める側を優先し、
+      // 記録できなかったことをサーバログに残す（運用者が鍵を設定すれば次回から記録される）
+      try {
+        await recordAudit(
+          repos,
+          {
+            tenantId: trigger.tenantId,
+            actorId: trigger.actorId,
+            action: AuditAction.guardrail_fired,
+            targetType: AuditTargetType.incident,
+            targetId: raised.incident.id,
+            payload: auditPayloadFor(rule, evaluation.observation, raised.suspended),
+          },
+          env,
+        );
+      } catch (error) {
+        // 鍵の未設定（503）も DB の障害も同じ扱い。**どの環境変数を直せばよいかを文言に書く**。
+        //
+        // 環境変数の名前を定数（`AUDIT_HMAC_SECRET_ENV`）から置換で埋めないのは、
+        // `tests/error-logging.test.ts` の許可表へ 1 件足すことになるため。あの表は
+        // 「静かに緩む口」としてこの repo が繰り返し見てきた形なので、文言の中へ直接書いて
+        // 表を増やさない側を採る（通知の `src/lib/notify/send.ts` と同じ判断）。
+        // **値ではなく名前なので、これは正本の写しではない**（値は secret.ts が読む）
+        console.error(
+          '[guardrail] 発火の監査ログを書けませんでした (AUDIT_HMAC_SECRET の設定を確認してください):',
+          describeError(error),
+        );
+      }
+      // 通知の材料を貯める（送信は最後）
+      notifications.push({
+        tenantId: trigger.tenantId,
+        agentId: trigger.agentId,
+        kind: rule.kind,
+        incidentId: raised.incident.id,
+        summary,
+        suspended: raised.suspended,
+        // **この発火の時刻**（インシデント行の作成時刻ではない）。開いているインシデントを
+        // 再利用したとき（`created === false`）に行の作成時刻を送ると、「数日前に起きた
+        // 出来事の通知がいま届いた」ように見える。要約もこの発火の実測値で組み立てているので、
+        // 時刻も同じ発火のものにそろえる。
+        // **インシデント行のほうは最初の発火を表したまま**（`createdAt` と `summary` は更新しない）
+        // で、各回の実測値は通知と監査ログに残る。回数や最終発火時刻を行に持たせるのは
+        // ADR-0010 の宿題（列が増えるので、ダッシュボードで必要になったときに決める）
+        occurredAt: trigger.now.toISOString(),
+      });
+    } catch (error) {
+      // 握り潰さずログに残す（§6）。**ルール id は文に入れない** —
+      // `tests/error-logging.test.ts` はログの実引数を「文字列リテラル / 置換の無い
+      // テンプレート / describeError(...) / 許可表の識別子」に限っており、id を入れるには
+      // 許可表を広げることになる。あの表は「静かに緩む口」としてこの repo が繰り返し
+      // 見てきた形なので、表を増やさない側を採る（種別や実測値も同じ理由で書かない）
+      console.error('[guardrail] ルールを判定できませんでした:', describeError(error));
     }
-    // 通知の材料を貯める（送信は最後）
-    notifications.push({
-      tenantId: trigger.tenantId,
-      agentId: trigger.agentId,
-      kind: rule.kind,
-      incidentId: raised.incident.id,
-      summary,
-      suspended: raised.suspended,
-      // **この発火の時刻**（インシデント行の作成時刻ではない）。開いているインシデントを
-      // 再利用したとき（`created === false`）に行の作成時刻を送ると、「数日前に起きた
-      // 出来事の通知がいま届いた」ように見える。要約もこの発火の実測値で組み立てているので、
-      // 時刻も同じ発火のものにそろえる。
-      // **インシデント行のほうは最初の発火を表したまま**（`createdAt` と `summary` は更新しない）
-      // で、各回の実測値は通知と監査ログに残る。回数や最終発火時刻を行に持たせるのは
-      // ADR-0010 の宿題（列が増えるので、ダッシュボードで必要になったときに決める）
-      occurredAt: trigger.now.toISOString(),
-    });
   }
   // **通知はすべての記録と停止が終わってから**（受け手の応答時間を停止までの計測に入れない）。
   // 失敗しても結果は変えない（`notifyGuardrailIncident` は例外を外へ出さない）

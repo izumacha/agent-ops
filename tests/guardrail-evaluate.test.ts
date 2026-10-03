@@ -404,6 +404,38 @@ describe('ガードレールの判定', () => {
     expect(result.fired).toHaveLength(1);
   });
 
+  it('1 本のルールの失敗で後ろのルールを飛ばさない（stop が巻き添えにならない）', async () => {
+    // **例外がループの外へ出ると、その後ろのルールが 1 本も判定されない。** 中継の経路は
+    // `evaluateGuardrailsSafely` が 1 行のログに畳むので、エージェントは超過したまま動き続け、
+    // 同じ並び順である限り次の中継でも同じ所で止まる（`raise` はエージェント行を押さえて
+    // 更新するので、ルール作成の `FOR KEY SHARE` と競って直列化の失敗が返ることがある）
+    const first = await makeRule(RuleKind.error_rate, 0.5, RuleAction.notify);
+    const second = await makeRule(RuleKind.cost, 1_000, RuleAction.stop);
+    // どちらも超過させる（エラー率は分母の下限を満たすだけ失敗させる）
+    for (let index = 0; index < GUARDRAIL_ERROR_RATE_MIN_REQUESTS; index += 1) {
+      await recordUsage(100n, 500);
+    }
+    await recordUsage(1_500n);
+    stubNotify();
+    // **1 本目の記録だけを失敗させる**（2 本目は通す）
+    const raise = repos.incidents.raise.bind(repos.incidents);
+    vi.spyOn(repos.incidents, 'raise').mockImplementation(async (input) => {
+      // 1 本目のルールなら落とす
+      if (input.ruleId === first.id) throw new Error('直列化に失敗しました');
+      // それ以外は本来の動き
+      return raise(input);
+    });
+    // 判定する
+    const result = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: ALL_KINDS, now: basisTime(), actorId: null },
+      env(),
+    );
+    // **2 本目は判定され、停止まで届いている**
+    expect(result.fired.map((row) => row.ruleId)).toEqual([second.id]);
+    expect(store.agents.get(agentId)?.status).toBe(AgentStatus.suspended);
+  });
+
   it('中継の直後は品質ルールを見ない（評価実行の表を引かない）', async () => {
     // **起点によって見る種別を絞る**のが要点。絞らないと中継 1 回ごとに評価実行の表まで引く
     // ことになり、しかも中継では品質は動かないので判定しても意味が無い

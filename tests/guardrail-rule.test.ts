@@ -9,6 +9,7 @@ import {
   GUARDRAIL_ERROR_RATE_MIN_REQUESTS,
   guardrailWindow,
   isValidWindowMinutes,
+  RULE_ACTION_SUSPENDS,
   RULE_COMPARISON,
   RULE_THRESHOLD_UNIT,
   RuleComparison,
@@ -17,7 +18,7 @@ import {
   worstQualityScore,
   type GuardrailMeasurement,
 } from '@/domain/guardrail/rule';
-import { RuleKind } from '@/domain/types';
+import { RuleAction, RuleKind } from '@/domain/types';
 import {
   GUARDRAIL_COST_THRESHOLD_MAX,
   GUARDRAIL_WINDOW_MAX_MINUTES,
@@ -205,6 +206,17 @@ describe('しきい値の範囲', () => {
         max: unit === ThresholdUnit.microUsd ? GUARDRAIL_COST_THRESHOLD_MAX : 1,
       });
     }
+  });
+
+  it('停止するかの表が全 action を覆っている (止めるかを決めずに action を足せない)', () => {
+    // **書き下すと新しい action が黙って「通知だけ」へ落ちる** — しきい値の検証も永続化も
+    // 発火も通り、インシデントと通知まで出るのに止まらない（典型的な fail-open）
+    for (const action of Object.values(RuleAction)) {
+      expect(typeof RULE_ACTION_SUSPENDS[action]).toBe('boolean');
+    }
+    // いまの取り決め（notify は止めない / stop は止める）
+    expect(RULE_ACTION_SUSPENDS[RuleAction.notify]).toBe(false);
+    expect(RULE_ACTION_SUSPENDS[RuleAction.stop]).toBe(true);
   });
 
   it('比べ方の表が全種別を覆っている (向きを決めずに種別を足せない)', () => {

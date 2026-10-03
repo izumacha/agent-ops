@@ -1,7 +1,7 @@
 // ガードレールのしきい値判定。**「発火するか」の規則はここが唯一の真実の源**で、
 // API 層 (入力検証)・評価の結線 (src/lib/guardrail/evaluate.ts)・テストがここを読む。
 // DB・Next.js に依存しない純粋ロジックなので、境界値をユニットテストで全部固定できる (§11)。
-import { RuleKind } from '@/domain/types';
+import { RuleAction, RuleKind } from '@/domain/types';
 
 // しきい値との比べ方。**種別によって向きが逆になる**のが要点で、
 // コストとエラー率は「上回ったら悪い」、品質は「下回ったら悪い」
@@ -57,6 +57,21 @@ export const RULE_THRESHOLD_UNIT: Readonly<Record<RuleKind, ThresholdUnit>> = {
   [RuleKind.cost]: ThresholdUnit.microUsd,
   [RuleKind.error_rate]: ThresholdUnit.ratio,
   [RuleKind.quality]: ThresholdUnit.ratio,
+};
+
+/**
+ * その `action` がエージェントを停止させるか。
+ *
+ * **網羅的な表にする** — `rule.action === RuleAction.stop` と書き下すと、`action` を足したとき
+ * 新しい値が黙って「通知だけ」へ落ちる（しきい値の検証も永続化も発火も通り、インシデントと
+ * 通知まで出るのに**止まらない**）。`Record<RuleAction, boolean>` なら足した人が
+ * 「止めるのか」を必ず一度決めることになる（`RULE_COMPARISON` / `RULE_THRESHOLD_UNIT` と同じ形）。
+ */
+export const RULE_ACTION_SUSPENDS: Readonly<Record<RuleAction, boolean>> = {
+  // 記録と通知だけ（止めない）
+  [RuleAction.notify]: false,
+  // 記録・通知に加えてエージェントを suspended にする
+  [RuleAction.stop]: true,
 };
 
 // 種別ごとのしきい値の範囲。コストはマイクロ USD の整数なので上限は金額の上限に合わせる

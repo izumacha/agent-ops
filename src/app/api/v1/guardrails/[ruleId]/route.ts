@@ -5,7 +5,7 @@ import { requireAdminRole } from '@/lib/api/guard';
 import { noContent, route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import type { ApiSchemas } from '@/lib/api-types';
-import { API_MESSAGES } from '@/lib/constants';
+import { API_MESSAGES, GUARDRAIL_RULES_MAX_PER_TENANT } from '@/lib/constants';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
 import { toGuardrailRuleDto } from '@/lib/api/serializers';
@@ -39,9 +39,23 @@ export const PATCH = route<{ ruleId: string }>(async ({ request, params, princip
   // **変える前に「監査ログを書ける状態か」を確かめる** — 変えてから記録に失敗すると、
   // 「いつ誰が止める条件を外したか」が辿れないまま条件だけが変わる (理由は assertAuditConfigured)
   assertAuditConfigured();
-  // 自テナント内で切り替える (他テナントの id・存在しない id は 404 で隠す)
-  const rule = await repos.guardrailRules.setEnabled(tenantId, params.ruleId, input.enabled);
-  if (rule === null) throw notFoundError();
+  // 自テナント内で切り替える (他テナントの id・存在しない id は 404 で隠す)。
+  // **有効へ戻すときは有効なルールの上限を数え直す** — 数えないと「上限まで作る →
+  // 全部無効化する → また作る → 最初の分を戻す」で有効なルールが上限を超え、中継 1 回ごとの
+  // 集計がその倍数まで重くなる (上限は行数の天井の側でしか縛られていない状態になる)
+  const result = await repos.guardrailRules.setEnabled(
+    tenantId,
+    params.ruleId,
+    input.enabled,
+    GUARDRAIL_RULES_MAX_PER_TENANT,
+  );
+  if (result.status === 'not_found') throw notFoundError();
+  // 有効なルールの上限に達している (409: 状態が許さない。作成と同じ文言)
+  if (result.status === 'too_many_rules') {
+    throw new ApiError(HTTP_STATUS.CONFLICT, API_MESSAGES.guardrailRuleLimit);
+  }
+  // 切り替えた後の行
+  const rule = result.rule;
   // 操作として記録する (同じ値への再実行でも 1 行残す — 記録するのは「誰がいつ何を要求したか」)
   await recordAudit(repos, {
     tenantId,

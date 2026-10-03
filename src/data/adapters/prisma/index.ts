@@ -30,6 +30,7 @@ import type {
   RaiseIncidentInput,
   RaisedIncident,
   ResolveIncidentResult,
+  SetGuardrailRuleEnabledResult,
   UsageWindowQuery,
   UsageWindowTotal,
   CreateAgentInput,
@@ -1005,14 +1006,34 @@ class PrismaGuardrailRules implements GuardrailRulesPort {
     tenantId: string,
     ruleId: string,
     enabled: boolean,
-  ): Promise<GuardrailRuleRecord | null> {
-    // テナント条件込みの複合一意で更新する
-    return updateOrNull(() =>
-      this.db.guardrailRule.update({
+    maxEnabled: number,
+  ): Promise<SetGuardrailRuleEnabledResult> {
+    // **数えてから書き換えるので 1 トランザクションに入れる** — 外で数えると、同時の 2 件が
+    // どちらも「まだ上限に達していない」と読んで上限を超える (create と同じ理由)
+    return this.db.$transaction(async (tx) => {
+      // 対象行をテナント条件込みで押さえる。**FOR NO KEY UPDATE** で同じ行への切り替えを
+      // 直列化する (削除は待たせるが、子テーブルの FK 検査とは衝突させない)
+      const locked = await tx.$queryRaw<
+        { enabled: boolean }[]
+      >`SELECT enabled FROM "GuardrailRule" WHERE "tenantId" = ${tenantId} AND id = ${ruleId} FOR NO KEY UPDATE`;
+      // 他テナントの id・存在しない id は「無い」(存在を隠す)
+      if (locked.length === 0) return { status: 'not_found' as const };
+      // **有効へ戻すときだけ上限を数え直す** (既に有効な行はその数に入っているので数えない)。
+      // 数えないと「上限まで作る → 全部無効化する → また作る → 最初の分を戻す」で上限を超える
+      if (enabled && locked[0]?.enabled === false) {
+        // そのテナントの有効なルール数
+        const active = await tx.guardrailRule.count({ where: { tenantId, enabled: true } });
+        // 上限に達していれば戻せない (行は変えない)
+        if (active >= maxEnabled) return { status: 'too_many_rules' as const };
+      }
+      // テナント条件込みの複合一意で更新する (上で押さえたので必ず見つかる)
+      const rule = await tx.guardrailRule.update({
         where: { tenantId_id: { tenantId, id: ruleId } },
         data: { enabled },
-      }),
-    );
+      });
+      // 切り替えた後の行
+      return { status: 'ok' as const, rule };
+    });
   }
 
   // ルールを消す (インシデントを持つルールは消せない = DB の Restrict FK)

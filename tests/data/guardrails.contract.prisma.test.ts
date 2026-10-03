@@ -105,6 +105,17 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
   });
 
   // 監査ログを 1 行追記する (ハッシュはこのファイルの鍵で計算する)
+  // 切り替えを行い、成功していることを確かめて「切り替えた後の有効・無効」を返す
+  // (失敗の種類は呼び出し側が status で見る。ここは成功を前提にする経路の短縮)
+  async function enabledAfter(tenantId: string, ruleId: string, enabled: boolean) {
+    // 切り替える
+    const result = await repos.guardrailRules.setEnabled(tenantId, ruleId, enabled, RULES_MAX);
+    // 失敗していればテストとして落とす
+    if (result.status !== 'ok') throw new Error(`切り替えに失敗しました: ${result.status}`);
+    // 切り替えた後の値
+    return result.rule.enabled;
+  }
+
   async function appendAudit(tenantId: string, action: string, actorId: string | null = null) {
     // 記録日時はアプリ側が決める (DB の既定値に任せるとハッシュに入れた時刻とずれる)
     const createdAt = new Date();
@@ -319,14 +330,15 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     expect(first.status).toBe('created');
     if (first.status !== 'created') return;
     // **他テナントからは切り替えられない** (複合主キーの tenantId を落とすとクロステナントの書き込み)
-    expect(await repos.guardrailRules.setEnabled(b.tenantId, first.rule.id, false)).toBeNull();
-    // 存在しない id も null (404 で隠すためにアダプタ側で区別しない)
     expect(
-      await repos.guardrailRules.setEnabled(a.tenantId, 'gr_does_not_exist', false),
-    ).toBeNull();
+      await repos.guardrailRules.setEnabled(b.tenantId, first.rule.id, false, RULES_MAX),
+    ).toMatchObject({ status: 'not_found' });
+    // 存在しない id も「無い」(404 で隠すためにアダプタ側で区別しない)
+    expect(
+      await repos.guardrailRules.setEnabled(a.tenantId, 'gr_does_not_exist', false, RULES_MAX),
+    ).toMatchObject({ status: 'not_found' });
     // 自テナントからは外せる
-    const disabled = await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, false);
-    expect(disabled?.enabled).toBe(false);
+    expect(await enabledAfter(a.tenantId, first.rule.id, false)).toBe(false);
     // **上限 1 件でも次の 1 件が作れる** — 件数を数えるのは有効なルールだけだから
     // (無効化した行も数えると、発火して消せなくなったテナントはルールを増やせなくなる)
     const second = await repos.guardrailRules.create(
@@ -342,12 +354,43 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     );
     expect(second.status).toBe('created');
     // 同じ値を 2 度送っても成功し (冪等)、戻せる
-    expect((await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, false))?.enabled).toBe(
-      false,
-    );
-    expect((await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, true))?.enabled).toBe(
-      true,
-    );
+    expect(await enabledAfter(a.tenantId, first.rule.id, false)).toBe(false);
+    expect(await enabledAfter(a.tenantId, first.rule.id, true)).toBe(true);
+  });
+
+  it('有効へ戻すときも上限を数え直す (memory と同じ答え)', async () => {
+    // テナントと、ルール 2 件
+    const a = await makeTenantWithAgent(repos, 'a');
+    const made = [];
+    for (const kind of [RuleKind.cost, RuleKind.quality]) {
+      const created = await repos.guardrailRules.create(
+        {
+          tenantId: a.tenantId,
+          agentId: null,
+          kind,
+          threshold: kind === RuleKind.cost ? 1_000 : 0.7,
+          windowMinutes: 60,
+          action: RuleAction.notify,
+        },
+        LIMITS,
+      );
+      expect(created.status).toBe('created');
+      if (created.status !== 'created') return;
+      made.push(created.rule);
+    }
+    // 1 件目を無効化する
+    expect(await enabledAfter(a.tenantId, made[0].id, false)).toBe(false);
+    // 上限 1 件の状態で戻そうとすると、有効な 1 件 (2 件目) がもう枠を埋めている
+    expect(await repos.guardrailRules.setEnabled(a.tenantId, made[0].id, true, 1)).toMatchObject({
+      status: 'too_many_rules',
+    });
+    // **断ったので行は無効のまま** (実 DB でもトランザクションが巻き戻る)
+    const listed = await repos.guardrailRules.list(a.tenantId, { limit: 10 });
+    expect(listed.items.find((row) => row.id === made[0].id)?.enabled).toBe(false);
+    // 既に有効な行を有効へ送り直すのは数に入っているので通る (冪等)
+    expect(await repos.guardrailRules.setEnabled(a.tenantId, made[1].id, true, 1)).toMatchObject({
+      status: 'ok',
+    });
   });
 
   it('行数の上限に達したら作れない (無効化した行も数える天井。memory と同じ答え)', async () => {
@@ -367,7 +410,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     );
     expect(first.status).toBe('created');
     if (first.status !== 'created') return;
-    await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, false);
+    await repos.guardrailRules.setEnabled(a.tenantId, first.rule.id, false, RULES_MAX);
     // 行数の天井 1 件に達しているので、有効側に余裕があっても作れない
     const second = await repos.guardrailRules.create(
       {
@@ -400,7 +443,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     );
     expect(created.status).toBe('created');
     if (created.status !== 'created') return;
-    await repos.guardrailRules.setEnabled(a.tenantId, created.rule.id, false);
+    await repos.guardrailRules.setEnabled(a.tenantId, created.rule.id, false, RULES_MAX);
     // 有効なルールの取得に出てこない (＝評価の起点から見えない)
     expect(
       await repos.guardrailRules.findActiveRules(a.tenantId, { agentId: a.agent.id }),

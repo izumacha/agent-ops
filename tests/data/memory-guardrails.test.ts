@@ -79,6 +79,16 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     return created.rule;
   }
 
+  // 切り替えを行い、成功を確かめて「切り替えた後の有効・無効」を返す
+  async function enabledAfter(ruleId: string, enabled: boolean) {
+    // 切り替える
+    const result = await repos.guardrailRules.setEnabled(tenantId, ruleId, enabled, RULES_MAX);
+    // 失敗していればテストとして落とす
+    if (result.status !== 'ok') throw new Error(`切り替えに失敗しました: ${result.status}`);
+    // 切り替えた後の値
+    return result.rule.enabled;
+  }
+
   // 監査ログを 1 行追記する
   async function appendAudit(action: string) {
     // 記録日時はアプリ側が決める
@@ -185,8 +195,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
   it('無効化したルールは上限に数えない (prisma の enabled 条件つき count と同じ)', async () => {
     // 1 件作って無効化する
     const first = await makeRule(RuleKind.cost, RuleAction.notify, false);
-    const disabled = await repos.guardrailRules.setEnabled(tenantId, first.id, false);
-    expect(disabled?.enabled).toBe(false);
+    expect(await enabledAfter(first.id, false)).toBe(false);
     // **上限 1 件でも次の 1 件が作れる** — 数え方を「有効なルールだけ」にしているから。
     // 無効化した行も数えると、上限ぶん発火したテナントは「消せない・止めても枠が空かない」で
     // ルールを 1 件も作れなくなる (発火記録を持つルールは削除できない)
@@ -204,10 +213,27 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     expect(second.status).toBe('created');
   });
 
+  it('有効へ戻すときも上限を数え直す (prisma と同じ答え)', async () => {
+    // 2 件作り、1 件を無効化する
+    const first = await makeRule(RuleKind.cost, RuleAction.notify, false);
+    const second = await makeRule(RuleKind.quality, RuleAction.notify, false);
+    expect(await enabledAfter(first.id, false)).toBe(false);
+    // 上限 1 件の状態で戻そうとすると、有効な 1 件 (second) がもう枠を埋めている
+    expect(await repos.guardrailRules.setEnabled(tenantId, first.id, true, 1)).toMatchObject({
+      status: 'too_many_rules',
+    });
+    // **断ったので行は無効のまま** (書き換えてから断ると上限を超えた状態が残る)
+    expect(store.guardrailRules.get(first.id)?.enabled).toBe(false);
+    // 既に有効な行を有効へ送り直すのは数に入っているので通る (冪等)
+    expect(await repos.guardrailRules.setEnabled(tenantId, second.id, true, 1)).toMatchObject({
+      status: 'ok',
+    });
+  });
+
   it('行数の上限に達したら作れない (無効化した行も数える天井。prisma と同じ)', async () => {
     // 行数の上限 1 件として 1 件作り、無効化して「有効なルールは 0 件」にする
     const first = await makeRule(RuleKind.cost, RuleAction.notify, false);
-    await repos.guardrailRules.setEnabled(tenantId, first.id, false);
+    await repos.guardrailRules.setEnabled(tenantId, first.id, false, RULES_MAX);
     // 有効側の上限には達していないのに、行数の天井で断られる
     const second = await repos.guardrailRules.create(
       {
@@ -228,17 +254,21 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     // 自テナントのルール
     const rule = await makeRule(RuleKind.cost, RuleAction.notify, true);
     // 外す
-    expect((await repos.guardrailRules.setEnabled(tenantId, rule.id, false))?.enabled).toBe(false);
+    expect(await enabledAfter(rule.id, false)).toBe(false);
     // 表の行も変わっている
     expect(store.guardrailRules.get(rule.id)?.enabled).toBe(false);
     // 同じ値を 2 度送っても成功する (冪等)
-    expect((await repos.guardrailRules.setEnabled(tenantId, rule.id, false))?.enabled).toBe(false);
+    expect(await enabledAfter(rule.id, false)).toBe(false);
     // 戻せる
-    expect((await repos.guardrailRules.setEnabled(tenantId, rule.id, true))?.enabled).toBe(true);
+    expect(await enabledAfter(rule.id, true)).toBe(true);
     // **他テナントからは触れない** (テナント条件を落とすとクロステナントの書き込みになる)
-    expect(await repos.guardrailRules.setEnabled('tn-other', rule.id, false)).toBeNull();
+    expect(
+      await repos.guardrailRules.setEnabled('tn-other', rule.id, false, RULES_MAX),
+    ).toMatchObject({ status: 'not_found' });
     // 存在しない id も null
-    expect(await repos.guardrailRules.setEnabled(tenantId, 'gr-does-not-exist', false)).toBeNull();
+    expect(
+      await repos.guardrailRules.setEnabled(tenantId, 'gr-does-not-exist', false, RULES_MAX),
+    ).toMatchObject({ status: 'not_found' });
     // 触れなかったので有効なまま
     expect(store.guardrailRules.get(rule.id)?.enabled).toBe(true);
   });

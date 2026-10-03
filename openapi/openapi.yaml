@@ -1036,7 +1036,11 @@ paths:
         テナントのルール数上限にも数えない (数えると、発火済みのルールがたまったテナントが
         二度とルールを作れなくなる)。しきい値や種別は変更できない — **判定の条件を書き換えると、
         過去のインシデントが「どの条件で発火したか」を指さなくなる**ので、条件を変えるときは
-        無効にして新しいルールを作る
+        無効にして新しいルールを作る。
+
+        **有効へ戻すときは有効なルールの上限を数え直す (上限に達していれば 409)。** 数えないと
+        「上限まで作る → 全部無効化する → また上限まで作る → 最初の分を有効へ戻す」で有効な
+        ルールが上限を超え、中継 1 回ごとの集計がその倍数まで重くなる
       requestBody:
         required: true
         content:
@@ -1056,6 +1060,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':

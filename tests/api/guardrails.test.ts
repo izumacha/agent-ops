@@ -414,6 +414,63 @@ describe('ガードレールのルールの無効化', () => {
     expect(created.status, JSON.stringify(created.json)).toBe(201);
   });
 
+  it('有効へ戻すときも上限を数え直す（上限を超えて有効にできない）', async () => {
+    // **これが無いと有効側の上限が迂回できる** — 上限まで作る → 全部無効化する →
+    // また上限まで作る → 最初の分を有効へ戻す、で有効なルールが上限の 2 倍になり、
+    // 中継 1 回ごとの集計もその倍数まで重くなる（上限は行数の天井でしか縛られなくなる）
+    const first = [];
+    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+      first.push(await makeRule({ action: RuleAction.notify }));
+    }
+    // 全部無効化する（有効なルールは 0 件になる）
+    for (const rule of first) {
+      await call(updateGuardrailRule, {
+        token: seed.a.tokens.admin,
+        method: 'PATCH',
+        params: { ruleId: rule.id },
+        body: { enabled: false },
+      });
+    }
+    // 空いた枠でもう一度上限まで作る
+    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+      await makeRule({ action: RuleAction.notify });
+    }
+    // 最初の分を 1 件だけ有効へ戻そうとすると 409
+    const refused = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: first[0].id },
+      body: { enabled: true },
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.json).toMatchObject({ message: API_MESSAGES.guardrailRuleLimit });
+    // 行は無効のまま（断ったのに書き換わっていない）
+    expect(seed.store.guardrailRules.get(first[0].id)?.enabled).toBe(false);
+    // 有効なルールは上限のまま増えていない
+    expect(
+      [...seed.store.guardrailRules.values()].filter(
+        (row) => row.tenantId === seed.a.id && row.enabled,
+      ),
+    ).toHaveLength(GUARDRAIL_RULES_MAX_PER_TENANT);
+  });
+
+  it('既に有効な行を有効へ送り直しても 409 にしない（冪等。数に入っている行を二重に数えない）', async () => {
+    // 上限まで作る（すべて有効）
+    const rules = [];
+    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+      rules.push(await makeRule({ action: RuleAction.notify }));
+    }
+    // 既に有効な行へ enabled: true を送る
+    const again = await call(updateGuardrailRule, {
+      token: seed.a.tokens.admin,
+      method: 'PATCH',
+      params: { ruleId: rules[0].id },
+      body: { enabled: true },
+    });
+    expect(again.status, JSON.stringify(again.json)).toBe(200);
+    expect(again.json).toMatchObject({ enabled: true });
+  });
+
   it('無効化を繰り返しても行数の上限で止まる（409・別の文言）', async () => {
     // **有効なルールの上限だけでは総行数が縛れない** — 無効化した行を数えないので、
     // 「作る → 無効化する」を繰り返すと行が無制限に増える (§9 のリソース枯渇)。

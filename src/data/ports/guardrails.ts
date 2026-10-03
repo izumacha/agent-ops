@@ -34,6 +34,20 @@ export type CreateGuardrailRuleResult =
   | { status: 'too_many_rows' };
 
 /**
+ * 有効・無効の切り替えの結果。
+ *
+ * **「無い」と「上限」を区別する** — 前者は 404（他テナントの id も同じ扱いで存在を隠す）、
+ * 後者は 409。1 つに畳むと、上限に達しているだけなのに「そのルールは存在しない」と答える。
+ */
+export type SetGuardrailRuleEnabledResult =
+  // 切り替えた後の行（既に同じ値でも成功する）
+  | { status: 'ok'; rule: GuardrailRuleRecord }
+  // 他テナントの id・存在しない id
+  | { status: 'not_found' }
+  // 有効なルールの上限に達しているので有効へ戻せない
+  | { status: 'too_many_rules' };
+
+/**
  * ルール作成時に守る 2 つの上限。
  *
  * **2 つ要る。** `maxEnabled` だけだと総行数が縛れない — 無効化した行は数えないので
@@ -128,12 +142,18 @@ export interface GuardrailRulesPort {
    * 無効にして新しいルールを作る)。
    *
    * **冪等**（既に同じ値でも成功して現在の行を返す）— 2 度押しや再試行で 409 にしない。
+   *
+   * **有効へ戻すときは有効なルールの上限を数え直す。** 数えないと「上限まで作る → 全部
+   * 無効化する → また上限まで作る → 最初の分を有効へ戻す」で有効なルールが上限を超える
+   * （行数の天井までいくら増やせる＝中継 1 回ごとの集計がその倍数まで重くなる）。
+   * 上限に達していれば 'too_many_rules' を返し、行は変えない。
    */
   setEnabled(
     tenantId: string,
     ruleId: string,
     enabled: boolean,
-  ): Promise<GuardrailRuleRecord | null>;
+    maxEnabled: number,
+  ): Promise<SetGuardrailRuleEnabledResult>;
   // **判定の対象になる有効なルールを引く** (エージェント指定のものとテナント全体のものの和集合)。
   // ページ送りを持たないのは、これが中継 1 回ごとに走る経路で、
   // 「有効なルールは少数」という前提に立っているため (上限は API 側のルール数制限で担保する)

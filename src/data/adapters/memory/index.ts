@@ -25,6 +25,7 @@ import type {
   RaiseIncidentInput,
   RaisedIncident,
   ResolveIncidentResult,
+  SetGuardrailRuleEnabledResult,
   UsageWindowQuery,
   UsageWindowTotal,
   ApiKeyRecord,
@@ -885,14 +886,25 @@ class MemoryGuardrailRules implements GuardrailRulesPort {
     tenantId: string,
     ruleId: string,
     enabled: boolean,
-  ): Promise<GuardrailRuleRecord | null> {
+    maxEnabled: number,
+  ): Promise<SetGuardrailRuleEnabledResult> {
     // 対象行 (テナント境界内。他テナントの id は「無い」と同じ扱いにして存在を隠す)
     const row = this.store.guardrailRules.get(ruleId);
-    if (!row || row.tenantId !== tenantId) return null;
+    if (!row || row.tenantId !== tenantId) return { status: 'not_found' };
+    // **有効へ戻すときは有効なルールの上限を数え直す** (prisma 側も同じ判定を
+    // 1 トランザクションで行う)。既に有効な行を有効へ戻す場合は数に入っているので数え直さない
+    if (enabled && !row.enabled) {
+      // そのテナントの有効なルール数
+      const active = [...this.store.guardrailRules.values()].filter(
+        (other) => other.tenantId === tenantId && other.enabled,
+      ).length;
+      // 上限に達していれば戻せない (行は変えない)
+      if (active >= maxEnabled) return { status: 'too_many_rules' };
+    }
     // 値を書き換える (同じ値でも成功として扱う)
     row.enabled = enabled;
     // 複製を返す (表の行を呼び出し側へ渡さない)
-    return clone(row);
+    return { status: 'ok', rule: clone(row) };
   }
 
   // ルールを消す (インシデントを持つルールは消せない = 本番の Restrict FK と同じ)

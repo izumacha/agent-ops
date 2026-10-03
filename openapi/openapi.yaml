@@ -1198,7 +1198,12 @@ paths:
           description: |
             読み始める行の連番 (1 以上の整数。既定は先頭)。前の区間の応答の nextFromSeq を渡す。
             **区間の継ぎ目も検証される** (1 つ前の行のハッシュを錨にして、最初の行の
-            prevHash と突き合わせる) ので、区間に分けても連鎖の強さは落ちない
+            prevHash と突き合わせる) ので、区間に分けても連鎖の強さは落ちない。
+
+            **末尾を越えた連番 (その連番以降に行が無い) は 422。** 0 件を検証して
+            「ok: true / verified: 0」を返すと、古いカーソルを握った監視が「連鎖は健全」と
+            報告し続ける (このパラメータが防ぐはずだった fail-open そのもの)。
+            行が 1 件も無いテナントは 200 (検証すべきものが無い)
           schema:
             type: string
             pattern: '^[0-9]+$'
@@ -1211,6 +1216,8 @@ paths:
                 $ref: '#/components/schemas/AuditChainVerification'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':

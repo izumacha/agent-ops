@@ -48,6 +48,7 @@ type Operation = {
   operationId?: string;
   tags?: string[];
   responses?: Record<string, unknown>;
+  parameters?: { name?: string; in?: string; $ref?: string }[];
   security?: unknown[];
   requestBody?: {
     content?: Record<
@@ -75,7 +76,7 @@ type Spec = {
   paths: Record<string, PathItem>;
   tags?: { name: string }[];
   components: {
-    parameters: Record<string, { schema: Record<string, unknown> }>;
+    parameters: Record<string, { name?: string; in?: string; schema: Record<string, unknown> }>;
     schemas: Record<string, SchemaObject>;
     responses?: Record<string, unknown>;
   };
@@ -416,6 +417,43 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     }
     // 1 つも確かめていなければ、印の読み取りか走査が壊れている (fail-closed)
     expect(checked, 'レート制限を掛けたオペレーションを 1 つも見つけられない').toBeGreaterThan(0);
+  });
+
+  // **クエリ引数を宣言したオペレーションは 422 を宣言する。**
+  //
+  // クエリは `parseQuery` が Zod で検証するので、形が違えば必ず 422 になる。宣言が無いと
+  // 生成した型にその応答が現れず、契約から型を作るクライアントは「古いカーソルを渡した」
+  // ような日常的な失敗を扱えないまま書かれる (実測: `?fromSeq=` を足した
+  //  `GET /audit-logs/verify` が 422 を宣言しておらず、クエリを持つ他の 4 本はすべて
+  //  宣言していた)。
+  //
+  // **判定は契約の中だけで閉じる。** 実装側から導く形 (`parseQuery` へ到達するルートを
+  // import の連鎖で引く) も試したが、連鎖はファイル単位なので「本文を読むメソッドと
+  // 読まないメソッドが同じファイルに居る」ルートを巻き込み、実測で 7 件のうち 6 件が
+  // 誤検出だった (本文もクエリも持たない DELETE / GET)。除外表で潰すと、表に 1 行足すだけで
+  // 本物の漏れも隠せるようになるので、精度の高い手がかり (契約が宣言したクエリ引数) に寄せた
+  it('クエリ引数を宣言したオペレーションは 422 を宣言している', () => {
+    // 確かめた数 (0 件なら走査が壊れている)
+    let checked = 0;
+    for (const { path, method, op } of operations) {
+      // そのオペレーションが宣言したクエリ引数 ($ref は components.parameters の共有定義)
+      const hasQuery = (op.parameters ?? []).some(
+        (parameter) =>
+          parameter.in === 'query' ||
+          (parameter.$ref?.startsWith('#/components/parameters/') === true &&
+            spec.components.parameters[parameter.$ref.split('/').pop() ?? '']?.name !== undefined),
+      );
+      // クエリを取らなければ宣言は要らない
+      if (!hasQuery) continue;
+      // 422 を宣言していること
+      checked += 1;
+      expect(
+        Object.keys(op.responses ?? {}),
+        `${method.toUpperCase()} ${path} はクエリ引数を取るのに 422 を宣言していない`,
+      ).toContain('422');
+    }
+    // 1 つも確かめていなければ走査が壊れている (fail-closed)
+    expect(checked, 'クエリ引数を取るオペレーションを 1 つも見つけられない').toBeGreaterThan(0);
   });
 
   // 予算の上限値は説明文にも書いてあるので、定数と一致することを固定する (散文の写しだけが古くなるのを防ぐ)

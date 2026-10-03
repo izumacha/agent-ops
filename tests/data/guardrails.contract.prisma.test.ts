@@ -10,7 +10,7 @@
 //   - 連番の採番が同じテナントで重複しないこと
 // RUN_PRISMA_CONTRACT=1 のときだけ走り、beforeEach で全テーブルを TRUNCATE するため開発 DB を指さない
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { Repositories } from '@/data/ports';
+import type { GuardrailRuleRecord, Repositories } from '@/data/ports';
 import {
   auditRowHash,
   verifyAuditChain,
@@ -361,7 +361,7 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
   it('有効へ戻すときも上限を数え直す (memory と同じ答え)', async () => {
     // テナントと、ルール 2 件
     const a = await makeTenantWithAgent(repos, 'a');
-    const made = [];
+    const made: GuardrailRuleRecord[] = [];
     for (const kind of [RuleKind.cost, RuleKind.quality]) {
       const created = await repos.guardrailRules.create(
         {

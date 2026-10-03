@@ -1,11 +1,33 @@
 // memory アダプタ: Port をインメモリの表で実装する (API テスト用。DB 無しで本番と同じ経路を通す)。
 // 本番 (prisma アダプタ) と挙動をそろえる要点: テナント絞り込み・一意制約 (DuplicateError)・
 // ページネーションの並び順・削除の Restrict
+import { FIRST_AUDIT_SEQ, nextAuditSeq } from '@/domain/audit/chain';
+import { USAGE_ERROR_STATUS_FLOOR } from '@/domain/guardrail/rule';
 import { DuplicateError } from '@/data/errors';
 import type {
+  ActiveRuleQuery,
   AgentFilter,
   AgentRecord,
   AgentsPort,
+  AppendAuditLogInput,
+  AuditHashInput,
+  AuditLogRecord,
+  AuditLogsPort,
+  CreateGuardrailRuleInput,
+  CreateGuardrailRuleResult,
+  DeleteGuardrailRuleResult,
+  GuardrailRuleLimits,
+  GuardrailRuleRecord,
+  GuardrailRulesPort,
+  IncidentFilter,
+  IncidentRecord,
+  IncidentsPort,
+  RaiseIncidentInput,
+  RaisedIncident,
+  ResolveIncidentResult,
+  SetGuardrailRuleEnabledResult,
+  UsageWindowQuery,
+  UsageWindowTotal,
   ApiKeyRecord,
   ApiKeysPort,
   CreateAgentInput,
@@ -45,7 +67,7 @@ import type {
   UserTokensPort,
   UsersPort,
 } from '@/data/ports';
-import { AgentStatus, EvaluationRunStatus, Plan, Role } from '@/domain/types';
+import { AgentStatus, EvaluationRunStatus, IncidentStatus, Plan, Role } from '@/domain/types';
 import { formatUtcDay } from '@/domain/usage-window';
 import { compareCursorKeys } from '@/data/page';
 import { paginate } from './paginate';
@@ -55,6 +77,35 @@ import { MemoryStore } from './store';
 function clone<T>(row: T): T {
   // スプレッドで浅い複製 (行はプリミティブと Date だけなので十分)
   return { ...row };
+}
+
+/**
+ * 監査ログの `payload` を複製する。
+ *
+ * `clone` は行を浅く複製するだけなので、**`payload` は呼び出し側と同じオブジェクトのまま**に
+ * なる。追記専用の表で参照を共有してはいけない — 呼び出し側が渡したオブジェクトを後から
+ * 書き換えると、保存済みの行の中身が変わるのに `hash` は再計算されないので、その行は検証で
+ * `hash_mismatch` になる（prisma 側は DB のトリガが UPDATE を拒むので起こらない。memory 側にも
+ * 同じ規律を置かないと、API テストだけが「書き換えられる世界」で通る。ADR-0006 の死角）。
+ *
+ * **1 段の複製で足りる** — この表へ値が入る経路は `append` だけで、そこへ渡せるのは
+ * `AuditPayload`（値はプリミティブだけ。入れ子を許さない形を `isAuditPayload` が実行時に
+ * 強制する）なので、入れ子をたどる必要が無い。引数の型が `unknown` なのは
+ * `AuditLogRecord.payload` が `unknown` だから（DB の列は `Json?` で、形の保証はドメイン側）。
+ */
+function cloneAuditPayload(payload: unknown): unknown {
+  // オブジェクトでなければそのまま返す（プリミティブと null は共有しても書き換えられない）
+  if (payload === null || typeof payload !== 'object') return payload;
+  // 配列も別の実体にする（`AuditPayload` には現れないが、DB から読んだ行には混ざりうる）
+  if (Array.isArray(payload)) return [...payload];
+  // キーと値を写した別のオブジェクトにする
+  return { ...(payload as Record<string, unknown>) };
+}
+
+// 監査ログの 1 行を複製する (`payload` は別のオブジェクトにする。他の列はプリミティブと Date)
+function cloneAuditLog(row: AuditLogRecord): AuditLogRecord {
+  // 浅い複製のうえで payload を差し替える
+  return { ...row, payload: cloneAuditPayload(row.payload) };
 }
 
 // テナント Port の memory 実装
@@ -375,13 +426,25 @@ class MemoryAgents implements AgentsPort {
     // 対象行 (テナント境界内)
     const row = this.store.agents.get(id);
     if (!row || row.tenantId !== tenantId) return 'not_found';
-    // 履歴 (利用イベント・評価実行) を持つエージェントは削除できない (本番では Restrict FK が拒否する)
+    // 履歴 (利用イベント・評価実行・インシデント) を持つエージェントは削除できない
+    // (本番では Restrict FK が拒否する)。**インシデントも履歴として数える** —
+    // `Incident.agent` は onDelete: Restrict なので、prisma は 409 相当で拒む。
+    // ここに入れていなかった頃は memory だけが 204 を返し、しかも「インシデントがあるなら
+    // UsageEvent もある」ため普段は現れない食い違いとして残っていた (ADR-0006 の死角)
     const hasUsage = [...this.store.usageEvents.values()].some((event) => event.agentId === id);
     const hasRuns = [...this.store.evaluationRuns.values()].some((run) => run.agentId === id);
-    if (hasUsage || hasRuns) return 'restricted';
+    const hasIncidents = [...this.store.incidents.values()].some((row) => row.agentId === id);
+    if (hasUsage || hasRuns || hasIncidents) return 'restricted';
     // 設定 (API キー) は一緒に消える (本番の Cascade と同じ)
     for (const [keyId, key] of this.store.apiKeys) {
       if (key.agentId === id) this.store.apiKeys.delete(keyId);
+    }
+    // **そのエージェント向けのガードレールのルールも一緒に消える** (`GuardrailRule.agent` は
+    // onDelete: Cascade)。消していなかった頃は memory だけがルールを残し、消えたエージェントを
+    // 指すルールが一覧に出続け、テナントのルール数上限にも数えられていた。
+    // **テナント全体のルール (agentId が null) は残す** — 対象が消えたわけではない
+    for (const [ruleId, rule] of this.store.guardrailRules) {
+      if (rule.agentId === id) this.store.guardrailRules.delete(ruleId);
     }
     // 本体を消す
     this.store.agents.delete(id);
@@ -488,6 +551,31 @@ class MemoryUsageEvents implements UsageEventsPort {
     // 表へ入れて複製を返す
     this.store.usageEvents.set(row.id, row);
     return clone(row);
+  }
+
+  // 任意の半開区間を 1 つの合計にまとめる (ガードレールの判定が使う。prisma 側の SQL と同じ規則)
+  async windowTotals(tenantId: string, query: UsageWindowQuery): Promise<UsageWindowTotal> {
+    // 合計を貯める (呼び出し回数・失敗した回数・料金)
+    let requests = 0;
+    let errorRequests = 0;
+    let costMicroUsd = 0n;
+    // テナント・期間・エージェントで絞りながら足し込む
+    for (const event of this.store.usageEvents.values()) {
+      // 他テナントの行は数えない
+      if (event.tenantId !== tenantId) continue;
+      // 期間は半開区間 (開始は含み、終了は含まない)
+      if (event.createdAt < query.start || event.createdAt >= query.endExclusive) continue;
+      // エージェントの指定があれば一致する行だけ
+      if (query.agentId !== undefined && event.agentId !== query.agentId) continue;
+      // 呼び出し回数を数える (エラー率の分母)
+      requests += 1;
+      // 上流の HTTP ステータスが 400 以上なら失敗として数える (エラー率の分子)
+      if (event.statusCode >= USAGE_ERROR_STATUS_FLOOR) errorRequests += 1;
+      // 料金を足す
+      costMicroUsd += event.costMicroUsd;
+    }
+    // 窓の合計
+    return { requests, errorRequests, costMicroUsd };
   }
 
   // 期間内を UTC の日ごとに集計する (prisma 側の SQL と同じ規則。日の境目は src/domain/usage-window.ts)
@@ -715,6 +803,336 @@ class MemoryEvaluations implements EvaluationsPort {
     candidates.sort(compareCursorKeys);
     return clone(candidates[candidates.length - 1]);
   }
+
+  // そのエージェントの最新の completed な実行 (品質低下ルールが読む相手)
+  async findLatestCompletedRun(
+    tenantId: string,
+    agentId: string,
+    since?: Date,
+  ): Promise<EvaluationRunRecord | null> {
+    // テナント・エージェントが一致し、採点が成立した実行だけを集める。
+    // **`since` 以降に絞る** (品質ルールの集計窓。prisma の where と同じ条件)
+    const candidates = [...this.store.evaluationRuns.values()].filter(
+      (row) =>
+        row.tenantId === tenantId &&
+        row.agentId === agentId &&
+        row.status === EvaluationRunStatus.completed &&
+        (since === undefined || row.createdAt.getTime() >= since.getTime()),
+    );
+    // 1 件も無ければ測れていない (ルールは発火しない)
+    if (candidates.length === 0) return null;
+    // 並べて最後 (= 最新) を返す
+    candidates.sort(compareCursorKeys);
+    return clone(candidates[candidates.length - 1]);
+  }
+}
+
+// ── ガードレールのルール ──────────────────────────
+class MemoryGuardrailRules implements GuardrailRulesPort {
+  // 共有の表を受け取る
+  constructor(private readonly store: MemoryStore) {}
+
+  // ルールを作る (上限に達していれば作らない。prisma 側はこれを 1 トランザクションで行う)
+  async create(
+    input: CreateGuardrailRuleInput,
+    limits: GuardrailRuleLimits,
+  ): Promise<CreateGuardrailRuleResult> {
+    // **テナントが実在することを確かめる** (prisma 側は Tenant 行を FOR NO KEY UPDATE で
+    // 押さえ、0 行なら同じ答えを返す)。ここで見ていなかった頃は、存在しないテナント id ＋
+    // agentId: null の入力で memory だけが `created` を返していた — API テストは memory で
+    // 走るので、アダプタで答えが割れると本番だけ別のステータスになる (ADR-0006 の死角)
+    if (!this.store.tenants.has(input.tenantId)) return { status: 'agent_not_found' };
+    // 対象エージェントの指定があれば、同テナントに居ることを確かめる (本番では複合 FK が同じ判定をする)
+    if (input.agentId !== null) {
+      // 指定されたエージェントを引く
+      const agent = this.store.agents.get(input.agentId);
+      // 他テナントのエージェント・存在しないエージェントは作成できない
+      if (!agent || agent.tenantId !== input.tenantId) return { status: 'agent_not_found' };
+    }
+    // そのテナントの行 (有効・無効の両方)
+    const rows = [...this.store.guardrailRules.values()].filter(
+      (row) => row.tenantId === input.tenantId,
+    );
+    // そのうち**有効な**ルール数 (無効化したものは数えない。理由は Port のコメント)
+    const existing = rows.filter((row) => row.enabled).length;
+    // 有効なルールの上限に達していれば作らない (判定は中継 1 回ごとに走るので件数を縛る)
+    if (existing >= limits.maxEnabled) return { status: 'too_many_rules' };
+    // **行数の上限にも達していれば作らない** — 無効化した行を数えないぶんの天井
+    // (prisma 側も同じ 2 段の判定を 1 トランザクションで行う)
+    if (rows.length >= limits.maxRows) return { status: 'too_many_rows' };
+    // 新しい行 (作成日時は表の時計から取る)
+    const row: GuardrailRuleRecord = {
+      id: this.store.nextId('rule'),
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      kind: input.kind,
+      threshold: input.threshold,
+      windowMinutes: input.windowMinutes,
+      action: input.action,
+      enabled: true,
+      createdAt: this.store.now(),
+    };
+    // 表へ入れて複製を返す
+    this.store.guardrailRules.set(row.id, row);
+    return { status: 'created', rule: clone(row) };
+  }
+
+  // ルールを一覧する (テナント内、createdAt 昇順)
+  async list(tenantId: string, query: PageQuery): Promise<Page<GuardrailRuleRecord>> {
+    // テナントで絞ってから共通のページネーションに通す
+    const rows = [...this.store.guardrailRules.values()].filter((row) => row.tenantId === tenantId);
+    return paginate(rows, query);
+  }
+
+  // 有効・無効を切り替える (他テナントの id は null)。冪等 — 既に同じ値でも現在の行を返す
+  async setEnabled(
+    tenantId: string,
+    ruleId: string,
+    enabled: boolean,
+    maxEnabled: number,
+  ): Promise<SetGuardrailRuleEnabledResult> {
+    // 対象行 (テナント境界内。他テナントの id は「無い」と同じ扱いにして存在を隠す)
+    const row = this.store.guardrailRules.get(ruleId);
+    if (!row || row.tenantId !== tenantId) return { status: 'not_found' };
+    // **有効へ戻すときは有効なルールの上限を数え直す** (prisma 側も同じ判定を
+    // 1 トランザクションで行う)。既に有効な行を有効へ戻す場合は数に入っているので数え直さない
+    if (enabled && !row.enabled) {
+      // そのテナントの有効なルール数
+      const active = [...this.store.guardrailRules.values()].filter(
+        (other) => other.tenantId === tenantId && other.enabled,
+      ).length;
+      // 上限に達していれば戻せない (行は変えない)
+      if (active >= maxEnabled) return { status: 'too_many_rules' };
+    }
+    // 値を書き換える (同じ値でも成功として扱う)
+    row.enabled = enabled;
+    // 複製を返す (表の行を呼び出し側へ渡さない)
+    return { status: 'ok', rule: clone(row) };
+  }
+
+  // ルールを消す (インシデントを持つルールは消せない = 本番の Restrict FK と同じ)
+  async delete(tenantId: string, ruleId: string): Promise<DeleteGuardrailRuleResult> {
+    // 対象のルール
+    const rule = this.store.guardrailRules.get(ruleId);
+    // 他テナントのルール・存在しないルールは「無い」
+    if (!rule || rule.tenantId !== tenantId) return 'not_found';
+    // そのルールが起こしたインシデントがあるか (「なぜ止まったか」の記録なので消させない)
+    const hasIncidents = [...this.store.incidents.values()].some((row) => row.ruleId === ruleId);
+    // あれば消せない (無効化は enabled を false にする)
+    if (hasIncidents) return 'restricted';
+    // 消して結果を返す
+    this.store.guardrailRules.delete(ruleId);
+    return 'deleted';
+  }
+
+  // 判定の対象になる有効なルールを引く (エージェント指定のものとテナント全体のものの和集合)
+  async findActiveRules(tenantId: string, query: ActiveRuleQuery): Promise<GuardrailRuleRecord[]> {
+    // 種別の絞り込み (指定が無ければ全種別)
+    const kinds = query.kinds;
+    // テナント内の有効なルールのうち、対象エージェント向けかテナント全体のものを集める
+    const rows = [...this.store.guardrailRules.values()].filter(
+      (row) =>
+        row.tenantId === tenantId &&
+        row.enabled &&
+        (row.agentId === null || row.agentId === query.agentId) &&
+        (kinds === undefined || kinds.includes(row.kind)),
+    );
+    // 並びを決定的にしてから複製を返す (prisma 側の ORDER BY と同じ順序)
+    rows.sort(compareCursorKeys);
+    return rows.map((row) => clone(row));
+  }
+}
+
+// ── インシデント ──────────────────────────
+class MemoryIncidents implements IncidentsPort {
+  // 共有の表を受け取る
+  constructor(private readonly store: MemoryStore) {}
+
+  // 発火を記録し、必要ならエージェントを停止する (prisma 側はこれを 1 トランザクションで行う)
+  async raise(input: RaiseIncidentInput): Promise<RaisedIncident | null> {
+    // 対象エージェント (本番では複合 FK (tenantId, agentId) が同じ判定をする)
+    const agent = this.store.agents.get(input.agentId);
+    // 同テナントに居なければ記録しない
+    if (!agent || agent.tenantId !== input.tenantId) return null;
+    // 発火したルール (本番では複合 FK (tenantId, ruleId) が同じ判定をする)
+    const rule = this.store.guardrailRules.get(input.ruleId);
+    // 同テナントに無ければ記録しない
+    if (!rule || rule.tenantId !== input.tenantId) return null;
+    // **同じルール・同じエージェントで既に開いているインシデントを探す。**
+    // 見つかれば新しい行は作らない (理由は Port の `created` のコメント)
+    const open = [...this.store.incidents.values()]
+      .filter(
+        (candidate) =>
+          candidate.tenantId === input.tenantId &&
+          candidate.agentId === input.agentId &&
+          candidate.ruleId === input.ruleId &&
+          candidate.status === IncidentStatus.open,
+      )
+      // 複数あれば最も古いものを採る (prisma 側の orderBy と同じ順。表の並びに依存させない)
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )[0];
+    // 開いている行が無ければ作る
+    const row =
+      open ??
+      ({
+        id: this.store.nextId('incident'),
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        ruleId: input.ruleId,
+        status: IncidentStatus.open,
+        summary: input.summary,
+        createdAt: this.store.now(),
+        resolvedAt: null,
+      } satisfies IncidentRecord);
+    // 新しく作ったときだけ表へ入れる
+    if (open === undefined) this.store.incidents.set(row.id, row);
+    // 停止を要求されていて、かつ今が稼働中なら suspended にする。
+    // **既に stopped / suspended のときは状態を変えない** — 手動停止を自動停止で塗り替えると、
+    // 復帰の判断 (誰が止めたのか) が読めなくなる。
+    // **重複排除とは独立に判定する** (理由は Port の `created` のコメント)
+    const suspended = input.suspendAgent && agent.status === AgentStatus.active;
+    // 状態を変えるときだけ書き戻す
+    if (suspended) this.store.agents.set(agent.id, { ...agent, status: AgentStatus.suspended });
+    // 記録・新規かどうか・「実際に止めたか」を返す
+    return { incident: clone(row), suspended, created: open === undefined };
+  }
+
+  // インシデントを一覧する (テナント内、createdAt 昇順。絞り込みは任意)
+  async list(
+    tenantId: string,
+    query: PageQuery,
+    filter?: IncidentFilter,
+  ): Promise<Page<IncidentRecord>> {
+    // テナントと絞り込み条件で選ぶ
+    const rows = [...this.store.incidents.values()].filter(
+      (row) =>
+        row.tenantId === tenantId &&
+        (filter?.agentId === undefined || row.agentId === filter.agentId) &&
+        (filter?.status === undefined || row.status === filter.status),
+    );
+    // 共通のページネーションに通す
+    return paginate(rows, query);
+  }
+
+  // インシデントを引く (他テナントのものは null)
+  async findById(tenantId: string, incidentId: string): Promise<IncidentRecord | null> {
+    // 対象の行
+    const row = this.store.incidents.get(incidentId);
+    // 他テナントのものは「無い」(存在を隠す)
+    return row && row.tenantId === tenantId ? clone(row) : null;
+  }
+
+  // 解決済みにする (既に解決済みなら 'already_resolved')
+  async resolve(tenantId: string, incidentId: string): Promise<ResolveIncidentResult> {
+    // 対象の行
+    const row = this.store.incidents.get(incidentId);
+    // 他テナントのものは「無い」
+    if (!row || row.tenantId !== tenantId) return 'not_found';
+    // 既に解決済みなら二重に記録しない (監査ログに同じ操作を何度も残さないため)
+    if (row.status === IncidentStatus.resolved) return 'already_resolved';
+    // 解決済みにして解決日時を入れる
+    this.store.incidents.set(row.id, {
+      ...row,
+      status: IncidentStatus.resolved,
+      resolvedAt: this.store.now(),
+    });
+    return 'resolved';
+  }
+}
+
+// ── 監査ログ ──────────────────────────
+class MemoryAuditLogs implements AuditLogsPort {
+  // 共有の表を受け取る
+  constructor(private readonly store: MemoryStore) {}
+
+  // 1 行を追記する (連番の採番と連鎖の結線をここで行う。prisma 側は直前の行をロックしてから同じことをする)
+  async append(
+    input: AppendAuditLogInput,
+    computeHash: (hashInput: AuditHashInput) => string,
+  ): Promise<AuditLogRecord> {
+    // そのテナントの直前の行 (seq が最大のもの)
+    const previous = this.latestOf(input.tenantId);
+    // 次の連番 (直前が無ければ 1)
+    const seq = nextAuditSeq(previous?.seq ?? null);
+    // 直前の行のハッシュ (最初の行は null)
+    const prevHash = previous?.hash ?? null;
+    // 新しい行の id (ハッシュの入力に入るので採番より前に決める)
+    const id = this.store.nextId('audit');
+    // ハッシュを計算してもらう (鍵と計算方法はアプリ側が持つ。アダプタは鍵に触らない)
+    const hash = computeHash({ seq, prevHash, id });
+    // 保存する行
+    const row: AuditLogRecord = {
+      id,
+      tenantId: input.tenantId,
+      actorId: input.actorId,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      // **深く複製して持つ** (呼び出し側のオブジェクトを参照のまま保存しない。理由は関数のコメント)
+      payload: cloneAuditPayload(input.payload),
+      createdAt: input.createdAt,
+      seq,
+      prevHash,
+      hash,
+    };
+    // 表へ入れて複製を返す (戻り値の payload も表とは別の実体にする)
+    this.store.auditLogs.set(row.id, row);
+    return cloneAuditLog(row);
+  }
+
+  // 一覧する (テナント内、createdAt 昇順)
+  async list(tenantId: string, query: PageQuery): Promise<Page<AuditLogRecord>> {
+    // テナントで絞ってから共通のページネーションに通す
+    const rows = [...this.store.auditLogs.values()].filter((row) => row.tenantId === tenantId);
+    const page = await paginate(rows, query);
+    // **ここも payload を複製する。** `paginate` の複製は浅い（`{...row}`）ので、返した行の
+    // `payload` は表のオブジェクトを指したまま。3 つの読み書き経路のうち 2 つだけを複製すると、
+    // 残った 1 つから保存済みの行を書き換えられ、追記専用の保証が片側だけ成立する状態になる
+    return { ...page, items: page.items.map((row) => cloneAuditLog(row)) };
+  }
+
+  // 連鎖の検証のために seq 昇順で読む (上限付き。fromSeq から読み始められる)
+  async readChain(
+    tenantId: string,
+    limit: number,
+    fromSeq?: bigint,
+  ): Promise<{ rows: AuditLogRecord[]; reachedLimit: boolean; anchorHash: string | null }> {
+    // 読み始める連番 (省略時は先頭)
+    const start = fromSeq ?? FIRST_AUDIT_SEQ;
+    // テナントの行を seq の昇順に並べる
+    const ordered = [...this.store.auditLogs.values()]
+      .filter((row) => row.tenantId === tenantId)
+      .sort((left, right) => (left.seq < right.seq ? -1 : left.seq > right.seq ? 1 : 0));
+    // 読み始める連番より前の行 (錨。途中から検証するときに前の行のハッシュが要る)
+    const before = ordered.filter((row) => row.seq < start);
+    // 読む範囲
+    const all = ordered.filter((row) => row.seq >= start);
+    // 上限までに切る
+    const rows = all.slice(0, limit).map((row) => cloneAuditLog(row));
+    // 上限に達したか (呼び出し側が「まだ続きがある」と伝えられるようにする)
+    return {
+      rows,
+      reachedLimit: all.length > limit,
+      // 先頭から読むなら錨は無い (前の行が無いときも null)
+      anchorHash: start <= FIRST_AUDIT_SEQ ? null : (before[before.length - 1]?.hash ?? null),
+    };
+  }
+
+  // そのテナントの直前の行 (seq が最大のもの。無ければ undefined)
+  private latestOf(tenantId: string): AuditLogRecord | undefined {
+    // 最大の seq を持つ行を探す
+    let latest: AuditLogRecord | undefined;
+    for (const row of this.store.auditLogs.values()) {
+      // 他テナントの行は連鎖が別なので見ない
+      if (row.tenantId !== tenantId) continue;
+      // より大きい seq の行で置き換える
+      if (latest === undefined || row.seq > latest.seq) latest = row;
+    }
+    // 見つかった行 (無ければ undefined)
+    return latest;
+  }
 }
 
 // memory アダプタ一式を組み立てる (テストはこれを setReposForTesting へ渡し、store で seed する)
@@ -731,6 +1149,9 @@ export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repos
     apiKeys: new MemoryApiKeys(store),
     usageEvents: new MemoryUsageEvents(store),
     evaluations: new MemoryEvaluations(store),
+    guardrailRules: new MemoryGuardrailRules(store),
+    incidents: new MemoryIncidents(store),
+    auditLogs: new MemoryAuditLogs(store),
   };
 }
 

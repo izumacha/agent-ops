@@ -26,6 +26,7 @@ import {
   EVALUATION_BENCH_CASE_COUNT,
   maxDisagreedCases,
 } from './step3-criteria.mjs';
+import { GUARDRAIL_STOP_MAX_MS } from './step4-criteria.mjs';
 
 // 捨て玉 (ウォームアップ) の最大遅延に置く上限 (ミリ秒)。
 // **受け入れ基準の 50ms から導かない。** あちらは「プロキシ経由と直接の差」の予算で、こちらは
@@ -227,6 +228,61 @@ export function disagreementProblem(disagreedCases, cases) {
   return `再現率が低すぎます: ${cases} 件中 ${disagreedCases} 件が食い違いました (上限 ${limit} 件 = 再現率 ${EVALUATION_AGREEMENT_MIN_PERCENT}%)`;
 }
 
+/**
+ * 発火から停止までのベンチで、**ルールが実際に発火したか**を判定する。
+ * **これが無いと 0ms で通る** — 何も発火しなければ `evaluateGuardrails` はルールを引いて
+ * 集計して終わるので所要時間は必ず基準を下回り、「停止まで 3 秒」を一度も測らない
+ * @param {number} firedRules 発火したルールの件数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function firedRulesProblem(firedRules) {
+  // 1 件以上発火していれば問題なし
+  if (firedRules > 0) return null;
+  // 0 件なら測っているものが基準と違う
+  return 'ルールが 1 件も発火していません (仕込みが足りず「停止まで」を測っていません)';
+}
+
+/**
+ * 停止が**永続化されたか**を判定する。
+ * **発火だけでは足りない** — `action` が notify のルールや、停止の書き込みが落ちた場合も
+ * 「発火した」とは数えられるので、エージェントの状態を読み直して確かめる
+ * @param {number} suspendedAgents 判定後に suspended になっていたエージェントの件数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function suspendedAgentsProblem(suspendedAgents) {
+  // 1 件以上停止していれば問題なし
+  if (suspendedAgents > 0) return null;
+  // 0 件なら「停止まで」を測っていない
+  return 'エージェントが停止していません (発火だけを測っていて停止の書き込みを含みません)';
+}
+
+/**
+ * 発火が**監査ログに残ったか**を判定する。
+ * `evaluateGuardrails` は監査ログの失敗を握って停止を優先する (fail-open) ので、鍵の設定を
+ * 忘れたまま測ると**記録の費用が抜けた速い数字**が出る。残ったことまで確かめて数字の中身を固定する
+ * @param {number} auditRows 書かれた監査ログの件数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function auditRowsProblem(auditRows) {
+  // 1 件以上残っていれば問題なし
+  if (auditRows > 0) return null;
+  // 0 件なら監査ログの書き込みを含まない計測になっている
+  return '監査ログが残っていません (AUDIT_HMAC_SECRET の設定を確認してください)';
+}
+
+/**
+ * 受け入れ基準「ルール発火から停止まで ≦ 上限」を判定する。
+ * 上限を引数で受け取らないのは他の判定と同じ理由 (実測値と上限を入れ替えられる)
+ * @param {number} elapsedMs 発火から停止の永続化までの実測
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function guardrailStopProblem(elapsedMs) {
+  // 上限以内なら問題なし
+  if (elapsedMs <= GUARDRAIL_STOP_MAX_MS) return null;
+  // 超えていれば受け入れ基準を満たしていない
+  return `発火から停止までが遅すぎます: ${elapsedMs}ms (上限 ${GUARDRAIL_STOP_MAX_MS}ms)`;
+}
+
 // ベンチごとの受け入れ基準の表。**「どの値を、どの判定に掛けるか」の唯一の定義。**
 //
 // **要点は「判定へ渡す値を、出力 JSON に載せる値そのものから読む」こと。** 以前はベンチ本体が
@@ -270,6 +326,17 @@ const BENCH_CRITERIA = {
     { fields: ['upstreamRequests'], judge: upstreamRequestsProblem },
     // 受け入れ基準そのもの (食い違い ≦ 上限 = 再現率 ≧ 90%)
     { fields: ['disagreedCases', 'cases'], judge: disagreementProblem },
+  ],
+  // 発火から停止までのベンチ (scripts/bench-guardrail.ts)
+  'guardrail-stop': [
+    // 実際に発火したか (発火しなければ所要時間は必ず基準を下回る)
+    { fields: ['firedRules'], judge: firedRulesProblem },
+    // 停止が永続化されたか (発火だけを測って停止の書き込みを含めない形を落とす)
+    { fields: ['suspendedAgents'], judge: suspendedAgentsProblem },
+    // 監査ログが残ったか (fail-open で抜けた分だけ速い数字を落とす)
+    { fields: ['auditRows'], judge: auditRowsProblem },
+    // 受け入れ基準そのもの (発火から停止まで ≦ 上限)
+    { fields: ['elapsedMs'], judge: guardrailStopProblem },
   ],
 };
 

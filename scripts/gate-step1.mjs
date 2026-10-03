@@ -3,7 +3,7 @@
 //   1. Step0 の項目 (gen / db:generate / lint / format:check / typecheck) が通る
 //   2. ユニット + API テストが 60 件以上 pass (失敗 0)
 //   3. 権限違反テストが役割 3 × 操作 3 の全パターン存在し、すべて pass (tests/api/rbac-matrix.test.ts)
-//   4. `npm audit --audit-level=high` が high 0
+//   4. `npm audit --audit-level=high --omit=dev` が high 0 (本番依存のみ。理由は ADR-0004)
 // ファイル操作 (Node 標準)
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 // 一時ディレクトリ (Node 標準)
@@ -89,7 +89,7 @@ console.log(`[gate:step1] RBAC 行列 ${ROLES.length * ACTIONS.length} パター
 
 // 4. npm audit で high 以上が 0 件であること
 banner('npm audit (high 0)');
-if (runNpm(['audit', '--audit-level=high']) !== 0) {
+if (runNpm(['audit', '--audit-level=high', '--omit=dev']) !== 0) {
   console.error('[gate:step1] 失敗: npm audit で high 以上の脆弱性があります');
   process.exit(1);
 }

@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
+// ファイル URL への変換 (Route Handler を動的に取り込んで印を読むのに使う)
+import { pathToFileURL } from 'node:url';
 // YAML パーサ (OpenAPI 定義は YAML)
 import { parse } from 'yaml';
 import { ALLOWED_ROUTE_FILE_NAME, ROUTE_FILE_PATTERN } from './lib/route-files';
@@ -27,8 +29,14 @@ import { evaluationRunCreateSchema, evaluationSetCreateSchema } from '@/lib/vali
 import { tenantCreateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
+import {
+  guardrailRuleCreateSchema,
+  guardrailRuleUpdateSchema,
+  guardrailRunSchema,
+} from '@/lib/validations/guardrail';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
+import { ROUTE_RATE_LIMIT_BRAND } from '@/lib/api/handler';
 
 // OpenAPI 定義の場所 (package.json の gen スクリプトと同じファイル)
 const OPENAPI_PATH = join(process.cwd(), 'openapi', 'openapi.yaml');
@@ -40,6 +48,7 @@ type Operation = {
   operationId?: string;
   tags?: string[];
   responses?: Record<string, unknown>;
+  parameters?: ParameterRef[];
   security?: unknown[];
   requestBody?: {
     content?: Record<
@@ -48,7 +57,12 @@ type Operation = {
     >;
   };
 };
-type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>>;
+type ParameterRef = { name?: string; in?: string; $ref?: string };
+// パスごとの定義。**パス単位の parameters も読む** — OpenAPI では共通の引数をここに置けて、
+// このファイルも実際にそうしている (置き場所の違いで検査から外れないようにする)
+type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>> & {
+  parameters?: ParameterRef[];
+};
 type SchemaObject = {
   type?: unknown;
   maxLength?: number;
@@ -67,7 +81,7 @@ type Spec = {
   paths: Record<string, PathItem>;
   tags?: { name: string }[];
   components: {
-    parameters: Record<string, { schema: Record<string, unknown> }>;
+    parameters: Record<string, { name?: string; in?: string; schema: Record<string, unknown> }>;
     schemas: Record<string, SchemaObject>;
     responses?: Record<string, unknown>;
   };
@@ -87,6 +101,9 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   EvaluationRunCreate: evaluationRunCreateSchema,
   'PUT /users/{userId}/role': userRoleSchema,
   ProxyRequest: proxyRequestSchema,
+  GuardrailRuleCreate: guardrailRuleCreateSchema,
+  GuardrailRuleUpdate: guardrailRuleUpdateSchema,
+  GuardrailRunRequest: guardrailRunSchema,
 };
 
 // **未知キーを許すことが意図である本文の除外表 (理由付き)。**
@@ -212,8 +229,34 @@ function objectBranches(schema: SchemaObject): SchemaObject[] {
 
 // 全オペレーションを (パス, メソッド, 定義) の並びに平坦化する
 const operations = Object.entries(spec.paths).flatMap(([path, item]) =>
-  HTTP_METHODS.flatMap((method) => (item[method] ? [{ path, method, op: item[method]! }] : [])),
+  HTTP_METHODS.flatMap((method) =>
+    item[method]
+      ? [
+          {
+            path,
+            method,
+            op: item[method]!,
+            // **パス単位と操作単位の引数を合わせたもの。** 片方しか見ないと、同じ引数を
+            // どちらに書いたかで検査に入るかが変わる (このファイルは両方の置き方を使っている)
+            parameters: [...(item.parameters ?? []), ...(item[method]!.parameters ?? [])],
+          },
+        ]
+      : [],
+  ),
 );
+
+// その引数がクエリ引数か ($ref は components.parameters を引いて `in` を見る)。
+// **`in === 'query'` まで確かめる** — `name` があるかだけで決めると、共有のパス引数
+// (`RuleId` など 9 件) をクエリと誤認し、返しようのない 422 を要求することになる
+function isQueryParameter(parameter: ParameterRef): boolean {
+  // 直接書かれていれば in をそのまま見る
+  if (parameter.$ref === undefined) return parameter.in === 'query';
+  // $ref なら components.parameters から引く (読めなければクエリではないと扱う)
+  const name = parameter.$ref.startsWith('#/components/parameters/')
+    ? parameter.$ref.slice('#/components/parameters/'.length)
+    : undefined;
+  return name === undefined ? false : spec.components.parameters[name]?.in === 'query';
+}
 
 describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   // 受け入れ基準「定義が存在する」を最低限の中身込みで固定する
@@ -357,6 +400,86 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
         );
       }
     }
+  });
+
+  // **レート制限を掛けたオペレーションは 429 を宣言する。**
+  //
+  // 宣言が無いと、生成した型 (`src/generated/openapi.d.ts`) にその応答が現れないので、
+  // この API を型から使うクライアントは 429 と Retry-After を知らないまま書かれる
+  // (実測: `rateLimit` を足した `POST /evaluations` が 429 を宣言しておらず、同じ差分で
+  //  足した他のステータスはすべて宣言されていた)。
+  //
+  // **期待は契約側の一覧ではなく実装の結線から導く** — ルートに載る印
+  // (`ROUTE_RATE_LIMIT_BRAND`) を読むので、新しく制限を掛けた人が契約の更新を忘れたら落ちる。
+  // 印は枠の種類をそのまま載せるので、`null` でなければ「掛かっている」
+  it('レート制限を掛けたオペレーションは 429 を宣言している', async () => {
+    // 確かめた数 (0 件なら走査が壊れている)
+    let checked = 0;
+    for (const { path, method, op } of operations) {
+      // 契約のパスを Next.js のディレクトリへ戻す ({param} → [param])
+      const file = join(
+        process.cwd(),
+        'src',
+        'app',
+        'api',
+        'v1',
+        ...path
+          .slice(1)
+          .split('/')
+          .map((segment) => segment.replace(/^\{(.+)\}$/, '[$1]')),
+        ALLOWED_ROUTE_FILE_NAME,
+      );
+      // 実装が無ければ別のテストが落とすので、ここでは見ない
+      if (!existsSync(file)) continue;
+      // モジュールを読み込み、そのメソッドの export を取り出す
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(file).href);
+      const exported = routeModule[method.toUpperCase()];
+      if (exported === undefined) continue;
+      // 印を読む (綴りではなく結線を見る)
+      const tier = (exported as unknown as Record<symbol, unknown>)[ROUTE_RATE_LIMIT_BRAND];
+      // 掛けていなければ宣言は要らない
+      if (tier === null || tier === undefined) continue;
+      // 429 を宣言していること
+      checked += 1;
+      expect(
+        Object.keys(op.responses ?? {}),
+        `${method.toUpperCase()} ${path} はレート制限 (${String(tier)}) を掛けているのに 429 を宣言していない`,
+      ).toContain('429');
+    }
+    // 1 つも確かめていなければ、印の読み取りか走査が壊れている (fail-closed)
+    expect(checked, 'レート制限を掛けたオペレーションを 1 つも見つけられない').toBeGreaterThan(0);
+  });
+
+  // **クエリ引数を宣言したオペレーションは 422 を宣言する。**
+  //
+  // クエリは `parseQuery` が Zod で検証するので、形が違えば必ず 422 になる。宣言が無いと
+  // 生成した型にその応答が現れず、契約から型を作るクライアントは「古いカーソルを渡した」
+  // ような日常的な失敗を扱えないまま書かれる (実測: `?fromSeq=` を足した
+  //  `GET /audit-logs/verify` が 422 を宣言しておらず、クエリを持つ他の 4 本はすべて
+  //  宣言していた)。
+  //
+  // **判定は契約の中だけで閉じる。** 実装側から導く形 (`parseQuery` へ到達するルートを
+  // import の連鎖で引く) も試したが、連鎖はファイル単位なので「本文を読むメソッドと
+  // 読まないメソッドが同じファイルに居る」ルートを巻き込み、実測で 7 件のうち 6 件が
+  // 誤検出だった (本文もクエリも持たない DELETE / GET)。除外表で潰すと、表に 1 行足すだけで
+  // 本物の漏れも隠せるようになるので、精度の高い手がかり (契約が宣言したクエリ引数) に寄せた
+  it('クエリ引数を宣言したオペレーションは 422 を宣言している', () => {
+    // 確かめた数 (0 件なら走査が壊れている)
+    let checked = 0;
+    for (const { path, method, op, parameters } of operations) {
+      // そのオペレーションに効くクエリ引数 (パス単位と操作単位の両方を見る)
+      const hasQuery = parameters.some(isQueryParameter);
+      // クエリを取らなければ宣言は要らない
+      if (!hasQuery) continue;
+      // 422 を宣言していること
+      checked += 1;
+      expect(
+        Object.keys(op.responses ?? {}),
+        `${method.toUpperCase()} ${path} はクエリ引数を取るのに 422 を宣言していない`,
+      ).toContain('422');
+    }
+    // 1 つも確かめていなければ走査が壊れている (fail-closed)
+    expect(checked, 'クエリ引数を取るオペレーションを 1 つも見つけられない').toBeGreaterThan(0);
   });
 
   // 予算の上限値は説明文にも書いてあるので、定数と一致することを固定する (散文の写しだけが古くなるのを防ぐ)

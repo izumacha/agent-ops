@@ -3,6 +3,9 @@
 import type {
   AgentRecord,
   ApiKeyRecord,
+  AuditLogRecord,
+  GuardrailRuleRecord,
+  IncidentRecord,
   EvaluationCaseRecord,
   EvaluationResultRecord,
   EvaluationRunRecord,
@@ -39,6 +42,13 @@ export class MemoryStore {
   readonly evaluationRuns = new Map<string, EvaluationRunRecord>();
   // 採点結果 (実行 × ケース)
   readonly evaluationResults = new Map<string, EvaluationResultRecord>();
+  // ガードレールのルール (本番の Restrict FK と同じく、インシデントを持つルールは削除できない)
+  readonly guardrailRules = new Map<string, GuardrailRuleRecord>();
+  // インシデント (ルール発火の記録)
+  readonly incidents = new Map<string, IncidentRecord>();
+  // 監査ログ。**追記専用を memory 側でも守る** — prisma 側では DB のトリガが守っている規律を
+  // こちらにも置かないと、API テストだけが「書き換えられる世界」で通ってしまう (ADR-0006 の死角)
+  readonly auditLogs = new Map<string, AuditLogRecord>();
   // 採番用の連番 (cuid の代わり。テストで読みやすいよう接頭辞 + 連番にする)
   private sequence = 0;
 

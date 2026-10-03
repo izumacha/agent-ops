@@ -3,7 +3,7 @@
 AI エージェントの**登録・権限・コスト・品質・停止**を一元管理する運用基盤（SaaS）。複数のエージェントを複数チームで運用し、コストと品質を可視化して事故（暴走・コスト超過・品質低下）を自動で止める。
 
 - スタック: Next.js 16（App Router）/ TypeScript / Prisma 7 / PostgreSQL 16 / Docker
-- 現在の段階: **Step3（品質評価: LLM-as-judge）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
+- 現在の段階: **Step4（ガードレール・自動停止・通知・監査ログ）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
 
 ## デモ
 
@@ -87,6 +87,76 @@ curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/evaluations/<実
 **評価の呼び出しは `UsageEvent` に記録しない** — 利用者の呼び出しと混ぜると日次集計と Step4 のコスト超過ルールが
 評価のたびに跳ねるため。ただし**ベンダー側の課金は発生する**ので、上限（spend limit）は必ず設定しておく。
 
+### 超過したら自動で止める・監査ログを検証する（Step4）
+
+しきい値ルールを設定すると、**超過しうるイベントの直後**（中継・評価実行）に判定が走り、`stop` の
+ルールならエージェントを `suspended` にして通知を送る（[ADR-0010](./docs/adr/0010-guardrails-and-audit-chain.md)）。
+cron は要らない。
+
+```bash
+# 1. ルールを設定する (admin ロール限定。種別は cost / error_rate / quality)
+#    cost のしきい値はマイクロ USD の整数、error_rate と quality は 0〜1
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agentId":"<エージェントの id>","kind":"cost","threshold":1000000,"windowMinutes":1440,"action":"stop"}' \
+  localhost:3000/api/v1/guardrails
+
+# 2. 中継を繰り返して超過させる (判定は中継の応答を返す前に終わっている)
+#    超過した次の中継は 403 で断られる
+
+# 3. 発火の記録を見る (open のものだけ絞るなら ?status=open)
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/incidents
+
+# 4. 原因に対処したらインシデントを解決し、別操作でエージェントを復帰させる (どちらも admin)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  localhost:3000/api/v1/incidents/<インシデントの id>/resolve
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  localhost:3000/api/v1/agents/<エージェントの id>/resume
+
+# 5. しきい値を誤ったルールを止める (admin 限定。発火したルールは削除できないのでこれで止める)
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' localhost:3000/api/v1/guardrails/<ルールの id>
+
+# 6. 監査ログと、その改ざん検知 (verify は admin 限定)
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/audit-logs
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/api/v1/audit-logs/verify
+# 続きがある (reachedLimit: true) なら、返ってきた nextFromSeq を渡して次の区間を検証する
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "localhost:3000/api/v1/audit-logs/verify?fromSeq=<nextFromSeq の値>"
+```
+
+**検証は区間に分かれる。** 1 回に読む行数には上限があるので、`reachedLimit` が `true` なら
+`nextFromSeq` を `?fromSeq=` に渡して続きを検証する（渡さずに呼び直すと**同じ最古の区間を
+検証し続ける**ことになり、それ以降の行は一度も確かめられない）。区間の継ぎ目も検証される。
+
+**発火したルールは削除できないので、止めるには無効化する。** 発火の記録からルールを辿れなくなると
+「何がなぜ止めたのか」が読めなくなるため、`Incident` を持つルールの `DELETE` は 409 になる。しきい値を
+誤った `stop` のルールは `PATCH /guardrails/{ruleId}` で `enabled: false` にして判定の対象から外す
+（インシデントを解決してエージェントを復帰させれば、以降は止まらない）。切り替えられるのは `enabled`
+だけで、しきい値や窓を変えたいときは作り直す（変えると過去のインシデントが「どの設定で発火したのか」を
+示さなくなる）。**無効化した行はルール数の上限（50 件）に数えない**（代わりに行数の天井 200 件が掛かる — 不要になった行は削除する）。
+
+**`AUDIT_HMAC_SECRET`（32 文字以上）が必須。** 人が行う操作（停止・復帰・インシデントの解決・ルールの
+登録・無効化・削除）は、鍵が無いと **503 で何も変えずに**断る（変えてから記録に失敗すると、記録の無い変更が
+残り再試行も永久に失敗するため）。ガードレールの自動発火だけは例外で、記録できなくても停止は行う。
+
+**同じ超過で記録は重ねない。** 超過は解消するまで続くので、開いているインシデントが同じルールに
+あれば新しい行を作らず通知も出さない。ただし**停止はやり直す**（開いている間に復帰させられた
+エージェントは再び止める）。
+
+**通知の宛先は環境変数だけが決める**（`NOTIFY_WEBHOOK_URL` / `NOTIFY_MAIL_WEBHOOK_URL`）。利用者が
+入れた URL へサーバが要求を出す形にしないため（SSRF を作らない）。`NOTIFY_SIGNING_SECRET` が無ければ
+**送らない**（署名なしの通知は受け手がなりすましと区別できない）。
+
+**上流へ費用を発生させる経路にはレート制限が掛かる**（中継 ・ 評価の実行 ・ ガードレールの明示実行。
+既定は毎分 `PROXY_RATE_LIMIT_PER_MINUTE` 件で、環境変数で上書きできる。超過は 429 ＋ `Retry-After`）。
+**1 要求の重さが違う経路には、それに加えて別の小さい枠**が掛かる（評価の実行は
+`FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE` 件、ガードレールの明示実行は
+`OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE` 件）— 回数だけを数える 1 つの枠では、
+1 要求で上流へ 400 回出る経路を守れない。数える単位は**テナント**（API キーを増やしても枠は増えない）。**`Agent.budgetMicroUsd` を設定すると、当月（UTC）の累計がそれを超えた
+中継と評価の実行を 403 で断る**（上流を呼んでから断っても課金は発生するため、呼ぶ前に確かめる）。
+ただし**評価の呼び出し自体は利用台帳に記録しない設計**（ADR-0009）なので、その支出は予算に積まれない
+— 上限はベンダー側の月次利用上限（spend limit）で設定すること。
+
 ## 検証コマンド
 
 ```bash
@@ -99,14 +169,16 @@ npm run gate:step0   # Step0 の受け入れ基準を一括検査 (gen / db:gene
 npm run gate:step1   # Step1 の受け入れ基準を一括検査 (上記 + テスト 60 件以上 / RBAC 3×3 の 403 / npm audit high 0)
 npm run gate:step2   # Step2 の受け入れ基準を一括検査 (上記 + 料金計算が全モデル分 pass / 本番ビルド / ベンチ 2 本)
 npm run gate:step3   # Step3 の受け入れ基準を一括検査 (上記 + 不正出力の除外が全理由分 pass / ベンチ 3 本)
+npm run gate:step4   # Step4 の受け入れ基準を一括検査 (上記 + 発火が全種別分 pass / 改ざん検知が全種類分 pass / E2E / ベンチ 4 本)
 npm run bench:usage  # 1 万件投入で日次集計 ≦ 1 秒 (専用 DB が必要)
 npm run bench:proxy  # プロキシ経由の追加遅延 ≦ 50ms (先に npm run build。専用 DB が必要)
 npm run bench:evaluation # 固定評価セット 100 件を 2 回採点して再現率 ≧ 90% (専用 DB が必要)
+npm run bench:guardrail  # 発火から停止まで ≦ 3 秒 (専用 DB が必要)
 ```
 
-`gate:step3`（と `gate:step2`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチは全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩くので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
+`gate:step4`（と `gate:step2` / `gate:step3`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチは全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩くので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
 
-CI（`.github/workflows/ci.yml`）は `gate:step3` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
+CI（`.github/workflows/ci.yml`）は `gate:step4` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
 
 ## ディレクトリ
 
@@ -128,14 +200,17 @@ CI（`.github/workflows/ci.yml`）は `gate:step3` に加え、PostgreSQL サー
 
 このアプリ単体では塞いでいない前提が 2 つあり、どちらも設計判断として ADR に記録してある。
 
-- **上流の使いすぎを止める仕組みがまだ無い**（ADR-0007「残る宿題」）。Step2 時点ではプロキシ経路に
-  レート制限も予算の強制も無いので、有効な API キーを持つテナントは共有の上流アカウントへ上限なく
-  課金を積める（本文 64 KiB・応答 8 MiB・タイムアウト 120 秒まで）。**公開前に、ベンダー側の月次利用
-  上限（spend limit）と前段のレート制限を必ず設定すること。** 予算の強制は Step4 で実装する。
+- **上流の使いすぎは Step4 で絞ったが、ベンダー側の上限は別に要る**（ADR-0007「残る宿題」→
+  [ADR-0010](./docs/adr/0010-guardrails-and-audit-chain.md)）。上流へ費用を発生させる経路（中継・評価の
+  実行）にはレート制限が掛かり、`Agent.budgetMicroUsd` を設定すれば当月の累計超過で中継を断る。
+  ただし**レート制限はインプロセスの Map なので、水平スケールするとインスタンス数ぶん上限が緩む**
+  （共有ストアは Step6）。**公開前に、ベンダー側の月次利用上限（spend limit）は必ず設定すること。**
 - **前段にリバースプロキシを置く前提**（ADR-0005「残る宿題」）。未対応メソッド（`TRACE` 等）の遮断、
   本文サイズとタイムアウトの上限、`/api/v1/health` を内部からだけ見せることは前段の責務にしてある。
-  **レート制限も、アプリ側で入るまでは前段で掛ける**（プロキシ経路は ADR-0007 のとおり Step4、
-  認証経路は ADR-0005 のとおり Step6 で実装する）。
+  **認証経路のレート制限は前段で掛ける**（アプリ側で全ルートに掛けるのは Step6）。
+- **`AUDIT_HMAC_SECRET` を設定しないと人の操作ができない**（停止・復帰・インシデントの解決・ルールの
+  登録と削除が 503）。鍵を変えるとそれ以前に書いた行は検証できなくなるので、交換した時点を運用記録に
+  残すこと。`docker compose` で動かす場合は `.env` に置けば app サービスへ渡る。
 
 ## ロードマップ（要約）
 
@@ -144,8 +219,8 @@ CI（`.github/workflows/ci.yml`）は `gate:step3` に加え、PostgreSQL サー
 | 0 | 設計・骨組み（実装済み） | 1 週 |
 | 1 | エージェント台帳・権限（CRUD / API キー / RBAC。実装済み） | 2 週 |
 | 2 | コスト計測プロキシ（Anthropic/OpenAI 互換。実装済み） | 2 週 |
-| 3 | 品質評価（LLM-as-judge。実装済み・本 README の状態） | 2 週 |
-| 4 | ガードレール・自動停止・通知・監査ログ | 2 週 |
+| 3 | 品質評価（LLM-as-judge。実装済み） | 2 週 |
+| 4 | ガードレール・自動停止・通知・監査ログ（実装済み・本 README の状態） | 2 週 |
 | 5 | ダッシュボード | 2 週 |
 | 6 | マルチテナント・課金（Stripe） | 2 週 |
 | 7 | リリース準備 | 1 週 |

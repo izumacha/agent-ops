@@ -13,15 +13,19 @@ import {
 } from '@/app/api/v1/proxy/proxy-route';
 import { POST as proxyAnthropic } from '@/app/api/v1/proxy/anthropic/messages/route';
 import { POST as proxyOpenAi } from '@/app/api/v1/proxy/openai/chat/completions/route';
-import { AgentStatus, Provider } from '@/domain/types';
+import { AgentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import * as pricing from '@/domain/pricing';
 import {
   API_MESSAGES,
   JSON_BODY_MAX_BYTES,
   JSON_BODY_MAX_DEPTH,
+  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
+  GUARDRAIL_RULES_MAX_PER_TENANT,
   UPSTREAM_MAX_RESPONSE_BYTES,
 } from '@/lib/constants';
+import { GUARDRAIL_ERROR_RATE_MIN_REQUESTS } from '@/domain/guardrail/rule';
 import { call, seedApiKey, seedEachTest } from './helpers';
+import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -972,5 +976,425 @@ describe('遅延の記録', () => {
     await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
     // 測った時間が記録されている (0 固定や未計測の変異を落とす。上振れは環境次第なので下限だけ見る)
     expect(recordedEvents()[0].latencyMs).toBeGreaterThanOrEqual(delayMs);
+  });
+});
+
+describe('プロキシのレート制限', () => {
+  // 検査用の小さい上限（本番の既定は PROXY_RATE_LIMIT_PER_MINUTE で、そこまで叩くのは遅い）。
+  // **上限そのものの値はここの主題ではない** — 確かめたいのは「上限に達したら断る」挙動
+  const TEST_LIMIT = 2;
+  // 窓は 1 分（窓の境界は tests/rate-limit.test.ts が決定的に固定している）
+  const TEST_WINDOW_MS = 60_000;
+
+  // 各テストの前に小さい上限で作り直す（helpers の seedEachTest も作り直すので、この順で上書きする）
+  beforeEach(() => {
+    resetSharedRateLimiterForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
+  });
+
+  // 中継を 1 回呼ぶ
+  async function relay(secret: string) {
+    // 上流は毎回正常応答（fetch の差し替えは呼び出しごとに使い回せる）
+    return call(proxyAnthropic, {
+      method: 'POST',
+      token: secret,
+      body: { model: ANTHROPIC_MODEL, messages: [{ role: 'user', content: 'こんにちは' }] },
+    });
+  }
+
+  it('上限までは中継し、超えたら 429 と Retry-After を返す', async () => {
+    // 上流は正常応答
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    // エージェントに紐づくキー
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 上限までは通る
+    for (let i = 0; i < TEST_LIMIT; i += 1) {
+      expect((await relay(key.secret)).status).toBe(200);
+    }
+    // 次は断られる
+    const limited = await relay(key.secret);
+    expect(limited.status).toBe(429);
+    // Retry-After は整数の秒数（RFC 9110 の delay-seconds）
+    expect(limited.headers.get('Retry-After')).toMatch(/^\d+$/);
+    // 文言は利用者向けの日本語（内部詳細を含めない）
+    expect(limited.json).toMatchObject({ message: API_MESSAGES.rateLimited });
+  });
+
+  it('断った要求は上流へ出ず、利用イベントも記録しない', async () => {
+    // **ここが制限を置いた目的** — 上限を超えた要求で上流の課金を発生させない。
+    // 「429 を返す」だけ確かめても、先に中継してから断る実装でも緑になる
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 上限まで使う
+    for (let i = 0; i < TEST_LIMIT; i += 1) await relay(key.secret);
+    // ここまでの上流呼び出しと記録の件数を覚える
+    const callsBefore = fetchCalls.length;
+    const eventsBefore = recordedEvents().length;
+    // 断られる要求を 3 回出す
+    for (let i = 0; i < 3; i += 1) {
+      expect((await relay(key.secret)).status).toBe(429);
+    }
+    // 上流へは 1 度も出ていない
+    expect(fetchCalls).toHaveLength(callsBefore);
+    // 台帳も増えていない（上流へ 1 バイトも出ていない呼び出しは記録しない方針と一致）
+    expect(recordedEvents()).toHaveLength(eventsBefore);
+  });
+
+  it('同じテナントの API キーは枠を共有する', () => {
+    // **キーはテナント単位で数える。** API キー単位にすると、`POST /api-keys` を叩いて
+    // キーを増やすだけで上限が何倍にもなる（件数の上限は無く、発行経路にレート制限も無い）。
+    // 実測の形: 同じエージェント向けのキーを 100 本発行すると中継は毎分 60,000 回通り、
+    // 予算が未設定なら上流への課金に歯止めが無くなる。
+    //
+    // **代償は「1 本の暴走したクライアントが同じテナントの枠を食い潰す」こと。** 費用を払う
+    // 単位はテナントなので、ベンダーへの無制限な課金よりそちらを選ぶ（ADR-0010）
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    const first = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const second = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 片方で使い切ったら、もう片方も断られることを確かめる
+    return (async () => {
+      for (let i = 0; i < TEST_LIMIT; i += 1) await relay(first.secret);
+      expect((await relay(first.secret)).status).toBe(429);
+      // **別のキーでも通らない**（枠はテナントのもの）
+      expect((await relay(second.secret)).status).toBe(429);
+    })();
+  });
+
+  it('別のテナントの枠は独立している', () => {
+    // テナントをまたいだ巻き添えは起こさない（枠はテナントごと）
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    const mine = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    const other = seedApiKey(seed, { tenantId: seed.b.id, agentId: seed.b.agent.id });
+    return (async () => {
+      for (let i = 0; i < TEST_LIMIT; i += 1) await relay(mine.secret);
+      expect((await relay(mine.secret)).status).toBe(429);
+      // 別テナントは枠を使っていないので通る
+      expect((await relay(other.secret)).status).toBe(200);
+    })();
+  });
+});
+
+describe('プロキシの予算の強制', () => {
+  // 当月の累計を作るために記録する 1 件あたりの料金（マイクロ USD）
+  const SPENT_PER_EVENT = 400n;
+
+  // そのエージェントに予算を設定する（表を直接書き換える）
+  function setBudget(budgetMicroUsd: bigint | null): void {
+    // 既存の行を取り出す
+    const agent = seed.store.agents.get(seed.a.agent.id);
+    // 無ければテストとして落とす
+    if (!agent) throw new Error('エージェントの行が見つかりません');
+    // 予算だけを差し替える
+    seed.store.agents.set(agent.id, { ...agent, budgetMicroUsd });
+  }
+
+  // 当月の利用を 1 件記録する（createdAt は表の時計 = いまなので当月に入る）
+  async function spend(): Promise<void> {
+    // 料金だけが意味を持つ 1 行
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: seed.a.agent.id,
+      provider: Provider.anthropic,
+      model: ANTHROPIC_MODEL,
+      inputTokens: 1,
+      outputTokens: 1,
+      costMicroUsd: SPENT_PER_EVENT,
+      latencyMs: 1,
+      statusCode: 200,
+    });
+  }
+
+  // 中継を 1 回呼ぶ
+  async function relay(secret: string) {
+    // 正常な本文で呼ぶ
+    return call(proxyAnthropic, {
+      method: 'POST',
+      token: secret,
+      body: { model: ANTHROPIC_MODEL, messages: [{ role: 'user', content: 'こんにちは' }] },
+    });
+  }
+
+  it('予算が未設定なら集計もせず中継する', async () => {
+    // **設定していないエージェントの中継に 1 クエリ増やさない**のが要点
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(null);
+    const windowTotals = vi.spyOn(seed.repos.usageEvents, 'windowTotals');
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 中継できる
+    expect((await relay(key.secret)).status).toBe(200);
+    // 当月の集計は 1 度も引いていない
+    expect(windowTotals).not.toHaveBeenCalled();
+  });
+
+  it('予算に届いていなければ中継する', async () => {
+    // 予算 1000 に対して 400 だけ使った状態
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(1_000n);
+    await spend();
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // まだ余っているので通る
+    expect((await relay(key.secret)).status).toBe(200);
+  });
+
+  it('予算に達したら 403 で断り、上流へ出さず記録もしない', async () => {
+    // **上流へ出してから断っても課金は発生する**ので、出ていないことまで見る
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(1_000n);
+    // ちょうど予算に達するまで使う（400 × 3 = 1200 ≧ 1000）
+    await spend();
+    await spend();
+    await spend();
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 断られる前の件数を覚える
+    const callsBefore = fetchCalls.length;
+    const eventsBefore = recordedEvents().length;
+    // 403 で断られる
+    const result = await relay(key.secret);
+    expect(result.status).toBe(403);
+    expect(result.json).toMatchObject({ message: API_MESSAGES.budgetExceeded });
+    // 上流へは出ていない
+    expect(fetchCalls).toHaveLength(callsBefore);
+    // 台帳も増えていない（上流へ 1 バイトも出ていない呼び出しは記録しない）
+    expect(recordedEvents()).toHaveLength(eventsBefore);
+  });
+
+  it('予算ちょうどで断る（上限は「ここまで使ってよい」の意味）', async () => {
+    // 予算 800 に対して 400 × 2 = 800（ちょうど）
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(SPENT_PER_EVENT * 2n);
+    await spend();
+    await spend();
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // ちょうど達した時点で断る
+    expect((await relay(key.secret)).status).toBe(403);
+  });
+
+  it('他のエージェントの利用は予算に数えない', async () => {
+    // 同じテナントに 2 つ目のエージェントを作り、そちらで使う
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(SPENT_PER_EVENT);
+    const other = await seed.repos.agents.create({
+      tenantId: seed.a.id,
+      name: 'bot-2',
+      description: null,
+      provider: Provider.anthropic,
+      model: ANTHROPIC_MODEL,
+      budgetMicroUsd: null,
+    });
+    // 2 つ目のエージェントで予算ぶんを使う
+    await seed.repos.usageEvents.record({
+      tenantId: seed.a.id,
+      agentId: other.id,
+      provider: Provider.anthropic,
+      model: ANTHROPIC_MODEL,
+      inputTokens: 1,
+      outputTokens: 1,
+      costMicroUsd: SPENT_PER_EVENT,
+      latencyMs: 1,
+      statusCode: 200,
+    });
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 1 つ目のエージェントの枠は減っていないので通る
+    expect((await relay(key.secret)).status).toBe(200);
+  });
+
+  it('先月の利用は当月の予算に数えない', async () => {
+    // 当月の窓の外（先月）に記録を移す
+    stubUpstream({ status: 200, body: anthropicResponse(1, 1) });
+    setBudget(SPENT_PER_EVENT);
+    await spend();
+    // 記録の作成日時を先月へずらす（表を直接書き換える）
+    for (const [id, event] of seed.store.usageEvents) {
+      // 当月の 1 日より前へ移す
+      const lastMonth = new Date(event.createdAt);
+      lastMonth.setUTCMonth(lastMonth.getUTCMonth() - 1);
+      seed.store.usageEvents.set(id, { ...event, createdAt: lastMonth });
+    }
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 当月の累計は 0 なので通る
+    expect((await relay(key.secret)).status).toBe(200);
+  });
+});
+
+describe('中継の直後のガードレール判定', () => {
+  // 通知は送らない設定で動かす（宛先が未設定なら送らずに済む。fetch は上流用に差し替えてある）
+  // ルール 1 件を作る
+  async function makeRule(kind: RuleKind, threshold: number, windowMinutes = 60) {
+    // stop ルール（発火したら停止する）
+    const created = await seed.repos.guardrailRules.create(
+      {
+        tenantId: seed.a.id,
+        agentId: seed.a.agent.id,
+        kind,
+        threshold,
+        windowMinutes,
+        action: RuleAction.stop,
+      },
+      { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
+    );
+    // 作れていなければテストとして落とす
+    if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);
+    return created.rule;
+  }
+
+  /**
+   * 窓の中に「失敗した呼び出し」を台帳へ直接積む。
+   *
+   * エラー率のルールは分母が `GUARDRAIL_ERROR_RATE_MIN_REQUESTS` に届かない窓では発火しない
+   * （1 件だけ呼んで失敗した窓は 1/1 = 100% になるので、門番が無いと 1 回のミスで止まる）。
+   * 中継の経路を確かめたいテストは、**その 1 回が最後の 1 件になるように**残りをここで積む。
+   */
+  async function spendFailures(count: number): Promise<void> {
+    // 失敗として数えられる status で count 件積む
+    for (let index = 0; index < count; index += 1) {
+      await seed.repos.usageEvents.record({
+        tenantId: seed.a.id,
+        agentId: seed.a.agent.id,
+        provider: Provider.anthropic,
+        model: ANTHROPIC_MODEL,
+        inputTokens: 1,
+        outputTokens: 1,
+        costMicroUsd: 0n,
+        latencyMs: 1,
+        statusCode: 502,
+      });
+    }
+  }
+
+  // 中継を 1 回呼ぶ
+  async function relay(secret: string) {
+    // 正常な本文で呼ぶ
+    return call(proxyAnthropic, {
+      method: 'POST',
+      token: secret,
+      body: { model: ANTHROPIC_MODEL, messages: [{ role: 'user', content: 'こんにちは' }] },
+    });
+  }
+
+  // 監査ログの鍵を設定する（無いと記録だけが欠ける）
+  beforeEach(() => {
+    vi.stubEnv('AUDIT_HMAC_SECRET', 'proxy-test-audit-secret-0123456789ab');
+  });
+
+  it('コスト超過のルールが中継の直後に発火してエージェントを停止する', async () => {
+    // 1 回で料金がしきい値を超える応答（しきい値 1 マイクロ USD）
+    stubUpstream({ status: 200, body: anthropicResponse(1_000, 1_000) });
+    await makeRule(RuleKind.cost, 1);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 1 回目の中継は通る（この呼び出しの料金が台帳に入り、その直後に判定される）
+    expect((await relay(key.secret)).status).toBe(200);
+    // **応答を返した時点でもう停止している**（cron を待たない）
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    // インシデントが 1 件できている
+    expect(seed.store.incidents.size).toBe(1);
+    // 2 回目は停止中なので中継されない（403）
+    expect((await relay(key.secret)).status).toBe(403);
+  });
+
+  it('通知の往復を待たずに応答を返す（外部の遅さを中継の遅延に乗せない）', async () => {
+    // **これが無いと受け入れ基準「追加遅延 ≦ 50ms」を外部の遅さで破れる。** しかも
+    // プロキシのベンチは「発火しないルール」で測るので、この経路は一度も通らない（実測で、
+    // 1.2 秒で応答する受け手に対して中継が 1.2 秒以上掛かった）。
+    // ここでは「通知が完了するより前に応答が返る」ことを決定的に確かめる
+    //
+    // 上流は正常、しきい値 1 マイクロ USD で必ず発火する
+    await makeRule(RuleKind.cost, 1);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 通知の宛先を設定する（未設定だと送らずに戻るので待つかどうかを試せない）
+    vi.stubEnv('NOTIFY_WEBHOOK_URL', 'http://127.0.0.1:4099/hook');
+    vi.stubEnv('NOTIFY_SIGNING_SECRET', 'proxy-test-notify-secret-0123456789');
+    // 通知が完了したかどうか
+    let notified = false;
+    // 解決を手元で握る（テスト側が明示的に完了させるまで通知は終わらない）
+    let finishNotify = (): void => {};
+    const notifyFinished = new Promise<void>((resolve) => {
+      finishNotify = resolve;
+    });
+    // fetch を上流と通知で振り分ける（上流は即答、通知は待たせる）
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        // 通知の宛先への呼び出しは、テストが完了させるまで待つ
+        if (String(input).includes('/hook')) {
+          await notifyFinished;
+          notified = true;
+          return new Response(null, { status: 204 });
+        }
+        // 上流は正常な応答を即返す
+        return new Response(JSON.stringify(anthropicResponse(1_000, 1_000)), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+    // 中継する（通知はまだ終わっていない）
+    const relayed = await relay(key.secret);
+    // **応答は返っている**
+    expect(relayed.status).toBe(200);
+    // **通知はまだ完了していない**（待っていたらここは true になっている）
+    expect(notified).toBe(false);
+    // 止める側は待ってから応答を返している（こちらは遅延に乗せてよい。受け入れ基準 3 秒以内）
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    // 後始末: 通知を完了させてから抜ける（浮いたままにしない）
+    finishNotify();
+    await notifyFinished;
+  });
+
+  it('失敗した中継でもエラー率のルールが発火する', async () => {
+    // **失敗の経路で判定を呼ばないと「上流が落ち続けているのに止まらない」ことになる**。
+    // 上流が 500 を返す（502 に写って返る）
+    stubUpstream({ status: 500, body: { error: 'upstream down' } });
+    await makeRule(RuleKind.error_rate, 0.5);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 分母を最小の 1 件手前まで埋める（この中継が最後の 1 件になる）
+    await spendFailures(GUARDRAIL_ERROR_RATE_MIN_REQUESTS - 1);
+    // 中継は失敗する
+    expect((await relay(key.secret)).status).toBe(502);
+    // 失敗した呼び出しも台帳に入り、エラー率 100% で発火して停止している
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    expect(seed.store.incidents.size).toBe(1);
+  });
+
+  it('上流へ繋がらなかった中継でもエラー率のルールが発火する', async () => {
+    // **記録の経路は 2 つある**: 上流が応答を返した場合（5xx を 502 に写す経路も含む）と、
+    // 上流へ繋がらなかった・時間切れになった場合（catch の経路）。
+    // 後者で判定を呼ばないと「上流がダウンしていて 1 度も応答が無い」ときに止まらない。
+    // 実測で、catch 側だけ判定を外す変異は上流 500 のテストでは落ちなかった
+    // （あちらは応答が返るので前者の経路を通る）
+    stubUpstream(new TypeError('fetch failed'));
+    await makeRule(RuleKind.error_rate, 0.5);
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 分母を最小の 1 件手前まで埋める（この中継が最後の 1 件になる）
+    await spendFailures(GUARDRAIL_ERROR_RATE_MIN_REQUESTS - 1);
+    // 繋がらないので 502
+    expect((await relay(key.secret)).status).toBe(502);
+    // この呼び出しも台帳に入り、エラー率 100% で発火して停止している
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.suspended);
+    expect(seed.store.incidents.size).toBe(1);
+  });
+
+  it('ルールが無ければ何も起きない（中継だけが成立する）', async () => {
+    // ルールを作らずに中継する
+    stubUpstream({ status: 200, body: anthropicResponse(1_000, 1_000) });
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    expect((await relay(key.secret)).status).toBe(200);
+    // 停止もインシデントも起きない
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
+    expect(seed.store.incidents.size).toBe(0);
+  });
+
+  it('判定が失敗しても中継の応答は変えない', async () => {
+    // **判定はすでに成立した中継のあとに走る**ので、ここで 500 にすると
+    // 「上流の課金は発生して応答も得たのに失敗を返す」ことになる
+    stubUpstream({ status: 200, body: anthropicResponse(1_000, 1_000) });
+    await makeRule(RuleKind.cost, 1);
+    // ルールの取得が必ず失敗するようにする
+    vi.spyOn(seed.repos.guardrailRules, 'findActiveRules').mockRejectedValue(
+      new Error('DB が落ちている'),
+    );
+    const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
+    // 中継は 200 のまま
+    expect((await relay(key.secret)).status).toBe(200);
+    // 停止はしていない（判定できなかったので）
+    expect(seed.store.agents.get(seed.a.agent.id)?.status).toBe(AgentStatus.active);
   });
 });

@@ -3,7 +3,7 @@
 //   1. Step0 の項目 (gen / db:generate / lint / format:check / typecheck) が通る
 //   2. Step1・Step2 の基準を引き継ぐ: テスト件数・RBAC 行列 3 × 3・料金計算が料金表の全モデル分
 //   3. **不正出力の除外テストが、除外理由の全種類ぶん pass している** (受け入れ基準 2)
-//   4. `npm audit --audit-level=high` が high 0
+//   4. `npm audit --audit-level=high --omit=dev` が high 0 (本番依存のみ。理由は ADR-0004)
 //   5. 本番ビルドが通る (プロキシのベンチがその成果物を使う)
 //   6. ベンチ 3 本: 日次集計 ≦ 1 秒 / プロキシの追加遅延 ≦ 50ms / **採点の再現率 ≧ 90%** (受け入れ基準 1)
 //
@@ -29,6 +29,8 @@ import {
 } from './lib/run-npm-steps.mjs';
 // 受け入れ基準の判定 (純粋関数。挙動は tests/gate-scripts.test.ts が固定する)
 import { benchOutputProblems, evaluateStep3Report } from './lib/gate-report.mjs';
+// 列挙の正本をソースから読む共有モジュール (gate:step4 と同じ読み方を共有する。§6 DRY)
+import { readPrismaEnumMembers } from './lib/source-enums.mjs';
 // Step2 のしきい値とテスト名の接頭辞 (ベンチと共有する唯一の定義)
 import {
   PRICE_TEST_PREFIX,
@@ -51,10 +53,8 @@ import {
 
 // 料金表 (正本) の場所。**期待するテスト名はここから導く** (一覧をゲートに書き写さない)
 const VENDOR_PRICES_PATH = join(process.cwd(), 'src', 'domain', 'pricing', 'vendor-prices.json');
-// 除外理由の正本 (Prisma スキーマの enum)。**ドメイン側の TypeScript とは
+// 除外理由の enum 名 (Prisma スキーマから切り出す鍵)。**ドメイン側の TypeScript とは
 // tests/domain-enums.test.ts が一致を固定している**ので、どちらを読んでも同じ一覧になる
-const SCHEMA_PATH = join(process.cwd(), 'prisma', 'schema.prisma');
-// 除外理由の enum 名 (スキーマから切り出す鍵)
 const EXCLUSION_ENUM_NAME = 'EvaluationExclusionReason';
 
 // 料金表のモデル一覧を読む (読めなければ空。空のときは判定側が fail-closed で落とす)
@@ -71,31 +71,6 @@ function readPricedModels() {
     // 読めなかったことを残す (判定は空配列として落ちる)
     console.error(
       '[gate:step3] 料金表を読めません:',
-      error instanceof Error ? error.message : error,
-    );
-    return [];
-  }
-}
-
-// 除外理由の一覧を Prisma スキーマの enum から読む (読めなければ空 = 判定側が落とす)
-function readExclusionReasons() {
-  // スキーマを読む
-  try {
-    // ファイル全体
-    const schema = readFileSync(SCHEMA_PATH, 'utf8');
-    // 目的の enum のブロックを切り出す
-    const block = new RegExp(`enum\\s+${EXCLUSION_ENUM_NAME}\\s*\\{([^}]*)\\}`).exec(schema);
-    // 見つからなければ空 (判定側が fail-closed で落とす)
-    if (block === null) return [];
-    // 行ごとに、行末コメントを落として先頭の識別子だけを取る
-    return block[1]
-      .split('\n')
-      .map((line) => line.replace(/\/\/.*$/, '').trim())
-      .filter((line) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(line));
-  } catch (error) {
-    // 読めなかったことを残す
-    console.error(
-      '[gate:step3] 除外理由を読めません:',
       error instanceof Error ? error.message : error,
     );
     return [];
@@ -150,7 +125,7 @@ banner('受け入れ基準の判定 (テスト件数 / RBAC 行列 / 料金計�
 // 料金表のモデル一覧 (正本から導く)
 const models = readPricedModels();
 // 除外理由の一覧 (正本の enum から導く)
-const reasons = readExclusionReasons();
+const reasons = readPrismaEnumMembers('gate:step3', EXCLUSION_ENUM_NAME);
 // 満たしていない基準があればすべて表示して赤 (終了コードの扱いは run-npm-steps.mjs に集約)
 exitIfFailures(
   'gate:step3',
@@ -173,7 +148,7 @@ console.log(
 
 // 4. npm audit で high 以上が 0 件であること
 banner('npm audit (high 0)');
-if (runNpm(['audit', '--audit-level=high']) !== 0) {
+if (runNpm(['audit', '--audit-level=high', '--omit=dev']) !== 0) {
   console.error('[gate:step3] 失敗: npm audit で high 以上の脆弱性があります');
   process.exit(1);
 }

@@ -14,9 +14,13 @@ import { ApiError, validationError } from '@/lib/api/errors';
 import { requireProxyAgent } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { readUpstreamUsage } from '@/lib/proxy/usage';
+import { evaluationBasisTime } from '@/domain/usage-window';
+import { assertWithinBudget } from '@/lib/guardrail/budget';
+import { evaluateGuardrailsSafely, USAGE_RULE_KINDS } from '@/lib/guardrail/evaluate';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 // エラーをログへ落とす形 (PII やクエリ引数を message ごと出さないための唯一の経路)
 import { describeError } from '@/lib/describe-error';
@@ -136,7 +140,7 @@ async function recordUsage(
     latencyMs: number;
     statusCode: number;
   },
-): Promise<void> {
+): Promise<Date | null> {
   // 記録を試みる
   try {
     // 記録する (エージェントが同テナントに無ければ null が返る)
@@ -144,11 +148,47 @@ async function recordUsage(
     // 記録できなかったのは想定外 (認証時に同テナントのエージェントだと確かめている) なので残す
     if (recorded === null) {
       console.error('[proxy] 利用イベントを記録できませんでした (エージェントが見つかりません)');
+      return null;
     }
+    // **書いた行の時刻を返す。** 判定の基準時刻に使う (理由は evaluationBasisTime)
+    return recorded.createdAt;
   } catch (error) {
     // DB の障害などで記録できなくても中継は成立しているので、ログだけ残して続ける
     console.error('[proxy] 利用イベントの記録に失敗しました:', describeError(error));
+    return null;
   }
+}
+
+// 利用イベントを記録し、**続けてガードレールを判定する**。どちらも失敗しても投げない。
+//
+// **判定を記録の直後に置くのが要点**（cron 間隔に依存せず「発火から停止まで ≦ 3 秒」を満たす）。
+// 成功した中継と失敗した中継の両方から呼ぶ — エラー率のルールは失敗した呼び出しを見るので、
+// 失敗の経路で呼ばないと「上流が落ち続けているのに止まらない」ことになる
+async function recordUsageAndEvaluate(
+  repos: Repositories,
+  input: Parameters<typeof recordUsage>[1],
+): Promise<void> {
+  // まず台帳へ 1 行書く（判定はこの行を含めて集計する）
+  const recordedAt = await recordUsage(repos, input);
+  // 使用量から測れる種別だけを見る（品質は評価実行の表を見るので、中継では引かない）
+  await evaluateGuardrailsSafely(repos, {
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    kinds: USAGE_RULE_KINDS,
+    // **基準時刻は「書いた行の時刻」と「いま」の遅いほう。** DB の時計がアプリより進んでいると、
+    // 窓の終端（基準時刻の 1 ミリ秒後）が書いた行より前になり、**しきい値を越えさせた当の支出が
+    // 集計に入らない**（発火せず、以降の呼び出しが来なければ止まらない fail-open）
+    now: evaluationBasisTime(recordedAt, new Date()),
+    // **引き金の行の時刻も渡す** — DB の時計が遅れていると、窓の開始がこの行より後になって
+    // 当の支出が集計から落ちる（`evaluationBasisTime` は進んでいる向きだけを塞ぐ）
+    triggeredBy: recordedAt ?? undefined,
+    // 自動発火なので操作主体は居ない（API キーはユーザーではない）
+    actorId: null,
+    // **通知は待たない。** 受け手の応答時間は外部で決まるので、待つとその時間が中継の
+    // 応答時間に乗る（受け入れ基準「追加遅延 ≦ 50ms」を外部の遅さで破る形。理由と残る境界は
+    // `GuardrailTrigger.detachNotifications` のコメント）。**停止は待ってから応答を返す**
+    detachNotifications: true,
+  });
 }
 
 /**
@@ -167,6 +207,10 @@ export function proxyRoute(provider: Provider) {
       if (findModelPrice(provider, body.model) === null) {
         throw validationError([{ path: 'model', message: API_MESSAGES.unsupportedModel }]);
       }
+      // **予算を確かめてから上流を呼ぶ。** 中継してから断っても課金は発生してしまう。
+      // 予算が未設定のエージェントでは問い合わせも起きない（§8）。
+      // ガードレールのコストルールとは別物で、こちらは状態を変えずに要求を断るだけ
+      await assertWithinBudget(repos, { tenantId, agent, now: new Date() });
       // 検証済みの本文を組み立て直して送る (受け取ったバイト列をそのまま流さないので、
       // 本文の前後に紛れ込んだ余計なバイトが上流へ届かない)。
       // **JSON として作り直すので値の正規化が起きる**: 2^53 を超える整数は丸められ
@@ -213,7 +257,7 @@ export function proxyRoute(provider: Provider) {
               NO_COST);
         // 記録する (成功・失敗ともに 1 行。ステータスは**実際の上流の値**)
         alreadyRecorded = true;
-        await recordUsage(repos, {
+        await recordUsageAndEvaluate(repos, {
           tenantId,
           agentId: agent.id,
           provider,
@@ -274,7 +318,7 @@ export function proxyRoute(provider: Provider) {
         // (上流が未設定の 503 は `resolveUpstreamTarget` が **この try に入る前**に投げるので
         //  ここには来ない。上流へ 1 バイトも出ていない呼び出しを記録しない方針は変えていない)
         if (!alreadyRecorded) {
-          await recordUsage(repos, {
+          await recordUsageAndEvaluate(repos, {
             tenantId,
             agentId: agent.id,
             provider,
@@ -293,7 +337,10 @@ export function proxyRoute(provider: Provider) {
         throw error;
       }
     },
-    // このルートは API キーでしか呼べない
-    { auth: 'apiKey' },
+    // このルートは API キーでしか呼べない。**レート制限を掛ける** — 上流へ費用を発生させる
+    // 経路なので、有効なキー 1 本で無制限に要求できる状態を残さない
+    // (ADR-0007 の「残る宿題」。§9 公開エンドポイントを保護する)。
+    // 枠は `standard` (1 要求 = 上流 1 回。重い経路と同じ枠で数えない)
+    { auth: 'apiKey', rateLimit: RATE_LIMIT_TIER.standard },
   );
 }

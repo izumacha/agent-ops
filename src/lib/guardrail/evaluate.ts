@@ -129,28 +129,9 @@ async function measureFor(
   trigger: GuardrailTrigger,
   rule: GuardrailRuleRecord,
   usageByWindow: Map<number, { requests: number; errorRequests: number; costMicroUsd: bigint }>,
-  quality: { loaded: boolean; score: number | null },
+  qualityByWindow: Map<number, number | null>,
 ): Promise<GuardrailMeasurement | null> {
-  // 品質ルールは窓を使わず、直近の「採点が成立した」評価実行を見る
-  if (rule.kind === RuleKind.quality) {
-    // まだ引いていなければ 1 回だけ引く（複数の品質ルールがあっても問い合わせは 1 回）
-    if (!quality.loaded) {
-      // 最新の completed な実行（1 度も実行していなければ null）
-      const run = await repos.evaluations.findLatestCompletedRun(trigger.tenantId, trigger.agentId);
-      // 3 観点のうち最も低い値を採る（1 つでも欠けていれば null = 測れていない）
-      quality.score = worstQualityScore(run);
-      // 2 回目以降はこの値を使う
-      quality.loaded = true;
-    }
-    // 品質以外の項目はこのルールの判定では使われない（`observe` が種別で切り替える）
-    return {
-      requests: 0,
-      errorRequests: 0,
-      costMicroUsd: 0n,
-      worstQualityScore: quality.score,
-    };
-  }
-  // 使用量の種別は窓を組み立てる。**範囲外の長さなら判定しない**（null を返す）
+  // **どの種別も窓を組み立てる。範囲外の長さなら判定しない**（null を返す）
   const window = guardrailWindow(
     trigger.now,
     rule.windowMinutes,
@@ -161,6 +142,32 @@ async function measureFor(
   );
   // 窓が作れなければこのルールは判定できない（呼び出し側がログに残す）
   if (window === null) return null;
+  // 品質ルールは「窓の中の最新の、採点が成立した評価実行」を見る。
+  // **窓を無視してはいけない** — `windowMinutes` は種別を問わず必須で範囲検証もされるのに
+  // 全期間を見ていると、「3 か月前に 1 度だけ走って低い点だった」エージェントがその後 1 度も
+  // 評価していないのに毎回の判定で停止し続ける（インシデントを解決して復帰させても、次の判定で
+  // 同じ古い実行を読んで再び止まる = ルールを無効にするまで抜け出せない）。
+  // 窓の中に実行が無ければスコアは null = 「測れていない」で発火しない（この repo の既定の向き）
+  if (rule.kind === RuleKind.quality) {
+    // 同じ長さの窓は 1 回だけ問い合わせる（§8 の N+1 回避。長さが違えば別の窓なので引き直す）
+    if (!qualityByWindow.has(rule.windowMinutes)) {
+      // 窓の中の最新の completed な実行（無ければ null）
+      const run = await repos.evaluations.findLatestCompletedRun(
+        trigger.tenantId,
+        trigger.agentId,
+        window.start,
+      );
+      // 3 観点のうち最も低い値を採る（1 つでも欠けていれば null = 測れていない）
+      qualityByWindow.set(rule.windowMinutes, worstQualityScore(run));
+    }
+    // 品質以外の項目はこのルールの判定では使われない（`observe` が種別で切り替える）
+    return {
+      requests: 0,
+      errorRequests: 0,
+      costMicroUsd: 0n,
+      worstQualityScore: qualityByWindow.get(rule.windowMinutes) ?? null,
+    };
+  }
   // 同じ長さの集計を使い回す
   const cached = usageByWindow.get(rule.windowMinutes);
   // 無ければ問い合わせて貯める
@@ -242,9 +249,10 @@ export async function evaluateGuardrails(
     number,
     { requests: number; errorRequests: number; costMicroUsd: bigint }
   >();
-  // 品質スコアは「まだ引いていない」状態から始める (null は「測れていない」を意味するので、
-  // 引いたかどうかを別の真偽値で持つ)
-  const quality: { loaded: boolean; score: number | null } = { loaded: false, score: null };
+  // 品質スコアも**窓の長さごと**に覚える（`null` は「測れていない」を意味するので、
+  // 引いたかどうかは Map にキーがあるかで見る）。長さごとに分けるのは、窓の違う品質ルールが
+  // 2 本あるときに同じスコアを使い回すと、片方の窓では見えない実行で判定してしまうため
+  const qualityByWindow = new Map<number, number | null>();
   // 発火したものを貯める
   const fired: FiredGuardrail[] = [];
   // 通知の材料を貯める（送るのは全件の記録と停止が終わってから）
@@ -252,7 +260,7 @@ export async function evaluateGuardrails(
   // ルールを 1 つずつ判定する
   for (const rule of rules) {
     // 測定値をそろえる（窓が範囲外なら null）
-    const measurement = await measureFor(repos, trigger, rule, usageByWindow, quality);
+    const measurement = await measureFor(repos, trigger, rule, usageByWindow, qualityByWindow);
     // 窓が作れないルールは判定できない。**DB の CHECK 制約があるので通常は起きない**ので、
     // 起きたら設定が壊れている（制約を入れる前の行が残っている等）。黙って飛ばさずログに残す
     if (measurement === null) {

@@ -118,6 +118,22 @@ describe('memory アダプタの評価', () => {
       budgetMicroUsd: null,
     });
     expect(await repos.evaluations.findLatestCompletedRun(tenantId, other.id)).toBeNull();
+    // **since より前の実行は見えない** (品質ルールの集計窓。prisma 側と同じ答え)
+    expect(
+      await repos.evaluations.findLatestCompletedRun(
+        tenantId,
+        agentId,
+        new Date(Date.now() + 60_000),
+      ),
+    ).toBeNull();
+    // 窓の中なら見える
+    expect(
+      await repos.evaluations.findLatestCompletedRun(
+        tenantId,
+        agentId,
+        new Date(Date.now() - 60_000),
+      ),
+    ).not.toBeNull();
     // 他テナントから同じエージェント id を指しても見えない (テナント条件が効いている)
     expect(await repos.evaluations.findLatestCompletedRun('tn-other', agentId)).toBeNull();
   });

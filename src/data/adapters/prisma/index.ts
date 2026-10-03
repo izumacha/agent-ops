@@ -914,10 +914,17 @@ class PrismaEvaluations implements EvaluationsPort {
   async findLatestCompletedRun(
     tenantId: string,
     agentId: string,
+    since?: Date,
   ): Promise<EvaluationRunRecord | null> {
-    // 一覧と同じ並び (createdAt, id) の降順で先頭を取る (同時刻でも相手が入れ替わらない)
+    // 一覧と同じ並び (createdAt, id) の降順で先頭を取る (同時刻でも相手が入れ替わらない)。
+    // **`since` 以降に絞る** (品質ルールの集計窓。memory 側と同じ条件)
     return this.db.evaluationRun.findFirst({
-      where: { tenantId, agentId, status: EvaluationRunStatus.completed },
+      where: {
+        tenantId,
+        agentId,
+        status: EvaluationRunStatus.completed,
+        ...(since === undefined ? {} : { createdAt: { gte: since } }),
+      },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
   }

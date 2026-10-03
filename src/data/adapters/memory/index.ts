@@ -808,13 +808,16 @@ class MemoryEvaluations implements EvaluationsPort {
   async findLatestCompletedRun(
     tenantId: string,
     agentId: string,
+    since?: Date,
   ): Promise<EvaluationRunRecord | null> {
-    // テナント・エージェントが一致し、採点が成立した実行だけを集める
+    // テナント・エージェントが一致し、採点が成立した実行だけを集める。
+    // **`since` 以降に絞る** (品質ルールの集計窓。prisma の where と同じ条件)
     const candidates = [...this.store.evaluationRuns.values()].filter(
       (row) =>
         row.tenantId === tenantId &&
         row.agentId === agentId &&
-        row.status === EvaluationRunStatus.completed,
+        row.status === EvaluationRunStatus.completed &&
+        (since === undefined || row.createdAt.getTime() >= since.getTime()),
     );
     // 1 件も無ければ測れていない (ルールは発火しない)
     if (candidates.length === 0) return null;

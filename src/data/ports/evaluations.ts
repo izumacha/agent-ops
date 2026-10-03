@@ -103,6 +103,15 @@ export interface EvaluationsPort {
   // **そのエージェントの最新の `completed` な実行** (品質低下ルールが読む相手)。
   // `failed` を飛ばすのは、除外が多すぎた実行のスコアを「品質が落ちた」と読むのが誤判定だから
   // (採点できていないことと品質が低いことは別)。1 度も実行していなければ null で、
-  // そのときルールは発火しない (測れていないものを「悪い」と読まない。fail-safe)
-  findLatestCompletedRun(tenantId: string, agentId: string): Promise<EvaluationRunRecord | null>;
+  // そのときルールは発火しない (測れていないものを「悪い」と読まない。fail-safe)。
+  //
+  // **`since` より前の実行は見ない** (品質ルールの集計窓。省略すると全期間)。
+  // 窓を無視すると「3 か月前に 1 度だけ走って低い点だった」エージェントが、その後 1 度も
+  // 評価していないのに毎回の判定で停止し続ける (インシデントを解決して復帰させても、
+  // 次の判定で同じ古い実行を読んで再び止まる = ルールを無効にするまで抜け出せない)
+  findLatestCompletedRun(
+    tenantId: string,
+    agentId: string,
+    since?: Date,
+  ): Promise<EvaluationRunRecord | null>;
 }

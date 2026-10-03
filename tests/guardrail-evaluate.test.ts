@@ -322,6 +322,82 @@ describe('ガードレールの判定', () => {
     expect(result.fired).toHaveLength(2);
   });
 
+  it('窓より古い評価実行では品質ルールが発火しない（測れていないものを「悪い」と読まない）', async () => {
+    // **窓を無視していると、ここが「毎回停止し続ける」形になる** — 3 か月前に 1 度だけ走って
+    // 低い点だったエージェントは、その後 1 度も評価していないのに判定のたびに止まり、
+    // インシデントを解決して復帰させても次の判定で同じ古い実行を読んで再び止まる
+    // （ルールを無効にするまで抜け出せない）
+    await makeRule(RuleKind.quality, 0.9, RuleAction.stop, 60);
+    const run = await recordRun(0.1);
+    // 実行の記録日時を窓（60 分）より古くする
+    const old = store.evaluationRuns.get(run.run.id);
+    if (old === undefined) throw new Error('実行を仕込めません');
+    store.evaluationRuns.set(run.run.id, {
+      ...old,
+      createdAt: new Date(Date.now() - 90 * 60 * 1_000),
+    });
+    stubNotify();
+    // 判定する
+    const result = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: [RuleKind.quality], now: basisTime(), actorId: null },
+      env(),
+    );
+    // 判定はしたが発火しない（窓の中に採点された実行が無い＝測れていない）
+    expect(result.evaluated).toBe(1);
+    expect(result.fired).toHaveLength(0);
+    // 停止もしていない
+    expect(store.agents.get(agentId)?.status).toBe(AgentStatus.active);
+  });
+
+  it('窓の中の評価実行なら品質ルールが発火する（窓を広げれば古い実行も見える）', async () => {
+    // 同じ古さの実行でも、窓を 1 日にすれば中に入る（窓を見ていることの裏側の検査）
+    await makeRule(RuleKind.quality, 0.9, RuleAction.stop, 24 * 60);
+    const run = await recordRun(0.1);
+    const old = store.evaluationRuns.get(run.run.id);
+    if (old === undefined) throw new Error('実行を仕込めません');
+    store.evaluationRuns.set(run.run.id, {
+      ...old,
+      createdAt: new Date(Date.now() - 90 * 60 * 1_000),
+    });
+    stubNotify();
+    // 判定する
+    const result = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: [RuleKind.quality], now: basisTime(), actorId: null },
+      env(),
+    );
+    // 発火して停止する
+    expect(result.fired).toHaveLength(1);
+    expect(store.agents.get(agentId)?.status).toBe(AgentStatus.suspended);
+  });
+
+  it('窓の長さが違う品質ルールは窓ごとに引き直す（同じスコアを使い回さない）', async () => {
+    // 60 分の窓と 1 日の窓。古い実行は 1 日の窓にだけ入る
+    await makeRule(RuleKind.quality, 0.9, RuleAction.notify, 60);
+    await makeRule(RuleKind.quality, 0.9, RuleAction.notify, 24 * 60);
+    const run = await recordRun(0.1);
+    const old = store.evaluationRuns.get(run.run.id);
+    if (old === undefined) throw new Error('実行を仕込めません');
+    store.evaluationRuns.set(run.run.id, {
+      ...old,
+      createdAt: new Date(Date.now() - 90 * 60 * 1_000),
+    });
+    stubNotify();
+    const findLatest = vi.spyOn(repos.evaluations, 'findLatestCompletedRun');
+    // 判定する
+    const result = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: [RuleKind.quality], now: basisTime(), actorId: null },
+      env(),
+    );
+    // **窓ごとに 1 回ずつ引く**（1 回で済ませると、片方の窓では見えない実行で判定してしまう）
+    expect(findLatest).toHaveBeenCalledTimes(2);
+    // 発火するのは窓の中に実行がある 1 日のルールだけ
+    expect(result.evaluated).toBe(2);
+    expect(result.fired).toHaveLength(1);
+  });
+
   it('中継の直後は品質ルールを見ない（評価実行の表を引かない）', async () => {
     // **起点によって見る種別を絞る**のが要点。絞らないと中継 1 回ごとに評価実行の表まで引く
     // ことになり、しかも中継では品質は動かないので判定しても意味が無い

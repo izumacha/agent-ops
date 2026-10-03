@@ -450,6 +450,16 @@ describe.skipIf(!ENABLED)('評価の契約', () => {
     expect((await repos.evaluations.findLatestCompletedRun(tenantId, agent.id))?.id).toBe(higherId);
     // 他テナントから同じエージェント id を指しても見えない (テナント条件が効いている)
     expect(await repos.evaluations.findLatestCompletedRun('tn-other', agent.id)).toBeNull();
+    // **since より前の実行は見えない** (品質ルールの集計窓。memory 側にも同じ検査がある)。
+    // 窓を無視すると「ずっと前に 1 度だけ低い点だった」エージェントが毎回の判定で止まり続ける
+    const afterRuns = new Date(sameMoment.getTime() + 1_000);
+    expect(
+      await repos.evaluations.findLatestCompletedRun(tenantId, agent.id, afterRuns),
+    ).toBeNull();
+    // 窓の中なら見える (境界は「以降」を含む)
+    expect(
+      (await repos.evaluations.findLatestCompletedRun(tenantId, agent.id, sameMoment))?.id,
+    ).toBe(higherId);
   });
 
   it('同じケースの結果を 2 つ持つ実行は一意制約が拒否する', async () => {

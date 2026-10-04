@@ -78,6 +78,21 @@ export const UI_TEXT = {
   cardOpenIncidents: '未解決インシデント',
   dailyTableTitle: '日次の内訳',
   dailyReportLink: 'CSV でダウンロード',
+  // 期間の指定
+  rangeFrom: '開始日',
+  rangeTo: '終了日',
+  rangeApply: 'この期間で見る',
+  // **採用しなかった指定は必ず伝える**（黙って既定へ倒すと、絞ったつもりの数字を本物だと読む）
+  rangeIgnored:
+    '指定した期間を解釈できなかったため、既定の期間を表示しています（日付は YYYY-MM-DD の形で、開始日は終了日より前にしてください）。',
+  // 表の見出し
+  columnDay: '日付',
+  columnRequests: '中継回数',
+  columnErrors: '失敗',
+  columnUptime: '稼働率',
+  columnCost: 'コスト (USD)',
+  columnInputTokens: '入力トークン',
+  columnOutputTokens: '出力トークン',
   // 「測れていない」ことを表す表示。**0 と書かない**（§ 稼働率の定義）
   notMeasured: '—',
   noData: 'この期間に記録はありません。',

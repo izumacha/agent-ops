@@ -43,3 +43,31 @@ export function parseUsdDecimalToMicro(value: string): bigint | null {
   // BIGINT の範囲に収まるときだけ返す
   return micro <= MICRO_USD_MAX ? micro : null;
 }
+
+/**
+ * マイクロ USD を人が読む USD の文字列へ整形する（画面と CSV が使う）。
+ *
+ * **BigInt のまま整数演算で桁を分ける。** `Number()` を挟むと 2^53 を超える額で桁が落ち、
+ * 「請求の根拠」として使えない値になる（料金計算を全部 BigInt でやっているのと同じ理由）。
+ *
+ * 末尾の 0 は落とすが**小数 2 桁は必ず残す**（`1.5` ではなく `1.50`。金額として読みやすく、
+ * 表の桁もそろう）。1 回の中継は 1 USD に満たないことが多いので、有効な桁は 6 桁まで残す。
+ */
+export function formatMicroUsdAsUsd(micro: bigint): string {
+  // 符号を分けて絶対値で桁を組む (負の額は想定しないが、表示で壊れないようにする)
+  const negative = micro < 0n;
+  const absolute = negative ? -micro : micro;
+  // マイクロの 1 USD 分
+  const scale = 10n ** BigInt(MICRO_USD_DIGITS);
+  // 整数部と小数部に分ける
+  const whole = absolute / scale;
+  const fraction = absolute % scale;
+  // 小数部を 6 桁の文字列にする (足りない桁は先頭を 0 で埋める)
+  let fractionText = fraction.toString().padStart(MICRO_USD_DIGITS, '0');
+  // 末尾の 0 を落とす (0.250000 → 0.25)
+  fractionText = fractionText.replace(/0+$/, '');
+  // 2 桁は必ず残す (0.2 → 0.20 / 0 → 0.00)
+  while (fractionText.length < 2) fractionText += '0';
+  // 符号を戻して組み立てる
+  return `${negative ? '-' : ''}${whole.toString()}.${fractionText}`;
+}

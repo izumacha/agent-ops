@@ -3,6 +3,7 @@
 // **`next/headers` に触るのはこのファイルだけ。** 判定の規則そのものは `src/lib/session.ts`
 // (Next 非依存の純粋な部分) が持ち、ここは Cookie の読み書きと「未ログインなら /login へ」の
 // 枝だけを担う。分けているのは、規則の側を DB も Next も無しで単体テストできるようにするため。
+import { cache } from 'react';
 import { cookies, headers } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
 import { getRepos } from '@/data';
@@ -49,8 +50,14 @@ export async function readSessionToken(): Promise<string | undefined> {
 /**
  * ログイン中ならセッションを返し、していなければ `null`。
  * 画面の出し分け（ログイン画面でのリダイレクト判定など）に使う。
+ *
+ * **1 リクエストにつき 1 回しか照合しない**（React の `cache` で畳む）。レイアウトと各画面が
+ * それぞれ `requireSession()` を呼ぶ構成なので、畳まないと 1 回の描画でトークンのハッシュ照合と
+ * DB の問い合わせが 2 回走る（詳細画面では CSRF の HMAC も 2 回）。§8「同じ計算・取得を
+ * 繰り返さない」。**レイアウトと画面の両方で確かめる形は変えない** — あれは多層防御で、
+ * 畳んでいるのは問い合わせの回数だけ。
  */
-export async function currentSession(): Promise<DashboardSession | null> {
+export const currentSession = cache(async (): Promise<DashboardSession | null> => {
   // Cookie を読む
   const token = await readSessionToken();
   // 無ければ未ログイン
@@ -62,7 +69,7 @@ export async function currentSession(): Promise<DashboardSession | null> {
   if (principal === null) return null;
   // 主体と素のトークンを返す
   return { principal, token };
-}
+});
 
 /**
  * ログインを必須にし、**閲覧の権限（`view`）まで確かめる**。

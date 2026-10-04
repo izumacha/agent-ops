@@ -119,7 +119,7 @@ runSteps(
 // 2. テストを JSON レポート付きで流す
 banner('Unit + API tests (JSON レポート付き)');
 // レポートの置き場 (一時ディレクトリ。終わったら消す)
-const reportDir = mkdtempSync(join(tmpdir(), 'agent-ops-gate-step4-'));
+const reportDir = mkdtempSync(join(tmpdir(), 'agent-ops-gate-step5-'));
 const reportPath = join(reportDir, 'vitest.json');
 // vitest run --reporter=default --reporter=json --outputFile=<path>
 const testStatus = runNpm([
@@ -153,7 +153,7 @@ console.log(
   `\n[gate:step5] tests: passed=${report.numPassedTests} failed=${report.numFailedTests} skipped=${report.numPendingTests} (必要: passed >= ${REQUIRED_PASSED_TESTS}, failed = 0)`,
 );
 
-// 2'〜3. テストの成否・件数・RBAC 行列・料金計算・除外・発火・改ざん検知・E2E・突合をまとめて判定する
+// 3. テストの成否・件数・RBAC 行列・料金計算・除外・発火・改ざん検知・E2E・突合をまとめて判定する
 banner('受け入れ基準の判定 (前 Step の項目 / 突合)');
 // 料金表のモデル一覧 (正本から導く)
 const models = readPricedModels();
@@ -190,7 +190,7 @@ console.log(
   `[gate:step5] RBAC 行列 ${ROLES.length * ACTIONS.length} パターン・料金表 ${models.length} モデル・除外理由 ${reasons.length} 種類・発火 ${kinds.length} 種別・改ざん検知 ${breaks.length} 種類・ガードレールの E2E 1 本・突合 1 本すべて pass`,
 );
 
-// 6. npm audit で high 以上が 0 件であること
+// 4. npm audit で high 以上が 0 件であること
 banner('npm audit (high 0)');
 if (runNpm(['audit', '--audit-level=high', '--omit=dev']) !== 0) {
   console.error('[gate:step5] 失敗: npm audit で high 以上の脆弱性があります');

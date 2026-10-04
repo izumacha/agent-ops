@@ -103,8 +103,10 @@ function matchesPlatformAdminToken(token: string): boolean {
   return secretsEqual(token, configured);
 }
 
-// ユーザートークンを照合し、有効ならユーザー主体を返す
-async function authenticateUserToken(
+// ユーザートークンを照合し、有効ならユーザー主体を返す。
+// **ダッシュボードのセッション (src/lib/session.ts) もここを呼ぶ** — Cookie から来たトークンでも
+// 照合の規則 (ハッシュ・失効・期限切れ・ユーザー無効化) は 1 つでなければならない (ADR-0011)
+export async function authenticateUserToken(
   token: string,
   repos: Repositories,
   now: Date,

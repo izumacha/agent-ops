@@ -3,11 +3,25 @@
 AI エージェントの**登録・権限・コスト・品質・停止**を一元管理する運用基盤（SaaS）。複数のエージェントを複数チームで運用し、コストと品質を可視化して事故（暴走・コスト超過・品質低下）を自動で止める。
 
 - スタック: Next.js 16（App Router）/ TypeScript / Prisma 7 / PostgreSQL 16 / Docker
-- 現在の段階: **Step4（ガードレール・自動停止・通知・監査ログ）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
+- 現在の段階: **Step5（ダッシュボード）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
 
 ## デモ
 
-ダッシュボード（Step5）実装後に、`docs/screenshots/` へ主要 5 画面のスクリーンショットと「登録 → 実行 → 超過 → 停止 → 復帰」のデモ GIF を置く。公開デモ URL は Step7（Vercel/Supabase 向けデプロイ設定）で用意する。
+[▶ デモ動画を再生する](./docs/screenshots/demo.webm) — ログインしてコスト・稼働率・インシデントを見て、エージェントを止めて戻し、インシデントを解決するまでの 1 本（ダミーデータ・約 20 秒）。
+
+| ダッシュボード | エージェント一覧 |
+| --- | --- |
+| ![コスト・中継回数・稼働率・品質・未解決インシデントのカードと日次の内訳を並べたダッシュボード](./docs/screenshots/dashboard.png) | ![登録済みエージェントの名前・プロバイダ・モデル・状態・月次予算を並べた一覧](./docs/screenshots/agents-list.png) |
+
+| エージェント詳細 | インシデント一覧 |
+| --- | --- |
+| ![エージェントの登録内容と「このエージェントを停止する」ボタンを置いた詳細画面](./docs/screenshots/agent-detail.png) | ![ガードレールの発火と「解決済みにする」ボタンを並べたインシデント一覧](./docs/screenshots/incidents.png) |
+
+| ログイン |
+| --- |
+| ![ユーザートークンを貼り付けてログインする画面](./docs/screenshots/login.png) |
+
+画像と動画は**シードデータだけ**を写しており、実在のメールアドレス・トークンは入っていない（ログインの入力欄は伏せ字）。再生成は `npm run capture:screenshots`（下記）。**公開デモ URL は Step7**（Vercel/Supabase 向けデプロイ設定）で用意する。
 
 ## セットアップ
 
@@ -157,6 +171,40 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ただし**評価の呼び出し自体は利用台帳に記録しない設計**（ADR-0009）なので、その支出は予算に積まれない
 — 上限はベンダー側の月次利用上限（spend limit）で設定すること。
 
+### 画面で運用する（Step5）
+
+ブラウザで `http://localhost:3000` を開くとログイン画面に出る。**入力するのは Step1 と同じ
+ユーザートークン**（`aop_u_...`）で、貼り付けると HttpOnly / `SameSite=Strict` の
+セッション Cookie が張られる（[ADR-0011](./docs/adr/0011-dashboard-session-and-aggregation.md)）。
+
+| 画面 | パス | できること |
+| --- | --- | --- |
+| ダッシュボード | `/dashboard` | 期間のコスト・中継回数・稼働率・平均品質・未解決インシデント件数と、日次の内訳。CSV ダウンロード |
+| エージェント一覧 | `/agents` | 登録済みエージェントの状態・月次予算 |
+| エージェント詳細 | `/agents/{agentId}` | 登録内容の確認と、**停止 / 復帰**（`stop` 権限＝admin） |
+| インシデント一覧 | `/incidents` | ガードレールの発火と、**解決**（admin 限定） |
+
+**画面のデータは API を HTTP で呼ばず、Server Component から data 層を直接読む。** 期間は
+`?from=` / `?to=`（UTC の日付。既定は直近 7 日、上限は日次集計と同じ日数）。`tenantId` は
+セッションの主体から取り出して必ず `where` に差し込む（クロステナント漏洩を作らない）。
+
+**稼働率は「期間内の中継のうち `statusCode < 400` の割合」で、呼び出し 0 件の期間は `—`**（0% と
+読ませない。`docs/spec.md` の UC-06 が定義の正本）。平均品質も採点 0 件なら `—`。
+
+**日次表と CSV は同じ集計関数を通る**（`src/lib/dashboard/summary.ts`）。表示だけが合っていて
+ダウンロードが違う、という食い違いを作らないため、受け入れ基準 3（突合）はこの 1 か所を見る。
+
+**停止・復帰・解決は Server Action で、CSRF トークンと Origin の一致検査を通る**（`SameSite` は
+CSRF 対策の代わりにならないので併用する。§9）。権限は API と同じ許可表（`src/domain/rbac.ts`）を
+Server Action の冒頭で確かめるので、ボタンを隠すだけに頼らない。
+
+> **前段にリバースプロキシを置くときは、ブラウザが送った `Host` をそのまま転送すること。**
+> Origin の照合は `Origin` ヘッダのホストと `Host` ヘッダを突き合わせる（`X-Forwarded-Host` は
+> 見ない）。nginx の `proxy_pass` は既定で `Host` を上流のアドレスに書き換えるので、
+> `proxy_set_header Host $host;` を入れないと**画面の書き込み操作がすべて拒否される**
+> （fail-closed なので危険ではないが、「要求を受け付けられませんでした」が出続けて原因が
+> 画面からは読めない）。
+
 ## 検証コマンド
 
 ```bash
@@ -170,15 +218,21 @@ npm run gate:step1   # Step1 の受け入れ基準を一括検査 (上記 + テ�
 npm run gate:step2   # Step2 の受け入れ基準を一括検査 (上記 + 料金計算が全モデル分 pass / 本番ビルド / ベンチ 2 本)
 npm run gate:step3   # Step3 の受け入れ基準を一括検査 (上記 + 不正出力の除外が全理由分 pass / ベンチ 3 本)
 npm run gate:step4   # Step4 の受け入れ基準を一括検査 (上記 + 発火が全種別分 pass / 改ざん検知が全種類分 pass / E2E / ベンチ 4 本)
+npm run gate:step5   # Step5 の受け入れ基準を一括検査 (上記 + 突合 / 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90)
+npm run test:e2e     # 主要 5 画面の E2E (Playwright・chromium。先に npm run build。専用 DB が必要)
+npm run lighthouse   # 5 画面の Lighthouse を 3 回ずつ測って中央値を出す (同上)
+npm run capture:screenshots # README 用のスクショ 5 枚とデモ動画を撮り直す (同上)
 npm run bench:usage  # 1 万件投入で日次集計 ≦ 1 秒 (専用 DB が必要)
 npm run bench:proxy  # プロキシ経由の追加遅延 ≦ 50ms (先に npm run build。専用 DB が必要)
 npm run bench:evaluation # 固定評価セット 100 件を 2 回採点して再現率 ≧ 90% (専用 DB が必要)
 npm run bench:guardrail  # 発火から停止まで ≦ 3 秒 (専用 DB が必要)
 ```
 
-`gate:step4`（と `gate:step2` / `gate:step3`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチは全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩くので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
+`gate:step5`（と `gate:step2` 〜 `gate:step4`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチと E2E は全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩き、画面は上流を呼ばないので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
 
-CI（`.github/workflows/ci.yml`）は `gate:step4` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
+**E2E・Lighthouse・スクショの撮影はブラウザ（chromium）を使う。** 初回は `npx playwright install chromium` で入れる。ダウンロードできない環境では、既存の Chromium の実行ファイルを `PLAYWRIGHT_CHROMIUM_PATH` で指定する（E2E・Lighthouse・撮影の 3 つが同じ環境変数を読む）。
+
+CI（`.github/workflows/ci.yml`）は `gate:step5` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
 
 ## ディレクトリ
 
@@ -193,8 +247,12 @@ CI（`.github/workflows/ci.yml`）は `gate:step4` に加え、PostgreSQL サー
 | `src/data/` | Ports & Adapters（`ports/` 契約、`adapters/prisma/` 本番、`adapters/memory/` テスト） |
 | `src/lib/` | 横断インフラ（Prisma 結線・定数・トークン・API 基盤 `api/`・Zod スキーマ `validations/`） |
 | `src/app/api/v1/` | Route Handlers（OpenAPI 定義と 1:1） |
+| `src/app/(dashboard)/` | 画面（Server Component。書き込みは `actions.ts` の Server Action） |
+| `src/lib/dashboard/` | 画面・CSV・突合テストが共有する集計（`summary.ts` が唯一の集計） |
 | `scripts/gate-stepN.mjs` | Step ごとのゲート（`scripts/issue-user-token.ts` は開発用トークン発行 CLI） |
 | `tests/` | ユニット・API テスト（`tests/api/`）と契約テスト（`tests/data/*.contract.prisma.test.ts`） |
+| `e2e/` | 主要 5 画面の Playwright テスト（`e2e/lib/` は仕込みとアプリ起動の共有部分） |
+| `docs/screenshots/` | README 用のスクショとデモ動画（`npm run capture:screenshots` の生成物） |
 
 ## 本番配備の前提（公開する前に必ず読む）
 
@@ -208,6 +266,10 @@ CI（`.github/workflows/ci.yml`）は `gate:step4` に加え、PostgreSQL サー
 - **前段にリバースプロキシを置く前提**（ADR-0005「残る宿題」）。未対応メソッド（`TRACE` 等）の遮断、
   本文サイズとタイムアウトの上限、`/api/v1/health` を内部からだけ見せることは前段の責務にしてある。
   **認証経路のレート制限は前段で掛ける**（アプリ側で全ルートに掛けるのは Step6）。
+- **画面のセッション Cookie は本番で HTTPS 必須**（`Secure` 属性が付くので http では保持されない。
+  [ADR-0011](./docs/adr/0011-dashboard-session-and-aggregation.md)）。Cookie の値はユーザートークン
+  そのものなので、**失効は既存の `DELETE /users/{userId}/tokens/{tokenId}` が効く**一方、盗まれた
+  ときの影響はトークン流出と同じ（不透明なセッション ID への移行は同 ADR の宿題）。
 - **`AUDIT_HMAC_SECRET` を設定しないと人の操作ができない**（停止・復帰・インシデントの解決・ルールの
   登録と削除が 503）。鍵を変えるとそれ以前に書いた行は検証できなくなるので、交換した時点を運用記録に
   残すこと。`docker compose` で動かす場合は `.env` に置けば app サービスへ渡る。
@@ -220,8 +282,8 @@ CI（`.github/workflows/ci.yml`）は `gate:step4` に加え、PostgreSQL サー
 | 1 | エージェント台帳・権限（CRUD / API キー / RBAC。実装済み） | 2 週 |
 | 2 | コスト計測プロキシ（Anthropic/OpenAI 互換。実装済み） | 2 週 |
 | 3 | 品質評価（LLM-as-judge。実装済み） | 2 週 |
-| 4 | ガードレール・自動停止・通知・監査ログ（実装済み・本 README の状態） | 2 週 |
-| 5 | ダッシュボード | 2 週 |
+| 4 | ガードレール・自動停止・通知・監査ログ（実装済み） | 2 週 |
+| 5 | ダッシュボード（画面・CSV・Lighthouse。実装済み・本 README の状態） | 2 週 |
 | 6 | マルチテナント・課金（Stripe） | 2 週 |
 | 7 | リリース準備 | 1 週 |
 

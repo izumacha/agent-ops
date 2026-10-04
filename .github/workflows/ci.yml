@@ -1,7 +1,8 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step4`: gen / db:generate / lint / format:check / typecheck /
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step5`: gen / db:generate / lint / format:check / typecheck /
 # テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / 不正出力の除外が全理由分 pass /
-# 発火が全種別分 pass / 改ざん検知が全種類分 pass / E2E が pass /
-# npm audit (本番依存) high 0 / 本番ビルド / ベンチ 4 本) を検査し、
+# 発火が全種別分 pass / 改ざん検知が全種類分 pass / ガードレールの E2E が pass / 突合が pass /
+# npm audit (本番依存) high 0 / 本番ビルド / 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90 /
+# ベンチ 4 本) を検査し、
 # あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・
 # Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
 name: CI
@@ -67,9 +68,14 @@ jobs:
       - name: Apply migrations (bench DB)
         run: npm run db:deploy
 
+      # E2E と Lighthouse が使うブラウザを入れる (chromium だけ。ゲートの中で両方が使う)。
+      # **ゲートより前に置く** — 入っていないとゲートの E2E の段で初めて落ちる
+      - name: Install chromium for E2E and Lighthouse
+        run: npx playwright install --with-deps chromium
+
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run latest step gate (gate:step4)
-        run: npm run gate:step4
+      - name: Run latest step gate (gate:step5)
+        run: npm run gate:step5
 
       # **ゲートと同じ検査をここでも流す。** ゲートのステップを丸ごと削除する形（`STEP0_STEPS`
       # から 1 行消す・ゲート本体の呼び出しを消す）は検出網では捉えられない — 「流すと書いて

@@ -38,6 +38,10 @@ export interface DailyUsageTotal {
   day: string;
   // その日の呼び出し回数
   requests: number;
+  // そのうち上流の HTTP ステータスが 400 以上だった回数 (稼働率の分子。窓集計と同じ数え方)。
+  // **分母と同じクエリで取る** — 別に数えると間に入った呼び出しのぶんずれ、
+  // 稼働率が 100% を超える / 負になる組み合わせが生まれる (ダッシュボード Step5)
+  errorRequests: number;
   // 入力トークンの合計
   inputTokens: number;
   // 出力トークンの合計

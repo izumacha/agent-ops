@@ -82,6 +82,8 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
     inputTokens: number;
     outputTokens: number;
     costMicroUsd: bigint;
+    // 上流の HTTP ステータス (省略すると成功。稼働率の分子を見るテストだけが失敗の値を渡す)
+    statusCode?: number;
   }): Promise<void> {
     // 行を作る
     await client.usageEvent.create({
@@ -94,7 +96,7 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
         outputTokens: options.outputTokens,
         costMicroUsd: options.costMicroUsd,
         latencyMs: 5,
-        statusCode: 200,
+        statusCode: options.statusCode ?? 200,
         createdAt: new Date(options.createdAt),
       },
     });
@@ -201,8 +203,22 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
     });
     // 日ごとの合計 (他テナントは入らない)
     expect(totals).toEqual([
-      { day: '2026-03-01', requests: 2, inputTokens: 11, outputTokens: 22, costMicroUsd: 150n },
-      { day: '2026-03-02', requests: 1, inputTokens: 7, outputTokens: 8, costMicroUsd: 25n },
+      {
+        day: '2026-03-01',
+        requests: 2,
+        errorRequests: 0,
+        inputTokens: 11,
+        outputTokens: 22,
+        costMicroUsd: 150n,
+      },
+      {
+        day: '2026-03-02',
+        requests: 1,
+        errorRequests: 0,
+        inputTokens: 7,
+        outputTokens: 8,
+        costMicroUsd: 25n,
+      },
     ] satisfies DailyUsageTotal[]);
   });
 
@@ -229,10 +245,26 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
       model: MODEL,
       budgetMicroUsd: null,
     });
-    // 入れる行 (日をまたぐ・同じ日に複数・端の時刻)
-    const rows = [
+    // 入れる行 (日をまたぐ・同じ日に複数・端の時刻・失敗した呼び出し)。
+    // **失敗を 1 件混ぜるのが要点** — 全件成功のフィクスチャだと errorRequests が常に 0 になり、
+    // SQL の FILTER と memory 側の数え方が食い違っていても両方 0 で一致してしまう
+    const rows: {
+      createdAt: string;
+      inputTokens: number;
+      outputTokens: number;
+      costMicroUsd: bigint;
+      statusCode?: number;
+    }[] = [
       { createdAt: '2026-03-01T00:00:00Z', inputTokens: 3, outputTokens: 4, costMicroUsd: 11n },
       { createdAt: '2026-03-01T23:59:59.999Z', inputTokens: 5, outputTokens: 6, costMicroUsd: 22n },
+      // 上流が 500 を返した呼び出し (トークンと料金は 0 で記録される)
+      {
+        createdAt: '2026-03-01T12:00:00Z',
+        inputTokens: 0,
+        outputTokens: 0,
+        costMicroUsd: 0n,
+        statusCode: 500,
+      },
       { createdAt: '2026-03-03T09:00:00Z', inputTokens: 7, outputTokens: 8, costMicroUsd: 33n },
     ];
     for (const row of rows) {
@@ -251,7 +283,7 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
         outputTokens: row.outputTokens,
         costMicroUsd: row.costMicroUsd,
         latencyMs: 5,
-        statusCode: 200,
+        statusCode: row.statusCode ?? 200,
         createdAt: new Date(row.createdAt),
       });
     }
@@ -264,6 +296,9 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
     const fromMemory = await memory.usageEvents.dailyTotals(memoryTenant.tenant.id, window);
     // 日付・件数・合計がすべて一致する
     expect(fromDb).toEqual(fromMemory);
+    // **失敗が実際に数えられていることを別に固定する** — 一致だけを見ていると、両方が
+    // 0 を返す（どちらも数えていない）状態でも緑になる
+    expect(fromDb.find((total) => total.day === '2026-03-01')?.errorRequests).toBe(1);
   });
 
   it('日の境目はセッションのタイムゾーン設定に左右されない', async () => {
@@ -321,7 +356,14 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
       });
       // UTC の日で切れているので 3/1 の 1 行にまとまる (現地時刻で切ると 3/1 と 3/2 の 2 行になる)
       expect(totals).toEqual([
-        { day: '2026-03-01', requests: 2, inputTokens: 4, outputTokens: 6, costMicroUsd: 30n },
+        {
+          day: '2026-03-01',
+          requests: 2,
+          errorRequests: 0,
+          inputTokens: 4,
+          outputTokens: 6,
+          costMicroUsd: 30n,
+        },
       ] satisfies DailyUsageTotal[]);
     } finally {
       // 余分な接続を残さない
@@ -363,10 +405,19 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
       endExclusive: new Date('2026-03-02T00:00:00Z'),
       agentId: other.id,
     });
-    // 指定したエージェントの 1 件だけ
+    // 指定したエージェントの 1 件だけ。
+    // **`satisfies` を付けておく** — 付いていなかったとき、Port に項目を足しても typecheck が
+    // 通ってしまい、実 DB を触る契約テストの実行時にだけ落ちた (実測)
     expect(totals).toEqual([
-      { day: '2026-03-01', requests: 1, inputTokens: 2, outputTokens: 2, costMicroUsd: 2n },
-    ]);
+      {
+        day: '2026-03-01',
+        requests: 1,
+        errorRequests: 0,
+        inputTokens: 2,
+        outputTokens: 2,
+        costMicroUsd: 2n,
+      },
+    ] satisfies DailyUsageTotal[]);
   });
 
   it('BIGINT の料金を桁を落とさず合計する (JavaScript の数値では表せない額)', async () => {

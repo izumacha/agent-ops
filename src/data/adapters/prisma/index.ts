@@ -523,6 +523,19 @@ class PrismaAgents implements AgentsPort {
     return this.db.agent.findUnique({ where: { tenantId_id: { tenantId, id } } });
   }
 
+  // 指定した id の名前だけをまとめて引く (1 クエリ。テナント境界を跨がない)
+  async findNamesByIds(tenantId: string, ids: readonly string[]): Promise<Map<string, string>> {
+    // 空なら問い合わせない (`in: []` は常に空集合なので、往復の分だけ無駄になる)
+    if (ids.length === 0) return new Map();
+    // 自テナントの行だけを、要求された id に絞って引く (読むのは id と名前だけ)
+    const rows = await this.db.agent.findMany({
+      where: { tenantId, id: { in: [...new Set(ids)] } },
+      select: { id: true, name: true },
+    });
+    // id → 名前 の表にする
+    return new Map(rows.map((row) => [row.id, row.name]));
+  }
+
   // 作成 (名前重複は DuplicateError)
   async create(input: CreateAgentInput): Promise<AgentRecord> {
     // 挿入し、一意制約違反なら翻訳する
@@ -649,6 +662,7 @@ interface WindowTotalRow {
 interface DailyTotalRow {
   day: string;
   requests: bigint;
+  errorRequests: bigint;
   inputTokens: bigint;
   outputTokens: bigint;
   costMicroUsd: bigint;
@@ -691,6 +705,8 @@ class PrismaUsageEvents implements UsageEventsPort {
       SELECT
         to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS "day",
         COUNT(*)::bigint AS "requests",
+        COUNT(*) FILTER (WHERE "statusCode" >= ${USAGE_ERROR_STATUS_FLOOR})::bigint
+          AS "errorRequests",
         COALESCE(SUM("inputTokens"), 0)::bigint AS "inputTokens",
         COALESCE(SUM("outputTokens"), 0)::bigint AS "outputTokens",
         COALESCE(SUM("costMicroUsd"), 0)::bigint AS "costMicroUsd"
@@ -706,6 +722,7 @@ class PrismaUsageEvents implements UsageEventsPort {
     return rows.map((row) => ({
       day: row.day,
       requests: toSafeCount(row.requests, '呼び出し回数'),
+      errorRequests: toSafeCount(row.errorRequests, '失敗した呼び出し回数'),
       inputTokens: toSafeCount(row.inputTokens, '入力トークン'),
       outputTokens: toSafeCount(row.outputTokens, '出力トークン'),
       costMicroUsd: row.costMicroUsd,
@@ -913,17 +930,24 @@ class PrismaEvaluations implements EvaluationsPort {
   // 読むのは誤判定 (採点できていないことと品質が低いことは別)
   async findLatestCompletedRun(
     tenantId: string,
-    agentId: string,
+    agentId: string | null,
     since?: Date,
+    until?: Date,
   ): Promise<EvaluationRunRecord | null> {
+    // 期間の条件を 1 つのオブジェクトにまとめる (両方省略なら条件を付けない)。
+    // **gte と lt を別の createdAt キーに分けて書けない**ので、ここで合成する
+    const createdAt = {
+      ...(since === undefined ? {} : { gte: since }),
+      ...(until === undefined ? {} : { lt: until }),
+    };
     // 一覧と同じ並び (createdAt, id) の降順で先頭を取る (同時刻でも相手が入れ替わらない)。
-    // **`since` 以降に絞る** (品質ルールの集計窓。memory 側と同じ条件)
+    // **`agentId` が null ならテナント全体**から探す (ダッシュボードの品質カード)
     return this.db.evaluationRun.findFirst({
       where: {
         tenantId,
-        agentId,
+        ...(agentId === null ? {} : { agentId }),
         status: EvaluationRunStatus.completed,
-        ...(since === undefined ? {} : { createdAt: { gte: since } }),
+        ...(Object.keys(createdAt).length === 0 ? {} : { createdAt }),
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });

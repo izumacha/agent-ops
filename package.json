@@ -16,6 +16,9 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:contract": "node scripts/require-contract-env.mjs && vitest run tests/data --no-file-parallelism",
+    "test:e2e": "playwright test",
+    "lighthouse": "tsx scripts/measure-lighthouse.mts",
+    "capture:screenshots": "tsx scripts/capture-screenshots.mts",
     "gen": "openapi-typescript openapi/openapi.yaml -o src/generated/openapi.d.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
@@ -29,7 +32,8 @@
     "gate:step1": "node scripts/gate-step1.mjs",
     "gate:step2": "node scripts/gate-step2.mjs",
     "gate:step3": "node scripts/gate-step3.mjs",
-    "gate:step4": "node scripts/gate-step4.mjs"
+    "gate:step4": "node scripts/gate-step4.mjs",
+    "gate:step5": "node scripts/gate-step5.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",
@@ -43,6 +47,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/autocannon": "^7.12.7",
     "@types/node": "^22.20.2",
     "@types/react": "^19.3.0",
@@ -51,6 +56,7 @@
     "autocannon": "^8.0.0",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.3.6",
+    "lighthouse": "^13.5.0",
     "openapi-typescript": "^7.9.1",
     "prettier": "^3.9.6",
     "semver": "^7.8.5",

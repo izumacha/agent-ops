@@ -1,17 +1,12 @@
-// アプリ名の一元管理
-import { APP_NAME } from '@/lib/constants';
+// トップページ。ログイン状態に応じてダッシュボードかログイン画面へ送る (Step5)。
+//
+// **案内文を置かない。** 以前は「Step1 まで実装済み」と書いていたが、画面ができた以上
+// トップで止まる理由が無く、文言は実装が進むたびに古くなる (コードとドキュメントの乖離)。
+import { redirect } from 'next/navigation';
+import { DASHBOARD_PATH, LOGIN_PATH } from '@/lib/constants';
+import { currentSession } from '@/lib/session-server';
 
-// トップページ (いまは案内だけの骨組み。Step5 でダッシュボードに置き換える)
-export default function HomePage() {
-  // 見出しと現在の段階を表示する
-  return (
-    <main>
-      <h1>{APP_NAME}</h1>
-      <p>AI エージェントの登録・権限・コスト・品質・停止を管理する運用基盤です。</p>
-      <p>
-        現在は Step1（エージェント台帳・権限）まで実装済みです。ロードマップは{' '}
-        <code>docs/roadmap.md</code> を参照してください。
-      </p>
-    </main>
-  );
+export default async function HomePage(): Promise<never> {
+  // ログイン済みならダッシュボード、未ログインならログイン画面へ送る
+  redirect((await currentSession()) === null ? LOGIN_PATH : DASHBOARD_PATH);
 }

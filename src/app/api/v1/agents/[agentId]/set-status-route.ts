@@ -4,26 +4,10 @@ import { notFoundError } from '@/lib/api/errors';
 import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { toAgentDto } from '@/lib/api/serializers';
-import { AgentStatus } from '@/domain/types';
-import { AuditAction, AuditTargetType } from '@/domain/audit/action';
+// 指定できる状態と監査ログの操作名の対応は、画面の Server Action と共有する 1 か所から取る
+import { AGENT_STATUS_AUDIT_ACTION, type SettableAgentStatus } from '@/domain/agent-status';
+import { AuditTargetType } from '@/domain/audit/action';
 import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
-
-/**
- * この経路で人が指定できる状態。**`suspended` は入らない** — 自動停止はガードレールの判定が
- * アダプタの中で行うもので、人が API から直接その状態へ持っていく操作は存在しない
- * (入れてしまうと「誰かが手で suspended にした」記録と自動停止の記録が区別できなくなる)
- */
-export type SettableAgentStatus = typeof AgentStatus.active | typeof AgentStatus.stopped;
-
-// その状態変更を表す監査ログの操作名。**表で持つのは、指定できる状態を足したときに
-// typecheck が落ちるから** (条件分岐で書くと、新しい状態が既定の分岐へ黙って落ちて
-// 別の操作名で記録される)
-const AUDIT_ACTION_BY_STATUS: Readonly<Record<SettableAgentStatus, AuditAction>> = {
-  // 止まっていたものを戻した (UC-09。手動停止と自動停止のどちらからでも active へ戻す)
-  [AgentStatus.active]: AuditAction.agent_resumed,
-  // 手で止めた
-  [AgentStatus.stopped]: AuditAction.agent_stopped,
-};
 
 // 指定した状態へ変える Route Handler を作る
 export function setAgentStatusRoute(status: SettableAgentStatus) {
@@ -42,7 +26,7 @@ export function setAgentStatusRoute(status: SettableAgentStatus) {
     await recordAudit(repos, {
       tenantId,
       actorId: user.id,
-      action: AUDIT_ACTION_BY_STATUS[status],
+      action: AGENT_STATUS_AUDIT_ACTION[status],
       targetType: AuditTargetType.agent,
       targetId: agent.id,
       // 変更後の状態だけを残す (機微情報を入れない)

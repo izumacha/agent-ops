@@ -35,6 +35,12 @@ export interface AgentsPort {
   list(tenantId: string, query: PageQuery, filter?: AgentFilter): Promise<Page<AgentRecord>>;
   // テナント内のエージェントを id で引く (他テナントの id は null)
   findById(tenantId: string, id: string): Promise<AgentRecord | null>;
+  // 指定した id のエージェント名を id → 名前 の表で引く (画面の一覧が名前を出すのに使う)。
+  // **一覧の先頭から N 件取って突き合わせる形にしない** — 並びは createdAt 昇順なので、
+  // 上限より多くのエージェントを持つテナントでは**新しいエージェントだけ**名前が出ず id のまま
+  // 残る (しかもインシデントも古い順なので、後ろのページほど取りこぼしが集まる)。
+  // 他テナントの id を混ぜても結果に現れない (テナントで絞るのは実装の責務)
+  findNamesByIds(tenantId: string, ids: readonly string[]): Promise<Map<string, string>>;
   // エージェントを作る (テナント内で名前が重複していれば DuplicateError('name'))
   create(input: CreateAgentInput): Promise<AgentRecord>;
   // エージェントを更新する (見つからなければ null。名前重複は DuplicateError('name'))

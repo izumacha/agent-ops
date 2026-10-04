@@ -1,7 +1,7 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
-import { AgentStatus, Provider, Role, RuleKind } from '@/domain/types';
+import { AgentStatus, IncidentStatus, Provider, Role, RuleKind } from '@/domain/types';
 import { RATIO_MAX } from '@/domain/guardrail/rule';
 
 // アプリ名 (画面タイトル等で使う)
@@ -28,9 +28,120 @@ export const RULE_KIND_LABELS: Readonly<Record<RuleKind, string>> = {
   [RuleKind.quality]: '品質低下', // quality
 };
 
-// **`RuleAction` / `IncidentStatus` の日本語ラベルは置いていない。** 参照する場所がまだ無く
-// （API は enum の値をそのまま JSON へ出し、画面は Step5）、置くと「使われない値」が増えるだけ
+// **`RuleAction` の日本語ラベルは置いていない。** 参照する場所がまだ無く（API は enum の値を
+// そのまま JSON へ出し、ルールの設定画面は Step5 の範囲外）、置くと「使われない値」が増えるだけ
 // （§6 デッドコードを残さない）。画面で必要になったときに、使う側と一緒に足す
+
+// インシデント状態の日本語ラベル（ダッシュボードとインシデント一覧が使う）
+export const INCIDENT_STATUS_LABELS: Readonly<Record<IncidentStatus, string>> = {
+  [IncidentStatus.open]: '未解決', // open
+  [IncidentStatus.resolved]: '解決済み', // resolved
+};
+
+// ─────────────────────────────────────────────
+// ダッシュボード (Step5) の画面。**パスと文言をここに集め、画面に直書きしない** (§6)
+// ─────────────────────────────────────────────
+
+// ログイン画面のパス（未ログインのリダイレクト先。リンクとテストもここを読む）
+export const LOGIN_PATH = '/login';
+// ログイン後に開く画面のパス
+export const DASHBOARD_PATH = '/dashboard';
+// エージェント一覧のパス
+export const AGENTS_PATH = '/agents';
+// インシデント一覧のパス
+export const INCIDENTS_PATH = '/incidents';
+// 日次レポート (CSV) のパス
+export const DAILY_REPORT_PATH = '/reports/daily';
+
+// 画面に出す文言。**1 か所に集める**ので、同じ意味の言い回しが画面ごとに割れない
+export const UI_TEXT = {
+  // ログイン画面
+  loginTitle: 'ログイン',
+  loginDescription:
+    'ユーザートークン（aop_u_ で始まる値）を貼り付けてください。トークンは管理者が発行します。',
+  loginTokenLabel: 'ユーザートークン',
+  loginSubmit: 'ログイン',
+  loginFailed: 'トークンが正しくありません。失効・期限切れでないか確認してください。',
+  loginTokenRequired: 'ユーザートークンを入力してください。',
+  // 画面共通
+  skipToContent: '本文へスキップ',
+  logout: 'ログアウト',
+  navDashboard: 'ダッシュボード',
+  navAgents: 'エージェント',
+  navIncidents: 'インシデント',
+  // ダッシュボード
+  dashboardTitle: 'ダッシュボード',
+  cardCost: '期間内のコスト',
+  cardRequests: '中継回数',
+  cardUptime: '稼働率',
+  cardQuality: '品質（直近の評価）',
+  cardOpenIncidents: '未解決インシデント',
+  dailyTableTitle: '日次の内訳',
+  dailyReportLink: 'CSV でダウンロード',
+  // 期間の指定
+  rangeFrom: '開始日',
+  rangeTo: '終了日',
+  rangeApply: 'この期間で見る',
+  // **採用しなかった指定は必ず伝える**（黙って既定へ倒すと、絞ったつもりの数字を本物だと読む）
+  rangeIgnored:
+    '指定した期間を解釈できなかったため、既定の期間を表示しています（日付は YYYY-MM-DD の形で、開始日は終了日より前にしてください）。',
+  // 表の見出し
+  columnDay: '日付',
+  columnRequests: '中継回数',
+  columnErrors: '失敗',
+  columnUptime: '稼働率',
+  // **CSV の見出しは単位を書く** — 画面はセルに「%」を付けられるが、CSV は数字だけを入れて
+  // 表計算で扱える形にするので、単位の置き場が見出ししかない（無いと 0〜1 の割合と読まれる）
+  columnUptimePercent: '稼働率 (%)',
+  columnCost: 'コスト (USD)',
+  columnInputTokens: '入力トークン',
+  columnOutputTokens: '出力トークン',
+  // 一覧のページ送り
+  nextPage: '次のページ',
+  // **採用しなかったカーソルも必ず伝える**（黙って先頭へ戻すと「続きを見た」つもりで 1 ページ目を読む）
+  cursorIgnored: 'ページの位置を解釈できなかったため、先頭から表示しています。',
+  // エージェント一覧・詳細
+  agentsTitle: 'エージェント',
+  agentsEmpty: 'エージェントがまだ登録されていません。',
+  columnAgentName: '名前',
+  columnProvider: 'プロバイダ',
+  columnModel: 'モデル',
+  columnStatus: '状態',
+  columnBudget: '月次予算 (USD)',
+  agentDetailDescription: '説明',
+  agentDetailNoDescription: '（説明なし）',
+  agentDetailBudgetUnset: '未設定',
+  agentDetailCreatedAt: '登録日時 (UTC)',
+  agentDetailOperations: '操作',
+  agentStop: 'このエージェントを停止する',
+  agentResume: 'このエージェントを復帰させる',
+  agentStopped: '停止しました。',
+  agentResumed: '復帰させました。',
+  agentNotFound: '指定されたエージェントは見つかりません。',
+  backToAgents: 'エージェント一覧へ戻る',
+  // インシデント一覧
+  incidentsTitle: 'インシデント',
+  incidentsEmptyOpen: '未解決のインシデントはありません。',
+  incidentsEmptyAll: 'インシデントの記録はありません。',
+  incidentsViewOpen: '未解決のみ',
+  incidentsViewAll: 'すべて',
+  // **採用しなかった表示条件も伝える**（黙って倒すと「すべて見た」つもりで未解決だけを読む）
+  incidentViewIgnored: '表示条件を解釈できなかったため、未解決のみを表示しています。',
+  columnOccurredAt: '発火日時 (UTC)',
+  columnAgent: 'エージェント',
+  columnSummary: '理由',
+  columnResolvedAt: '解決日時 (UTC)',
+  incidentResolve: '解決済みにする',
+  incidentResolved: '解決済みにしました。',
+  incidentAlreadyResolved: 'このインシデントはすでに解決済みです。',
+  incidentNotFound: '指定されたインシデントは見つかりません。',
+  // Server Action の失敗（**内部の詳細は出さない**。§9）
+  actionForbidden: 'この操作を行う権限がありません。',
+  actionRejected: '要求を受け付けられませんでした。画面を開き直してからやり直してください。',
+  // 「測れていない」ことを表す表示。**0 と書かない**（§ 稼働率の定義）
+  notMeasured: '—',
+  noData: 'この期間に記録はありません。',
+} as const;
 
 // ─────────────────────────────────────────────
 // API (Step1) の上限値と利用者向けエラー文言。Route Handler はここから引き、直書きしない
@@ -141,6 +252,15 @@ export const USER_TOKEN_CLI_NAME = 'CLI';
 // 日次集計で一度に指定できる期間の上限 (日)。無制限の期間は全件走査になるので必ず区切る (§8 / §9)。
 // 366 日 (うるう年を含む 1 年) は「昨年分をまとめて出す」という実際の使い方を 1 回で満たせる最小の値
 export const USAGE_RANGE_MAX_DAYS = 366;
+// ダッシュボード (Step5) が既定で見る期間 (日)。31 日は「ひと月ぶんを 1 画面で見る」という
+// 使い方をちょうど満たす長さで、日次の表の行数もこの値で縛られる (§8 一覧は必ず上限を持つ)。
+// 期間はクエリで変えられるが、上限は USAGE_RANGE_MAX_DAYS が引き続き効く
+export const DASHBOARD_DEFAULT_RANGE_DAYS = 31;
+// ダッシュボードが数える未解決インシデントの上限。**件数だけを知るための無制限の取得をしない**
+// (§8 / §9) ので、ここまで数えて超えていれば画面は「〜件以上」と表示する。
+// 一覧 1 ページぶん (PAGE_LIMIT_DEFAULT) と同じ値にしているのは、画面が「未解決の一覧」へ
+// 遷移したときに見える件数と揃えるため (別の値にすると「40 件以上」と出たのに一覧には 50 件並ぶ)
+export const DASHBOARD_OPEN_INCIDENTS_MAX = PAGE_LIMIT_DEFAULT;
 // プロキシが上流 (Anthropic / OpenAI) の応答を待つ上限 (ミリ秒)。
 // 上流が黙り込んだときに接続を抱え続けないための打ち切りで、生成が長引く呼び出しも通せるよう長めに取る
 export const UPSTREAM_TIMEOUT_MS = 120_000;

@@ -1,0 +1,246 @@
+/*
+ * ダッシュボード (Step5) のデザイントークンと最小限の見た目。
+ *
+ * **配色はここだけで定義する** (§6 の一元管理)。画面やコンポーネントに色を直書きしない。
+ * コントラストは WCAG AA を満たす値を選んでいる (§7): 本文は 4.5:1 以上、
+ * 境界線やフォーカスリングのような非テキストは 3:1 以上。
+ *   --text  #1f2430 on --surface #ffffff ... 14.0:1
+ *   --muted #4a5260 on --surface #ffffff ...  8.1:1
+ *   --link  #1d4ed8 on --surface #ffffff ...  6.6:1
+ *   --danger-text #a3101a on --surface #ffffff ... 6.4:1
+ *   --border #767e8c on --surface #ffffff ...  3.9:1 (非テキストの 3:1 を満たす)
+ *
+ * **CSS フレームワークを入れない。** 画面数が少なく、Lighthouse の Performance を
+ * 落とす要素 (未使用 CSS・追加のリクエスト) を増やしたくないため。
+ */
+
+:root {
+  /* 面の色 (本文の背景) */
+  --surface: #ffffff;
+  /* 画面全体の背景 (面との差をわずかに付ける) */
+  --canvas: #f4f5f7;
+  /* 本文の文字色 */
+  --text: #1f2430;
+  /* 補助的な文字色 (ラベル・単位) */
+  --muted: #4a5260;
+  /* リンクと主要な操作の色 */
+  --link: #1d4ed8;
+  /* 危険な状態 (停止・未解決) を表す文字色 */
+  --danger-text: #a3101a;
+  /* 境界線 */
+  --border: #767e8c;
+  /* 余白の基本単位 (倍数で使う) */
+  --space: 8px;
+  /* 角の丸み */
+  --radius: 6px;
+  /* 本文の最大幅 (長すぎる行は読みにくい) */
+  --content-max: 1080px;
+}
+
+/* 箱の寸法を分かりやすくする (余白を足しても幅が増えない) */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  /* OS 標準のフォントを使う (Web フォントを読み込まないので FOIT が起きない。§8) */
+  font-family:
+    system-ui,
+    -apple-system,
+    'Hiragino Kaku Gothic ProN',
+    'Noto Sans JP',
+    Meiryo,
+    sans-serif;
+  line-height: 1.6;
+}
+
+/* 見出しは階層どおりに使う (§7)。大きさだけを調整する */
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 calc(var(--space) * 2);
+}
+
+h2 {
+  font-size: 1.125rem;
+  margin: calc(var(--space) * 3) 0 var(--space);
+}
+
+a {
+  color: var(--link);
+}
+
+/* **フォーカスリングを消さない** (§7)。キーボード操作で現在位置が分かるようにする */
+:focus-visible {
+  outline: 3px solid var(--link);
+  outline-offset: 2px;
+}
+
+/* 本文へ飛ぶスキップリンク。フォーカスされるまで画面外に置く (§7)。
+   **高さは 24px 以上を確保する** — 操作対象が小さいと指やポインタで狙いにくく、
+   Lighthouse の Accessibility も target-size で減点する (実測で 17px → 95 点)。
+   `display: inline-block` が無いと上下の padding が高さに効かない */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  display: inline-block;
+  background: var(--surface);
+  /* 上下は 1 行の高さと合わせて 24px を超えるように取る */
+  padding: calc(var(--space) * 1.5) var(--space);
+  z-index: 1;
+}
+
+.skip-link:focus {
+  left: var(--space);
+}
+
+/* 画面の枠 */
+.shell {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: calc(var(--space) * 2);
+}
+
+/* ヘッダー (アプリ名・ナビ・ログアウト) */
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space);
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space);
+  margin-bottom: calc(var(--space) * 2);
+}
+
+.header nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--space) * 2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* 現在のテナントと役割の表示 */
+.identity {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+/* 数値カードを並べる領域。メディアクエリ無しで折り返す (§A の auto-fit と同じ考え方) */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: calc(var(--space) * 2);
+  margin: 0;
+  padding: 0;
+}
+
+/* 1 枚のカード。dl / div で意味を持たせる (見出し = 項目名、値 = 数値) */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: calc(var(--space) * 2);
+}
+
+.card dt {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.card dd {
+  margin: var(--space) 0 0;
+  font-size: 1.5rem;
+  /* 数字の桁がそろうようにする (表組みの読みやすさ) */
+  font-variant-numeric: tabular-nums;
+}
+
+/* 表 */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+}
+
+caption {
+  text-align: left;
+  color: var(--muted);
+  padding-bottom: var(--space);
+}
+
+th,
+td {
+  border: 1px solid var(--border);
+  padding: var(--space);
+  text-align: left;
+}
+
+/* 折り返したくない列（日時・状態・操作ボタン）。折り返すと 1 行が 2 段になり、
+   表の中で**理由の文**に割く幅が減る（実測で、日時と「未解決」がどちらも 2 行になっていた） */
+.nowrap {
+  white-space: nowrap;
+}
+
+/* 数値の列は右寄せにして桁をそろえる */
+td.number,
+th.number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 状態の表示。**色だけで意味を持たせない** ので文字も併記する (§7) */
+.state-danger {
+  color: var(--danger-text);
+  font-weight: 700;
+}
+
+/* フォーム */
+label {
+  display: block;
+  margin-bottom: var(--space);
+}
+
+input[type='text'],
+input[type='password'],
+input[type='date'] {
+  width: 100%;
+  max-width: 480px;
+  padding: var(--space);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+button {
+  padding: var(--space) calc(var(--space) * 2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* エラーの表示。色に加えて文字で理由を書く (§7) */
+.error {
+  color: var(--danger-text);
+  font-weight: 700;
+}
+
+/* 動きを抑える設定を尊重する (§7) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -33,6 +33,21 @@ const UNAUTHENTICATED_ROUTES: Record<string, string> = {
   'api/v1/health/route.ts': 'DB 到達性だけを返す公開エンドポイント (compose の healthcheck が使う)',
 };
 
+// **画面側の Route Handler** (Step5)。セッション Cookie で認証し、JSON ではないものを返す経路で、
+// REST の契約 (openapi.yaml) には載らない。**除外ではなく「別の契約」として扱う** —
+// api/v1 の下に置かないこと・route() を通らないことを許す代わりに、下の 3 つを必ず要求する:
+//   (a) api/v1 の**外**にあること (契約の下に紛れ込ませない)
+//   (b) `@/lib/session-server` へ到達すること (= セッションを自分で確かめている)
+//   (c) `Cache-Control` に `no-store` を宣言すること (テナントごとに中身が違うので共有キャッシュへ
+//       載ると他テナントへ漏れる)
+// **ここに増える差分は理由の妥当性をレビューで必ず確認する**。表に無い route.ts は
+// 従来どおり「api/v1 の下で route() を通る」ことを要求される
+const SESSION_PAGE_ROUTES: Record<string, string> = {
+  '(dashboard)/reports/daily/route.ts':
+    '日次レポートの CSV ダウンロード。ブラウザのセッションで認証し text/csv を返すので、' +
+    'Bearer 認証・JSON 応答を前提にした route() と OpenAPI の契約には載せられない',
+};
+
 // パスの区切りを URL 向けに揃える
 function toPosix(path: string): string {
   // Windows の区切りも '/' にする
@@ -65,13 +80,54 @@ describe('Route Handler の結線', () => {
   });
 
   // 契約の外に生やした経路は、認可の網羅ガード (tests/api/rbac-endpoints.test.ts) の対象にもならない
-  it('Route Handler は契約が受け持つ api/v1 の下にしか置かれていない', () => {
+  it('Route Handler は契約が受け持つ api/v1 の下にしか置かれていない (画面側ルートを除く)', () => {
     for (const { full, relativeToApp } of routeFiles) {
-      // api/v1 の下にあること
+      // api/v1 の外にあるか
+      const outside = toPosix(relative(API_DIR, full)).startsWith('..');
+      // 画面側ルートとして理由を書いてあるものは**外にあることを要求する**
+      if (Object.hasOwn(SESSION_PAGE_ROUTES, relativeToApp)) {
+        expect(outside, `${relativeToApp} は画面側ルートなので api/v1 の下に置かない`).toBe(true);
+        continue;
+      }
+      // それ以外は api/v1 の下にあること
+      expect(outside, `${relativeToApp} が api/v1 の外にある`).toBe(false);
+    }
+  });
+
+  it('画面側ルートの表に載っているファイルは実在し、理由が書かれている', () => {
+    // 走査で見つかった route.ts の一覧 (src/app からの相対パス)
+    const found = new Set(routeFiles.map(({ relativeToApp }) => relativeToApp));
+    for (const [key, reason] of Object.entries(SESSION_PAGE_ROUTES)) {
+      // 消えたファイルの登録が残っていないこと (残ると「何を許したのか」が読めなくなる)
+      expect(found.has(key), `${key} は実在しない (表の登録が古い)`).toBe(true);
+      // 理由が空・空白でないこと (値を誰も読まないと「とりあえず黙らせる」口になる)
+      expect(reason.trim().length, `${key} の理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  it('画面側ルートはセッションを自分で確かめ、キャッシュを禁止している', () => {
+    // 走査が壊れていたら fail-closed で落とす
+    const sessionModule = join(SRC_DIR, 'lib', 'session-server.ts');
+    expect(importGraph.has(sessionModule), 'セッションの入口を走査できていない').toBe(true);
+    // 表に載っている画面側ルートを 1 本ずつ見る
+    const entries = Object.keys(SESSION_PAGE_ROUTES);
+    // 1 本も無ければ導出が壊れている (黙って「対象ゼロ＝緑」にしない)
+    expect(entries.length, '画面側ルートが 1 本も無い').toBeGreaterThan(0);
+    for (const key of entries) {
+      // 走査で見つけた実体を引く
+      const file = routeFiles.find(({ relativeToApp }) => relativeToApp === key);
+      expect(file, `${key} を走査できていない`).toBeDefined();
+      // (b) セッションの入口へ到達していること (= 自分で認証を確かめている)
       expect(
-        toPosix(relative(API_DIR, full)).startsWith('..'),
-        `${relativeToApp} が api/v1 の外にある`,
-      ).toBe(false);
+        reachesModule(importGraph, file!.full, sessionModule),
+        `${key} がセッションの確認を通っていない`,
+      ).toBe(true);
+      // (c) 共有キャッシュへ載らないことを宣言していること。
+      // **綴りを見るだけの弱い検査**だが、テナントごとに中身が違う応答なので宣言の有無は固定する
+      expect(
+        readFileSync(file!.full, 'utf8').includes('no-store'),
+        `${key} が Cache-Control に no-store を宣言していない`,
+      ).toBe(true);
     }
   });
 
@@ -152,6 +208,8 @@ describe('Route Handler の結線', () => {
     for (const { full, relativeToApp } of routeFiles) {
       // 公開エンドポイントは対象外 (理由は表に書く)
       if (relativeToApp in UNAUTHENTICATED_ROUTES) continue;
+      // 画面側ルートは route() を通らない代わりに上の 3 つを要求されている (理由は表に書く)
+      if (Object.hasOwn(SESSION_PAGE_ROUTES, relativeToApp)) continue;
       // モジュールを実際に読み込む (綴りではなく値を見る)
       const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
       for (const method of HTTP_METHOD_EXPORTS) {

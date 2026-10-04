@@ -362,6 +362,18 @@ class MemoryAgents implements AgentsPort {
     return row && row.tenantId === tenantId ? clone(row) : null;
   }
 
+  // 指定した id の名前だけをまとめて引く (テナント境界を跨がない)
+  async findNamesByIds(tenantId: string, ids: readonly string[]): Promise<Map<string, string>> {
+    // 探す id の集合 (重複を畳む)
+    const wanted = new Set(ids);
+    // 自テナントの行のうち、要求された id のものだけを表にする
+    return new Map(
+      this.rowsOf(tenantId)
+        .filter((row) => wanted.has(row.id))
+        .map((row) => [row.id, row.name]),
+    );
+  }
+
   // 作成 (名前重複は DuplicateError)
   async create(input: CreateAgentInput): Promise<AgentRecord> {
     // 同テナントに同じ名前があれば一意制約違反
@@ -596,12 +608,15 @@ class MemoryUsageEvents implements UsageEventsPort {
       const total = totals.get(day) ?? {
         day,
         requests: 0,
+        errorRequests: 0,
         inputTokens: 0,
         outputTokens: 0,
         costMicroUsd: 0n,
       };
       // 回数とトークン・料金を足す
       total.requests += 1;
+      // 失敗した呼び出しだけを別に数える (稼働率の分子。prisma 側の FILTER と同じ下限を使う)
+      if (event.statusCode >= USAGE_ERROR_STATUS_FLOOR) total.errorRequests += 1;
       total.inputTokens += event.inputTokens;
       total.outputTokens += event.outputTokens;
       total.costMicroUsd += event.costMicroUsd;
@@ -807,17 +822,20 @@ class MemoryEvaluations implements EvaluationsPort {
   // そのエージェントの最新の completed な実行 (品質低下ルールが読む相手)
   async findLatestCompletedRun(
     tenantId: string,
-    agentId: string,
+    agentId: string | null,
     since?: Date,
+    until?: Date,
   ): Promise<EvaluationRunRecord | null> {
-    // テナント・エージェントが一致し、採点が成立した実行だけを集める。
-    // **`since` 以降に絞る** (品質ルールの集計窓。prisma の where と同じ条件)
+    // テナントが一致し、採点が成立した実行だけを集める。
+    // **`agentId` が null ならエージェントで絞らない** (テナント全体の最新 1 件)。
+    // **`since` 以降・`until` より前に絞る** (prisma の where と同じ条件)
     const candidates = [...this.store.evaluationRuns.values()].filter(
       (row) =>
         row.tenantId === tenantId &&
-        row.agentId === agentId &&
+        (agentId === null || row.agentId === agentId) &&
         row.status === EvaluationRunStatus.completed &&
-        (since === undefined || row.createdAt.getTime() >= since.getTime()),
+        (since === undefined || row.createdAt.getTime() >= since.getTime()) &&
+        (until === undefined || row.createdAt.getTime() < until.getTime()),
     );
     // 1 件も無ければ測れていない (ルールは発火しない)
     if (candidates.length === 0) return null;

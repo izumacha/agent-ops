@@ -7,12 +7,21 @@
 // **API（`POST /agents/{id}/stop`・`/resume`）と同じ部品を通す** — 許可表（`requireAction`）・
 // 状態の書き換え（`repos.agents.setStatus`）・監査ログ（`recordAudit`）・操作名の対応
 // （`AGENT_STATUS_AUDIT_ACTION`）はすべて共有で、ここに書き下したものは 1 つも無い。
+//
+// **停止と復帰を 1 つの Server Action で受ける。** 操作ごとに別の関数を画面へ渡すと、
+// ボタンが入れ替わった瞬間に `useActionState` の状態が捨てられ、「停止しました。」が一度も
+// 見えないまま状態だけが変わる（実測）。どちらの操作かはフォームの項目で受け取り、
+// **必ず表と突き合わせる**（知らない値は断る。§9 fail-closed）。
 'use server';
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { getRepos } from '@/data';
-import { AGENT_STATUS_AUDIT_ACTION, type SettableAgentStatus } from '@/domain/agent-status';
+import {
+  AGENT_STATUS_AUDIT_ACTION,
+  settableStatusForIntent,
+  type SettableAgentStatus,
+} from '@/domain/agent-status';
 import { AuditTargetType } from '@/domain/audit/action';
 import { AgentStatus } from '@/domain/types';
 import { isResourceId } from '@/domain/resource-id';
@@ -25,7 +34,11 @@ import { AGENTS_PATH, LOGIN_PATH, UI_TEXT } from '@/lib/constants';
 import { CSRF_FIELD_NAME, csrfTokenMatches } from '@/lib/csrf';
 // **項目名と状態の型は別のファイルが持つ** — `'use server'` のファイルは async 関数以外を
 // export できない（ビルドが落ちる）。画面・Server Action・テストで綴りを共有する
-import { TARGET_ID_FIELD_NAME, type DashboardActionState } from '@/lib/dashboard/form';
+import {
+  INTENT_FIELD_NAME,
+  TARGET_ID_FIELD_NAME,
+  type DashboardActionState,
+} from '@/lib/dashboard/form';
 import { currentSession, isSameOriginAction } from '@/lib/session-server';
 
 // 状態変更が成功したときに出す文言。**表で持つ**ので、状態を足したら typecheck が落ちる
@@ -37,13 +50,13 @@ const SUCCESS_MESSAGE: Readonly<Record<SettableAgentStatus, string>> = {
 };
 
 /**
- * 指定した状態へ変える共通処理。`stopAgent` / `resumeAgent` の両方がここを通る。
+ * エージェントの稼働状態を変える（停止 / 復帰。どちらも stop 権限）。
  *
  * **失敗はすべて「状態を変えない」側に倒す**（§9 fail-closed）。理由は画面へ短い文言で返し、
  * 内部の詳細（例外の中身・他テナントに存在するかどうか）は出さない。
  */
-async function changeAgentStatus(
-  status: SettableAgentStatus,
+export async function changeAgentStatus(
+  _previous: DashboardActionState,
   formData: FormData,
 ): Promise<DashboardActionState> {
   // 1 枚目: 他サイトのフォームからの送信を断る
@@ -56,6 +69,10 @@ async function changeAgentStatus(
   if (!csrfTokenMatches(session.token, formData.get(CSRF_FIELD_NAME))) {
     return { error: UI_TEXT.actionRejected, message: null };
   }
+  // どちらの操作かを読み替える（知らない値は null。表はドメインが持つ）
+  const status = settableStatusForIntent(formData.get(INTENT_FIELD_NAME));
+  // 読み替えられなければ断る（`suspended` を指定する形もここで落ちる）
+  if (status === null) return { error: UI_TEXT.actionRejected, message: null };
   // 操作対象の id を取り出す（FormData は File も返しうるので型で確かめる）
   const submittedId = formData.get(TARGET_ID_FIELD_NAME);
   // 資源 id の形でなければ断る（形の定義は src/domain/resource-id.ts の 1 か所）
@@ -97,22 +114,4 @@ async function changeAgentStatus(
   revalidatePath(`${AGENTS_PATH}/${agent.id}`);
   // 成功の文言を返す
   return { error: null, message: SUCCESS_MESSAGE[status] };
-}
-
-/** エージェントを手動で停止する（stop 権限）。 */
-export async function stopAgent(
-  _previous: DashboardActionState,
-  formData: FormData,
-): Promise<DashboardActionState> {
-  // 停止は status を stopped にする操作
-  return changeAgentStatus(AgentStatus.stopped, formData);
-}
-
-/** エージェントを復帰させる（stop 権限。手動停止・自動停止のどちらからでも active へ戻す）。 */
-export async function resumeAgent(
-  _previous: DashboardActionState,
-  formData: FormData,
-): Promise<DashboardActionState> {
-  // 復帰は status を active にする操作
-  return changeAgentStatus(AgentStatus.active, formData);
 }

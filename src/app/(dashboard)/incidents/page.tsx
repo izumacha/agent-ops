@@ -16,6 +16,7 @@ import {
   UI_TEXT,
 } from '@/lib/constants';
 import { csrfTokenFor } from '@/lib/csrf';
+import { RESULT_INCIDENT_RESOLVED, RESULT_QUERY_NAME } from '@/lib/dashboard/form';
 import { resolveDashboardCursor } from '@/lib/dashboard/paging';
 import {
   INCIDENT_VIEW_ALL,
@@ -33,7 +34,7 @@ export const metadata: Metadata = {
 export default async function IncidentsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string; cursor?: string }>;
+  searchParams: Promise<{ status?: string; cursor?: string; result?: string }>;
 }) {
   // 未ログインならここで /login へ送られる
   const { principal, token } = await requireSession();
@@ -62,6 +63,11 @@ export default async function IncidentsPage({
   return (
     <>
       <h1>{UI_TEXT.incidentsTitle}</h1>
+      {/* 直前の操作の結果（解決した行は一覧から消えるので、行の中には文言を残せない）。
+          知らない値は何も出さない（印として扱わない） */}
+      {query[RESULT_QUERY_NAME] === RESULT_INCIDENT_RESOLVED ? (
+        <p role="status">{UI_TEXT.incidentResolved}</p>
+      ) : null}
       {/* 表示条件の切り替え。副作用が無いのでリンク（GET）で正しい */}
       <p>
         {view.showAll ? (

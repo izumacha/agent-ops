@@ -328,6 +328,14 @@ const NOT_DUPLICATED_IN_CI: Record<string, { kind: 'byOtherInvocation' | 'byCost
     'npm run bench:proxy': { kind: 'byCost', why: '同上 (プロキシの追加遅延の計測)' },
     'npm run bench:evaluation': { kind: 'byCost', why: '同上 (採点の再現率の計測)' },
     'npm run bench:guardrail': { kind: 'byCost', why: '同上 (発火から停止までの計測)' },
+    'npm run test:e2e -- --reporter=json': {
+      kind: 'byCost',
+      why: '受け入れ基準の計測そのもの (主要 5 画面の E2E)。ブラウザを起動するので二重に回すと所要時間が増える',
+    },
+    'npm run lighthouse': {
+      kind: 'byCost',
+      why: '同上 (Lighthouse の計測。5 画面 × 3 回の計測で約 100 秒かかる)',
+    },
   };
 
 describe('CI ワークフロー', () => {

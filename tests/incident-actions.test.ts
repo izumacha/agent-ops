@@ -11,11 +11,17 @@ import { IncidentStatus, Role, RuleAction, RuleKind } from '@/domain/types';
 import {
   GUARDRAIL_RULES_MAX_PER_TENANT,
   GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
+  INCIDENTS_PATH,
   LOGIN_PATH,
   UI_TEXT,
 } from '@/lib/constants';
 import { CSRF_FIELD_NAME, csrfTokenFor } from '@/lib/csrf';
-import { DASHBOARD_ACTION_INITIAL, TARGET_ID_FIELD_NAME } from '@/lib/dashboard/form';
+import {
+  DASHBOARD_ACTION_INITIAL,
+  RESULT_INCIDENT_RESOLVED,
+  RESULT_QUERY_NAME,
+  TARGET_ID_FIELD_NAME,
+} from '@/lib/dashboard/form';
 import { SESSION_COOKIE_NAME } from '@/lib/session';
 import { AUDIT_SECRET, seedEachTest, type SeededTenant } from './api/helpers';
 
@@ -142,12 +148,11 @@ describe('インシデントを解決する Server Action', () => {
     // 発火したインシデントを admin が閉じる
     const incidentId = await raiseIncident(seed.a);
     loginAs(seed.a.tokens.admin);
-    const state = await resolveIncident(
-      DASHBOARD_ACTION_INITIAL,
-      form(seed.a.tokens.admin, incidentId),
+    const target = await redirectTarget(() =>
+      resolveIncident(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, incidentId)),
     );
-    // 成功の文言が返る
-    expect(state).toEqual({ error: null, message: UI_TEXT.incidentResolved });
+    // **印を付けて一覧へ戻る**（解決した行は既定の表示から消えるので、成功は画面側が描く）
+    expect(target).toBe(`${INCIDENTS_PATH}?${RESULT_QUERY_NAME}=${RESULT_INCIDENT_RESOLVED}`);
     // 解決済みになっている
     expect(await statusOf(seed.a.id, incidentId)).toBe(IncidentStatus.resolved);
     // **操作として記録されている**（API 経路と同じ操作名を使う）
@@ -158,7 +163,10 @@ describe('インシデントを解決する Server Action', () => {
     // 同じインシデントを 2 回閉じる（二重送信・再試行）
     const incidentId = await raiseIncident(seed.a);
     loginAs(seed.a.tokens.admin);
-    await resolveIncident(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, incidentId));
+    // 1 度目は成功してリダイレクトする（投げられる例外をここで受け止める）
+    await redirectTarget(() =>
+      resolveIncident(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, incidentId)),
+    );
     const second = await resolveIncident(
       DASHBOARD_ACTION_INITIAL,
       form(seed.a.tokens.admin, incidentId),

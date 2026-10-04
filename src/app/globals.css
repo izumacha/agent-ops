@@ -80,13 +80,18 @@ a {
   outline-offset: 2px;
 }
 
-/* 本文へ飛ぶスキップリンク。フォーカスされるまで画面外に置く (§7) */
+/* 本文へ飛ぶスキップリンク。フォーカスされるまで画面外に置く (§7)。
+   **高さは 24px 以上を確保する** — 操作対象が小さいと指やポインタで狙いにくく、
+   Lighthouse の Accessibility も target-size で減点する (実測で 17px → 95 点)。
+   `display: inline-block` が無いと上下の padding が高さに効かない */
 .skip-link {
   position: absolute;
   left: -9999px;
   top: 0;
+  display: inline-block;
   background: var(--surface);
-  padding: var(--space);
+  /* 上下は 1 行の高さと合わせて 24px を超えるように取る */
+  padding: calc(var(--space) * 1.5) var(--space);
   z-index: 1;
 }
 

@@ -24,3 +24,38 @@ export const AGENT_STATUS_AUDIT_ACTION: Readonly<Record<SettableAgentStatus, Aud
   // 手で止めた
   [AgentStatus.stopped]: AuditAction.agent_stopped,
 };
+
+/**
+ * 画面から送られてくる操作の名前（意図）。**`stop` / `resume` の 2 つだけ**で、
+ * 状態の綴り（`stopped` / `active`）をそのまま送らせない — 送らせると
+ * 「`suspended` を指定できるのでは」という形が生まれる（自動停止は人が指定する操作ではない）。
+ */
+export const AgentStatusIntent = { stop: 'stop', resume: 'resume' } as const;
+// AgentStatusIntent の値の型
+export type AgentStatusIntent = (typeof AgentStatusIntent)[keyof typeof AgentStatusIntent];
+
+/**
+ * 意図から「その操作で設定する状態」への対応。**表で持つ**ので、意図を足したら typecheck が落ちる
+ * （条件分岐で書くと、新しい意図が既定の分岐へ黙って落ちて別の状態へ変えてしまう）。
+ */
+export const AGENT_STATUS_BY_INTENT: Readonly<Record<AgentStatusIntent, SettableAgentStatus>> = {
+  // 止める
+  [AgentStatusIntent.stop]: AgentStatus.stopped,
+  // 戻す（手動停止・自動停止のどちらからでも active へ）
+  [AgentStatusIntent.resume]: AgentStatus.active,
+};
+
+/**
+ * フォームから送られた値を、設定する状態へ読み替える。**知らない値は `null`**（fail-closed）。
+ *
+ * 画面は `AgentStatusIntent` の値しか送らないが、フォームの値は書き換えられるので
+ * 受け取る側で必ず表と突き合わせる（§9 入力は信用しない）。
+ */
+export function settableStatusForIntent(raw: unknown): SettableAgentStatus | null {
+  // 文字列でなければ読み替えられない（FormData は File も返しうる）
+  if (typeof raw !== 'string') return null;
+  // 表に**自身のキーとして**あるかを見る（素の添字だと `constructor` 等が値を返す）
+  if (!Object.hasOwn(AGENT_STATUS_BY_INTENT, raw)) return null;
+  // 表から引く
+  return AGENT_STATUS_BY_INTENT[raw as AgentStatusIntent];
+}

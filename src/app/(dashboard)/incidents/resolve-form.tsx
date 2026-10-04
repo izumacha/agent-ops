@@ -30,14 +30,14 @@ export function ResolveIncidentForm({ incidentId, csrfToken }: ResolveIncidentFo
       <button type="submit" disabled={pending}>
         {UI_TEXT.incidentResolve}
       </button>
-      {/* 失敗は色だけでなく文字で理由を出し、支援技術へも即時に伝える（§7） */}
+      {/* 失敗は色だけでなく文字で理由を出し、支援技術へも即時に伝える（§7）。
+          **成功の文言はここに出さない** — 解決した行は既定の表示から消えるので、
+          この状態に入れても一緒に消える。成功は一覧がクエリの印を見てサーバ側で描く */}
       {state.error === null ? null : (
         <p className="error" role="alert">
           {state.error}
         </p>
       )}
-      {/* 成功も文字で伝える（押したのに何も起きていないように見えるのを避ける） */}
-      {state.message === null ? null : <p role="status">{state.message}</p>}
     </form>
   );
 }

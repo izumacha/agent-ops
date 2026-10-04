@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getRepos } from '@/data';
 import { formatMicroUsdAsUsd } from '@/domain/money';
+import { AgentStatusIntent } from '@/domain/agent-status';
 import { canPerform } from '@/domain/rbac';
 import { isResourceId } from '@/domain/resource-id';
 import { AgentStatus } from '@/domain/types';
@@ -74,22 +75,19 @@ export default async function AgentDetailPage({
       {canOperate ? (
         <>
           <h2>{UI_TEXT.agentDetailOperations}</h2>
-          {/* 稼働中なら止める、止まっているなら戻す（押しても何も起きない操作を並べない） */}
-          {agent.status === AgentStatus.active ? (
-            <AgentStatusForm
-              agentId={agent.id}
-              csrfToken={csrfToken}
-              kind="stop"
-              label={UI_TEXT.agentStop}
-            />
-          ) : (
-            <AgentStatusForm
-              agentId={agent.id}
-              csrfToken={csrfToken}
-              kind="resume"
-              label={UI_TEXT.agentResume}
-            />
-          )}
+          {/* 稼働中なら止める、止まっているなら戻す（押しても何も起きない操作を並べない）。
+              **フォームは 1 つだけ置き、種類だけを切り替える** — 分岐で 2 つ並べると、
+              操作のあとに木の別の位置へ切り替わってフォームの状態が捨てられ、
+              「停止しました。」の文言が一度も見えないまま状態だけが変わる（実測） */}
+          <AgentStatusForm
+            agentId={agent.id}
+            csrfToken={csrfToken}
+            intent={
+              agent.status === AgentStatus.active
+                ? AgentStatusIntent.stop
+                : AgentStatusIntent.resume
+            }
+          />
         </>
       ) : null}
       {/* 一覧へ戻る導線 */}

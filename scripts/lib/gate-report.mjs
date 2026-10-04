@@ -293,20 +293,7 @@ export function benchOutputProblems({ label, status, stdout, valueField, limitFi
   if (typeof valueField !== 'string' || typeof limitField !== 'string' || typeof limit !== 'number')
     failures.push(`ベンチ ${label} の検査に実測値・上限の指定がありません`);
   // 標準出力の行のうち、JSON のオブジェクトとして読めたものを集める
-  const parsed = [];
-  for (const line of stdout.split('\n')) {
-    // 空行や npm 自身の出力は飛ばす
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('{')) continue;
-    // JSON として読めたものだけを覚える (読めない行は結果ではない)
-    try {
-      const value = JSON.parse(trimmed);
-      if (typeof value === 'object' && value !== null) parsed.push(value);
-    } catch {
-      // 結果ではない行なので無視する (理由を残す必要は無い)
-      continue;
-    }
-  }
+  const parsed = jsonObjectsInLines(stdout);
   // **そのベンチのラベルを名乗る行だけを結果の候補にする。**
   // 「読めた最後の行を採る」形だと、本物の失敗行のあとに嘘の合格行を 1 行足すだけで
   // 後勝ちして通り、逆に無関係な `{}` が 1 行混ざるだけで理由の読めない赤になった (実測)
@@ -461,6 +448,231 @@ export function evaluateStep4Report({
     (name) => name,
   );
   if (missingE2e.length > 0) failures.push(`E2E のテストが不足/失敗: ${missingE2e.join(', ')}`);
+  // 判定結果
+  return failures;
+}
+
+/**
+ * 標準出力の**行ごと**に JSON のオブジェクトを探して集める。
+ * 計測スクリプトは結果を 1 行の JSON で出す約束なので、行で割れば npm 自身の出力と混ざらない。
+ * @param {string} stdout 捕まえた標準出力
+ * @returns {Record<string, unknown>[]} 読めたオブジェクト (読めない行は捨てる)
+ */
+function jsonObjectsInLines(stdout) {
+  // 読めたオブジェクト
+  const parsed = [];
+  for (const line of stdout.split('\n')) {
+    // 空行や npm 自身の出力は飛ばす
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    // JSON として読めたものだけを覚える (読めない行は結果ではない)
+    try {
+      const value = JSON.parse(trimmed);
+      if (typeof value === 'object' && value !== null) parsed.push(value);
+    } catch {
+      // 結果ではない行なので無視する (理由を残す必要は無い)
+      continue;
+    }
+  }
+  return parsed;
+}
+
+/**
+ * Playwright の JSON レポートから、入れ子の suite を辿って spec (テスト 1 本) を平坦に集める。
+ * **入れ子を辿らないと 1 本も見つからない** — レポートはファイル → describe → spec の 3 段。
+ * @param {{ suites?: unknown[] }} report Playwright の JSON レポート
+ * @returns {{ title: string, ok: boolean }[]} spec の名前と成否
+ */
+function playwrightSpecs(report) {
+  // 集めた spec
+  const specs = [];
+  // 幅優先で辿る (再帰を使わないのは、深さの上限を気にしないため)
+  const queue = Array.isArray(report.suites) ? [...report.suites] : [];
+  while (queue.length > 0) {
+    // 次の suite
+    const suite = queue.shift();
+    // オブジェクトでなければ飛ばす
+    if (typeof suite !== 'object' || suite === null) continue;
+    // その suite が持つ spec
+    for (const spec of Array.isArray(suite.specs) ? suite.specs : []) {
+      // 名前と成否が読めるものだけを集める
+      if (typeof spec?.title === 'string') specs.push({ title: spec.title, ok: spec.ok === true });
+    }
+    // 子の suite を積む
+    for (const child of Array.isArray(suite.suites) ? suite.suites : []) queue.push(child);
+  }
+  return specs;
+}
+
+/**
+ * E2E (Playwright) の実行結果を、受け入れ基準「主要 5 画面の E2E 全 pass」の観点で判定する。
+ *
+ * **期待する画面は正本の一覧から受け取る** (`scripts/lib/step5-criteria.mjs`)。一覧をここへ
+ * 書き写すと、画面を足した人がテストを書き忘れてもゲートは緑のままになる (料金表と同じ形)。
+ * **終了コードだけを見ない** — スイートを空にして exit 0 にする形も、画面 1 つ分の
+ * テストを消す形も、終了コードには現れない。
+ * @param {{ status: number, stdout: string, screens: { title: string }[], screenPrefix: string }} input
+ * @returns {string[]} 満たしていない基準の文言 (すべて満たしていれば空配列)
+ */
+export function e2eOutputProblems({ status, stdout, screens, screenPrefix }) {
+  // 見つかった問題
+  const failures = [];
+  // 終了コードが 0 でなければ、理由は Playwright 自身が出している
+  if (status !== 0) failures.push(`E2E が失敗しました (終了コード ${status})`);
+  // 期待する画面が無ければ照合が空振りしている (fail-closed)
+  if (!Array.isArray(screens) || screens.length === 0) {
+    failures.push('E2E の対象画面を 1 つも読めません');
+    return failures;
+  }
+  // 接頭辞が無ければテスト名を組み立てられない (fail-closed)
+  if (typeof screenPrefix !== 'string') {
+    failures.push('E2E のテスト名の接頭辞がありません');
+    return failures;
+  }
+  // **レポートは複数行の JSON なので、最初の { から最後の } までをまとめて読む**
+  // (ベンチのように 1 行ではない。npm の前置きが混ざっても落とせる)
+  const start = stdout.indexOf('{');
+  const end = stdout.lastIndexOf('}');
+  // 読めなければ、テストを 1 本も走らせずに終わっている (fail-closed)
+  if (start < 0 || end <= start) {
+    failures.push('E2E の JSON レポートを読めません');
+    return failures;
+  }
+  // レポートを読む
+  let report;
+  try {
+    report = JSON.parse(stdout.slice(start, end + 1));
+  } catch (error) {
+    // 読めない理由を残す (§6 握り潰さない)
+    failures.push(
+      `E2E の JSON レポートを解釈できません: ${error instanceof Error ? error.message : error}`,
+    );
+    return failures;
+  }
+  // spec を平坦に集める
+  const specs = playwrightSpecs(report);
+  // 1 本も無ければ走っていない (fail-closed。「対象ゼロ＝緑」にしない)
+  if (specs.length === 0) {
+    failures.push('E2E のテストが 1 本も走っていません');
+    return failures;
+  }
+  // pass した spec の名前
+  const passed = new Set(specs.filter((spec) => spec.ok).map((spec) => spec.title));
+  // 画面ごとに「その名前の spec が pass しているか」を見る
+  const missing = screens
+    .map((screen) => `${screenPrefix}${screen.title}`)
+    .filter((name) => !passed.has(name));
+  // 足りなければ画面の名前を挙げて落とす
+  if (missing.length > 0) failures.push(`E2E が不足/失敗している画面: ${missing.join(', ')}`);
+  // 判定結果
+  return failures;
+}
+
+/**
+ * Lighthouse の計測結果を、受け入れ基準「Performance / Accessibility ≧ 90」の観点で判定する。
+ *
+ * **合否は計測スクリプト側に持たせない** (ベンチと違って `passed` を出させない) — 測る側と
+ * 判定する側を分けておけば、「測れていないのに合格」を測る側だけでは作れない。
+ * **上限・カテゴリ・計測回数は受け入れ基準の正本から受け取り、出力に載っている値と一致することまで確かめる**
+ * (食い違いはどちらかが古い)。
+ * @param {{ status: number, stdout: string, screens: { key: string }[], categories: string[], minScore: number, runs: number }} input
+ * @returns {string[]} 満たしていない基準の文言 (すべて満たしていれば空配列)
+ */
+export function lighthouseOutputProblems({ status, stdout, screens, categories, minScore, runs }) {
+  // 見つかった問題
+  const failures = [];
+  // 終了コードが 0 でなければ、理由は計測スクリプトが出している
+  if (status !== 0) failures.push(`Lighthouse の計測が失敗しました (終了コード ${status})`);
+  // 材料が揃っていなければ落とす (呼び出し側で 1 つ省くだけで比較が無音で消えないように)
+  if (!Array.isArray(screens) || screens.length === 0)
+    failures.push('Lighthouse の対象画面を 1 つも読めません');
+  if (!Array.isArray(categories) || categories.length === 0)
+    failures.push('Lighthouse の対象カテゴリを 1 つも読めません');
+  if (typeof minScore !== 'number') failures.push('Lighthouse の合格点がありません');
+  if (typeof runs !== 'number') failures.push('Lighthouse の計測回数がありません');
+  // 1 つでも欠けていれば比較できない
+  if (failures.length > 0 && status === 0) return failures;
+  // 結果の 1 行を探す (ベンチと同じ読み方を共有する)
+  const candidates = jsonObjectsInLines(stdout).filter((value) => value.measure === 'lighthouse');
+  // 無ければ測っていない (fail-closed)
+  if (candidates.length === 0) {
+    failures.push('Lighthouse の結果の JSON を読めません');
+    return failures;
+  }
+  // 2 本以上あるのは、嘘の結果を重ね書きしている形なので通さない
+  if (candidates.length > 1) {
+    failures.push(`Lighthouse の結果の JSON が ${candidates.length} 本あります`);
+    return failures;
+  }
+  // 唯一の結果
+  const result = candidates[0];
+  // 出力に載っている合格点が正本と食い違っていれば、どちらかが古い
+  if (result.minScore !== minScore)
+    failures.push(
+      `Lighthouse の minScore が受け入れ基準と違います (${JSON.stringify(result.minScore)} ≠ ${minScore})`,
+    );
+  // 計測回数も同じく突き合わせる (1 回に減らす変更は数字の揺れをそのまま判定に持ち込む)
+  if (result.runs !== runs)
+    failures.push(
+      `Lighthouse の計測回数が受け入れ基準と違います (${JSON.stringify(result.runs)} ≠ ${runs})`,
+    );
+  // 見たカテゴリが期待と一致すること (片方だけ測って緑にできないように)
+  const measured = Array.isArray(result.categories) ? result.categories : [];
+  const missingCategories = categories.filter((category) => !measured.includes(category));
+  if (missingCategories.length > 0)
+    failures.push(`Lighthouse が測っていないカテゴリ: ${missingCategories.join(', ')}`);
+  // 画面ごとの点数
+  const pages = Array.isArray(result.pages) ? result.pages : [];
+  for (const screen of screens) {
+    // その画面の結果
+    const page = pages.find((entry) => entry?.page === screen.key);
+    // 無ければその画面を測っていない
+    if (page === undefined) {
+      failures.push(`Lighthouse が ${screen.key} を測っていません`);
+      continue;
+    }
+    // カテゴリごとに合格点と比べる
+    for (const category of categories) {
+      // 点数 (数値でなければ測れていない)
+      const score = page.scores?.[category];
+      if (typeof score !== 'number') {
+        failures.push(`Lighthouse の ${screen.key} に数値の ${category} がありません`);
+        continue;
+      }
+      // 合格点を下回っていれば落とす
+      if (score < minScore)
+        failures.push(`Lighthouse の ${screen.key} の ${category} が ${score} 点 (< ${minScore})`);
+    }
+  }
+  // 判定結果
+  return failures;
+}
+
+/**
+ * Step5 の受け入れ基準のうち**テストレポートで見る分**を判定する。
+ * Step4 までをそのまま引き継ぎ、「表示データと DB 集計の突合テストが pass しているか」を足す。
+ *
+ * E2E と Lighthouse は別の実行なので、`e2eOutputProblems` / `lighthouseOutputProblems` が見る。
+ * @param {Parameters<typeof evaluateStep4Report>[0] & { reconcileTestName: string }} input
+ * @returns {string[]} 満たしていない基準の文言 (すべて満たしていれば空配列)
+ */
+export function evaluateStep5Report({ reconcileTestName, ...step4 }) {
+  // Step4 までの基準をそのまま引き継ぐ
+  const failures = evaluateStep4Report(step4);
+  // 突合テストの名前が無ければ照合できない (fail-closed)
+  if (typeof reconcileTestName !== 'string' || reconcileTestName.length === 0) {
+    failures.push('突合テストの名前がありません');
+    return failures;
+  }
+  // そのテストが pass していること (受け入れ基準 3)。
+  // **名前を 1 本だけ探す** — 突合は 1 本のテストで「画面の集計 = DB の集計」を見る約束
+  const missing = missingPassedCases(
+    step4.report,
+    [reconcileTestName],
+    (name) => [name],
+    (name) => name,
+  );
+  if (missing.length > 0) failures.push(`突合テストが不足/失敗: ${missing.join(', ')}`);
   // 判定結果
   return failures;
 }

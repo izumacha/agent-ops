@@ -20,7 +20,12 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
 import { DASHBOARD_PATH, INCIDENTS_PATH, LOGIN_PATH, UI_TEXT } from '@/lib/constants';
 import { CSRF_FIELD_NAME, csrfTokenMatches } from '@/lib/csrf';
-import { TARGET_ID_FIELD_NAME, type DashboardActionState } from '@/lib/dashboard/form';
+import {
+  RESULT_INCIDENT_RESOLVED,
+  RESULT_QUERY_NAME,
+  TARGET_ID_FIELD_NAME,
+  type DashboardActionState,
+} from '@/lib/dashboard/form';
 import { currentSession, isSameOriginAction } from '@/lib/session-server';
 
 /**
@@ -90,6 +95,9 @@ export async function resolveIncident(
   // 一覧と、未解決件数を出しているダッシュボードの表示を作り直す
   revalidatePath(INCIDENTS_PATH);
   revalidatePath(DASHBOARD_PATH);
-  // 成功の文言を返す
-  return { error: null, message: UI_TEXT.incidentResolved };
+  // **成功したら印を付けて同じ画面へ送る**（この行より下は実行されない）。
+  // 解決した行は既定の表示（未解決のみ）から消えるので、行の中のフォームに文言を返しても
+  // 一緒に消えてしまう — サーバ側で描ける形に移す（理由は RESULT_QUERY_NAME）。
+  // 表示条件は既定へ戻る（解決した直後に見たいのは残っている未解決なので、そちらへ寄せる）
+  redirect(`${INCIDENTS_PATH}?${RESULT_QUERY_NAME}=${RESULT_INCIDENT_RESOLVED}`);
 }

@@ -6,11 +6,16 @@
 //
 // `next/headers` / `next/navigation` / `next/cache` はテスト用に差し替える（Next のサーバを起こさない）。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AgentStatusIntent } from '@/domain/agent-status';
 import { AuditAction } from '@/domain/audit/action';
 import { AgentStatus, Role } from '@/domain/types';
 import { LOGIN_PATH, UI_TEXT } from '@/lib/constants';
 import { CSRF_FIELD_NAME, csrfTokenFor } from '@/lib/csrf';
-import { DASHBOARD_ACTION_INITIAL, TARGET_ID_FIELD_NAME } from '@/lib/dashboard/form';
+import {
+  DASHBOARD_ACTION_INITIAL,
+  INTENT_FIELD_NAME,
+  TARGET_ID_FIELD_NAME,
+} from '@/lib/dashboard/form';
 import { SESSION_COOKIE_NAME } from '@/lib/session';
 import { AUDIT_SECRET, seedEachTest } from './api/helpers';
 
@@ -52,15 +57,20 @@ vi.mock('next/cache', () => ({
 }));
 
 // 差し替えたモジュールを使うので、import は mock の後に動的に読む
-const { resumeAgent, stopAgent } = await import('@/app/(dashboard)/agents/actions');
+const { changeAgentStatus } = await import('@/app/(dashboard)/agents/actions');
 
 // テナント A / B と 3 役割のユーザー・トークン・エージェントを毎テスト作り直す
 const seed = seedEachTest();
 
-// フォームの入力を組み立てる（token から CSRF トークンを導く）
-function form(sessionToken: string, agentId: string): FormData {
+// フォームの入力を組み立てる（token から CSRF トークンを導く）。既定は「停止」の操作
+function form(
+  sessionToken: string,
+  agentId: string,
+  intent: string = AgentStatusIntent.stop,
+): FormData {
   const data = new FormData();
   data.set(TARGET_ID_FIELD_NAME, agentId);
+  data.set(INTENT_FIELD_NAME, intent);
   data.set(CSRF_FIELD_NAME, csrfTokenFor(sessionToken));
   return data;
 }
@@ -103,7 +113,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
   it('stop 権限があれば停止でき、監査ログに 1 行残る', async () => {
     // stop 権限を持つのは admin だけ（許可表 src/domain/rbac.ts が唯一の真実の源）
     loginAs(seed.a.tokens.admin);
-    const state = await stopAgent(
+    const state = await changeAgentStatus(
       DASHBOARD_ACTION_INITIAL,
       form(seed.a.tokens.admin, seed.a.agent.id),
     );
@@ -118,10 +128,10 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
   it('止めたものを復帰できる（操作名は agent_resumed）', async () => {
     // いったん止めてから戻す
     loginAs(seed.a.tokens.admin);
-    await stopAgent(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, seed.a.agent.id));
-    const state = await resumeAgent(
+    await changeAgentStatus(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, seed.a.agent.id));
+    const state = await changeAgentStatus(
       DASHBOARD_ACTION_INITIAL,
-      form(seed.a.tokens.admin, seed.a.agent.id),
+      form(seed.a.tokens.admin, seed.a.agent.id, AgentStatusIntent.resume),
     );
     // 成功の文言が返る
     expect(state).toEqual({ error: null, message: UI_TEXT.agentResumed });
@@ -141,7 +151,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
     async (role) => {
       // その役割でログインする
       loginAs(seed.a.tokens[role]);
-      const state = await stopAgent(
+      const state = await changeAgentStatus(
         DASHBOARD_ACTION_INITIAL,
         form(seed.a.tokens[role], seed.a.agent.id),
       );
@@ -157,7 +167,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
     // 別のセッションから導いたトークンを載せる（攻撃者が自分の値を入れた形）
     loginAs(seed.a.tokens.admin);
     const data = form(seed.b.tokens.admin, seed.a.agent.id);
-    const state = await stopAgent(DASHBOARD_ACTION_INITIAL, data);
+    const state = await changeAgentStatus(DASHBOARD_ACTION_INITIAL, data);
     // 断られる
     expect(state.error).toBe(UI_TEXT.actionRejected);
     expect(await statusOf(seed.a.id, seed.a.agent.id)).toBe(AgentStatus.active);
@@ -168,7 +178,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
     loginAs(seed.a.tokens.admin);
     const data = form(seed.a.tokens.admin, seed.a.agent.id);
     data.delete(CSRF_FIELD_NAME);
-    const state = await stopAgent(DASHBOARD_ACTION_INITIAL, data);
+    const state = await changeAgentStatus(DASHBOARD_ACTION_INITIAL, data);
     // 断られる
     expect(state.error).toBe(UI_TEXT.actionRejected);
     expect(await statusOf(seed.a.id, seed.a.agent.id)).toBe(AgentStatus.active);
@@ -179,7 +189,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
     // この検査だけが止めていることが分かる
     loginAs(seed.a.tokens.admin);
     requestHeaders = { origin: 'https://evil.example.com', host: 'ops.example.com' };
-    const state = await stopAgent(
+    const state = await changeAgentStatus(
       DASHBOARD_ACTION_INITIAL,
       form(seed.a.tokens.admin, seed.a.agent.id),
     );
@@ -191,7 +201,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
   it('未ログインならログイン画面へ送る', async () => {
     // Cookie が無い状態（セッション切れ後に古い画面から押した形）
     const target = await redirectTarget(() =>
-      stopAgent(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, seed.a.agent.id)),
+      changeAgentStatus(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, seed.a.agent.id)),
     );
     // ログイン画面へ送られる
     expect(target).toBe(LOGIN_PATH);
@@ -201,7 +211,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
   it('他テナントのエージェントは「見つからない」として断る（存在を漏らさない）', async () => {
     // テナント A のユーザーがテナント B のエージェント id を送る
     loginAs(seed.a.tokens.admin);
-    const state = await stopAgent(
+    const state = await changeAgentStatus(
       DASHBOARD_ACTION_INITIAL,
       form(seed.a.tokens.admin, seed.b.agent.id),
     );
@@ -214,11 +224,25 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
     expect(await auditActions(seed.b.id)).toEqual([]);
   });
 
+  it('知らない操作の名前は断る（状態の綴りを直接送る形も落とす）', async () => {
+    // `suspended` を直接指定する形・空の値・知らない語をすべて断る
+    loginAs(seed.a.tokens.admin);
+    for (const intent of ['suspended', 'active', '', 'constructor']) {
+      const state = await changeAgentStatus(
+        DASHBOARD_ACTION_INITIAL,
+        form(seed.a.tokens.admin, seed.a.agent.id, intent),
+      );
+      // 断られ、状態は変わらない（自動停止は人が指定する操作ではない）
+      expect(state.error, `${intent} が通ってしまう`).toBe(UI_TEXT.actionRejected);
+      expect(await statusOf(seed.a.id, seed.a.agent.id)).toBe(AgentStatus.active);
+    }
+  });
+
   it('資源 id の形でない値は断る', async () => {
     // パスに入らない形の値（NUL を含む等）を送る
     loginAs(seed.a.tokens.admin);
     const data = form(seed.a.tokens.admin, 'not an id\u0000');
-    const state = await stopAgent(DASHBOARD_ACTION_INITIAL, data);
+    const state = await changeAgentStatus(DASHBOARD_ACTION_INITIAL, data);
     // 断られる（形の定義は src/domain/resource-id.ts の 1 か所）
     expect(state.error).toBe(UI_TEXT.actionRejected);
   });
@@ -229,7 +253,7 @@ describe('エージェントの停止 / 復帰の Server Action', () => {
     vi.stubEnv('AUDIT_HMAC_SECRET', '');
     // 失敗する（画面にはエラー境界が出る。**成功を返さない**ことが要点）
     await expect(
-      stopAgent(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, seed.a.agent.id)),
+      changeAgentStatus(DASHBOARD_ACTION_INITIAL, form(seed.a.tokens.admin, seed.a.agent.id)),
     ).rejects.toThrow();
     // 鍵を戻す
     vi.stubEnv('AUDIT_HMAC_SECRET', AUDIT_SECRET);

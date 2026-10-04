@@ -26,10 +26,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
+  e2eOutputProblems,
   evaluateStep1Report,
   evaluateStep2Report,
   evaluateStep3Report,
   evaluateStep4Report,
+  evaluateStep5Report,
+  lighthouseOutputProblems,
   missingExclusionCases,
   missingFiringCases,
   missingMatrixCases,
@@ -82,6 +85,14 @@ import {
   GUARDRAIL_STOP_MAX_MS,
   TAMPER_TEST_PREFIX,
 } from '../scripts/lib/step4-criteria.mjs';
+import {
+  LIGHTHOUSE_CATEGORIES,
+  LIGHTHOUSE_MIN_SCORE,
+  LIGHTHOUSE_RUNS,
+  RECONCILE_TEST_NAME,
+  SCREEN_TEST_PREFIX,
+  STEP5_SCREENS,
+} from '../scripts/lib/step5-criteria.mjs';
 import {
   auditRowsProblem,
   firedRulesProblem,
@@ -229,6 +240,8 @@ const ROOT = process.cwd();
  * @param target 失敗させる npm のサブコマンド (空文字なら何も壊さない)
  * @param report テストの JSON レポートとして書かせる中身
  * @param benches npm スクリプト名ごとの、ベンチが出す JSON の材料 (ラベル・項目名・上限)
+ * @param printed npm スクリプト名ごとに、そのスクリプトが標準出力へ出す中身
+ *   (E2E のレポートや Lighthouse の結果のように、ゲートが**出力を読んで**判定するもの)
  * @returns 終了コードと、呼ばれた npm のサブコマンド
  */
 function runGateUnderShim(
@@ -236,6 +249,7 @@ function runGateUnderShim(
   target: string,
   report: string,
   benches: Record<string, { label: string; valueField: string; limitField: string; limit: number }>,
+  printed: Record<string, string> = {},
 ): { status: number | null; invoked: string[] } {
   // シムを置く一時ディレクトリ
   const shimDir = mkdtempSync(join(tmpdir(), 'agent-ops-npm-shim-'));
@@ -252,6 +266,13 @@ const key = argv[0] === 'run' ? argv[1] : argv[0];
 appendFileSync(${JSON.stringify(logPath)}, key + '\\n');
 const target = ${JSON.stringify(target)};
 const broken = key === target;
+const printed = ${JSON.stringify(printed)}[key];
+if (printed !== undefined) {
+  // 出力を読んで判定するもの (E2E / Lighthouse)。**壊すときも中身は出す** —
+  // 出さないと「読めません」で落ちてしまい、終了コードを見ているかが一度も試されない
+  console.log(printed);
+  process.exit(broken ? 1 : 0);
+}
 const bench = ${JSON.stringify(benches)}[key];
 if (bench !== undefined) {
   // ベンチは終了コードでなく**結果の JSON** で落ちるので、壊すときは基準を破る値を出す
@@ -808,6 +829,355 @@ describe('evaluateStep4Report', () => {
     // E2E のテストだけを落とす
     const failures = evaluateStep4Report({ ...base, report: fullReport({ e2e: false }) });
     expect(failures.some((message) => message.includes('E2E のテスト'))).toBe(true);
+  });
+});
+
+describe('evaluateStep5Report', () => {
+  // Step4 の材料に、Step5 の突合テストの名前を足したもの
+  const REASONS = ['unknown_case_id', 'judge_unavailable'];
+  const KINDS = Object.values(RuleKind);
+  const BREAKS = Object.values(AuditChainBreak);
+  const base = {
+    testStatus: 0,
+    requiredPassedTests: 60,
+    ...MATRIX,
+    models: PRICED_MODELS,
+    pricePrefix: PRICE_TEST_PREFIX,
+    reasons: REASONS,
+    exclusionPrefix: EXCLUSION_TEST_PREFIX,
+    kinds: KINDS,
+    firingPrefix: FIRING_TEST_PREFIX,
+    breaks: BREAKS,
+    tamperPrefix: TAMPER_TEST_PREFIX,
+    e2eTestName: GUARDRAIL_E2E_TEST_NAME,
+    reconcileTestName: RECONCILE_TEST_NAME,
+  };
+
+  // Step5 の基準をすべて満たすレポートを作る (突合テストを落とせる)
+  const fullReport = (options: { reconcile?: boolean } = {}): Record<string, unknown> => {
+    // 料金までのレポート
+    const priced = priceReport(PRICED_MODELS) as {
+      testResults: { assertionResults: unknown[] }[];
+      numPassedTests: number;
+    };
+    // 除外・発火・改ざん検知・ガードレールの E2E・突合を足す
+    const assertionResults = [
+      ...priced.testResults[0].assertionResults,
+      ...REASONS.map((reason) => ({
+        fullName: `${EXCLUSION_TEST_PREFIX}${reason} — 説明`,
+        status: 'passed',
+      })),
+      ...KINDS.map((kind) => ({
+        fullName: `${FIRING_TEST_PREFIX}${kind} しきい値を超えたら発火する`,
+        status: 'passed',
+      })),
+      ...BREAKS.map((reason) => ({
+        fullName: `${TAMPER_TEST_PREFIX}値を書き換えた行は ${reason} で落ちる`,
+        status: 'passed',
+      })),
+      { fullName: `ガードレールの E2E ${GUARDRAIL_E2E_TEST_NAME}`, status: 'passed' },
+      // **突合は実際の名前と同じく「説明が後ろに続く」形にする** (完全一致を前提にしない)
+      ...(options.reconcile === false
+        ? []
+        : [
+            {
+              fullName: `ダッシュボード ${RECONCILE_TEST_NAME}（独立に数え直す）`,
+              status: 'passed',
+            },
+          ]),
+    ];
+    return { ...priced, testResults: [{ assertionResults }] };
+  };
+
+  it('前 Step の基準と突合が揃っていれば失敗なし', () => {
+    // Step4 までの項目に突合が加わっている
+    expect(evaluateStep5Report({ ...base, report: fullReport() })).toEqual([]);
+  });
+
+  it('Step4 の基準 (改ざん検知) を引き継いでいる', () => {
+    // 壊れ方を 1 件も読めなかった状態にする (Step4 側の判定が効いているか)
+    const failures = evaluateStep5Report({ ...base, breaks: [], report: fullReport() });
+    expect(failures.some((message) => message.includes('壊れ方を 1 件も読めません'))).toBe(true);
+  });
+
+  it('突合テストが無ければ失敗になる (受け入れ基準 3)', () => {
+    // 突合だけを落とす
+    const failures = evaluateStep5Report({ ...base, report: fullReport({ reconcile: false }) });
+    expect(failures.some((message) => message.includes('突合テスト'))).toBe(true);
+  });
+
+  it('突合テストが落ちていれば失敗になる', () => {
+    // 名前はあるが status が failed
+    const report = fullReport() as { testResults: { assertionResults: { status: string }[] }[] };
+    const results = report.testResults[0].assertionResults;
+    results[results.length - 1].status = 'failed';
+    const failures = evaluateStep5Report({ ...base, report });
+    expect(failures.some((message) => message.includes('突合テスト'))).toBe(true);
+  });
+
+  it('突合テストの名前が無ければ失敗になる (照合の空振りを通さない)', () => {
+    // 名前を渡し忘れた状態
+    const failures = evaluateStep5Report({
+      ...base,
+      reconcileTestName: '',
+      report: fullReport(),
+    });
+    expect(failures.some((message) => message.includes('突合テストの名前がありません'))).toBe(true);
+  });
+});
+
+describe('e2eOutputProblems', () => {
+  // 判定に渡す画面一覧 (正本から取る。手書きにするとこの検査だけが古い一覧を見る)
+  const SCREENS = STEP5_SCREENS;
+  // 5 画面すべてが pass した Playwright のレポート (入れ子の suite 込み)
+  const fullReport = (options: { drop?: string; fail?: string } = {}): string =>
+    JSON.stringify({
+      suites: [
+        {
+          title: 'screens.spec.ts',
+          specs: [],
+          suites: [
+            {
+              title: '主要 5 画面',
+              specs: SCREENS.filter((screen) => screen.title !== options.drop).map((screen) => ({
+                title: `${SCREEN_TEST_PREFIX}${screen.title}`,
+                ok: screen.title !== options.fail,
+              })),
+            },
+          ],
+        },
+      ],
+    });
+
+  it('5 画面すべてが pass していれば失敗なし', () => {
+    // 入れ子を辿って spec を見つけられること
+    expect(
+      e2eOutputProblems({
+        status: 0,
+        stdout: fullReport(),
+        screens: SCREENS,
+        screenPrefix: SCREEN_TEST_PREFIX,
+      }),
+    ).toEqual([]);
+  });
+
+  it('終了コードが 0 でなければ失敗になる', () => {
+    const failures = e2eOutputProblems({
+      status: 1,
+      stdout: fullReport(),
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes('E2E が失敗しました'))).toBe(true);
+  });
+
+  it('画面 1 つ分のテストが無ければ失敗になる (画面を足して書き忘れた形)', () => {
+    // 1 画面分の spec を落とす
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: fullReport({ drop: SCREENS[0].title }),
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes(SCREENS[0].title))).toBe(true);
+  });
+
+  it('画面 1 つ分が落ちていれば失敗になる', () => {
+    // ok: false の spec がある
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: fullReport({ fail: SCREENS[1].title }),
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes(SCREENS[1].title))).toBe(true);
+  });
+
+  it('spec が 1 本も無ければ失敗になる (スイートを空にする形)', () => {
+    // suite はあるが spec が無い
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: JSON.stringify({ suites: [{ title: 'screens.spec.ts', specs: [], suites: [] }] }),
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes('1 本も走っていません'))).toBe(true);
+  });
+
+  it('レポートが読めなければ失敗になる (何も出さずに終わる形)', () => {
+    // 標準出力が空
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: '',
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes('読めません'))).toBe(true);
+  });
+
+  it('壊れた JSON は理由を付けて失敗になる', () => {
+    // 括弧は揃っているが JSON として読めない
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: '{ "suites": [ }',
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes('解釈できません'))).toBe(true);
+  });
+
+  it('画面一覧が空なら失敗になる (照合の空振りを通さない)', () => {
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: fullReport(),
+      screens: [],
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes('1 つも読めません'))).toBe(true);
+  });
+
+  it('npm の前置きが混ざっても読める', () => {
+    // npm run の出力が先に来る形
+    expect(
+      e2eOutputProblems({
+        status: 0,
+        stdout: `> agent-ops@0.1.0 test:e2e\n> playwright test\n\n${fullReport()}\n`,
+        screens: SCREENS,
+        screenPrefix: SCREEN_TEST_PREFIX,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('lighthouseOutputProblems', () => {
+  // 判定に渡す材料 (正本から取る)
+  const SCREENS = STEP5_SCREENS;
+  const base = {
+    screens: SCREENS,
+    categories: LIGHTHOUSE_CATEGORIES,
+    minScore: LIGHTHOUSE_MIN_SCORE,
+    runs: LIGHTHOUSE_RUNS,
+  };
+  // 全画面が合格点の結果 (1 行の JSON)
+  const fullOutput = (overrides: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      measure: 'lighthouse',
+      minScore: LIGHTHOUSE_MIN_SCORE,
+      categories: LIGHTHOUSE_CATEGORIES,
+      runs: LIGHTHOUSE_RUNS,
+      pages: SCREENS.map((screen) => ({
+        page: screen.key,
+        scores: Object.fromEntries(
+          LIGHTHOUSE_CATEGORIES.map((category) => [category, LIGHTHOUSE_MIN_SCORE + 5]),
+        ),
+      })),
+      ...overrides,
+    });
+
+  it('全画面が合格点なら失敗なし', () => {
+    expect(lighthouseOutputProblems({ ...base, status: 0, stdout: fullOutput() })).toEqual([]);
+  });
+
+  it('終了コードが 0 でなければ失敗になる', () => {
+    const failures = lighthouseOutputProblems({ ...base, status: 1, stdout: fullOutput() });
+    expect(failures.some((message) => message.includes('計測が失敗しました'))).toBe(true);
+  });
+
+  it('合格点を下回る画面があれば失敗になる', () => {
+    // 1 画面だけ 1 点足りない
+    const low = JSON.parse(fullOutput()) as {
+      pages: { page: string; scores: Record<string, number> }[];
+    };
+    low.pages[0].scores[LIGHTHOUSE_CATEGORIES[0]] = LIGHTHOUSE_MIN_SCORE - 1;
+    const failures = lighthouseOutputProblems({
+      ...base,
+      status: 0,
+      stdout: JSON.stringify(low),
+    });
+    expect(failures.some((message) => message.includes(low.pages[0].page))).toBe(true);
+  });
+
+  it('測っていない画面があれば失敗になる', () => {
+    // 1 画面分の結果が無い
+    const partial = JSON.parse(fullOutput()) as { pages: unknown[] };
+    partial.pages = partial.pages.slice(1);
+    const failures = lighthouseOutputProblems({
+      ...base,
+      status: 0,
+      stdout: JSON.stringify(partial),
+    });
+    expect(failures.some((message) => message.includes(SCREENS[0].key))).toBe(true);
+  });
+
+  it('カテゴリを 1 つしか測っていなければ失敗になる', () => {
+    // categories が片方だけ
+    const failures = lighthouseOutputProblems({
+      ...base,
+      status: 0,
+      stdout: fullOutput({ categories: [LIGHTHOUSE_CATEGORIES[0]] }),
+    });
+    expect(failures.some((message) => message.includes('測っていないカテゴリ'))).toBe(true);
+  });
+
+  it('合格点が正本と食い違えば失敗になる', () => {
+    // 出力側の合格点だけを下げる (どちらかが古い)
+    const failures = lighthouseOutputProblems({
+      ...base,
+      status: 0,
+      stdout: fullOutput({ minScore: LIGHTHOUSE_MIN_SCORE - 10 }),
+    });
+    expect(failures.some((message) => message.includes('minScore'))).toBe(true);
+  });
+
+  it('計測回数が正本と食い違えば失敗になる (1 回に減らす形)', () => {
+    // 揺れをそのまま判定に持ち込む形を落とす
+    const failures = lighthouseOutputProblems({
+      ...base,
+      status: 0,
+      stdout: fullOutput({ runs: 1 }),
+    });
+    expect(failures.some((message) => message.includes('計測回数'))).toBe(true);
+  });
+
+  it('結果の JSON が無ければ失敗になる (何も測らずに終わる形)', () => {
+    const failures = lighthouseOutputProblems({ ...base, status: 0, stdout: '' });
+    expect(failures.some((message) => message.includes('読めません'))).toBe(true);
+  });
+
+  it('結果の JSON が 2 本あれば失敗になる (嘘の行を重ねる形)', () => {
+    const failures = lighthouseOutputProblems({
+      ...base,
+      status: 0,
+      stdout: `${fullOutput()}\n${fullOutput()}`,
+    });
+    expect(failures.some((message) => message.includes('2 本あります'))).toBe(true);
+  });
+
+  it('点数が数値でなければ失敗になる', () => {
+    // 文字列の点数 ("90" のような形で比較をすり抜けさせない)
+    const broken = JSON.parse(fullOutput()) as {
+      pages: { page: string; scores: Record<string, unknown> }[];
+    };
+    broken.pages[0].scores[LIGHTHOUSE_CATEGORIES[0]] = String(LIGHTHOUSE_MIN_SCORE + 5);
+    const failures = lighthouseOutputProblems({
+      ...base,
+      status: 0,
+      stdout: JSON.stringify(broken),
+    });
+    expect(failures.some((message) => message.includes('数値の'))).toBe(true);
+  });
+
+  it('材料が欠けていれば失敗になる (比較が無音で消えないように)', () => {
+    // 画面一覧が空・カテゴリが空・合格点が無い
+    for (const patch of [{ screens: [] }, { categories: [] }, { minScore: undefined }]) {
+      const failures = lighthouseOutputProblems({
+        ...base,
+        ...patch,
+        status: 0,
+        stdout: fullOutput(),
+      } as Parameters<typeof lighthouseOutputProblems>[0]);
+      expect(failures.length).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -2322,8 +2692,11 @@ describe('判定の結線', () => {
       ...exclusions,
       ...firings,
       ...tampers,
-      // E2E は 1 本だけ (受け入れ基準 3)
+      // E2E は 1 本だけ (Step4 の受け入れ基準 3)
       GUARDRAIL_E2E_TEST_NAME,
+      // 突合も 1 本だけ (Step5 の受け入れ基準 3)。**説明が後ろに続く形**にする
+      // (実際のテスト名と同じく、完全一致を前提にしない)
+      `ダッシュボード ${RECONCILE_TEST_NAME}（独立に数え直す）`,
     ];
     // 件数の下限まで埋める
     const filler = Math.max(0, REQUIRED_PASSED_TESTS - named.length);
@@ -2340,7 +2713,7 @@ describe('判定の結線', () => {
     };
     // **組み立てた結果が意図どおりであることを、判定そのものに確かめさせる**。
     // 最新 Step の判定に通すので、前の Step の基準もそこから引き継がれて確かめられる
-    const failures = evaluateStep4Report({
+    const failures = evaluateStep5Report({
       testStatus: 0,
       report,
       requiredPassedTests: REQUIRED_PASSED_TESTS,
@@ -2356,6 +2729,7 @@ describe('判定の結線', () => {
       breaks: Object.values(AuditChainBreak),
       tamperPrefix: TAMPER_TEST_PREFIX,
       e2eTestName: GUARDRAIL_E2E_TEST_NAME,
+      reconcileTestName: RECONCILE_TEST_NAME,
     });
     // 落としたなら基準を満たさないこと、満点なら満たすこと
     if (dropPricedIndex >= 0)
@@ -2377,9 +2751,11 @@ describe('判定の結線', () => {
       const report = fullMarksReport();
       // ベンチが出す JSON の材料 (npm スクリプト名ごと)
       const benches = benchMaterials();
+      // 出力を読んで判定するもの (E2E / Lighthouse) が出す中身
+      const printed = printedMaterials();
       // **positive control**: 何も壊さなければ 0 で終わる。これが検査自身の射程を固定する —
       // 射程が縮めば「壊していないのに落ちる」か「壊したのに落ちない」のどちらかで赤くなる
-      const clean = runGateUnderShim(name, '', report, benches);
+      const clean = runGateUnderShim(name, '', report, benches, printed);
       expect(clean.status, `${name} がすべて成功しても緑にならない`).toBe(0);
       // **流すと書いてあるもの**を、実行とは別の手がかり（ソース）から導く。
       // **「実際に呼ばれたもの」から検査対象を導いてはいけない** — 途中で黙って終わる変異は
@@ -2410,7 +2786,7 @@ describe('判定の結線', () => {
         ).toContain(script);
       // **negative control**: 流すと書いてあるものを 1 つずつ壊す
       for (const target of required) {
-        const broken = runGateUnderShim(name, target, report, benches);
+        const broken = runGateUnderShim(name, target, report, benches, printed);
         expect(
           typeof broken.status === 'number' && broken.status !== 0,
           `${name} が ${target} の失敗を無視して成功終了した (終了コード ${String(broken.status)})`,
@@ -2435,6 +2811,7 @@ describe('判定の結線', () => {
         '',
         fullMarksReport(dropAt),
         benchMaterials(),
+        printedMaterials(),
       );
       // 非 0 で終わっていること (0 なら料金表の全モデルを見ていない)
       expect(
@@ -2471,6 +2848,49 @@ describe('判定の結線', () => {
     // 1 件も読めなければ fail-closed
     expect(models.length, '料金表のモデルを 1 つも読めない').toBeGreaterThan(0);
     return models.map((_model, index) => index);
+  }
+
+  /**
+   * 出力を読んで判定するもの（E2E / Lighthouse）が標準出力へ出す中身を、npm スクリプト名ごとに
+   * 組み立てる。**受け入れ基準を満たす内容**にするので、positive control が通る。
+   *
+   * **画面一覧・合格点・計測回数は正本から取る** — 写しを持つと、基準を変えたときに
+   * この材料だけが古くなり「満点のつもりのレポートで赤くなる」形になる。
+   */
+  function printedMaterials(): Record<string, string> {
+    // Playwright の JSON レポート（入れ子の suite の中に 5 画面ぶんの spec）
+    const e2e = JSON.stringify({
+      suites: [
+        {
+          title: 'screens.spec.ts',
+          specs: [],
+          suites: [
+            {
+              title: '主要 5 画面',
+              specs: STEP5_SCREENS.map((screen) => ({
+                title: `${SCREEN_TEST_PREFIX}${screen.title}`,
+                ok: true,
+              })),
+            },
+          ],
+        },
+      ],
+    });
+    // Lighthouse の結果（全画面・全カテゴリが合格点）
+    const lighthouse = JSON.stringify({
+      measure: 'lighthouse',
+      minScore: LIGHTHOUSE_MIN_SCORE,
+      categories: LIGHTHOUSE_CATEGORIES,
+      runs: LIGHTHOUSE_RUNS,
+      pages: STEP5_SCREENS.map((screen) => ({
+        page: screen.key,
+        scores: Object.fromEntries(
+          LIGHTHOUSE_CATEGORIES.map((category) => [category, LIGHTHOUSE_MIN_SCORE]),
+        ),
+      })),
+    });
+    // npm スクリプト名ごとに割り当てる
+    return { 'test:e2e': e2e, lighthouse };
   }
 
   // ベンチが出す JSON の材料を npm スクリプト名ごとに組み立てる (ラベル・上限の写しを作らない)

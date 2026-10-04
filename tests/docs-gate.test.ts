@@ -28,6 +28,8 @@ import {
 } from '../scripts/lib/step3-criteria.mjs';
 // Step4 のベンチのしきい値 (同じくロードマップの散文と突き合わせる)
 import { GUARDRAIL_STOP_MAX_MS } from '../scripts/lib/step4-criteria.mjs';
+// Step5 の受け入れ基準 (Lighthouse の合格点と画面の枚数。同じく散文と突き合わせる)
+import { LIGHTHOUSE_MIN_SCORE, STEP5_SCREENS } from '../scripts/lib/step5-criteria.mjs';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -206,6 +208,22 @@ describe('Step0 の設計成果物', () => {
     // 数字の途中への一致は許さない — 「30 秒」へ緩める差分を「3 秒」が拾わないようにする)
     expect(stepRow, '発火から停止までの上限がずれている').toMatch(
       new RegExp(`(?<![0-9])${GUARDRAIL_STOP_MAX_MS / 1_000} 秒`),
+    );
+  });
+
+  // Step5 の受け入れ基準のうち数で書けるもの (Lighthouse の合格点・画面の枚数) を散文と突き合わせる。
+  // Step2〜4 と同じ理由 — 値は正本 (scripts/lib/step5-criteria.mjs) とロードマップの 2 か所に
+  // 現れるので、「ゲートのしきい値だけを緩めて緑にする」変更をここで落とす
+  it('Step5 の受け入れ基準がロードマップと一致する', () => {
+    // ロードマップの Step5 の行
+    const stepRow = roadmapStepRow(5);
+    // Lighthouse の合格点 (散文は「≧ 90」。数字の途中への一致は許さない)
+    expect(stepRow, 'Lighthouse の合格点がずれている').toMatch(
+      new RegExp(`(?<![0-9])${LIGHTHOUSE_MIN_SCORE}(?![0-9])`),
+    );
+    // 画面の枚数 (散文は「主要 5 画面」。一覧の件数から導く)
+    expect(stepRow, '画面の枚数がずれている').toMatch(
+      new RegExp(`(?<![0-9])${STEP5_SCREENS.length} 画面`),
     );
   });
 

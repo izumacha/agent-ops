@@ -32,6 +32,8 @@ Step4 までで作ったのは REST API だけで、**このリポジトリに�
 
 **空のセッションを先に弾く**（`csrfTokenMatches` の 1 行目）。弾かないと「鍵が空の HMAC」という誰でも計算できる値が正解になる。
 
+**配備の前提**: Origin の照合は `Host` ヘッダと突き合わせ、**`X-Forwarded-Host` は見ない**。前段にリバースプロキシを置く場合はブラウザが送った `Host` をそのまま転送する必要がある（nginx の `proxy_pass` は既定で上流のアドレスへ書き換えるので `proxy_set_header Host $host;` が要る）。転送しないと書き込みがすべて拒否される — fail-closed なので安全側だが、画面には「要求を受け付けられませんでした」としか出ず原因が読めないので、README の運用手順に明記した。転送ヘッダを信頼する形にしないのは、`X-Forwarded-Host` は前段が付け替えない限り要求元が自由に名乗れるため（信頼できる前段がある配備でだけ意味を持つ設定を既定にしない）。
+
 ### 3. 画面のデータ取得は Server Component から data 層を直接読む
 
 自分の REST API を HTTP で呼ばない（認証の二重化と往復のコストを避ける）。`tenantId` は Cookie の主体から取り出して `where` に必ず差し込む（ADR-0002）。書き込みは Server Action で、冒頭で既存の `requireAction` / `requireAdminRole` を呼ぶ。

@@ -198,6 +198,13 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 CSRF 対策の代わりにならないので併用する。§9）。権限は API と同じ許可表（`src/domain/rbac.ts`）を
 Server Action の冒頭で確かめるので、ボタンを隠すだけに頼らない。
 
+> **前段にリバースプロキシを置くときは、ブラウザが送った `Host` をそのまま転送すること。**
+> Origin の照合は `Origin` ヘッダのホストと `Host` ヘッダを突き合わせる（`X-Forwarded-Host` は
+> 見ない）。nginx の `proxy_pass` は既定で `Host` を上流のアドレスに書き換えるので、
+> `proxy_set_header Host $host;` を入れないと**画面の書き込み操作がすべて拒否される**
+> （fail-closed なので危険ではないが、「要求を受け付けられませんでした」が出続けて原因が
+> 画面からは読めない）。
+
 ## 検証コマンド
 
 ```bash

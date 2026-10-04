@@ -18,6 +18,7 @@
     "test:contract": "node scripts/require-contract-env.mjs && vitest run tests/data --no-file-parallelism",
     "test:e2e": "playwright test",
     "lighthouse": "tsx scripts/measure-lighthouse.mts",
+    "capture:screenshots": "tsx scripts/capture-screenshots.mts",
     "gen": "openapi-typescript openapi/openapi.yaml -o src/generated/openapi.d.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

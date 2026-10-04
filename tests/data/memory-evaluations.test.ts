@@ -136,6 +136,28 @@ describe('memory アダプタの評価', () => {
     ).not.toBeNull();
     // 他テナントから同じエージェント id を指しても見えない (テナント条件が効いている)
     expect(await repos.evaluations.findLatestCompletedRun('tn-other', agentId)).toBeNull();
+    // **agentId が null ならテナント全体から探す** (ダッシュボードの品質カード。prisma 側と同じ答え)
+    expect(await repos.evaluations.findLatestCompletedRun(tenantId, null)).not.toBeNull();
+    // null でもテナント条件は効く
+    expect(await repos.evaluations.findLatestCompletedRun('tn-other', null)).toBeNull();
+    // **until より後の実行は見えない** (ダッシュボードは過去の期間も選べるので上限が要る)
+    expect(
+      await repos.evaluations.findLatestCompletedRun(
+        tenantId,
+        null,
+        undefined,
+        new Date(Date.now() - 60_000),
+      ),
+    ).toBeNull();
+    // 上限の内側なら見える
+    expect(
+      await repos.evaluations.findLatestCompletedRun(
+        tenantId,
+        null,
+        undefined,
+        new Date(Date.now() + 60_000),
+      ),
+    ).not.toBeNull();
   });
 
   it('同じ時刻の 2 件は id の大きい方を最新とする (並びが揺れない)', async () => {

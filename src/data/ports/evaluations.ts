@@ -109,9 +109,16 @@ export interface EvaluationsPort {
   // 窓を無視すると「3 か月前に 1 度だけ走って低い点だった」エージェントが、その後 1 度も
   // 評価していないのに毎回の判定で停止し続ける (インシデントを解決して復帰させても、
   // 次の判定で同じ古い実行を読んで再び止まる = ルールを無効にするまで抜け出せない)
+  //
+  // **`agentId` に `null` を渡すとテナント全体の最新 1 件**（ダッシュボードの品質カードが使う）。
+  // 画面はエージェントごとに引かない — 台数ぶんの往復になり §8 の N+1 そのものになる。
+  //
+  // **`until` より後の実行も見ない**（ダッシュボードは過去の期間も選べるので上限が要る。
+  // 省略すると上限なし＝ガードレールの呼び方と同じ）。
   findLatestCompletedRun(
     tenantId: string,
-    agentId: string,
+    agentId: string | null,
     since?: Date,
+    until?: Date,
   ): Promise<EvaluationRunRecord | null>;
 }

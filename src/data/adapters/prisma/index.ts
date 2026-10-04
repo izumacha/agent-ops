@@ -917,17 +917,24 @@ class PrismaEvaluations implements EvaluationsPort {
   // 読むのは誤判定 (採点できていないことと品質が低いことは別)
   async findLatestCompletedRun(
     tenantId: string,
-    agentId: string,
+    agentId: string | null,
     since?: Date,
+    until?: Date,
   ): Promise<EvaluationRunRecord | null> {
+    // 期間の条件を 1 つのオブジェクトにまとめる (両方省略なら条件を付けない)。
+    // **gte と lt を別の createdAt キーに分けて書けない**ので、ここで合成する
+    const createdAt = {
+      ...(since === undefined ? {} : { gte: since }),
+      ...(until === undefined ? {} : { lt: until }),
+    };
     // 一覧と同じ並び (createdAt, id) の降順で先頭を取る (同時刻でも相手が入れ替わらない)。
-    // **`since` 以降に絞る** (品質ルールの集計窓。memory 側と同じ条件)
+    // **`agentId` が null ならテナント全体**から探す (ダッシュボードの品質カード)
     return this.db.evaluationRun.findFirst({
       where: {
         tenantId,
-        agentId,
+        ...(agentId === null ? {} : { agentId }),
         status: EvaluationRunStatus.completed,
-        ...(since === undefined ? {} : { createdAt: { gte: since } }),
+        ...(Object.keys(createdAt).length === 0 ? {} : { createdAt }),
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });

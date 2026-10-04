@@ -810,17 +810,20 @@ class MemoryEvaluations implements EvaluationsPort {
   // そのエージェントの最新の completed な実行 (品質低下ルールが読む相手)
   async findLatestCompletedRun(
     tenantId: string,
-    agentId: string,
+    agentId: string | null,
     since?: Date,
+    until?: Date,
   ): Promise<EvaluationRunRecord | null> {
-    // テナント・エージェントが一致し、採点が成立した実行だけを集める。
-    // **`since` 以降に絞る** (品質ルールの集計窓。prisma の where と同じ条件)
+    // テナントが一致し、採点が成立した実行だけを集める。
+    // **`agentId` が null ならエージェントで絞らない** (テナント全体の最新 1 件)。
+    // **`since` 以降・`until` より前に絞る** (prisma の where と同じ条件)
     const candidates = [...this.store.evaluationRuns.values()].filter(
       (row) =>
         row.tenantId === tenantId &&
-        row.agentId === agentId &&
+        (agentId === null || row.agentId === agentId) &&
         row.status === EvaluationRunStatus.completed &&
-        (since === undefined || row.createdAt.getTime() >= since.getTime()),
+        (since === undefined || row.createdAt.getTime() >= since.getTime()) &&
+        (until === undefined || row.createdAt.getTime() < until.getTime()),
     );
     // 1 件も無ければ測れていない (ルールは発火しない)
     if (candidates.length === 0) return null;

@@ -460,6 +460,18 @@ describe.skipIf(!ENABLED)('評価の契約', () => {
     expect(
       (await repos.evaluations.findLatestCompletedRun(tenantId, agent.id, sameMoment))?.id,
     ).toBe(higherId);
+    // **agentId が null ならテナント全体から探す** (ダッシュボードの品質カード。memory 側にも同じ検査がある)
+    expect((await repos.evaluations.findLatestCompletedRun(tenantId, null))?.id).toBe(higherId);
+    // null でもテナント条件は効く
+    expect(await repos.evaluations.findLatestCompletedRun('tn-other', null)).toBeNull();
+    // **until より後の実行は見えない** (上限は「より前」なので実行時刻そのものは含まない)
+    expect(
+      await repos.evaluations.findLatestCompletedRun(tenantId, null, undefined, sameMoment),
+    ).toBeNull();
+    // 上限の内側なら見える
+    expect(
+      (await repos.evaluations.findLatestCompletedRun(tenantId, null, undefined, afterRuns))?.id,
+    ).toBe(higherId);
   });
 
   it('同じケースの結果を 2 つ持つ実行は一意制約が拒否する', async () => {

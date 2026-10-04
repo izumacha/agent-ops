@@ -4,8 +4,9 @@
 // (Next 非依存の純粋な部分) が持ち、ここは Cookie の読み書きと「未ログインなら /login へ」の
 // 枝だけを担う。分けているのは、規則の側を DB も Next も無しで単体テストできるようにするため。
 import { cookies, headers } from 'next/headers';
-import { redirect } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import { getRepos } from '@/data';
+import { canPerform } from '@/domain/rbac';
 import type { UserPrincipal } from '@/lib/api/auth';
 import { LOGIN_PATH } from '@/lib/constants';
 import { isSameOriginRequest } from '@/lib/csrf';
@@ -64,17 +65,29 @@ export async function currentSession(): Promise<DashboardSession | null> {
 }
 
 /**
- * ログインを必須にする。していなければ `/login` へリダイレクトする（この関数は戻らない）。
+ * ログインを必須にし、**閲覧の権限（`view`）まで確かめる**。
+ * ログインしていなければ `/login` へ、権限が無ければ 404 を返す（どちらもこの関数は戻らない）。
  *
  * **画面の冒頭で必ず呼ぶ。** 認可の判定をサーバ側で行う唯一の入口で、
  * UI を隠すだけに頼らない（§9）。
+ *
+ * **`view` も見るのが要点。** 同じ数字を返す `GET /usage/daily` は `requireAction(principal,
+ * 'view')` を通すのに、画面側が認証だけで止まっていると、両者は「現在の許可表ではたまたま
+ * 3 役割すべてが `view` を持つ」という偶然で一致しているだけになる。Step6 で `view` を持たない
+ * 役割（課金だけを見る主体など）を足した瞬間、API は 403 なのに画面はコスト・品質・稼働率を
+ * 出し CSV まで落とせる、という fail-open が黙って生まれる。
+ *
+ * **権限が無いときは 404。** このリポジトリは「見てよい資源でなければ存在を隠す」
+ * （他テナントの資源は 403 ではなく 404。ADR-0002）方針なので、画面でも同じにそろえる。
  */
 export async function requireSession(): Promise<DashboardSession> {
   // 今のセッションを引く
   const session = await currentSession();
   // 無ければログイン画面へ送る (redirect は例外を投げるのでここから先は実行されない)
   if (session === null) redirect(LOGIN_PATH);
-  // ログイン中ならそのまま返す
+  // 閲覧の権限が無ければ 404 にする（notFound も例外を投げるのでここから先は実行されない）
+  if (!canPerform(session.principal.user.role, 'view')) notFound();
+  // ログイン中かつ閲覧できるならそのまま返す
   return session;
 }
 

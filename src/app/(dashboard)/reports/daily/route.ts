@@ -4,6 +4,7 @@
 // 「ブラウザのセッションでダウンロードする画面の一部」だから（認証は Cookie、応答は CSV）。
 // OpenAPI の契約（ADR-0003）は `/api/v1` の下だけを対象にする。
 import { getRepos } from '@/data';
+import { canPerform } from '@/domain/rbac';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { buildDailyReportCsv, dailyReportFileName } from '@/lib/dashboard/csv';
 import { resolveDashboardRange } from '@/lib/dashboard/range';
@@ -17,6 +18,15 @@ export async function GET(request: Request): Promise<Response> {
   if (session === null) {
     return new Response('ログインが必要です。\n', {
       status: HTTP_STATUS.UNAUTHORIZED,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
+  }
+  // **閲覧の権限もここで確かめる**（画面の `requireSession()` と同じ判定。このルートは
+  // レイアウトを通らないので、認証だけで止めると「API は 403 なのに CSV は落とせる」が生まれる）。
+  // 権限が無ければ 404（見てよい資源でなければ存在を隠す。ADR-0002 と同じ方針）
+  if (!canPerform(session.principal.user.role, 'view')) {
+    return new Response('見つかりません。\n', {
+      status: HTTP_STATUS.NOT_FOUND,
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
   }

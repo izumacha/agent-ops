@@ -483,6 +483,25 @@ function jsonObjectsInLines(stdout) {
  * @param {{ suites?: unknown[] }} report Playwright の JSON レポート
  * @returns {{ title: string, ok: boolean }[]} spec の名前と成否
  */
+/**
+ * その spec が**実際に通った**かを返す。
+ *
+ * **`spec.ok` を信じてはいけない。** Playwright の JSON レポータが書く `ok` は
+ * `TestCase.ok()` の値で、`skipped` でも `true` になる（`expected` / `flaky` / `skipped` が
+ * すべて真）。そのため `ok` だけを見ると、画面 1 つに `test.skip()` を足すだけで
+ * 「その画面は一度も動いていないのにゲートは 5 画面すべて pass」になる — 検出網が自分で
+ * 塞いだつもりの「画面 1 つ分のテストを消す形」の、より静かな版（テストの本数も減らない）。
+ *
+ * そこで **1 本以上走っていて、すべてが `expected` であること**を求める。`flaky` を通さないのは、
+ * このスイートが状態を書き換える直列の 1 本で、再試行は意味を持たないため（`playwright.config.ts`）。
+ */
+function specPassed(spec) {
+  // 実行の記録が配列でなければ走っていない
+  if (!Array.isArray(spec.tests) || spec.tests.length === 0) return false;
+  // 1 本でも「期待どおり通った」以外があれば通っていない扱いにする
+  return spec.tests.every((test) => test?.status === 'expected');
+}
+
 function playwrightSpecs(report) {
   // 集めた spec
   const specs = [];
@@ -496,7 +515,7 @@ function playwrightSpecs(report) {
     // その suite が持つ spec
     for (const spec of Array.isArray(suite.specs) ? suite.specs : []) {
       // 名前と成否が読めるものだけを集める
-      if (typeof spec?.title === 'string') specs.push({ title: spec.title, ok: spec.ok === true });
+      if (typeof spec?.title === 'string') specs.push({ title: spec.title, ok: specPassed(spec) });
     }
     // 子の suite を積む
     for (const child of Array.isArray(suite.suites) ? suite.suites : []) queue.push(child);
@@ -583,15 +602,20 @@ export function lighthouseOutputProblems({ status, stdout, screens, categories, 
   const failures = [];
   // 終了コードが 0 でなければ、理由は計測スクリプトが出している
   if (status !== 0) failures.push(`Lighthouse の計測が失敗しました (終了コード ${status})`);
-  // 材料が揃っていなければ落とす (呼び出し側で 1 つ省くだけで比較が無音で消えないように)
+  // 材料が揃っていなければ落とす (呼び出し側で 1 つ省くだけで比較が無音で消えないように)。
+  // **終了コードの失敗とは別に数える** — 同じ配列へ混ぜて `failures.length > 0 && status === 0`
+  // で返していた版は、計測が非 0 で終わったときに材料不足の枝を素通りし、`categories.filter`
+  // が `undefined` を触って TypeError になっていた（判定の文言が 1 つも返らず、呼び出し側の
+  // `exitIfFailures` は理由を出す機会すら失う。実測）
+  const missingMaterials = [];
   if (!Array.isArray(screens) || screens.length === 0)
-    failures.push('Lighthouse の対象画面を 1 つも読めません');
+    missingMaterials.push('Lighthouse の対象画面を 1 つも読めません');
   if (!Array.isArray(categories) || categories.length === 0)
-    failures.push('Lighthouse の対象カテゴリを 1 つも読めません');
-  if (typeof minScore !== 'number') failures.push('Lighthouse の合格点がありません');
-  if (typeof runs !== 'number') failures.push('Lighthouse の計測回数がありません');
-  // 1 つでも欠けていれば比較できない
-  if (failures.length > 0 && status === 0) return failures;
+    missingMaterials.push('Lighthouse の対象カテゴリを 1 つも読めません');
+  if (typeof minScore !== 'number') missingMaterials.push('Lighthouse の合格点がありません');
+  if (typeof runs !== 'number') missingMaterials.push('Lighthouse の計測回数がありません');
+  // 1 つでも欠けていれば比較できないので、終了コードの成否に関わらずここで返す
+  if (missingMaterials.length > 0) return [...failures, ...missingMaterials];
   // 結果の 1 行を探す (ベンチと同じ読み方を共有する)
   const candidates = jsonObjectsInLines(stdout).filter((value) => value.measure === 'lighthouse');
   // 無ければ測っていない (fail-closed)

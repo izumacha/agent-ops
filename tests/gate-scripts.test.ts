@@ -929,8 +929,11 @@ describe('evaluateStep5Report', () => {
 describe('e2eOutputProblems', () => {
   // 判定に渡す画面一覧 (正本から取る。手書きにするとこの検査だけが古い一覧を見る)
   const SCREENS = STEP5_SCREENS;
-  // 5 画面すべてが pass した Playwright のレポート (入れ子の suite 込み)
-  const fullReport = (options: { drop?: string; fail?: string } = {}): string =>
+  // 5 画面すべてが pass した Playwright のレポート (入れ子の suite 込み)。
+  // **`ok` と `tests[].status` の両方を本物と同じ形で入れる** — Playwright は skip された
+  // spec にも `ok: true` を書くので、`status` が無いフィクスチャでは「skip を pass と
+  // 数える」退行を再現できない
+  const fullReport = (options: { drop?: string; fail?: string; skip?: string } = {}): string =>
     JSON.stringify({
       suites: [
         {
@@ -941,7 +944,18 @@ describe('e2eOutputProblems', () => {
               title: '主要 5 画面',
               specs: SCREENS.filter((screen) => screen.title !== options.drop).map((screen) => ({
                 title: `${SCREEN_TEST_PREFIX}${screen.title}`,
+                // skip された spec も Playwright は ok: true と書く (TestCase.ok() の仕様)
                 ok: screen.title !== options.fail,
+                tests: [
+                  {
+                    status:
+                      screen.title === options.fail
+                        ? 'unexpected'
+                        : screen.title === options.skip
+                          ? 'skipped'
+                          : 'expected',
+                  },
+                ],
               })),
             },
           ],
@@ -991,6 +1005,40 @@ describe('e2eOutputProblems', () => {
       screenPrefix: SCREEN_TEST_PREFIX,
     });
     expect(failures.some((message) => message.includes(SCREENS[1].title))).toBe(true);
+  });
+
+  it('skip された画面は pass と数えない (test.skip() で黙らせる形)', () => {
+    // **Playwright は skip された spec にも `ok: true` を書く**ので、`ok` だけを見ていた版は
+    // 「その画面は一度も動いていないのに 5 画面すべて pass」になっていた (テストの本数も減らない)
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: fullReport({ skip: SCREENS[2].title }),
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    expect(failures.some((message) => message.includes(SCREENS[2].title))).toBe(true);
+  });
+
+  it('実行の記録が無い spec も pass と数えない (レポートを削った形)', () => {
+    // `tests` を持たない spec だけのレポート (ok だけを書いた偽の結果)
+    const failures = e2eOutputProblems({
+      status: 0,
+      stdout: JSON.stringify({
+        suites: [
+          {
+            title: '主要 5 画面',
+            specs: SCREENS.map((screen) => ({
+              title: `${SCREEN_TEST_PREFIX}${screen.title}`,
+              ok: true,
+            })),
+          },
+        ],
+      }),
+      screens: SCREENS,
+      screenPrefix: SCREEN_TEST_PREFIX,
+    });
+    // 5 画面すべてが「不足/失敗」に挙がる
+    expect(failures.some((message) => message.includes(SCREENS[0].title))).toBe(true);
   });
 
   it('spec が 1 本も無ければ失敗になる (スイートを空にする形)', () => {
@@ -1178,6 +1226,27 @@ describe('lighthouseOutputProblems', () => {
       } as Parameters<typeof lighthouseOutputProblems>[0]);
       expect(failures.length).toBeGreaterThan(0);
     }
+  });
+
+  it('計測が非 0 で終わっていても、材料不足は理由を付けて返す (例外にしない)', () => {
+    // **終了コードの失敗と材料不足が同時に起きる場合** — 1 つの配列へ混ぜて
+    // 「失敗があり、かつ終了コードが 0 なら返す」としていた版は、この組み合わせで
+    // 判定を素通りし `categories.filter` が undefined を触って TypeError になっていた
+    // （呼び出し側は理由を 1 つも受け取れず、例外がそのまま外へ出る）
+    const failures = lighthouseOutputProblems({
+      status: 1,
+      stdout: fullOutput(),
+      screens: undefined,
+      categories: undefined,
+      minScore: undefined,
+      runs: undefined,
+    } as unknown as Parameters<typeof lighthouseOutputProblems>[0]);
+    // 終了コードの失敗と、欠けた材料 4 つ分がすべて文言として返る
+    expect(failures.some((message) => message.includes('終了コード'))).toBe(true);
+    expect(failures.some((message) => message.includes('対象画面'))).toBe(true);
+    expect(failures.some((message) => message.includes('対象カテゴリ'))).toBe(true);
+    expect(failures.some((message) => message.includes('合格点'))).toBe(true);
+    expect(failures.some((message) => message.includes('計測回数'))).toBe(true);
   });
 });
 
@@ -2870,6 +2939,9 @@ describe('判定の結線', () => {
               specs: STEP5_SCREENS.map((screen) => ({
                 title: `${SCREEN_TEST_PREFIX}${screen.title}`,
                 ok: true,
+                // **実行の記録まで本物と同じ形で入れる** — ゲートは `ok` ではなく
+                // `tests[].status` を見る（skip も `ok: true` になるため）
+                tests: [{ status: 'expected' }],
               })),
             },
           ],

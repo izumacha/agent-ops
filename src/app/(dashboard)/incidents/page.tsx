@@ -16,6 +16,7 @@ import {
   UI_TEXT,
 } from '@/lib/constants';
 import { csrfTokenFor } from '@/lib/csrf';
+import { formatUtcMinute } from '@/lib/dashboard/datetime';
 import { RESULT_INCIDENT_RESOLVED, RESULT_QUERY_NAME } from '@/lib/dashboard/form';
 import { resolveDashboardCursor } from '@/lib/dashboard/paging';
 import {
@@ -110,8 +111,11 @@ export default async function IncidentsPage({
           <tbody>
             {page.items.map((incident) => (
               <tr key={incident.id}>
-                {/* 行の見出しは発火日時。ISO 8601 で出す（ロケール差で読み方が変わらない） */}
-                <th scope="row">{incident.createdAt.toISOString()}</th>
+                {/* 行の見出しは発火日時。**分まで**を出す（秒とミリ秒は判断に使わないのに
+                    列を広げ、肝心の理由の文を折り返させる）。タイムゾーンは列の見出しが伝える */}
+                <th scope="row" className="nowrap">
+                  {formatUtcMinute(incident.createdAt)}
+                </th>
                 {/* エージェントは詳細へのリンク。名前が引けなければ id を出す */}
                 <td>
                   <Link href={`${AGENTS_PATH}/${incident.agentId}`}>
@@ -122,19 +126,21 @@ export default async function IncidentsPage({
                 <td>{incident.summary}</td>
                 {/* 状態は日本語ラベル。未解決は色に加えて太字でも分かる（§7） */}
                 <td
-                  className={incident.status === IncidentStatus.open ? 'state-danger' : undefined}
+                  className={
+                    incident.status === IncidentStatus.open ? 'state-danger nowrap' : 'nowrap'
+                  }
                 >
                   {INCIDENT_STATUS_LABELS[incident.status]}
                 </td>
                 {/* 解決日時。未解決なら記号を出す（空欄だと読み込み失敗に見える） */}
-                <td>
+                <td className="nowrap">
                   {incident.resolvedAt === null
                     ? UI_TEXT.notMeasured
-                    : incident.resolvedAt.toISOString()}
+                    : formatUtcMinute(incident.resolvedAt)}
                 </td>
                 {/* 未解決のものだけに解決ボタンを出す（押しても何も起きない操作を並べない） */}
                 {canResolve ? (
-                  <td>
+                  <td className="nowrap">
                     {incident.status === IncidentStatus.open ? (
                       <ResolveIncidentForm incidentId={incident.id} csrfToken={csrfToken} />
                     ) : null}

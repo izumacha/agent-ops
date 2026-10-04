@@ -13,6 +13,7 @@ import { isResourceId } from '@/domain/resource-id';
 import { AgentStatus } from '@/domain/types';
 import { AGENTS_PATH, AGENT_STATUS_LABELS, APP_NAME, UI_TEXT } from '@/lib/constants';
 import { csrfTokenFor } from '@/lib/csrf';
+import { formatUtcMinute } from '@/lib/dashboard/datetime';
 import { requireSession } from '@/lib/session-server';
 import { AgentStatusForm } from './status-form';
 
@@ -68,8 +69,8 @@ export default async function AgentDetailPage({
         {/* 説明が無い場合も項目を落とさず「説明なし」と書く（空欄だと読み込み失敗に見える） */}
         <dd>{agent.description ?? UI_TEXT.agentDetailNoDescription}</dd>
         <dt>{UI_TEXT.agentDetailCreatedAt}</dt>
-        {/* 日時は ISO 8601 で出す（ロケール差で読み方が変わらない） */}
-        <dd>{agent.createdAt.toISOString()}</dd>
+        {/* 日時は分まで（UTC）。タイムゾーンは項目名が伝える */}
+        <dd>{formatUtcMinute(agent.createdAt)}</dd>
       </dl>
       {/* 操作できる役割にだけボタンを見せる（判定の本体は Server Action 側） */}
       {canOperate ? (

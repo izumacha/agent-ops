@@ -181,6 +181,29 @@ describe('ダッシュボードの期間の解釈', () => {
     }
   });
 
+  it('入力欄を空にして送った側は「未指定」として扱い、もう片方の指定を捨てない', () => {
+    // **画面の期間フォームは GET で 2 つの入力を必ず両方送る** ので、片方を消すと
+    // `?from=2026-05-10&to=` の形で届く。空文字を「読めない値」と判定すると、
+    // 指定した開始日まで捨てて既定へ倒れ、しかも「解釈できませんでした」と嘘の注意書きが出る
+    const range = resolveDashboardRange('2026-05-10', '', NOW);
+    // 指定した開始日が生きている
+    expect(range.fromText).toBe('2026-05-10');
+    // 欠けた側は既定（今日）で埋まる
+    expect(range.toText).toBe('2026-05-31');
+    // 採用できているので旗は立たない
+    expect(range.ignoredInput).toBe(false);
+  });
+
+  it('両方とも空なら既定の期間になり、旗も立たない', () => {
+    // 2 つとも空にして送った形（フォームを開いてすぐ送信した場合）
+    const range = resolveDashboardRange('', '', NOW);
+    // 既定の期間
+    expect(range.window.days).toBe(DASHBOARD_DEFAULT_RANGE_DAYS);
+    expect(range.toText).toBe('2026-05-31');
+    // 何も指定していないのと同じなので旗は立たない
+    expect(range.ignoredInput).toBe(false);
+  });
+
   it('既定の期間は上限を超えない', () => {
     // 既定が上限より長いと、指定が無いだけで必ず解釈に失敗する
     expect(DASHBOARD_DEFAULT_RANGE_DAYS).toBeLessThanOrEqual(USAGE_RANGE_MAX_DAYS);

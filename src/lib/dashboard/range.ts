@@ -22,16 +22,35 @@ export interface DashboardRange {
 }
 
 /**
+ * 受け取った値を「指定あり / 指定なし」に正規化する。
+ *
+ * **空文字は「指定なし」として扱う。** 画面の期間フォームは GET で 2 つの入力を**必ず両方**
+ * 送るので、片方を消すと `?from=2026-05-10&to=` の形で届く。`?? 既定値` は null / undefined しか
+ * 置き換えないため、空文字のまま日付の解釈へ渡すと「読めない」と判定され、**もう片方に入れた
+ * 日付まで捨てて既定の期間へ倒したうえで「指定を解釈できませんでした」と出る**（実測）。
+ * 兄弟の解決処理（`resolveDashboardCursor` / `resolveIncidentView`）も同じく空文字を弾いている。
+ */
+function presentOrUndefined(value: string | undefined): string | undefined {
+  // 未指定はそのまま
+  if (value === undefined) return undefined;
+  // 空文字（と空白だけ）は「入力欄を空にした」なので未指定と同じ扱いにする
+  return value.trim().length === 0 ? undefined : value;
+}
+
+/**
  * クエリの `from` / `to` から期間を決める。読めない・逆順・長すぎるときは**既定の期間へ倒し、
  * 旗を立てる**（画面が注意書きを出す）。
  *
  * **既定は「今日を含む直近 N 日」**。`now` を引数に取るのは、テストで時刻を固定できるようにするため。
  */
 export function resolveDashboardRange(
-  from: string | undefined,
-  to: string | undefined,
+  rawFrom: string | undefined,
+  rawTo: string | undefined,
   now: Date = new Date(),
 ): DashboardRange {
+  // 空の入力欄を「未指定」に揃える（この正規化が無いと片方を消しただけで両方が捨てられる）
+  const from = presentOrUndefined(rawFrom);
+  const to = presentOrUndefined(rawTo);
   // 既定の期間（今日を終わりとする N 日間）を組み立てる
   const defaultTo = formatUtcDay(now);
   const defaultFrom = formatUtcDay(

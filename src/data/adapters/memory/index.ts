@@ -362,6 +362,18 @@ class MemoryAgents implements AgentsPort {
     return row && row.tenantId === tenantId ? clone(row) : null;
   }
 
+  // 指定した id の名前だけをまとめて引く (テナント境界を跨がない)
+  async findNamesByIds(tenantId: string, ids: readonly string[]): Promise<Map<string, string>> {
+    // 探す id の集合 (重複を畳む)
+    const wanted = new Set(ids);
+    // 自テナントの行のうち、要求された id のものだけを表にする
+    return new Map(
+      this.rowsOf(tenantId)
+        .filter((row) => wanted.has(row.id))
+        .map((row) => [row.id, row.name]),
+    );
+  }
+
   // 作成 (名前重複は DuplicateError)
   async create(input: CreateAgentInput): Promise<AgentRecord> {
     // 同テナントに同じ名前があれば一意制約違反

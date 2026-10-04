@@ -523,6 +523,19 @@ class PrismaAgents implements AgentsPort {
     return this.db.agent.findUnique({ where: { tenantId_id: { tenantId, id } } });
   }
 
+  // 指定した id の名前だけをまとめて引く (1 クエリ。テナント境界を跨がない)
+  async findNamesByIds(tenantId: string, ids: readonly string[]): Promise<Map<string, string>> {
+    // 空なら問い合わせない (`in: []` は常に空集合なので、往復の分だけ無駄になる)
+    if (ids.length === 0) return new Map();
+    // 自テナントの行だけを、要求された id に絞って引く (読むのは id と名前だけ)
+    const rows = await this.db.agent.findMany({
+      where: { tenantId, id: { in: [...new Set(ids)] } },
+      select: { id: true, name: true },
+    });
+    // id → 名前 の表にする
+    return new Map(rows.map((row) => [row.id, row.name]));
+  }
+
   // 作成 (名前重複は DuplicateError)
   async create(input: CreateAgentInput): Promise<AgentRecord> {
     // 挿入し、一意制約違反なら翻訳する

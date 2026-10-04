@@ -158,6 +158,44 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect((await repos.agents.findById(a.tenant.id, agent.id))?.budgetMicroUsd).toBe(123n);
   });
 
+  it('エージェント名のまとめ取得は自テナントの要求した id だけを返す', async () => {
+    // 2 テナントに 1 件ずつ、自テナントにはもう 1 件
+    const a = await makeTenant(repos, 'A');
+    const b = await makeTenant(repos, 'B');
+    const mine = await repos.agents.create({
+      tenantId: a.tenant.id,
+      name: '要約ボット',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+    });
+    const other = await repos.agents.create({
+      tenantId: a.tenant.id,
+      name: '呼ばれないボット',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+    });
+    const theirs = await repos.agents.create({
+      tenantId: b.tenant.id,
+      name: '他テナント',
+      description: null,
+      provider: Provider.anthropic,
+      model: 'claude-sonnet-4-6',
+      budgetMicroUsd: null,
+    });
+    // 自テナントの 1 件と他テナントの 1 件を混ぜて要求する
+    const names = await repos.agents.findNamesByIds(a.tenant.id, [mine.id, theirs.id, mine.id]);
+    // **自テナントの要求した id だけ**が返る（他テナントの行は where.tenantId が落とす）
+    expect([...names.entries()]).toEqual([[mine.id, '要約ボット']]);
+    // 要求していない自テナントの行も入らない
+    expect(names.has(other.id)).toBe(false);
+    // 空の要求は問い合わせずに空で返る
+    expect((await repos.agents.findNamesByIds(a.tenant.id, [])).size).toBe(0);
+  });
+
   // 一覧はどれも `where.tenantId` の 1 行だけがテナント境界を支えている。API テストは memory アダプタで
   // 走るので prisma の where は通らず、ここで呼ばない一覧は「tenantId を外しても全件緑」になる
   // (実際 users / apiKeys / userTokens の一覧は外しても緑で、他テナントのメール・API キーが見えた)

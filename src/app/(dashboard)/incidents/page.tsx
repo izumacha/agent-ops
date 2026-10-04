@@ -12,7 +12,6 @@ import {
   INCIDENTS_PATH,
   INCIDENT_STATUS_LABELS,
   PAGE_LIMIT_DEFAULT,
-  PAGE_LIMIT_MAX,
   UI_TEXT,
 } from '@/lib/constants';
 import { csrfTokenFor } from '@/lib/csrf';
@@ -51,11 +50,14 @@ export default async function IncidentsPage({
     { limit: PAGE_LIMIT_DEFAULT, cursor: paging.cursor },
     { status: view.status },
   );
-  // **エージェント名は 1 回のまとめ取得で引く**（行ごとに引くと N+1。§8）。
-  // 上限を超える数のエージェントを持つテナントでは名前が引けない行が出るので、
-  // そのときは id を出す（名前が引けないことを隠さない）
-  const agents = await repos.agents.list(principal.tenantId, { limit: PAGE_LIMIT_MAX });
-  const agentNames = new Map(agents.items.map((agent) => [agent.id, agent.name]));
+  // **エージェント名は「この画面に出ている id」だけを 1 回で引く**（行ごとに引くと N+1。§8）。
+  // 一覧の先頭から取って突き合わせる形にしないのは、並びが createdAt 昇順なので
+  // エージェントが多いテナントでは**新しいエージェントだけ**名前が出ず id のまま残るため
+  // （インシデントも古い順なので、後ろのページほど取りこぼしが集まる）
+  const agentNames = await repos.agents.findNamesByIds(
+    principal.tenantId,
+    page.items.map((incident) => incident.agentId),
+  );
   // 解決を操作できるのは admin だけ（表示の出し分けだけに使う。判定は Server Action 側）
   const canResolve = principal.user.role === Role.admin;
   // このセッション専用の CSRF トークンを導く（素のセッショントークンは画面へ出さない）

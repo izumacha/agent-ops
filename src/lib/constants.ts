@@ -1,7 +1,7 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
-import { AgentStatus, Provider, Role, RuleKind } from '@/domain/types';
+import { AgentStatus, IncidentStatus, Provider, Role, RuleKind } from '@/domain/types';
 import { RATIO_MAX } from '@/domain/guardrail/rule';
 
 // アプリ名 (画面タイトル等で使う)
@@ -28,9 +28,60 @@ export const RULE_KIND_LABELS: Readonly<Record<RuleKind, string>> = {
   [RuleKind.quality]: '品質低下', // quality
 };
 
-// **`RuleAction` / `IncidentStatus` の日本語ラベルは置いていない。** 参照する場所がまだ無く
-// （API は enum の値をそのまま JSON へ出し、画面は Step5）、置くと「使われない値」が増えるだけ
+// **`RuleAction` の日本語ラベルは置いていない。** 参照する場所がまだ無く（API は enum の値を
+// そのまま JSON へ出し、ルールの設定画面は Step5 の範囲外）、置くと「使われない値」が増えるだけ
 // （§6 デッドコードを残さない）。画面で必要になったときに、使う側と一緒に足す
+
+// インシデント状態の日本語ラベル（ダッシュボードとインシデント一覧が使う）
+export const INCIDENT_STATUS_LABELS: Readonly<Record<IncidentStatus, string>> = {
+  [IncidentStatus.open]: '未解決', // open
+  [IncidentStatus.resolved]: '解決済み', // resolved
+};
+
+// ─────────────────────────────────────────────
+// ダッシュボード (Step5) の画面。**パスと文言をここに集め、画面に直書きしない** (§6)
+// ─────────────────────────────────────────────
+
+// ログイン画面のパス（未ログインのリダイレクト先。リンクとテストもここを読む）
+export const LOGIN_PATH = '/login';
+// ログイン後に開く画面のパス
+export const DASHBOARD_PATH = '/dashboard';
+// エージェント一覧のパス
+export const AGENTS_PATH = '/agents';
+// インシデント一覧のパス
+export const INCIDENTS_PATH = '/incidents';
+// 日次レポート (CSV) のパス
+export const DAILY_REPORT_PATH = '/reports/daily';
+
+// 画面に出す文言。**1 か所に集める**ので、同じ意味の言い回しが画面ごとに割れない
+export const UI_TEXT = {
+  // ログイン画面
+  loginTitle: 'ログイン',
+  loginDescription:
+    'ユーザートークン（aop_u_ で始まる値）を貼り付けてください。トークンは管理者が発行します。',
+  loginTokenLabel: 'ユーザートークン',
+  loginSubmit: 'ログイン',
+  loginFailed: 'トークンが正しくありません。失効・期限切れでないか確認してください。',
+  loginTokenRequired: 'ユーザートークンを入力してください。',
+  // 画面共通
+  skipToContent: '本文へスキップ',
+  logout: 'ログアウト',
+  navDashboard: 'ダッシュボード',
+  navAgents: 'エージェント',
+  navIncidents: 'インシデント',
+  // ダッシュボード
+  dashboardTitle: 'ダッシュボード',
+  cardCost: '期間内のコスト',
+  cardRequests: '中継回数',
+  cardUptime: '稼働率',
+  cardQuality: '品質（直近の評価）',
+  cardOpenIncidents: '未解決インシデント',
+  dailyTableTitle: '日次の内訳',
+  dailyReportLink: 'CSV でダウンロード',
+  // 「測れていない」ことを表す表示。**0 と書かない**（§ 稼働率の定義）
+  notMeasured: '—',
+  noData: 'この期間に記録はありません。',
+} as const;
 
 // ─────────────────────────────────────────────
 // API (Step1) の上限値と利用者向けエラー文言。Route Handler はここから引き、直書きしない

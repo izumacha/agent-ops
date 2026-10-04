@@ -1,61 +1,70 @@
 // ダッシュボードの書き込み操作を守る CSRF 対策 (Step5 / ADR-0011) の検査。
 // 「通してはいけない組み合わせ」を 1 つずつ固定する。
 import { describe, expect, it } from 'vitest';
-import { createCsrfToken, csrfTokenMatches, isSameOriginRequest } from '@/lib/csrf';
+import { csrfTokenFor, csrfTokenMatches, isSameOriginRequest } from '@/lib/csrf';
+import { generateSecret } from '@/lib/tokens';
 
-describe('createCsrfToken', () => {
-  it('毎回違う値を作る', () => {
-    // 2 回作って一致しないことを見る (固定値を返す実装を落とす)
-    expect(createCsrfToken()).not.toBe(createCsrfToken());
+describe('csrfTokenFor', () => {
+  it('同じセッションからは同じ値、別のセッションからは別の値を導く', () => {
+    // 同じセッショントークンなら何度計算しても同じ (インスタンスを増やしても再起動しても同じ)
+    const session = generateSecret('user');
+    expect(csrfTokenFor(session)).toBe(csrfTokenFor(session));
+    // 別のセッションなら別の値 (他人のフォームの値を使い回せない)
+    expect(csrfTokenFor(session)).not.toBe(csrfTokenFor(generateSecret('user')));
   });
 
-  it('推測できない長さの URL 安全な文字列を作る', () => {
-    // 1 つ作る
-    const token = createCsrfToken();
-    // base64url は英数字と - _ だけ (Cookie と HTML にそのまま置ける)
+  it('セッショントークンそのものを漏らさない URL 安全な文字列を返す', () => {
+    // 1 つ導く
+    const session = generateSecret('user');
+    const token = csrfTokenFor(session);
+    // base64url は英数字と - _ だけ (HTML にそのまま置ける)
     expect(token).toMatch(/^[A-Za-z0-9_-]+$/);
-    // 32 バイトを base64url にすると 43 文字。短くする変異を落とすため下限を置く
-    expect(token.length).toBeGreaterThanOrEqual(43);
+    // HMAC-SHA256 は 32 バイト = base64url で 43 文字
+    expect(token).toHaveLength(43);
+    // **セッショントークンが混ざっていない** (HMAC は一方向なので復元もできない)
+    expect(token).not.toContain(session);
   });
 });
 
 describe('csrfTokenMatches', () => {
-  it('Cookie とフォームの値が一致すれば通す', () => {
-    // 同じ値なら一致
-    const token = createCsrfToken();
-    expect(csrfTokenMatches(token, token)).toBe(true);
+  it('そのセッションから導いた値なら通す', () => {
+    // 画面が埋める値をそのまま送る
+    const session = generateSecret('user');
+    expect(csrfTokenMatches(session, csrfTokenFor(session))).toBe(true);
   });
 
-  it('値が違えば拒否する', () => {
-    // 別々に作った 2 つは一致しない
-    expect(csrfTokenMatches(createCsrfToken(), createCsrfToken())).toBe(false);
+  it('別のセッションから導いた値は拒否する', () => {
+    // 他のログインで得た値を使い回せない
+    const session = generateSecret('user');
+    expect(csrfTokenMatches(session, csrfTokenFor(generateSecret('user')))).toBe(false);
   });
 
-  it('Cookie が無ければ拒否する', () => {
-    // Cookie 側が undefined / 空のときは、フォームに何が入っていても拒否する
-    expect(csrfTokenMatches(undefined, createCsrfToken())).toBe(false);
-    expect(csrfTokenMatches('', createCsrfToken())).toBe(false);
+  it('セッショントークンそのものを送っても通らない', () => {
+    // hidden 項目に入るのは導出した値で、セッショントークンではない
+    const session = generateSecret('user');
+    expect(csrfTokenMatches(session, session)).toBe(false);
   });
 
-  it('空どうしを一致と判定しない', () => {
-    // **これが要点** — 定数時間比較は両辺をハッシュするので「空 vs 空」は一致してしまう。
-    // Cookie を持たない相手が空の hidden 項目を送るだけで通る、という抜け道を塞ぐ。
-    // 守っているのは `if (!cookieToken) return false;` の 1 行で、外すとこのテストが落ちる (実測)
-    expect(csrfTokenMatches('', '')).toBe(false);
+  it('セッションが無ければ拒否する', () => {
+    // **これが要点** — 弾かないと「鍵が空の HMAC」という誰でも計算できる値が正解になり、
+    // 未ログインの相手が自分で作った値で検証を通れる。
+    // 守っているのは `if (!sessionToken) return false;` の 1 行で、外すとこのテストが落ちる (実測)
+    expect(csrfTokenMatches(undefined, csrfTokenFor('x'))).toBe(false);
+    expect(csrfTokenMatches('', csrfTokenFor(''))).toBe(false);
   });
 
-  it('Cookie があってもフォームが空なら拒否する', () => {
-    // 空の hidden 項目はハッシュが一致しないので通らない
-    expect(csrfTokenMatches(createCsrfToken(), '')).toBe(false);
+  it('フォームが空なら拒否する', () => {
+    // 空の hidden 項目は導出した値と一致しない
+    expect(csrfTokenMatches(generateSecret('user'), '')).toBe(false);
   });
 
   it('フォームの値が文字列でなければ拒否する', () => {
     // FormData は File も返しうるので、文字列以外は拒否する
-    const token = createCsrfToken();
-    expect(csrfTokenMatches(token, null)).toBe(false);
-    expect(csrfTokenMatches(token, undefined)).toBe(false);
-    expect(csrfTokenMatches(token, 42)).toBe(false);
-    expect(csrfTokenMatches(token, new Blob(['x']))).toBe(false);
+    const session = generateSecret('user');
+    expect(csrfTokenMatches(session, null)).toBe(false);
+    expect(csrfTokenMatches(session, undefined)).toBe(false);
+    expect(csrfTokenMatches(session, 42)).toBe(false);
+    expect(csrfTokenMatches(session, new Blob(['x']))).toBe(false);
   });
 });
 

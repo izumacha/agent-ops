@@ -1,5 +1,7 @@
 // Next.js のメタデータ型 (title 等の補完のため)
 import type { Metadata } from 'next';
+// 画面のデザイントークンと最小限の見た目 (配色は globals.css の :root が唯一の定義。§6)
+import './globals.css';
 // アプリ名の一元管理
 import { APP_NAME } from '@/lib/constants';
 

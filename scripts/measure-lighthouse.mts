@@ -29,7 +29,7 @@ import {
   screenPath,
 } from './lib/step5-criteria.mjs';
 import { chromiumExecutablePath } from '../e2e/lib/chromium';
-import { freePort, startApp, stopApp } from '../e2e/lib/app';
+import { freePorts, startApp, stopApp } from '../e2e/lib/app';
 import { seedE2eFixture } from '../e2e/lib/fixture';
 import { SESSION_COOKIE_NAME } from '../src/lib/session';
 
@@ -110,9 +110,15 @@ async function measure(url: string, port: number, cookie: string | null): Promis
 async function main(): Promise<void> {
   // 専用 DB を空にして画面を開くのに必要な行を仕込む（開発 DB なら 1 行も書かずに落ちる）
   const seed = await seedE2eFixture();
-  // 空いているポートを 2 つ取る（アプリと Chromium の CDP）
-  const appPort = await freePort();
-  const debugPort = await freePort();
+  // 空いているポートを 2 つ**同時に**取る（アプリと Chromium の CDP）。
+  // 1 つずつ取ると同じ番号が返りうる（閉じた直後のポートは即座に再割り当てされる）ため、
+  // 先に起動したアプリが占有して Chromium の CDP が bind に失敗し、原因と無関係な
+  // 「Lighthouse が繋がらない」でゲートが落ちる
+  const [appPort, debugPort] = await freePorts(2);
+  // 2 つ揃わなければ測れない（fail-closed）
+  if (appPort === undefined || debugPort === undefined) {
+    throw new Error('計測に使うポートを取得できません');
+  }
   // 本番ビルドを起動する
   const app = await startApp(appPort);
   // Chromium を起動する（CDP を開けて Lighthouse に繋がせる）

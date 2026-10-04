@@ -23,23 +23,54 @@ const STARTUP_POLL_MS = 200;
 
 /** 空いている TCP ポートを 1 つ取る（固定ポートだと CI で衝突する）。 */
 export async function freePort(): Promise<number> {
-  // 一時的に 0 番で待ち受けて、割り当てられたポートを読む
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      // 割り当てられたアドレス
-      const address = server.address();
-      // 読めなければ失敗
-      if (address === null || typeof address === 'string') {
-        reject(new Error('ポートを取得できません'));
-        return;
-      }
-      // 閉じてから返す
-      const port = address.port;
-      server.close(() => resolve(port));
-    });
-  });
+  // 1 つだけ要るときも、まとめて取る関数を使う（規則を 2 つ持たない）
+  const [port] = await freePorts(1);
+  // 必ず 1 つ返るので取り出す（型のための既定値は使わない）
+  if (port === undefined) throw new Error('ポートを取得できません');
+  return port;
+}
+
+/**
+ * 空いているポートを**同時に**複数取る。
+ *
+ * **1 つずつ取って足し合わせてはいけない。** 0 番で待ち受けて即座に閉じたポートは、
+ * 接続を 1 度も受けていないので TIME_WAIT に残らず**すぐ再割り当てされうる**。
+ * アプリと Chromium の CDP のように 2 つ要る場面で同じ番号が返ると、先に起動したほうが
+ * 占有して後から起動するほうが bind に失敗し、**原因と無関係な場所**（Lighthouse の
+ * 接続エラー）でゲートが落ちる。全部を開いたまま番号を読み、最後にまとめて閉じれば衝突しない。
+ */
+export async function freePorts(count: number): Promise<number[]> {
+  // 開いたままにしておく待ち受け（最後にまとめて閉じる）
+  const servers: ReturnType<typeof createServer>[] = [];
+  // 読み取った番号
+  const ports: number[] = [];
+  try {
+    // 必要な数だけ順に開く（開いている間は同じ番号が再割り当てされない）
+    for (let index = 0; index < count; index += 1) {
+      // 1 つ分の待ち受けを開いて番号を読む
+      const port = await new Promise<number>((resolve, reject) => {
+        const server = createServer();
+        servers.push(server);
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => {
+          // 割り当てられたアドレス
+          const address = server.address();
+          // 読めなければ失敗
+          if (address === null || typeof address === 'string') {
+            reject(new Error('ポートを取得できません'));
+            return;
+          }
+          // **ここでは閉じない**（閉じると次の待ち受けに同じ番号が返りうる）
+          resolve(address.port);
+        });
+      });
+      ports.push(port);
+    }
+    return ports;
+  } finally {
+    // 使う側が bind できるよう、読み終えたら必ず全部閉じる（§8 リソースを確実に解放する）
+    for (const server of servers) server.close();
+  }
 }
 
 /**

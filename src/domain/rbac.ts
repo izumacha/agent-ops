@@ -40,3 +40,20 @@ export function canPerform(role: Role, action: Action): boolean {
   // 許可集合に含まれていれば true、無ければ false
   return allowed.has(action);
 }
+
+/**
+ * 役割が「admin 限定の操作」を行えるかを判定する純粋関数。
+ *
+ * **許可表（`PERMISSIONS`）で表せない操作のための入口。** ユーザーの招待・役割変更・
+ * トークン発行、そしてインシデントの解決は `view` / `execute` / `stop` のどれでもなく、
+ * 「admin であること」そのものを条件にしている（docs/spec.md §3）。
+ *
+ * **判定をここに 1 つ置くのは、画面と API が同じ述語を読むため。** 画面側で
+ * `role === Role.admin` と書き下すと、admin 限定の定義が変わったとき（Step6 で役割が増える・
+ * 解決を許可表へ移す）に API のガードだけが追随し、**ボタンは出るのに 403・あるいはボタンが
+ * 消えるのに API は通る**という食い違いが静かに生まれる。
+ */
+export function isAdminRole(role: Role): boolean {
+  // 役割が admin のときだけ true（未知の値は false。fail-closed）
+  return role === Role.admin;
+}

@@ -5,7 +5,8 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { getRepos } from '@/data';
-import { IncidentStatus, Role } from '@/domain/types';
+import { isAdminRole } from '@/domain/rbac';
+import { IncidentStatus } from '@/domain/types';
 import {
   AGENTS_PATH,
   APP_NAME,
@@ -58,8 +59,10 @@ export default async function IncidentsPage({
     principal.tenantId,
     page.items.map((incident) => incident.agentId),
   );
-  // 解決を操作できるのは admin だけ（表示の出し分けだけに使う。判定は Server Action 側）
-  const canResolve = principal.user.role === Role.admin;
+  // 解決を操作できるのは admin だけ（表示の出し分けだけに使う。判定は Server Action 側）。
+  // **判定はドメインの述語を読む** — ここで `role === admin` と書き下すと、admin 限定の
+  // 定義が変わったときに API のガードだけが追随し、画面と食い違う
+  const canResolve = isAdminRole(principal.user.role);
   // このセッション専用の CSRF トークンを導く（素のセッショントークンは画面へ出さない）
   const csrfToken = csrfTokenFor(token);
   // 画面を描く

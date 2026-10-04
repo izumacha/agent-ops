@@ -1,7 +1,6 @@
 // 認可ガード: 認証済みの主体 (Principal) に対して、操作ごとの権限を確かめる。
 // 権限の語彙は 3 種類 (docs/spec.md §4): RBAC の 3 操作 / admin ロール限定 / プラットフォーム管理者
-import { canPerform, type Action } from '@/domain/rbac';
-import { Role } from '@/domain/types';
+import { canPerform, isAdminRole, type Action } from '@/domain/rbac';
 import { API_MESSAGES } from '@/lib/constants';
 import type { AgentPrincipal, Principal, UserPrincipal } from './auth';
 import { ApiError } from './errors';
@@ -34,8 +33,8 @@ export function requireAction(principal: Principal, action: Action): UserPrincip
 export function requireAdminRole(principal: Principal): UserPrincipal {
   // まずテナントのユーザーであること
   const user = requireTenantUser(principal);
-  // 役割が admin であること
-  if (user.user.role !== Role.admin)
+  // 役割が admin であること（判定はドメインの述語 1 か所。画面も同じものを読む）
+  if (!isAdminRole(user.user.role))
     throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.forbidden);
   // 許可された
   return user;

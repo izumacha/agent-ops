@@ -1,7 +1,7 @@
 // Vitest のテスト API
 import { describe, expect, it } from 'vitest';
 // 検証対象: 役割 × 操作の許可表と判定関数
-import { ACTIONS, PERMISSIONS, canPerform } from '@/domain/rbac';
+import { ACTIONS, PERMISSIONS, canPerform, isAdminRole } from '@/domain/rbac';
 // 役割の一覧 (正準な参照元)
 import { Role } from '@/domain/types';
 
@@ -41,5 +41,20 @@ describe('RBAC の許可表', () => {
     for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
       expect(canPerform(name as Role, 'view')).toBe(false);
     }
+  });
+});
+
+describe('isAdminRole', () => {
+  // 許可表で表せない「admin 限定の操作」の判定（画面と API がこの 1 つを読む）
+  it('admin だけが true になる', () => {
+    // 3 役割すべてを見る（表に無い役割が増えたら typecheck が落ちる形）
+    expect(isAdminRole(Role.admin)).toBe(true);
+    expect(isAdminRole(Role.operator)).toBe(false);
+    expect(isAdminRole(Role.viewer)).toBe(false);
+  });
+
+  it('知らない値は拒否する（fail-closed）', () => {
+    // セッション由来の文字列がそのまま来ても true にしない
+    expect(isAdminRole('superuser' as Role)).toBe(false);
   });
 });

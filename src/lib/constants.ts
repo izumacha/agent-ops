@@ -90,6 +90,9 @@ export const UI_TEXT = {
   columnRequests: '中継回数',
   columnErrors: '失敗',
   columnUptime: '稼働率',
+  // **CSV の見出しは単位を書く** — 画面はセルに「%」を付けられるが、CSV は数字だけを入れて
+  // 表計算で扱える形にするので、単位の置き場が見出ししかない（無いと 0〜1 の割合と読まれる）
+  columnUptimePercent: '稼働率 (%)',
   columnCost: 'コスト (USD)',
   columnInputTokens: '入力トークン',
   columnOutputTokens: '出力トークン',

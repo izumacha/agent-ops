@@ -3,6 +3,7 @@
 // CSV は**画面と同じ `DashboardSummary` から作る**ので、ここで固定するのは
 // 「表に出ている数字がそのまま出るか」と「列がずれない形になっているか」。
 import { describe, expect, it } from 'vitest';
+import { formatUptimePercent, uptimeRate } from '@/domain/uptime';
 import { UI_TEXT, DASHBOARD_DEFAULT_RANGE_DAYS, USAGE_RANGE_MAX_DAYS } from '@/lib/constants';
 import { buildDailyReportCsv, dailyReportFileName } from '@/lib/dashboard/csv';
 import { resolveDashboardRange } from '@/lib/dashboard/range';
@@ -56,7 +57,7 @@ describe('日次レポートの CSV', () => {
     expect(csv).toContain('\r\n');
   });
 
-  it('見出しは画面の表と同じ文言を使う', () => {
+  it('見出しは画面の表と同じ文言を使う（稼働率だけは単位を足した見出し）', () => {
     // 見出しが 2 か所で割れないよう、画面と同じ定数から作る
     const [header] = rowsOf(buildDailyReportCsv(SUMMARY));
     expect(header).toBe(
@@ -64,22 +65,37 @@ describe('日次レポートの CSV', () => {
         UI_TEXT.columnDay,
         UI_TEXT.columnRequests,
         UI_TEXT.columnErrors,
-        UI_TEXT.columnUptime,
+        // **画面の `稼働率` ではなく単位付きの見出し** — CSV のセルには「%」を書かないので、
+        // 単位が見出しに無いと 0〜1 の割合と読まれる
+        UI_TEXT.columnUptimePercent,
         UI_TEXT.columnCost,
         UI_TEXT.columnInputTokens,
         UI_TEXT.columnOutputTokens,
       ].join(','),
     );
+    // 単位が実際に書かれていること（見出しの定数を素の「稼働率」に戻す変異をここで落とす）
+    expect(UI_TEXT.columnUptimePercent).toContain('%');
   });
 
   it('日次の明細をそのまま出す（金額は BigInt のまま整形する）', () => {
     // 2 日分が順に出る
     const rows = rowsOf(buildDailyReportCsv(SUMMARY));
     expect(rows).toHaveLength(3);
-    // 1 日目: 4 件中 1 件失敗 → 稼働率 0.75、料金 1.25 USD
-    expect(rows[1]).toBe('2026-05-01,4,1,0.7500,1.25,40,80');
-    // 2 日目: 失敗なし → 稼働率 1.0000
-    expect(rows[2]).toBe('2026-05-02,1,0,1.0000,0.25,10,20');
+    // 1 日目: 4 件中 1 件失敗 → 稼働率 75.0%、料金 1.25 USD
+    expect(rows[1]).toBe('2026-05-01,4,1,75.0,1.25,40,80');
+    // 2 日目: 失敗なし → 稼働率 100.0%
+    expect(rows[2]).toBe('2026-05-02,1,0,100.0,0.25,10,20');
+  });
+
+  it('稼働率は画面の表示と同じ数字になる（単位の記号だけが違う）', () => {
+    // 画面は `formatUptimePercent` の値に「%」を足して出す（src/app/(dashboard)/dashboard/page.tsx）。
+    // **ここが割れると、同じ見出しの列を突き合わせた運用者が 100 分の 1 に読み違える**
+    const rate = uptimeRate(4, 1);
+    // 型の都合で null を先に落とす（4 件中 1 件なので必ず数になる）
+    expect(rate).not.toBeNull();
+    // CSV のセルと、画面が「%」を外した値が一致する
+    const cell = rowsOf(buildDailyReportCsv(SUMMARY))[1]?.split(',')[3];
+    expect(cell).toBe(formatUptimePercent(rate as number));
   });
 
   it('測れていない日の稼働率は空欄にする（0 と書かない）', () => {

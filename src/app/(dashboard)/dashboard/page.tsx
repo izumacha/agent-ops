@@ -9,7 +9,7 @@ import { formatMicroUsdAsUsd } from '@/domain/money';
 import { APP_NAME, DAILY_REPORT_PATH, INCIDENTS_PATH, UI_TEXT } from '@/lib/constants';
 import { loadDashboardSummary } from '@/lib/dashboard/summary';
 import { resolveDashboardRange } from '@/lib/dashboard/range';
-import { uptimeRate } from '@/domain/uptime';
+import { formatUptimePercent, uptimeRate } from '@/domain/uptime';
 import { requireSession } from '@/lib/session-server';
 
 // ブラウザのタブに出す題名
@@ -21,8 +21,8 @@ export const metadata: Metadata = {
 function formatRate(rate: number | null): string {
   // null は「測れていない」ので記号で表す
   if (rate === null) return UI_TEXT.notMeasured;
-  // 小数 1 桁の百分率にする（表示の桁はここで決める。集計側は丸めない）
-  return `${(rate * 100).toFixed(1)}%`;
+  // 百分率の数字は CSV と共有の関数から取り、画面では単位の記号を足す
+  return `${formatUptimePercent(rate)}%`;
 }
 
 // 品質スコアを表示用の文字列にする（0〜1 を小数 2 桁で出す）

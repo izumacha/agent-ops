@@ -30,3 +30,20 @@ export function uptimeRate(requests: number, errorRequests: number): number | nu
   // 成功した件数の割合を返す
   return (requests - errorRequests) / requests;
 }
+
+// 百分率にするときの小数の桁数（画面と CSV がこの 1 つの定義を共有する）
+const UPTIME_PERCENT_FRACTION_DIGITS = 1;
+
+/**
+ * 稼働率（0〜1）を**百分率の数字**にする（`0.6667` → `'66.7'`）。
+ *
+ * **単位の記号は付けない。** 画面は後ろに `%` を足して出し、CSV は列の見出しに単位を書いて
+ * 数字だけを入れる（表計算で合計や並べ替えができる形にするため）。
+ * **桁を 1 か所で決めるのが要点** — 画面が百分率・CSV が 0〜1 の割合という食い違いがあると、
+ * 同じ見出しの列を突き合わせた運用者が稼働率を 100 分の 1 に読み違える（実測で
+ * 画面「66.7%」・CSV「0.6667」が同じ `稼働率` の列に出ていた）。
+ */
+export function formatUptimePercent(rate: number): string {
+  // 100 倍して決めた桁で丸める（丸めるのは表示の都合。集計側は丸めない）
+  return (rate * 100).toFixed(UPTIME_PERCENT_FRACTION_DIGITS);
+}

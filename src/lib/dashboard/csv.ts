@@ -3,7 +3,7 @@
 // **画面と同じ `DashboardSummary` から作る**ので、表に出ている数字と CSV の数字が食い違わない
 // （受け入れ基準「表示データと DB 集計の突合」を 1 本で満たす形を崩さない。§6 DRY）。
 import { formatMicroUsdAsUsd } from '@/domain/money';
-import { uptimeRate } from '@/domain/uptime';
+import { formatUptimePercent, uptimeRate } from '@/domain/uptime';
 import { UI_TEXT } from '@/lib/constants';
 import type { DashboardSummary } from './summary';
 
@@ -12,7 +12,8 @@ const COLUMNS = [
   UI_TEXT.columnDay,
   UI_TEXT.columnRequests,
   UI_TEXT.columnErrors,
-  UI_TEXT.columnUptime,
+  // **画面の見出しをそのまま使わない**（単位の記号を置けないので見出しで単位を伝える）
+  UI_TEXT.columnUptimePercent,
   UI_TEXT.columnCost,
   UI_TEXT.columnInputTokens,
   UI_TEXT.columnOutputTokens,
@@ -53,8 +54,9 @@ export function buildDailyReportCsv(summary: DashboardSummary): string {
         row.day,
         String(row.requests),
         String(row.errorRequests),
-        // 測れていない日は空欄にする（0 と書くと「稼働率 0%」と読まれる）
-        rate === null ? '' : rate.toFixed(4),
+        // 測れていない日は空欄にする（0 と書くと「稼働率 0%」と読まれる）。
+        // 数字は画面と同じ関数・同じ桁で出す（見出しの単位と合わせて百分率）
+        rate === null ? '' : formatUptimePercent(rate),
         formatMicroUsdAsUsd(row.costMicroUsd),
         String(row.inputTokens),
         String(row.outputTokens),

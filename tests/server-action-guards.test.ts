@@ -76,11 +76,11 @@ function resolveSpecifier(fromFile: string, specifier: string): string | null {
 }
 
 // そのファイルの中で、その名前が**呼ばれている**か（`foo(...)` の形）
-function callsName(source: ts.SourceFile, name: string): boolean {
+function callsName(scope: ts.Node, name: string): boolean {
   // 見つかったか
   let found = false;
   // 構文木を辿る
-  forEachNode(source, (node) => {
+  forEachNode(scope, (node) => {
     // 呼び出し式で、呼ぶ対象がその識別子
     if (
       ts.isCallExpression(node) &&
@@ -93,10 +93,48 @@ function callsName(source: ts.SourceFile, name: string): boolean {
   return found;
 }
 
+// 1 つの Server Action（export された async 関数宣言）
+interface ExportedAction {
+  // 画面から呼ばれる名前（失敗の文言に出す）
+  name: string;
+  // 本体（この中に守りがあるかを見る）
+  node: ts.FunctionDeclaration;
+}
+
+/**
+ * そのファイルが export している**関数宣言**を集める。
+ *
+ * **ファイル単位で見てはいけない。** 1 つの `actions.ts` に 2 本目を足したとき、既にある
+ * 1 本目が守りを呼んでいればファイル全体としては「呼んでいる」ことになり、新しいほうが
+ * 丸腰でも素通りする（`src/app/login/actions.ts` が既に 2 本を export しているので、
+ * 複数本を 1 ファイルに置くのはこのリポジトリの既定の形）。
+ */
+function exportedActionsOf(source: ts.SourceFile): ExportedAction[] {
+  // 集めた関数
+  const actions: ExportedAction[] = [];
+  // ファイル直下の文だけを見る（Server Action は必ずトップレベルの export）
+  for (const statement of source.statements) {
+    // 関数宣言でなければ対象外
+    if (!ts.isFunctionDeclaration(statement) || statement.name === undefined) continue;
+    // export されていなければ外から呼べないので対象外
+    const modifiers = ts.getModifiers(statement) ?? [];
+    if (!modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
+    // 本体を持たない宣言（オーバーロード）は対象外
+    if (statement.body === undefined) continue;
+    actions.push({ name: statement.name.text, node: statement });
+  }
+  return actions;
+}
+
 // src 配下の 'use server' ファイル（構文木つき）
 const serverActionFiles = parseSourceFiles()
   .filter((parsed) => parsed.path.startsWith(APP_DIR) && isServerActionFile(parsed.source))
   .map((parsed) => ({ ...parsed, key: relative(SRC_DIR, parsed.path).split('\\').join('/') }));
+
+// そのファイルたちが export している Server Action（**判定の単位は関数**）
+const serverActions = serverActionFiles.flatMap((file) =>
+  exportedActionsOf(file.source).map((action) => ({ ...action, file })),
+);
 
 describe('Server Action の守りの配線', () => {
   it('"use server" のファイルを 1 つ以上見つけられる（導出が空振りしていない）', () => {
@@ -104,26 +142,31 @@ describe('Server Action の守りの配線', () => {
     expect(serverActionFiles.length).toBeGreaterThan(0);
   });
 
+  it('export された Server Action を 1 本以上見つけられる（関数の導出が空振りしていない）', () => {
+    // ファイルは見つかるのに関数が 0 本なら、関数の導出のほうが壊れている（fail-closed）
+    expect(serverActions.length).toBeGreaterThan(0);
+  });
+
   it('すべての Server Action が Origin の照合を呼んでいる', () => {
-    // 守りを呼んでいないファイル
-    const missing = serverActionFiles.filter(
-      (file) =>
-        !(namedImportsOf(file).get(ORIGIN_GUARD.module)?.has(ORIGIN_GUARD.name) ?? false) ||
-        !callsName(file.source, ORIGIN_GUARD.name),
+    // 守りを呼んでいない**関数**（同じファイルの別の関数が呼んでいても数えない）
+    const missing = serverActions.filter(
+      (action) =>
+        !(namedImportsOf(action.file).get(ORIGIN_GUARD.module)?.has(ORIGIN_GUARD.name) ?? false) ||
+        !callsName(action.node, ORIGIN_GUARD.name),
     );
     // **他サイトのフォームから状態を変えられる形**なので、1 つでもあれば落とす
-    expect(missing.map((file) => file.key)).toEqual([]);
+    expect(missing.map((action) => `${action.file.key}#${action.name}`)).toEqual([]);
   });
 
   it('CSRF トークンの照合を呼んでいる（除外は理由付きの表だけ）', () => {
-    // 除外に載っていないのに照合を呼んでいないファイル
-    const missing = serverActionFiles.filter(
-      (file) =>
-        !Object.hasOwn(CSRF_EXEMPT, file.key) &&
-        (!(namedImportsOf(file).get(CSRF_GUARD.module)?.has(CSRF_GUARD.name) ?? false) ||
-          !callsName(file.source, CSRF_GUARD.name)),
+    // 除外に載っていないのに照合を呼んでいない関数
+    const missing = serverActions.filter(
+      (action) =>
+        !Object.hasOwn(CSRF_EXEMPT, action.file.key) &&
+        (!(namedImportsOf(action.file).get(CSRF_GUARD.module)?.has(CSRF_GUARD.name) ?? false) ||
+          !callsName(action.node, CSRF_GUARD.name)),
     );
-    expect(missing.map((file) => file.key)).toEqual([]);
+    expect(missing.map((action) => `${action.file.key}#${action.name}`)).toEqual([]);
   });
 
   it('除外表のキーは実在し、理由が書かれている', () => {

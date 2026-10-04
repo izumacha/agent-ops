@@ -22,7 +22,13 @@ import { chromiumExecutablePath } from '../e2e/lib/chromium';
 import { freePort, startApp, stopApp } from '../e2e/lib/app';
 import { seedE2eFixture } from '../e2e/lib/fixture';
 import { SESSION_COOKIE_NAME } from '../src/lib/session';
-import { AGENTS_PATH, DASHBOARD_PATH, INCIDENTS_PATH, UI_TEXT } from '../src/lib/constants';
+import {
+  AGENTS_PATH,
+  DASHBOARD_PATH,
+  INCIDENTS_PATH,
+  LOGIN_PATH,
+  UI_TEXT,
+} from '../src/lib/constants';
 
 // 画像の置き場（§15: `docs/screenshots/` 配下）
 const SHOTS_DIR = join(process.cwd(), 'docs', 'screenshots');
@@ -106,7 +112,7 @@ async function main(): Promise<void> {
     });
     const demoPage = await demoContext.newPage();
     // 1. ログイン（入力欄は type="password" なのでトークンは伏せ字になる）
-    await demoPage.goto(`${baseUrl}/login`);
+    await demoPage.goto(`${baseUrl}${LOGIN_PATH}`);
     await demoPage.waitForTimeout(STEP_PAUSE_MS);
     await demoPage.getByLabel(UI_TEXT.loginTokenLabel).fill(seed.token);
     await demoPage.getByRole('button', { name: UI_TEXT.loginSubmit }).click();

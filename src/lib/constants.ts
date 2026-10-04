@@ -116,6 +116,22 @@ export const UI_TEXT = {
   agentResumed: '復帰させました。',
   agentNotFound: '指定されたエージェントは見つかりません。',
   backToAgents: 'エージェント一覧へ戻る',
+  // インシデント一覧
+  incidentsTitle: 'インシデント',
+  incidentsEmptyOpen: '未解決のインシデントはありません。',
+  incidentsEmptyAll: 'インシデントの記録はありません。',
+  incidentsViewOpen: '未解決のみ',
+  incidentsViewAll: 'すべて',
+  // **採用しなかった表示条件も伝える**（黙って倒すと「すべて見た」つもりで未解決だけを読む）
+  incidentViewIgnored: '表示条件を解釈できなかったため、未解決のみを表示しています。',
+  columnOccurredAt: '発火日時',
+  columnAgent: 'エージェント',
+  columnSummary: '理由',
+  columnResolvedAt: '解決日時',
+  incidentResolve: '解決済みにする',
+  incidentResolved: '解決済みにしました。',
+  incidentAlreadyResolved: 'このインシデントはすでに解決済みです。',
+  incidentNotFound: '指定されたインシデントは見つかりません。',
   // Server Action の失敗（**内部の詳細は出さない**。§9）
   actionForbidden: 'この操作を行う権限がありません。',
   actionRejected: '要求を受け付けられませんでした。画面を開き直してからやり直してください。',

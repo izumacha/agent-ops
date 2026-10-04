@@ -3,11 +3,12 @@
 // **`next/headers` に触るのはこのファイルだけ。** 判定の規則そのものは `src/lib/session.ts`
 // (Next 非依存の純粋な部分) が持ち、ここは Cookie の読み書きと「未ログインなら /login へ」の
 // 枝だけを担う。分けているのは、規則の側を DB も Next も無しで単体テストできるようにするため。
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getRepos } from '@/data';
 import type { UserPrincipal } from '@/lib/api/auth';
 import { LOGIN_PATH } from '@/lib/constants';
+import { isSameOriginRequest } from '@/lib/csrf';
 import {
   SESSION_COOKIE_NAME,
   clearedSessionCookieOptions,
@@ -20,6 +21,20 @@ export interface DashboardSession {
   principal: UserPrincipal;
   // **CSRF トークンを導くためだけに持つ。** 画面へ出すのは導出した値で、この値そのものは出さない
   token: string;
+}
+
+/**
+ * 要求元が自分自身かを返す。**すべての Server Action が冒頭で呼ぶ**（CSRF 対策の 1 枚目）。
+ *
+ * ヘッダを読むのはこのファイルだけなので、判定の規則（`isSameOriginRequest`）を呼ぶ側も
+ * ここに置く — 画面ごとに `headers()` を呼ぶ形にすると、`Origin` の読み方（ヘッダ名の綴りや
+ * 無いときの扱い）が Server Action ごとに割れる。
+ */
+export async function isSameOriginAction(): Promise<boolean> {
+  // ヘッダを読む（Next.js 16 では非同期）
+  const headerList = await headers();
+  // Origin と Host を突き合わせる（判定の規則は csrf.ts の 1 か所）
+  return isSameOriginRequest(headerList.get('origin'), headerList.get('host'));
 }
 
 /** Cookie からセッショントークンを読む (無ければ undefined)。 */

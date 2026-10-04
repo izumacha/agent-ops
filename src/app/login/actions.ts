@@ -5,25 +5,15 @@
 // 他人のセッションを張らせる = セッション固定攻撃を防ぐ）。
 'use server';
 
-import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getRepos } from '@/data';
-import { isSameOriginRequest } from '@/lib/csrf';
 import { DASHBOARD_PATH, LOGIN_PATH, UI_TEXT } from '@/lib/constants';
 import { resolveSessionPrincipal } from '@/lib/session';
-import { clearSessionCookie, setSessionCookie } from '@/lib/session-server';
+import { clearSessionCookie, isSameOriginAction, setSessionCookie } from '@/lib/session-server';
 
 // ログインフォームの状態 (useActionState が受け取る形)。エラーが無ければ null
 export interface LoginState {
   error: string | null;
-}
-
-/** 要求元が自分自身かを確かめる。違えば `false`（呼び出し側が断る）。 */
-async function sameOrigin(): Promise<boolean> {
-  // ヘッダを読む (Next.js 16 では非同期)
-  const headerList = await headers();
-  // Origin と Host を突き合わせる (判定の規則は csrf.ts の 1 か所)
-  return isSameOriginRequest(headerList.get('origin'), headerList.get('host'));
 }
 
 /**
@@ -34,7 +24,7 @@ async function sameOrigin(): Promise<boolean> {
  */
 export async function login(_previous: LoginState, formData: FormData): Promise<LoginState> {
   // 他サイトからのフォーム送信を断る (セッション固定攻撃を防ぐ)
-  if (!(await sameOrigin())) return { error: UI_TEXT.loginFailed };
+  if (!(await isSameOriginAction())) return { error: UI_TEXT.loginFailed };
   // 入力を取り出す (FormData は File も返しうるので型で確かめる)
   const submitted = formData.get('token');
   // 文字列でない・空なら入力を促す
@@ -57,7 +47,7 @@ export async function login(_previous: LoginState, formData: FormData): Promise<
 /** ログアウトする。Cookie を消してログイン画面へ戻す。 */
 export async function logout(): Promise<void> {
   // 他サイトから勝手にログアウトさせられないようにする
-  if (!(await sameOrigin())) return;
+  if (!(await isSameOriginAction())) return;
   // Cookie を消す (属性は発行時とそろえる)
   await clearSessionCookie();
   // ログイン画面へ送る

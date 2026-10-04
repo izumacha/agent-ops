@@ -93,6 +93,32 @@ export const UI_TEXT = {
   columnCost: 'コスト (USD)',
   columnInputTokens: '入力トークン',
   columnOutputTokens: '出力トークン',
+  // 一覧のページ送り
+  nextPage: '次のページ',
+  // **採用しなかったカーソルも必ず伝える**（黙って先頭へ戻すと「続きを見た」つもりで 1 ページ目を読む）
+  cursorIgnored: 'ページの位置を解釈できなかったため、先頭から表示しています。',
+  // エージェント一覧・詳細
+  agentsTitle: 'エージェント',
+  agentsEmpty: 'エージェントがまだ登録されていません。',
+  columnAgentName: '名前',
+  columnProvider: 'プロバイダ',
+  columnModel: 'モデル',
+  columnStatus: '状態',
+  columnBudget: '月次予算 (USD)',
+  agentDetailDescription: '説明',
+  agentDetailNoDescription: '（説明なし）',
+  agentDetailBudgetUnset: '未設定',
+  agentDetailCreatedAt: '登録日時',
+  agentDetailOperations: '操作',
+  agentStop: 'このエージェントを停止する',
+  agentResume: 'このエージェントを復帰させる',
+  agentStopped: '停止しました。',
+  agentResumed: '復帰させました。',
+  agentNotFound: '指定されたエージェントは見つかりません。',
+  backToAgents: 'エージェント一覧へ戻る',
+  // Server Action の失敗（**内部の詳細は出さない**。§9）
+  actionForbidden: 'この操作を行う権限がありません。',
+  actionRejected: '要求を受け付けられませんでした。画面を開き直してからやり直してください。',
   // 「測れていない」ことを表す表示。**0 と書かない**（§ 稼働率の定義）
   notMeasured: '—',
   noData: 'この期間に記録はありません。',

@@ -596,12 +596,15 @@ class MemoryUsageEvents implements UsageEventsPort {
       const total = totals.get(day) ?? {
         day,
         requests: 0,
+        errorRequests: 0,
         inputTokens: 0,
         outputTokens: 0,
         costMicroUsd: 0n,
       };
       // 回数とトークン・料金を足す
       total.requests += 1;
+      // 失敗した呼び出しだけを別に数える (稼働率の分子。prisma 側の FILTER と同じ下限を使う)
+      if (event.statusCode >= USAGE_ERROR_STATUS_FLOOR) total.errorRequests += 1;
       total.inputTokens += event.inputTokens;
       total.outputTokens += event.outputTokens;
       total.costMicroUsd += event.costMicroUsd;

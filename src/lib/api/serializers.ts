@@ -122,6 +122,7 @@ export function toDailyUsageDto(row: DailyUsageTotal): DailyUsageDto {
   return {
     day: row.day,
     requests: row.requests,
+    errorRequests: row.errorRequests,
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
     costMicroUsd: row.costMicroUsd.toString(),

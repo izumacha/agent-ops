@@ -16,6 +16,7 @@ interface DailyUsageListJson {
   items: {
     day: string;
     requests: number;
+    errorRequests: number;
     inputTokens: number;
     outputTokens: number;
     costMicroUsd: string;
@@ -30,6 +31,8 @@ function addEvent(options: {
   inputTokens?: number;
   outputTokens?: number;
   costMicroUsd?: bigint;
+  // 上流の HTTP ステータス (省略すると成功。失敗件数を見るテストだけが別の値を渡す)
+  statusCode?: number;
 }): UsageEventRecord {
   // 行を組み立てる
   const row: UsageEventRecord = {
@@ -42,7 +45,7 @@ function addEvent(options: {
     outputTokens: options.outputTokens ?? 200,
     costMicroUsd: options.costMicroUsd ?? 1_000n,
     latencyMs: 10,
-    statusCode: 200,
+    statusCode: options.statusCode ?? 200,
     createdAt: new Date(options.createdAt),
   };
   // 表へ入れる
@@ -93,6 +96,7 @@ describe('日次集計の結果', () => {
     expect(items[0]).toEqual({
       day: '2026-03-01',
       requests: 2,
+      errorRequests: 0,
       inputTokens: 15,
       outputTokens: 27,
       costMicroUsd: '750',
@@ -100,6 +104,30 @@ describe('日次集計の結果', () => {
     // 2 日目
     expect(items[1].day).toBe('2026-03-02');
     expect(items[1].requests).toBe(1);
+  });
+
+  it('上流が失敗した呼び出しは requests に含めつつ errorRequests でも数える', async () => {
+    // 成功 2 件・失敗 1 件を同じ日に入れる (失敗はトークンと料金が 0 で記録される)
+    addEvent({ tenantId: seed.a.id, agentId: seed.a.agent.id, createdAt: '2026-04-01T01:00:00Z' });
+    addEvent({ tenantId: seed.a.id, agentId: seed.a.agent.id, createdAt: '2026-04-01T02:00:00Z' });
+    addEvent({
+      tenantId: seed.a.id,
+      agentId: seed.a.agent.id,
+      createdAt: '2026-04-01T03:00:00Z',
+      inputTokens: 0,
+      outputTokens: 0,
+      costMicroUsd: 0n,
+      statusCode: 502,
+    });
+    // その日 1 日を集計する
+    const result = await fetchDaily('from=2026-04-01&to=2026-04-01');
+    expect(result.status).toBe(200);
+    const items = (result.json as DailyUsageListJson).items;
+    // 分母は 3 件 (失敗も中継の試行なので requests には入る)
+    expect(items[0].requests).toBe(3);
+    // 分子は失敗した 1 件だけ。**この 2 つの対から稼働率を出す**ので、
+    // どちらかだけを数える実装では画面の成功率が狂う
+    expect(items[0].errorRequests).toBe(1);
   });
 
   it('日の境目は UTC (23:59Z と 00:00Z は別の日になる)', async () => {

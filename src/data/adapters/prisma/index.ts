@@ -649,6 +649,7 @@ interface WindowTotalRow {
 interface DailyTotalRow {
   day: string;
   requests: bigint;
+  errorRequests: bigint;
   inputTokens: bigint;
   outputTokens: bigint;
   costMicroUsd: bigint;
@@ -691,6 +692,8 @@ class PrismaUsageEvents implements UsageEventsPort {
       SELECT
         to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS "day",
         COUNT(*)::bigint AS "requests",
+        COUNT(*) FILTER (WHERE "statusCode" >= ${USAGE_ERROR_STATUS_FLOOR})::bigint
+          AS "errorRequests",
         COALESCE(SUM("inputTokens"), 0)::bigint AS "inputTokens",
         COALESCE(SUM("outputTokens"), 0)::bigint AS "outputTokens",
         COALESCE(SUM("costMicroUsd"), 0)::bigint AS "costMicroUsd"
@@ -706,6 +709,7 @@ class PrismaUsageEvents implements UsageEventsPort {
     return rows.map((row) => ({
       day: row.day,
       requests: toSafeCount(row.requests, '呼び出し回数'),
+      errorRequests: toSafeCount(row.errorRequests, '失敗した呼び出し回数'),
       inputTokens: toSafeCount(row.inputTokens, '入力トークン'),
       outputTokens: toSafeCount(row.outputTokens, '出力トークン'),
       costMicroUsd: row.costMicroUsd,

@@ -2066,7 +2066,7 @@ components:
       additionalProperties: false
     DailyUsage:
       type: object
-      required: [day, requests, inputTokens, outputTokens, costMicroUsd]
+      required: [day, requests, errorRequests, inputTokens, outputTokens, costMicroUsd]
       properties:
         day:
           type: string
@@ -2075,6 +2075,12 @@ components:
         requests:
           type: integer
           description: その日の中継回数 (上流が失敗した呼び出しも含む)
+        errorRequests:
+          type: integer
+          description: >-
+            そのうち上流の HTTP ステータスが 400 以上だった回数。
+            稼働率 (ダッシュボードが表示する成功率) の分子で、requests との対で意味を持つ。
+            **分母と同じクエリで数える**ので requests を超えることはない
         inputTokens:
           type: integer
           description: 入力トークンの合計

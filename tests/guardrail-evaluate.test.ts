@@ -18,6 +18,7 @@ import {
   RuleKind,
 } from '@/domain/types';
 import { GUARDRAIL_ERROR_RATE_MIN_REQUESTS } from '@/domain/guardrail/rule';
+import { GUARDRAIL_WINDOW_MAX_MINUTES } from '@/lib/constants';
 
 // 監査ログの鍵（下限を満たす固定値）
 const AUDIT_SECRET = 'evaluate-test-audit-secret-0123456789';
@@ -434,6 +435,31 @@ describe('ガードレールの判定', () => {
     // **2 本目は判定され、停止まで届いている**
     expect(result.fired.map((row) => row.ruleId)).toEqual([second.id]);
     expect(store.agents.get(agentId)?.status).toBe(AgentStatus.suspended);
+  });
+
+  it('集計窓が範囲外のルールも failed に数える（判定していないものを数えない）', async () => {
+    // **「判定できなかった」を数え損なう形は 1 つでも残せない。** 窓が作れないルールは
+    // しきい値と突き合わせる値そのものが無いので、`stop` のルールでも 1 度も判定されない。
+    // 数えないと `evaluated` の側に入り、`POST /guardrails/run` が 200 を返して
+    // 運用者は「上限内」と読む（記録できなかった発火と同じ fail-open）。
+    // 窓が範囲外になるのは設定が壊れているとき（CHECK 制約を入れる前の行・後から上限を
+    // 狭めた等）なので、気付かせる必要がある
+    const rule = await makeRule(RuleKind.cost, 1_000, RuleAction.stop);
+    await recordUsage(1_500n);
+    // **作成の経路では作れない行**（CHECK 制約と入力検証が弾く）なので、読み出しを差し替える
+    vi.spyOn(repos.guardrailRules, 'findActiveRules').mockResolvedValue([
+      { ...rule, windowMinutes: GUARDRAIL_WINDOW_MAX_MINUTES + 1 },
+    ]);
+    // 判定する
+    const result = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: ALL_KINDS, now: basisTime(), actorId: null },
+      env(),
+    );
+    // 判定しきった件数は 0・発火は無し・失敗が 1 件
+    expect(result).toEqual({ evaluated: 0, fired: [], failed: 1 });
+    // 止める側も動いていない（だからこそ 500 で気付く必要がある）
+    expect((await repos.agents.findById(tenantId, agentId))?.status).toBe(AgentStatus.active);
   });
 
   it('インシデントを記録できなければ failed に数える（「上限内」と読ませない）', async () => {

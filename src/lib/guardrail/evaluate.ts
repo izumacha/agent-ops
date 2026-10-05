@@ -284,6 +284,11 @@ export async function evaluateGuardrails(
       // 起きたら設定が壊れている（制約を入れる前の行が残っている等）。黙って飛ばさずログに残す
       if (measurement === null) {
         console.error('[guardrail] 集計窓の長さが範囲外のルールを判定できませんでした');
+        // **記録できなかった発火と同じく失敗として数える**（下の `raised === null` と同じ理由）。
+        // 数えないと「判定しきった」側に入り、`stop` のルールが 1 度も判定されていないのに
+        // `POST /guardrails/run` は 200 を返す。しかも窓が範囲外になる原因は設定の壊れ方
+        // （CHECK 制約を入れる前の行・後から上限を狭めた等）なので、気付かせる必要がある
+        failed += 1;
         continue;
       }
       // しきい値を越えたか（向きは RULE_COMPARISON の表が決める）

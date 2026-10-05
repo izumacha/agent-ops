@@ -1,6 +1,10 @@
 // UI 文言と enum ラベルの一元管理 (§6)。画面・API のエラー文言はここから引く
 import { MICRO_USD_MAX } from '@/domain/money';
 import { JSON_BODY_MAX_DEPTH } from '@/lib/body-limits';
+// 連番の範囲は定数だけのモジュールから引く。**`@/domain/audit/chain` からは引けない** —
+// あちらは `node:crypto` を取り込むので、このファイルを使う `'use client'` のフォーム経由で
+// クライアントのバンドルへ Node の API が入ってビルドが壊れる
+import { FIRST_AUDIT_SEQ, MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 import { AgentStatus, IncidentStatus, Provider, Role, RuleKind } from '@/domain/types';
 import { RATIO_MAX } from '@/domain/guardrail/rule';
 
@@ -399,8 +403,10 @@ export const API_MESSAGES = {
   // 監査ログの鍵が未設定・短すぎるとき。**何が足りないかは外へ出さない** (§9 の「内部詳細を漏らさない」)。
   // 503 にするのは「設定が無いので今はできない」側の事情だから (上流未設定と同じ扱い)
   auditNotConfigured: '監査ログの設定が正しくありません。',
-  // 連鎖の検証の fromSeq が 10 進の整数でない・1 未満のとき (422)
-  auditFromSeqInvalid: 'fromSeq は 1 以上の整数を指定してください。',
+  // 連鎖の検証の fromSeq が 10 進の整数でない・範囲外のとき (422)。
+  // **上下限は定数から組み立てる** — 文言に数値を書き写すと、範囲を変えたときに
+  // 検証と案内が食い違う (§6 の一元管理)
+  auditFromSeqInvalid: `fromSeq は ${FIRST_AUDIT_SEQ.toString()} 以上 ${MAX_AUDIT_SEQ.toString()} 以下の整数を指定してください。`,
   auditFromSeqBeyondEnd:
     'fromSeq が監査ログの末尾を越えています (その連番以降に行がありません)。nextFromSeq を渡し直すか、省略して先頭から検証してください。',
   // **連鎖が壊れていたときの文言は置いていない。** `GET /audit-logs/verify` は壊れていても

@@ -22,7 +22,8 @@ import {
 } from '@/lib/constants';
 import { MICRO_USD_MAX } from '@/domain/money';
 import { RESOURCE_ID_MAX_LENGTH } from '@/domain/resource-id';
-import { MAX_AUDIT_SEQ, MAX_AUDIT_SEQ_DIGITS } from '@/domain/audit/seq';
+import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
+import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
 import type { ZodObject, ZodTypeAny } from 'zod';
 import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
@@ -359,7 +360,7 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       (parameter) => parameter.name === 'fromSeq',
     );
     // 桁数の上限（正規表現）は定数から組み立てた形と一致する
-    expect(fromSeq?.schema?.pattern).toBe(`^[0-9]{1,${MAX_AUDIT_SEQ_DIGITS}}$`);
+    expect(fromSeq?.schema?.pattern).toBe(`^[0-9]{1,${PG_BIGINT_MAX_DIGITS}}$`);
     // 値の上限は説明文に書いてある（YAML に `maximum` は置けない — 型は string なので）
     expect(fromSeq?.description).toContain(MAX_AUDIT_SEQ.toString());
   });

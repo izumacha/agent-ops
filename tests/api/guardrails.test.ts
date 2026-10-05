@@ -21,7 +21,8 @@ import { POST as resolveIncident } from '@/app/api/v1/incidents/[incidentId]/res
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
 import { AuditAction } from '@/domain/audit/action';
-import { MAX_AUDIT_SEQ, MAX_AUDIT_SEQ_DIGITS } from '@/domain/audit/seq';
+import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
+import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
 import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import {
   API_MESSAGES,
@@ -1109,7 +1110,7 @@ describe('監査ログと連鎖の検証', () => {
       // 上限ちょうどの 1 つ上（19 桁なので桁数の規則は通る＝値の比較が効いていないと素通りする）
       (MAX_AUDIT_SEQ + 1n).toString(),
       // 桁数の上限を超える長さ（BigInt へ直す前に落ちる経路）
-      '9'.repeat(MAX_AUDIT_SEQ_DIGITS + 1),
+      '9'.repeat(PG_BIGINT_MAX_DIGITS + 1),
     ];
     for (const value of values) {
       const result = await call(verifyAuditLogs, {

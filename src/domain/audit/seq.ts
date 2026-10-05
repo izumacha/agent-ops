@@ -5,6 +5,7 @@
 // `chain.ts` は `node:crypto` を取り込むので、そこから引くと Node の API がクライアントの
 // バンドルへ入ってビルドが壊れる。`src/lib/body-limits.ts` が `next.config.ts` のために
 // 「定数だけ」を保っているのと同じ形にして、どこからでも安全に読めるようにする。
+import { PG_BIGINT_MAX } from '../pg-bigint';
 
 /**
  * テナントの最初の行の連番。
@@ -15,7 +16,7 @@
 export const FIRST_AUDIT_SEQ = 1n;
 
 /**
- * 連番が取りうる最大値（PostgreSQL の `BIGINT` = 符号付き 64 ビットの上限）。
+ * 連番が取りうる最大値。**値は列の型（`BIGINT`）が決めるので共有の定数から導く**（§6）。
  *
  * **これを超える値は DB へ渡す前に弾く。** `AuditLog.seq` は `BigInt` なので、範囲外の値を
  * `where: { seq: { gte: … } }` に入れると PostgreSQL が拒否し、利用者の入力が原因なのに
@@ -24,13 +25,4 @@ export const FIRST_AUDIT_SEQ = 1n;
  * **memory アダプタでは再現しない** — 全行が「その連番より小さい」として空を返すだけなので、
  * API テストは 422 に見える（ADR-0006 の構造的な死角）。だからこの上限は入口の検証で持つ。
  */
-export const MAX_AUDIT_SEQ = 9_223_372_036_854_775_807n;
-
-/**
- * 連番を 10 進で書いたときの最大桁数（`MAX_AUDIT_SEQ` の桁数）。
- *
- * **BigInt へ直す前に長さで落とすために使う。** 桁数を見ないと、何万桁もある数字列を
- * `BigInt()` に通してから捨てることになる（§9 のリソース枯渇対策。上限そのものの判定は
- * この後の比較が行うので、ここは「明らかに長すぎる入力」を手前で切るための門）。
- */
-export const MAX_AUDIT_SEQ_DIGITS = MAX_AUDIT_SEQ.toString().length;
+export const MAX_AUDIT_SEQ = PG_BIGINT_MAX;

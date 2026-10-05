@@ -6,7 +6,8 @@
 import { z } from './zod';
 import { resourceId } from './common';
 import { isValidWindowMinutes, thresholdRangeFor } from '@/domain/guardrail/rule';
-import { FIRST_AUDIT_SEQ, MAX_AUDIT_SEQ, MAX_AUDIT_SEQ_DIGITS } from '@/domain/audit/seq';
+import { FIRST_AUDIT_SEQ } from '@/domain/audit/seq';
+import { parsePgBigint } from '@/domain/pg-bigint';
 import { IncidentStatus, RuleAction, RuleKind } from '@/domain/types';
 import { pageQuerySchema } from '@/lib/api/pagination';
 import {
@@ -116,19 +117,25 @@ export const guardrailRuleUpdateSchema = z.strictObject({
  * 空を返すだけなので 422 に見える。ADR-0006 の構造的な死角）ので、入口で閉じる。
  */
 export const auditChainVerifyQuerySchema = z.strictObject({
-  // 読み始める連番（下限以上・上限以下の 10 進整数。省略時は先頭）
+  // 読み始める連番（下限以上・上限以下の 10 進整数。省略時は先頭）。
+  // **判定は共有の `parsePgBigint`**（桁数 → BigInt → 列の上限）に任せ、下限だけここで見る。
+  // `microUsd`（`src/lib/validations/common.ts`）と同じ形にそろえてあるのは、Zod 側に
+  // `.max(19)` などを置くと「桁数が多い」と「値が大きい」で文言が割れるため（同ファイルのコメント）
   fromSeq: z
     .string()
-    // 桁数の上限も正規表現で見る。**BigInt へ直す前に落とす**ため —
-    // 何万桁もある数字列を変換してから捨てると、その変換の費用だけを払わされる（§9）
-    .regex(new RegExp(`^[0-9]{1,${MAX_AUDIT_SEQ_DIGITS}}$`), API_MESSAGES.auditFromSeqInvalid)
-    .transform((value) => BigInt(value))
-    // 桁数が収まっていても値が上限を越えることはある（19 桁の最大は上限より大きい）ので、
-    // BigInt にしてから上下限の両側で比べる
-    .refine(
-      (value) => value >= FIRST_AUDIT_SEQ && value <= MAX_AUDIT_SEQ,
-      API_MESSAGES.auditFromSeqInvalid,
-    )
+    .transform((value, ctx) => {
+      // 列の範囲に収まる BigInt へ直す（形が違う・範囲外なら null）。
+      // **上限はここで書かない** — `MAX_AUDIT_SEQ` は列の型の上限から導いてあるので、
+      // この変換が落とす範囲と同じ（両者がずれたら `tests/validations.test.ts` の境界が落ちる）
+      const parsed = parsePgBigint(value);
+      // 範囲外、または先頭より小さい連番は検証エラーにする
+      if (parsed === null || parsed < FIRST_AUDIT_SEQ) {
+        ctx.addIssue({ code: 'custom', message: API_MESSAGES.auditFromSeqInvalid });
+        return z.NEVER;
+      }
+      // BigInt を返す（アダプタの where へそのまま渡せる）
+      return parsed;
+    })
     .optional(),
 });
 

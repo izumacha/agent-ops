@@ -6,7 +6,8 @@
 import { z } from './zod';
 import { resourceId } from './common';
 import { isValidWindowMinutes, thresholdRangeFor } from '@/domain/guardrail/rule';
-import { FIRST_AUDIT_SEQ } from '@/domain/audit/chain';
+import { FIRST_AUDIT_SEQ } from '@/domain/audit/seq';
+import { parsePgBigint } from '@/domain/pg-bigint';
 import { IncidentStatus, RuleAction, RuleKind } from '@/domain/types';
 import { pageQuerySchema } from '@/lib/api/pagination';
 import {
@@ -109,14 +110,32 @@ export const guardrailRuleUpdateSchema = z.strictObject({
  * **文字列で受けて BigInt へ直す。** 連番は BigInt なので、JSON の数値（倍精度）で受けると
  * 2^53 を超えた時点で別の行を指す。**10 進の数字だけを許す**（先頭の `+`・空白・指数表記は
  * 弾く。`BigInt('')` が 0 になるので空文字も弾く）
+ *
+ * **上限（`MAX_AUDIT_SEQ`）も必ず見る。** `seq` 列は PostgreSQL の `BIGINT` なので、範囲外の値が
+ * `where: { seq: { gte: … } }` へ届くと DB が拒否し、利用者の入力が原因なのに**500 とスタックの
+ * ログ**になる。**API テストでは見えない**（memory アダプタは「全行がその連番より小さい」として
+ * 空を返すだけなので 422 に見える。ADR-0006 の構造的な死角）ので、入口で閉じる。
  */
 export const auditChainVerifyQuerySchema = z.strictObject({
-  // 読み始める連番（1 以上の 10 進整数。省略時は先頭）
+  // 読み始める連番（下限以上・上限以下の 10 進整数。省略時は先頭）。
+  // **判定は共有の `parsePgBigint`**（桁数 → BigInt → 列の上限）に任せ、下限だけここで見る。
+  // `microUsd`（`src/lib/validations/common.ts`）と同じ形にそろえてあるのは、Zod 側に
+  // `.max(19)` などを置くと「桁数が多い」と「値が大きい」で文言が割れるため（同ファイルのコメント）
   fromSeq: z
     .string()
-    .regex(/^[0-9]+$/, API_MESSAGES.auditFromSeqInvalid)
-    .transform((value) => BigInt(value))
-    .refine((value) => value >= FIRST_AUDIT_SEQ, API_MESSAGES.auditFromSeqInvalid)
+    .transform((value, ctx) => {
+      // 列の範囲に収まる BigInt へ直す（形が違う・範囲外なら null）。
+      // **上限はここで書かない** — `MAX_AUDIT_SEQ` は列の型の上限から導いてあるので、
+      // この変換が落とす範囲と同じ（両者がずれたら `tests/validations.test.ts` の境界が落ちる）
+      const parsed = parsePgBigint(value);
+      // 範囲外、または先頭より小さい連番は検証エラーにする
+      if (parsed === null || parsed < FIRST_AUDIT_SEQ) {
+        ctx.addIssue({ code: 'custom', message: API_MESSAGES.auditFromSeqInvalid });
+        return z.NEVER;
+      }
+      // BigInt を返す（アダプタの where へそのまま渡せる）
+      return parsed;
+    })
     .optional(),
 });
 

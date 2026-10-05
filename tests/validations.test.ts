@@ -7,6 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
 import { RESOURCE_ID_MAX_LENGTH } from '@/domain/resource-id';
+import { auditChainVerifyQuerySchema } from '@/lib/validations/guardrail';
+import { FIRST_AUDIT_SEQ, MAX_AUDIT_SEQ } from '@/domain/audit/seq';
+import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
 import { Provider } from '@/domain/types';
 
 // NUL 文字 (ソースに直接書かず組み立てる)
@@ -88,5 +91,44 @@ describe('本文に載る資源 id (API キー発行の agentId)', () => {
   it('agentId を省略した本文は受け付ける (任意項目のまま)', () => {
     // 紐づけないキーも発行できる
     expect(apiKeyCreateSchema.safeParse({ name: 'キー' }).success).toBe(true);
+  });
+});
+
+// 連鎖の検証の `fromSeq` の境界。判定そのものは共有の `parsePgBigint`（`tests/pg-bigint.test.ts`
+// が形と範囲を固定する）に任せているので、ここで見るのは**この画面の下限と上限が実際に効いて
+// いるか**。とくに上限は `MAX_AUDIT_SEQ` が列の型の上限から導かれていることに依存しているため、
+// 導出が崩れた（＝小さい値に置き換えた）ときにここで落ちる必要がある
+describe('連鎖の検証の fromSeq', () => {
+  it('上限ちょうどは受け付ける', () => {
+    // 「越えたら弾く」の副作用で上限そのものを弾いてしまう退行を防ぐ
+    const parsed = auditChainVerifyQuerySchema.safeParse({ fromSeq: MAX_AUDIT_SEQ.toString() });
+    expect(parsed.success).toBe(true);
+    // 文字列ではなく BigInt へ直って出てくる（JSON の数値だと 2^53 を超えて別の行を指す）
+    expect(parsed.success && parsed.data.fromSeq).toBe(MAX_AUDIT_SEQ);
+  });
+
+  it('下限ちょうども受け付ける', () => {
+    // 先頭の行を明示的に指す呼び出し（nextFromSeq を追わない運用）を壊さない
+    expect(
+      auditChainVerifyQuerySchema.safeParse({ fromSeq: FIRST_AUDIT_SEQ.toString() }).success,
+    ).toBe(true);
+  });
+
+  it('下限より小さい値は受け付けない', () => {
+    // 0 を通すと「先頭より前」を指す呼び出しが成立してしまう（錨の計算が意味を失う）
+    const parsed = auditChainVerifyQuerySchema.safeParse({
+      fromSeq: (FIRST_AUDIT_SEQ - 1n).toString(),
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it.each([
+    // 上限の 1 つ上（桁数は収まるので、値の比較が効いていないと素通りする）
+    ['上限を 1 だけ越えた値', (MAX_AUDIT_SEQ + 1n).toString()],
+    // 桁数の上限を超える長さ（`BigInt` へ直す前に落ちる経路）
+    ['桁数の上限を越えた値', '9'.repeat(PG_BIGINT_MAX_DIGITS + 1)],
+  ])('%s は受け付けない（DB へ渡すと 500 になる）', (_label, fromSeq) => {
+    // 範囲外の連番が `where: { seq: { gte: … } }` へ届くと PostgreSQL が拒否する
+    expect(auditChainVerifyQuerySchema.safeParse({ fromSeq }).success).toBe(false);
   });
 });

@@ -21,6 +21,8 @@ import { POST as resolveIncident } from '@/app/api/v1/incidents/[incidentId]/res
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
 import { AuditAction } from '@/domain/audit/action';
+import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
+import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
 import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import {
   API_MESSAGES,
@@ -1096,6 +1098,43 @@ describe('監査ログと連鎖の検証', () => {
       });
       expect(result.status, `fromSeq=${value}`).toBe(422);
     }
+  });
+
+  it('fromSeq が int8 の範囲を越えていれば 422（DB へ渡して 500 にしない）', async () => {
+    // **memory アダプタでは壊れ方が見えない**（全行が「その連番より小さい」として空を返すので
+    // 「末尾を越えた」の 422 に見える）。本番の prisma アダプタでは `where: { seq: { gte: … } }`
+    // へ範囲外の BigInt が届き、PostgreSQL が拒否して 500 ＋ スタックのログになる。
+    // そこで**入口（Zod）で落ちていること**を文言まで見て固定する — 文言が
+    // auditFromSeqBeyondEnd だったら、入口を素通りしてアダプタまで届いている
+    const values = [
+      // 上限ちょうどの 1 つ上（19 桁なので桁数の規則は通る＝値の比較が効いていないと素通りする）
+      (MAX_AUDIT_SEQ + 1n).toString(),
+      // 桁数の上限を超える長さ（BigInt へ直す前に落ちる経路）
+      '9'.repeat(PG_BIGINT_MAX_DIGITS + 1),
+    ];
+    for (const value of values) {
+      const result = await call(verifyAuditLogs, {
+        token: seed.a.tokens.admin,
+        query: `fromSeq=${value}`,
+      });
+      expect(result.status, `fromSeq=${value}`).toBe(422);
+      // 入力検証の 422 は最上位が定型文で、どの項目がなぜ駄目かは issues に載る。
+      // **文言まで見る**のが要点 — 入口を素通りしていれば auditFromSeqBeyondEnd になる
+      expect(result.json, `fromSeq=${value}`).toMatchObject({
+        issues: [{ path: 'fromSeq', message: API_MESSAGES.auditFromSeqInvalid }],
+      });
+    }
+  });
+
+  it('fromSeq が上限ちょうどなら入口は通る（上限そのものは有効な連番）', async () => {
+    // 上限を「越えたら 422」にした副作用で**上限ちょうども弾いてしまう**退行を防ぐ。
+    // 行は無いので「末尾を越えた」の 422 になるが、文言が入力の形のエラーでないことを見る
+    await appendViaResolve();
+    const result = await call(verifyAuditLogs, {
+      token: seed.a.tokens.admin,
+      query: `fromSeq=${MAX_AUDIT_SEQ.toString()}`,
+    });
+    expect(result.json).toMatchObject({ message: API_MESSAGES.auditFromSeqBeyondEnd });
   });
 
   it('fromSeq が末尾を越えていれば 422（0 件を「無傷」と答えない）', async () => {

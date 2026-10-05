@@ -4,6 +4,10 @@
 // DB・Next.js に依存しない純粋ロジックなので、ユニットテストで境界を全部固定できる (§11)。
 import { createHmac } from 'node:crypto';
 
+// 連番の範囲 (下限・上限) は定数だけのモジュールが持つ。ここから再公開するので、
+// `@/domain/audit/chain` から下限を取り込んでいる既存の呼び出し側は 1 行も変えなくてよい
+import { FIRST_AUDIT_SEQ } from './seq';
+
 // 監査ログの詳細 (payload 列) に入れられる値の形。**入れ子を許さない平坦な辞書に限る。**
 // 理由は 2 つ。(1) 正規化がキーの並べ替えだけで済み、再帰の実装を持たなくてよい。
 // (2) JSONB は**キーの順序を保存しない**ので、保存して読み直すと書いたときと順序が変わりうる。
@@ -117,13 +121,10 @@ export function auditRowHash(secret: string, row: AuditChainRow): string {
   return createHmac('sha256', secret).update(canonicalAuditRow(row), 'utf8').digest('hex');
 }
 
-/**
- * テナントの最初の行の連番。
- *
- * **1 始まりであることをここが決める。** 採番・検証・途中からの読み出しの 3 か所が
- * 「先頭はどれか」を知る必要があるので、裸の `1n` を散らさず 1 つの定数から読む
- */
-export const FIRST_AUDIT_SEQ = 1n;
+// 連番の下限を再公開する (正本は `./seq`)。**値をここで宣言し直さない** —
+// 文言を組み立てる `src/lib/constants.ts` は `'use client'` のフォームから取り込まれるので、
+// `node:crypto` を持つこのモジュールからは引けず、定数だけのモジュールを正本にしてある
+export { FIRST_AUDIT_SEQ };
 
 // 次の行の連番 (直前の行が無ければ先頭から始める)
 export function nextAuditSeq(previousSeq: bigint | null): bigint {

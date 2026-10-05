@@ -10,6 +10,8 @@ import { importSharedModule, sharedModuleNames } from './lib/script-files';
 const DOCS = join(process.cwd(), 'docs');
 // 定数の正本 (文書に書かれた数値と突き合わせる)
 import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
+// 監査ログの連番の上限 (README が運用者向けに数値で書いているので突き合わせる)
+import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 // RBAC の許可表 (役割と操作の唯一の真実の源)
 import { PERMISSIONS } from '@/domain/rbac';
 // Step1 の受け入れ基準の値 (ゲートが読むのと同じ定義)。**名前空間でも読む** —
@@ -83,6 +85,19 @@ describe('Step0 の設計成果物', () => {
       // その数値が本文に現れること
       expect(readFileSync(path, 'utf8'), `${path} の最小長が実装とずれている`).toContain(expected);
     }
+  });
+
+  // 同じ事情で README にある連番の上限も突き合わせる。**OpenAPI 側の写しには既に検査がある**
+  // (tests/openapi.test.ts) のに、運用者が読む README だけが素のままだと、定数を下げたときに
+  // 「README には上限と書いてあるのに API はもっと狭い」状態が静かに残る
+  it(`連鎖の検証の fromSeq の上限 ${MAX_AUDIT_SEQ.toString()} が README と一致する`, () => {
+    // 実装の値を README の書き方 (「1 以上 … 以下」) に合わせた文字列
+    const expected = `${MAX_AUDIT_SEQ.toString()} 以下`;
+    // 運用者がこの値を読む場所
+    expect(
+      readFileSync(join(process.cwd(), 'README.md'), 'utf8'),
+      'README の fromSeq の上限が実装とずれている',
+    ).toContain(expected);
   });
 
   // ゲートの受け入れ基準が、正本 (ロードマップの散文と RBAC の許可表) と一致していることを固定する。

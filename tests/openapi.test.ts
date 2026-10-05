@@ -22,6 +22,8 @@ import {
 } from '@/lib/constants';
 import { MICRO_USD_MAX } from '@/domain/money';
 import { RESOURCE_ID_MAX_LENGTH } from '@/domain/resource-id';
+import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
+import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
 import type { ZodObject, ZodTypeAny } from 'zod';
 import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
@@ -57,7 +59,15 @@ type Operation = {
     >;
   };
 };
-type ParameterRef = { name?: string; in?: string; $ref?: string };
+// パラメータの定義。**`schema` と `description` も読む** — 連番の上限のように、
+// 定数の写しがここに現れるものを突き合わせるため
+type ParameterRef = {
+  name?: string;
+  in?: string;
+  $ref?: string;
+  description?: string;
+  schema?: Record<string, unknown>;
+};
 // パスごとの定義。**パス単位の parameters も読む** — OpenAPI では共通の引数をここに置けて、
 // このファイルも実際にそうしている (置き場所の違いで検査から外れないようにする)
 type PathItem = Partial<Record<(typeof HTTP_METHODS)[number], Operation>> & {
@@ -340,6 +350,19 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     const expiresInDays = spec.components.schemas.UserTokenCreate.properties?.expiresInDays;
     expect(expiresInDays?.default).toBe(USER_TOKEN_DEFAULT_TTL_DAYS);
     expect(expiresInDays?.maximum).toBe(USER_TOKEN_MAX_TTL_DAYS);
+  });
+
+  // 連鎖の検証の fromSeq も同じ事情（上限が YAML と定数の 2 か所にある）。**ここが古くなると
+  // 契約だけが範囲外の値を許し、生成した型から書くクライアントが 422 になる値を送る**
+  it('連鎖の検証の fromSeq の範囲は定数と一致する', () => {
+    // パラメータはパスの中にインラインで置いてある
+    const fromSeq = spec.paths['/audit-logs/verify']?.get?.parameters?.find(
+      (parameter) => parameter.name === 'fromSeq',
+    );
+    // 桁数の上限（正規表現）は定数から組み立てた形と一致する
+    expect(fromSeq?.schema?.pattern).toBe(`^[0-9]{1,${PG_BIGINT_MAX_DIGITS}}$`);
+    // 値の上限は説明文に書いてある（YAML に `maximum` は置けない — 型は string なので）
+    expect(fromSeq?.description).toContain(MAX_AUDIT_SEQ.toString());
   });
 
   // 逆方向 (実装 → 契約) も見る。契約に無い Route Handler は 401/403 等の宣言検査も型生成も掛からないまま出荷される

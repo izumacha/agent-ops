@@ -17,6 +17,7 @@ import {
   type AuditPayload,
   type StoredAuditRow,
 } from '@/domain/audit/chain';
+import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import { secretsEqual, userTokenExpiresAt } from '@/lib/tokens';
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
@@ -906,6 +907,21 @@ describe.skipIf(!ENABLED)('ガードレールと監査ログの契約', () => {
     // 消えている
     const { rows } = await repos.auditLogs.readChain(a.tenantId, CHAIN_LIMIT);
     expect(rows).toHaveLength(0);
+  });
+
+  it('fromSeq に連番の上限を渡しても DB は受け付ける (入口の上限が厳しすぎない)', async () => {
+    // **入口（Zod）の上限が「DB が受け付ける範囲」と一致していることを、DB 側から確かめる。**
+    // 上限は seq 列 (BIGINT) の最大値なので、この呼び出しは 0 件を返して正常に終わるはず。
+    // ここが例外になるなら入口の上限が緩すぎ（＝範囲外の値が届いて 500 になる経路が残っている）。
+    // **範囲外の値はここで試さない** — 入口の Zod が手前で落とすので本番では到達しない
+    const a = await makeTenantWithAgent(repos, 'a');
+    const head = await appendAudit(a.tenantId, 'agent.suspend');
+    const page = await repos.auditLogs.readChain(a.tenantId, CHAIN_LIMIT, MAX_AUDIT_SEQ);
+    // 上限より大きい連番の行は無いので 0 件（上限に達してもいない）
+    expect(page.rows).toHaveLength(0);
+    expect(page.reachedLimit).toBe(false);
+    // 錨を引くクエリ（`seq < start`）も同じ上限を渡されるので、そちらも受け付けている
+    expect(page.anchorHash).toBe(head.hash);
   });
 
   it('同じ (tenantId, seq) の 2 行目は一意制約が拒否する', async () => {

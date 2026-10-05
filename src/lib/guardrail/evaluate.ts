@@ -309,6 +309,11 @@ export async function evaluateGuardrails(
       // エージェントかルールが（並行して）消えていれば記録できない。握り潰さずログに残す
       if (raised === null) {
         console.error('[guardrail] インシデントを記録できませんでした (対象が見つかりません)');
+        // **失敗として数える。** しきい値は越えているのに記録も停止もできていないので、
+        // ここを数えないと `evaluated` が「判定しきった」側に加算され、
+        // `POST /guardrails/run` は `{ evaluated: N, fired: [] }` の 200 を返す
+        // ＝運用者と cron は「上限内」と読む（例外を受け止める下の catch と同じ fail-open）
+        failed += 1;
         continue;
       }
       // 発火として数える

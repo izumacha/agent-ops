@@ -436,6 +436,27 @@ describe('ガードレールの判定', () => {
     expect(store.agents.get(agentId)?.status).toBe(AgentStatus.suspended);
   });
 
+  it('インシデントを記録できなければ failed に数える（「上限内」と読ませない）', async () => {
+    // **記録できなかった発火を数えないと最悪の倒れ方になる。** 戻り値は
+    // `evaluated: rules.length - failed` なので、数えないとそのルールは「判定しきった」側に入り、
+    // `POST /guardrails/run` は `failed > 0` のときだけ 500 にするので
+    // **超過して記録も停止もされていないのに `{ evaluated: 1, fired: [] }` の 200** が返る。
+    // cron や運用者はそれを「上限内」と読む（例外を受け止める上の経路と同じ fail-open）
+    await makeRule(RuleKind.cost, 1_000, RuleAction.stop);
+    await recordUsage(1_500n);
+    stubNotify();
+    // **エージェントかルールが並行して消えた状況を作る**（アダプタは null を返す）
+    vi.spyOn(repos.incidents, 'raise').mockResolvedValue(null);
+    // 判定する
+    const result = await evaluateGuardrails(
+      repos,
+      { tenantId, agentId, kinds: ALL_KINDS, now: basisTime(), actorId: null },
+      env(),
+    );
+    // 判定しきった件数は 0・発火は無し・失敗が 1 件（この 3 つが揃って初めて 500 になる）
+    expect(result).toEqual({ evaluated: 0, fired: [], failed: 1 });
+  });
+
   it('中継の直後は品質ルールを見ない（評価実行の表を引かない）', async () => {
     // **起点によって見る種別を絞る**のが要点。絞らないと中継 1 回ごとに評価実行の表まで引く
     // ことになり、しかも中継では品質は動かないので判定しても意味が無い

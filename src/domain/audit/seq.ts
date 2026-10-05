@@ -5,6 +5,8 @@
 // `chain.ts` は `node:crypto` を取り込むので、そこから引くと Node の API がクライアントの
 // バンドルへ入ってビルドが壊れる。`src/lib/body-limits.ts` が `next.config.ts` のために
 // 「定数だけ」を保っているのと同じ形にして、どこからでも安全に読めるようにする。
+// **取り込むのも同じ性質のモジュールだけに限る** — 実行時コードを持つモジュールを引くと、
+// この約束が連鎖の先で破れる（`entry-body-limit` 系と同じ規則）。
 import { PG_BIGINT_MAX } from '../pg-bigint';
 
 /**

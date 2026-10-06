@@ -34,7 +34,8 @@
     "gate:step3": "node scripts/gate-step3.mjs",
     "gate:step4": "node scripts/gate-step4.mjs",
     "gate:step5": "node scripts/gate-step5.mjs",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "gate:step6": "node scripts/gate-step6.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",

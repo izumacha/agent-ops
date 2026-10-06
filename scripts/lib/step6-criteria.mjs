@@ -51,6 +51,25 @@ export const COVERAGE_EXCLUDE = [
 /** 越境アクセスのテスト名の接頭辞（`tests/api/tenant-isolation.test.ts` が付ける） */
 export const CROSS_TENANT_TEST_PREFIX = '越境: ';
 
+/**
+ * 越境テストの**導出と表を突き合わせる**テストの名前。
+ *
+ * **ゲートは群（接頭辞）とは別にこれを要求する。** 群の件数だけを見ると、表から 1 件消す変異は
+ * 要求も一緒に縮むので素通りする（「流れたものから期待を導く」形。この repo が繰り返し
+ * 避けている）。このテストが契約（openapi.yaml）と表を双方向で照合するので、
+ * 「契約にあるのに表に無い」も「表にあるのに契約に無い」も落ちる。
+ */
+export const CROSS_TENANT_DERIVATION_TEST_NAME =
+  '導出した対象と表が一致する（追記漏れ・古い登録のどちらでも落ちる）';
+
+/**
+ * 越境テストに要求する最小件数（**床**）。
+ *
+ * 正確な網羅は上の導出のテストが担保するので、ここは「群がまるごと消えたら気付く」ための床。
+ * 現在の契約から導かれるのは 17 パターン。**下げない**（上げるのはルートが増えたとき）。
+ */
+export const CROSS_TENANT_MIN_CASES = 17;
+
 /** Webhook の冪等性のテスト名の接頭辞（`tests/api/billing.test.ts` が付ける） */
 export const IDEMPOTENCY_TEST_PREFIX = '冪等性: ';
 

@@ -1,6 +1,7 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step5`: gen / db:generate / lint / format:check / typecheck /
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step6`: gen / db:generate / lint / format:check / typecheck /
 # テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / 不正出力の除外が全理由分 pass /
 # 発火が全種別分 pass / 改ざん検知が全種類分 pass / ガードレールの E2E が pass / 突合が pass /
+# テナント越境が全パターン pass / Webhook の冪等性が pass / ロジック層のカバレッジ 4 指標 ≧ 80% /
 # npm audit (本番依存) high 0 / 本番ビルド / 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90 /
 # ベンチ 4 本) を検査し、
 # あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・
@@ -74,8 +75,8 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run latest step gate (gate:step5)
-        run: npm run gate:step5
+      - name: Run latest step gate (gate:step6)
+        run: npm run gate:step6
 
       # **ゲートと同じ検査をここでも流す。** ゲートのステップを丸ごと削除する形（`STEP0_STEPS`
       # から 1 行消す・ゲート本体の呼び出しを消す）は検出網では捉えられない — 「流すと書いて

@@ -401,14 +401,11 @@ export function enforceRateLimit(principal: Principal, tier: RateLimitTier, now:
   const extra = extraFrames.get(tier);
   // 追加の枠の上限（枠が無ければ null）
   const extraLimit = extraRateLimitFor(tier);
-  // 見るべき「枠と上限」の組（追加の枠を持つ種類は共有の枠も消費する）
-  const frames: [SlidingWindowRateLimiter, number][] =
-    extra === undefined || extraLimit === null
-      ? [[shared, sharedLimit]]
-      : [
-          [shared, sharedLimit],
-          [extra, extraLimit],
-        ];
+  // 見るべき「枠と上限」の組。**共有の枠は必ず消費する**ので先に 1 つだけ書き、
+  // 追加の枠を持つ種類はその後ろへ足す（両方の分岐に書くと、組み方を直したときに片方だけ直る）
+  const frames: [SlidingWindowRateLimiter, number][] = [[shared, sharedLimit]];
+  // 追加の枠を持つ種類だけ 2 つ目を足す（置き換えではなく「加えて」消費する）
+  if (extra !== undefined && extraLimit !== null) frames.push([extra, extraLimit]);
   // まず全部を覗き見して、断るものがあるか調べる
   const denials = frames
     .map(([limiter, limit]) => limiter.inspect(key, now, limit))

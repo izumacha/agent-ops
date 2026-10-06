@@ -12,7 +12,7 @@ import { BILLING_SIGNATURE_HEADER } from '@/lib/billing/signature';
 import { BILLING_PRICE_LOOKUP_KEYS } from '@/lib/billing/events';
 import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 import { Plan } from '@/domain/types';
-import { API_MESSAGES } from '@/lib/constants';
+import { API_MESSAGES, PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
@@ -160,6 +160,17 @@ describe('GET /billing', () => {
     seed.store.tenants.set(b.id, { ...b, plan: Plan.enterprise });
     const result = await call(getBilling, { token: seed.a.tokens.viewer });
     expect(result.json).toMatchObject({ plan: Plan.pro });
+  });
+
+  it('中継の枠は実際に効いている値を返す（環境変数の上書きを含む）', async () => {
+    // **広告する上限と断られる上限が食い違ってはいけない。** この API の存在理由は
+    // 429 / 409 / 403 を受けた側が実際の上限を知ることなので、表の値ではなく判定に使う値を返す
+    vi.stubEnv(PROXY_RATE_LIMIT_ENV, '100');
+    const result = await call(getBilling, { token: seed.a.tokens.viewer });
+    expect((result.json as { limits: { proxyRateLimitPerMinute: number } }).limits).toMatchObject({
+      proxyRateLimitPerMinute: 100,
+    });
+    vi.unstubAllEnvs();
   });
 });
 
@@ -393,6 +404,48 @@ describe('POST /billing/webhook', () => {
     ).toEqual({ received: true, applied: true });
     // free のまま（有料へ戻らない）
     expect(await planOfA()).toBe(Plan.free);
+  });
+
+  it('いまの契約とは別のサブスクリプションの解約では落とさない', async () => {
+    // **解約の配信が失敗して再送待ちのあいだに結び直すと、古い解約が後から届く。**
+    // 区別しないと、いま払っている契約があるのに free へ落ちる
+    await linkCustomerViaApi('cus_1', Plan.free);
+    // 新しい契約（sub_2）が有効になる
+    expect(
+      (
+        await postWebhook(
+          webhookBody({ eventId: 'evt_new', plan: Plan.pro, subscriptionId: 'sub_2' }),
+        )
+      ).json,
+    ).toEqual({ received: true, applied: true });
+    expect(await planOfA()).toBe(Plan.pro);
+    expect((await billingLinkOfA())?.billingSubscriptionId).toBe('sub_2');
+    // 遅れて届いた古い契約（sub_1）の解約
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await postWebhook(
+      webhookBody({
+        eventId: 'evt_old_del',
+        type: 'customer.subscription.deleted',
+        subscriptionId: 'sub_1',
+      }),
+    );
+    expect(result.json).toEqual({ received: true, applied: false });
+    // pro のまま（取り落としたことはログに残す）
+    expect(await planOfA()).toBe(Plan.pro);
+    expect(logged).toHaveBeenCalledTimes(1);
+    logged.mockRestore();
+  });
+
+  it('解約が顧客 ID の取り違えで反映できなければログに残す', async () => {
+    // **解約も「契約の変更」**。`fromPrice` の種別だけを異常としていた版では、解約が
+    // 反映できなかったときにログが 1 行も出ず、運用者から見えなかった
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await postWebhook(
+      webhookBody({ type: 'customer.subscription.deleted', customer: 'cus_unknown' }),
+    );
+    expect(result.json).toEqual({ received: true, applied: false });
+    expect(logged).toHaveBeenCalledTimes(1);
+    logged.mockRestore();
   });
 
   it('支払いが完了していない契約では有料プランを付けない', async () => {

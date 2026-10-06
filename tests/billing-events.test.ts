@@ -11,6 +11,7 @@ import {
   BILLING_PRICE_LOOKUP_KEYS,
   BILLING_SUBSCRIPTION_STATUS_EFFECT,
   isPlanChangeEvent,
+  isStaleCancellation,
   planChangeFor,
   subscriptionStatusEffect,
 } from '@/lib/billing/events';
@@ -60,6 +61,8 @@ describe('イベントからプランへの写像', () => {
     expect(planChangeFor(event({ type, lookupKey }))).toEqual({
       plan,
       subscriptionId: 'sub_1',
+      // 契約は有効なので解約ではない（呼び出し側が「古い解約」の判定に使う）
+      cancellation: false,
     });
   });
 
@@ -74,8 +77,10 @@ describe('イベントからプランへの写像', () => {
       event({ type: 'customer.subscription.updated', lookupKey: 'agent-ops-pro', status }),
     );
     // 有効なら価格のプラン、終わっていれば free、まだ有効でないなら何もしない
-    if (effect === 'fromPrice') expect(change).toEqual({ plan: Plan.pro, subscriptionId: 'sub_1' });
-    if (effect === 'toFree') expect(change).toEqual({ plan: Plan.free, subscriptionId: 'sub_1' });
+    if (effect === 'fromPrice')
+      expect(change).toEqual({ plan: Plan.pro, subscriptionId: 'sub_1', cancellation: false });
+    if (effect === 'toFree')
+      expect(change).toEqual({ plan: Plan.free, subscriptionId: 'sub_1', cancellation: true });
     if (effect === 'ignore') expect(change).toBeNull();
   });
 
@@ -90,7 +95,7 @@ describe('イベントからプランへの写像', () => {
           status: 'canceled',
         }),
       ),
-    ).toEqual({ plan: Plan.free, subscriptionId: 'sub_1' });
+    ).toEqual({ plan: Plan.free, subscriptionId: 'sub_1', cancellation: true });
   });
 
   it('支払いが完了していない契約では有料プランを付けない', () => {
@@ -130,7 +135,7 @@ describe('イベントからプランへの写像', () => {
           status: 'active',
         }),
       ),
-    ).toEqual({ plan: Plan.free, subscriptionId: 'sub_1' });
+    ).toEqual({ plan: Plan.free, subscriptionId: 'sub_1', cancellation: true });
   });
 
   it('解約は価格を見ずに free へ落とす', () => {
@@ -138,6 +143,7 @@ describe('イベントからプランへの写像', () => {
     expect(planChangeFor(event({ type: 'customer.subscription.deleted' }))).toEqual({
       plan: Plan.free,
       subscriptionId: 'sub_1',
+      cancellation: true,
     });
   });
 
@@ -181,14 +187,15 @@ describe('イベントからプランへの写像', () => {
           subscriptionId: null,
         }),
       ),
-    ).toEqual({ plan: Plan.pro, subscriptionId: null });
+    ).toEqual({ plan: Plan.pro, subscriptionId: null, cancellation: false });
   });
 });
 
 describe('ログに残すべき種別の判定', () => {
-  it.each(Object.entries(BILLING_EVENT_EFFECT))('%s は %s の扱い', (type, effect) => {
-    // 「価格から決める種別」だけが「決められないのは異常」（表から導く）
-    expect(isPlanChangeEvent(type)).toBe(effect === 'fromPrice');
+  it.each(Object.keys(BILLING_EVENT_EFFECT))('%s は契約の変更として扱う', (type) => {
+    // **表にある種別はすべて対象**（`fromPrice` も `toFree` も）。`fromPrice` だけを見ていた版では、
+    // 解約が顧客 ID の取り違えで反映できなかったときにログが 1 行も出なかった
+    expect(isPlanChangeEvent(type)).toBe(true);
   });
 
   it('表に無い種別は異常ではない', () => {
@@ -196,6 +203,42 @@ describe('ログに残すべき種別の判定', () => {
     expect(isPlanChangeEvent('invoice.payment_succeeded')).toBe(false);
     // プロトタイプ由来の名前も同じ
     expect(isPlanChangeEvent('constructor')).toBe(false);
+  });
+});
+
+describe('古い解約の判定', () => {
+  // 解約（`cancellation: true`）の変更を組み立てる
+  const cancel = (subscriptionId: string | null) => ({
+    plan: Plan.free,
+    subscriptionId,
+    cancellation: true,
+  });
+
+  it('いまの契約と別のサブスクリプションの解約は古い', () => {
+    // **配信順は保証されない。** 解約の再送が遅れているあいだに結び直した契約を打ち消さない
+    expect(isStaleCancellation(cancel('sub_1'), 'sub_2')).toBe(true);
+  });
+
+  it('いまの契約と同じなら古くない', () => {
+    // 通常の解約（反映する）
+    expect(isStaleCancellation(cancel('sub_1'), 'sub_1')).toBe(false);
+  });
+
+  it('どちらかの ID が無ければ区別できないので反映する側へ倒す', () => {
+    // 本文が ID を運んでいない
+    expect(isStaleCancellation(cancel(null), 'sub_1')).toBe(false);
+    // まだ連携していない（1 通目を取り落とさない）
+    expect(isStaleCancellation(cancel('sub_1'), null)).toBe(false);
+  });
+
+  it('契約の開始・変更は対象外（新しい契約が勝つ）', () => {
+    // `cancellation: false` の変更は ID が違っても反映する
+    expect(
+      isStaleCancellation(
+        { plan: Plan.pro, subscriptionId: 'sub_2', cancellation: false },
+        'sub_1',
+      ),
+    ).toBe(false);
   });
 });
 

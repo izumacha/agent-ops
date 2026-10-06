@@ -1513,8 +1513,9 @@ components:
         (a) **このサービスのレート制限** — 窓の中で出せる回数を超えた。数える単位は
         **テナント** (プラットフォーム管理者トークンだけは単一の枠。API キーやユーザーを
         増やしても枠は増えない) で、枠は重さの理由ごとに分かれている:
-        対象のすべての経路が消費する枠 (src/lib/constants.ts の PROXY_RATE_LIMIT_PER_MINUTE。
-        同名の環境変数で上書きできる) に加えて、評価の実行は
+        対象のすべての経路が消費する枠 (**契約プランごと**。正本は src/domain/plan.ts の
+        PLAN_LIMITS の proxyRateLimitPerMinute で、いまの値は GET /billing が返す。
+        環境変数 PROXY_RATE_LIMIT_PER_MINUTE で上書きするとプランの差が消える) に加えて、評価の実行は
         FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE、ガードレールの明示実行は
         OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE の小さい枠も消費する。
         Retry-After はこちらが計算した秒数で、複数の枠が尽きている場合は長いほうを返す。
@@ -2527,10 +2528,41 @@ components:
                   maxLength: 255
                   nullable: true
                   description: 顧客 ID (cus_...)。これでテナントを引く
+                status:
+                  type: string
+                  maxLength: 255
+                  nullable: true
+                  description: |-
+                    契約の状態 (active / trialing / past_due / canceled / unpaid / paused /
+                    incomplete / incomplete_expired)。**価格だけでプランは決まらない** —
+                    active / trialing / past_due は価格のプランへ反映し、canceled / unpaid /
+                    paused は無料プランへ落とし、incomplete / incomplete_expired と知らない
+                    状態・未指定は何もしない (支払う前に有料の枠が付かないようにする)
+                  example: active
                 items:
                   type: object
                   nullable: true
-                  description: 契約の明細 (最初の 1 件だけを読む)
+                  description: 契約の明細 (**最初の 1 件だけを読む**。1 契約 1 プランの前提)
+                  properties:
+                    data:
+                      type: array
+                      nullable: true
+                      items:
+                        type: object
+                        properties:
+                          price:
+                            type: object
+                            nullable: true
+                            properties:
+                              lookup_key:
+                                type: string
+                                maxLength: 255
+                                nullable: true
+                                description: |-
+                                  価格に付けた名前。プランとの対応は
+                                  src/lib/billing/events.ts の BILLING_PRICE_LOOKUP_KEYS が持つ
+                                  (agent-ops-free / -pro / -enterprise)
+                                example: agent-ops-pro
     BillingWebhookResult:
       type: object
       required: [received, applied]
@@ -2543,7 +2575,8 @@ components:
           type: boolean
           description: |-
             プランを反映したか。false になるのは「再送 (2 通目)」「顧客 ID に対応する
-            テナントが無い」「知らない種別・知らない価格」のいずれか
+            テナントが無い」「知らない種別・知らない価格」「まだ有効でない契約 (incomplete)」
+            「いまの契約とは別のサブスクリプションの解約 (配信順の入れ替わり)」のいずれか
     TenantPlanUpdate:
       type: object
       required: [plan]

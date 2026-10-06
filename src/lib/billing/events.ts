@@ -101,6 +101,33 @@ export interface BillingPlanChange {
   plan: Plan;
   // 事業者側のサブスクリプション ID（紐付けを保つために一緒に書く。無ければ null）
   subscriptionId: string | null;
+  /**
+   * 契約の終了による変更か（解約・未払い・停止）。
+   *
+   * **呼び出し側が「いまの契約と同じものの解約か」を確かめるのに要る。** 配信順は保証されない
+   * ので、解約が再送で遅れて届くあいだに利用者が**別の契約を結び直す**ことがある
+   * （`deleted(sub_1)` の配信失敗 → `created(sub_2, active)` が反映 → 遅れて `deleted(sub_1)`）。
+   * 区別しないと、**いま払っている契約があるのに古い解約で free へ落ちる**。
+   */
+  cancellation: boolean;
+}
+
+/**
+ * その解約イベントが「いまの契約とは別のもの」か（＝反映してはいけない）。
+ *
+ * 判定は**両方の ID が分かるときだけ**（どちらかが無ければ区別できないので反映する側へ倒す —
+ * 連携を作る前の 1 通目を取り落とさないため）。
+ */
+export function isStaleCancellation(
+  change: BillingPlanChange,
+  linkedSubscriptionId: string | null,
+): boolean {
+  // 解約以外は対象外（契約の開始・変更は新しい契約が勝つ）
+  if (!change.cancellation) return false;
+  // どちらかの ID が無ければ区別できない
+  if (change.subscriptionId === null || linkedSubscriptionId === null) return false;
+  // 別の契約の解約なら古い（いまの契約は続いている）
+  return change.subscriptionId !== linkedSubscriptionId;
 }
 
 /**
@@ -117,31 +144,33 @@ export function planChangeFor(event: BillingWebhookEvent): BillingPlanChange | n
   // サブスクリプション ID（本文に無ければ null）
   const subscriptionId = event.data.object.id ?? null;
   // 解約は無料プランへ落とす（価格を見ない — 消えた契約の価格は意味を持たない）
-  if (effect === 'toFree') return { plan: Plan.free, subscriptionId };
+  if (effect === 'toFree') return { plan: Plan.free, subscriptionId, cancellation: true };
   // **価格を見る前に契約の状態を見る**（理由は BILLING_SUBSCRIPTION_STATUS_EFFECT）
   const byStatus = subscriptionStatusEffect(event.data.object.status);
   // まだ有効でない・判断できない状態は何もしない（既存の契約を取り消さない）
   if (byStatus === 'ignore') return null;
   // 終わっている状態は価格を見ずに無料プランへ落とす（解約の 2 通目が有料へ戻すのを防ぐ）
-  if (byStatus === 'toFree') return { plan: Plan.free, subscriptionId };
+  if (byStatus === 'toFree') return { plan: Plan.free, subscriptionId, cancellation: true };
   // 価格の lookup_key を取り出す（最初の明細だけを見る。1 契約 1 プランの前提）
   const lookupKey = event.data.object.items?.data?.[0]?.price?.lookup_key ?? null;
   // 価格が無い・表に無いなら決められない（呼び出し側がログに残す）
   if (lookupKey === null || !Object.hasOwn(BILLING_PRICE_LOOKUP_KEYS, lookupKey)) return null;
-  // 表のプランへ反映する
-  return { plan: BILLING_PRICE_LOOKUP_KEYS[lookupKey], subscriptionId };
+  // 表のプランへ反映する（契約は有効なので解約ではない）
+  return { plan: BILLING_PRICE_LOOKUP_KEYS[lookupKey], subscriptionId, cancellation: false };
 }
 
 /**
- * その種別が「価格からプランを決めるはずの種別」か（＝ `planChangeFor` が `null` を返したら
- * 設定の取り違え）。
+ * その種別が「契約の変更に関わる種別」か（＝ 反映できなかったら設定の取り違えなので、
+ * 呼び出し側がサーバログに残す）。
+ *
+ * **表の全種別が対象**（`fromPrice` も `toFree` も）。`fromPrice` だけを見ていた版では、
+ * **解約（`toFree`）が顧客 ID の取り違えで反映できなかったときにログが 1 行も出ず**、
+ * 解約したテナントが有料の権限を保ったまま運用者に何も見えなかった（レビューで指摘された）。
  *
  * **表から導く**（写しを持たない）。これが無いと、呼び出し側が「ログに残すべき種別」の一覧を
  * もう 1 つ持つことになり、種別を足したときに片方だけが古くなる（§6）。
  */
 export function isPlanChangeEvent(type: string): boolean {
-  // 表に無い種別は契約と無関係なので、決められなくても異常ではない
-  if (!Object.hasOwn(BILLING_EVENT_EFFECT, type)) return false;
-  // 価格から決める種別だけが「決められないのは異常」
-  return BILLING_EVENT_EFFECT[type as keyof typeof BILLING_EVENT_EFFECT] === 'fromPrice';
+  // 表にある種別だけが「反映できないのは異常」（無関係な通知はログを汚さない）
+  return Object.hasOwn(BILLING_EVENT_EFFECT, type);
 }

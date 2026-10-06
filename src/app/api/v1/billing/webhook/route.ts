@@ -8,7 +8,7 @@
 //
 // 順序が決まっている: 鍵の確認（503）→ 本文を生テキストで読む（415 / 413）→ **署名検証（401）**
 // → 解釈とスキーマ検証（400 / 422）→ 受信記録（冪等性）→ 顧客 ID からテナントを引く
-// → プランの反映 → 200。**署名より前に解析しない**（未認証の相手に解析の費用を払わせず、
+// → 契約の状態と「いまの契約か」を確かめる → プランの反映 → 200。**署名より前に解析しない**（未認証の相手に解析の費用を払わせず、
 // 400 / 422 と 401 の出方の違いから本文の形を探らせないため）。
 //
 // **知らないイベントでも 200 を返す。** 事業者は契約と無関係な種別も送るので、エラーにすると
@@ -21,7 +21,7 @@ import { toErrorResponse } from '@/lib/api/handler';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { getRepos } from '@/data';
 import { API_MESSAGES } from '@/lib/constants';
-import { isPlanChangeEvent, planChangeFor } from '@/lib/billing/events';
+import { isPlanChangeEvent, isStaleCancellation, planChangeFor } from '@/lib/billing/events';
 import { applyPlanChange, PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
 import { assertAuditConfigured } from '@/lib/audit/record';
 import {
@@ -40,10 +40,12 @@ const MILLIS_PER_SECOND = 1_000;
 export async function POST(request: Request): Promise<Response> {
   // 例外はすべて HTTP 応答へ写す（`route()` を通らないので、この 1 か所で受ける）
   try {
+    // 共有シークレット（未設定・短すぎは 503。検証を飛ばして受け入れることはしない）。
+    // **DB へ触る前に確かめる** — この経路は未認証なので、設定していない配備で
+    // 誰でも接続プールを起こせる状態にしない
+    const secret = billingWebhookSecret();
     // データ層の束（本番/テストの切り替えは Composition Root が持つ）
     const repos = await getRepos();
-    // 共有シークレット（未設定・短すぎは 503。検証を飛ばして受け入れることはしない）
-    const secret = billingWebhookSecret();
     // 本文を**生のテキストのまま**読む（415 → 413。署名の対象は受け取った本文そのまま）
     const raw = await readRawJsonText(request);
     // 署名を確かめる（**形が違う・時刻が古い・一致しない のどれでも同じ 401**。
@@ -101,6 +103,13 @@ export async function POST(request: Request): Promise<Response> {
       if (isPlanChangeEvent(event.type)) {
         console.error('[billing] 契約の変更イベントからプランを決められませんでした');
       }
+      return received(false);
+    }
+    // **いまの契約とは別のサブスクリプションの解約は反映しない**（配信順は保証されないので、
+    // 解約の再送が遅れているあいだに結び直した新しい契約を古い解約が打ち消しうる）
+    if (isStaleCancellation(change, tenant.billingSubscriptionId)) {
+      // 取り落としたことは残す（値そのものは出さない）
+      console.error('[billing] いまの契約とは別のサブスクリプションの解約なので反映しません');
       return received(false);
     }
     // プランと事業者側のサブスクリプション ID を同時に書き、監査ログに 1 行残す

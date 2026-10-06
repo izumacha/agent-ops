@@ -673,14 +673,6 @@ export function lighthouseOutputProblems({ status, stdout, screens, categories, 
 }
 
 /**
- * Step5 の受け入れ基準のうち**テストレポートで見る分**を判定する。
- * Step4 までをそのまま引き継ぎ、「表示データと DB 集計の突合テストが pass しているか」を足す。
- *
- * E2E と Lighthouse は別の実行なので、`e2eOutputProblems` / `lighthouseOutputProblems` が見る。
- * @param {Parameters<typeof evaluateStep4Report>[0] & { reconcileTestName: string }} input
- * @returns {string[]} 満たしていない基準の文言 (すべて満たしていれば空配列)
- */
-/**
  * 名前に手がかりを含むテストの群を見る（件数の下限 ＋ 全部 pass）。
  *
  * **「流れたものから期待を導く」形になっていることに注意して使う。** 群の件数だけを見ると、
@@ -830,6 +822,14 @@ export function evaluateStep6Report({
   return failures;
 }
 
+/**
+ * Step5 の受け入れ基準のうち**テストレポートで見る分**を判定する。
+ * Step4 までをそのまま引き継ぎ、「表示データと DB 集計の突合テストが pass しているか」を足す。
+ *
+ * E2E と Lighthouse は別の実行なので、`e2eOutputProblems` / `lighthouseOutputProblems` が見る。
+ * @param {Parameters<typeof evaluateStep4Report>[0] & { reconcileTestName: string }} input
+ * @returns {string[]} 満たしていない基準の文言 (すべて満たしていれば空配列)
+ */
 export function evaluateStep5Report({ reconcileTestName, ...step4 }) {
   // Step4 までの基準をそのまま引き継ぐ
   const failures = evaluateStep4Report(step4);

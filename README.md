@@ -234,6 +234,17 @@ curl -s http://localhost:3000/api/v1/billing -H "Authorization: Bearer $TOKEN" |
 監査ログに `tenant.plan_changed` を残す（誰がやったかは `actorId`（Webhook 由来なら `null`）と
 payload の `source` が示す）。
 
+**事業者の顧客 ID とテナントを結び付けるのは運用者**（プラットフォーム管理者）。Webhook は顧客 ID で
+テナントを**引く**だけなので、結び付けていないイベントは受け取るだけで反映されません（`applied: false`）。
+
+```bash
+# プランと課金連携を変える (プラットフォーム管理者トークン。テナント内の admin では 403)
+curl -s -X PATCH http://localhost:3000/api/v1/tenants/$TENANT_ID \
+  -H "Authorization: Bearer $PLATFORM_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"plan":"pro","billingCustomerId":"cus_123"}'
+# billingCustomerId を省けば据え置き、null を渡せば連携を外す
+```
+
 ```bash
 # 受信 Webhook (Bearer 認証は無い。署名で確かめる)
 curl -s -X POST http://localhost:3000/api/v1/billing/webhook \

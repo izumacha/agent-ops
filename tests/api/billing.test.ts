@@ -6,13 +6,14 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { GET as getBilling } from '@/app/api/v1/billing/route';
+import { PATCH as updateTenantPlan } from '@/app/api/v1/tenants/[tenantId]/route';
 import { POST as receiveBillingWebhook } from '@/app/api/v1/billing/webhook/route';
 import { BILLING_SIGNATURE_HEADER } from '@/lib/billing/signature';
 import { BILLING_PRICE_LOOKUP_KEYS } from '@/lib/billing/events';
 import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 import { Plan } from '@/domain/types';
 import { API_MESSAGES } from '@/lib/constants';
-import { BILLING_SECRET, call, seedEachTest } from './helpers';
+import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
@@ -31,14 +32,15 @@ function webhookBody(options: {
   type?: string;
   customer?: string | null;
   plan?: Plan;
-  subscriptionId?: string;
+  // `null` を渡すと `data.object.id` を**省いた**本文になる（事業者が ID を運ばない再送の形）
+  subscriptionId?: string | null;
 }): Record<string, unknown> {
   return {
     id: options.eventId ?? 'evt_1',
     type: options.type ?? 'customer.subscription.updated',
     data: {
       object: {
-        id: options.subscriptionId ?? 'sub_1',
+        id: options.subscriptionId === undefined ? 'sub_1' : (options.subscriptionId ?? undefined),
         customer: options.customer === undefined ? 'cus_1' : options.customer,
         items:
           options.plan === undefined
@@ -79,6 +81,34 @@ async function linkCustomer(customerId = 'cus_1'): Promise<void> {
     plan: Plan.free,
     billingCustomerId: customerId,
   });
+}
+
+// テナント A を**プラットフォーム管理者の API 経由で**顧客 ID と結び付ける。
+// **データ層を直接触らない** — 連携を作る経路が API に無いと、事業者からのイベントは
+// 永久に反映されない（実際この経路が無く、`findByBillingCustomerId` が常に null を返していた）
+async function linkCustomerViaApi(customerId: string, plan: Plan = Plan.free) {
+  // PATCH /tenants/{tenantId}（プラットフォーム管理者専用）
+  return call(updateTenantPlan, {
+    method: 'PATCH',
+    token: PLATFORM_TOKEN,
+    params: { tenantId: seed.a.id },
+    body: { plan, billingCustomerId: customerId },
+  });
+}
+
+// テナント A の課金連携（顧客 ID / サブスクリプション ID）を読む
+async function billingLinkOfA(): Promise<{
+  billingCustomerId: string | null;
+  billingSubscriptionId: string | null;
+} | null> {
+  // 行を引いて 2 列だけ返す
+  const tenant = await seed.repos.tenants.findById(seed.a.id);
+  return tenant === null
+    ? null
+    : {
+        billingCustomerId: tenant.billingCustomerId,
+        billingSubscriptionId: tenant.billingSubscriptionId,
+      };
 }
 
 // テナント A の現在のプランを読む
@@ -295,6 +325,87 @@ describe('POST /billing/webhook', () => {
     await linkCustomer();
     const result = await postWebhook(webhookBody({ plan: Plan.pro }));
     expect(result.headers.get('Cache-Control')).toContain('no-store');
+  });
+
+  it('連携: プラットフォーム管理者が結び付けた顧客 ID で Webhook がテナントを引ける', async () => {
+    // **API だけで端から端まで通す。** 連携を作る経路が無いと、署名が正しくても
+    // `findByBillingCustomerId` が null を返して永久に `applied: false` になる
+    expect((await linkCustomerViaApi('cus_link')).status).toBe(200);
+    // その顧客 ID を名乗るイベントが反映される
+    const result = await postWebhook(webhookBody({ customer: 'cus_link', plan: Plan.enterprise }));
+    expect(result.json).toEqual({ received: true, applied: true });
+    expect(await planOfA()).toBe(Plan.enterprise);
+  });
+
+  it('連携: 顧客 ID を省いた変更は既存の連携を消さない', async () => {
+    // 先に結び付ける
+    await linkCustomerViaApi('cus_keep');
+    // プランだけを変える（項目を省く = 据え置き）
+    expect(
+      (
+        await call(updateTenantPlan, {
+          method: 'PATCH',
+          token: PLATFORM_TOKEN,
+          params: { tenantId: seed.a.id },
+          body: { plan: Plan.pro },
+        })
+      ).status,
+    ).toBe(200);
+    // 連携は残っているので、同じ顧客 ID のイベントが届く
+    expect((await billingLinkOfA())?.billingCustomerId).toBe('cus_keep');
+    expect(
+      (await postWebhook(webhookBody({ customer: 'cus_keep', plan: Plan.free }))).json,
+    ).toEqual({ received: true, applied: true });
+  });
+
+  it('連携: null を渡すと連携を外す（以降のイベントは反映しない）', async () => {
+    // 結び付けてから外す
+    await linkCustomerViaApi('cus_drop');
+    await call(updateTenantPlan, {
+      method: 'PATCH',
+      token: PLATFORM_TOKEN,
+      params: { tenantId: seed.a.id },
+      body: { plan: Plan.free, billingCustomerId: null },
+    });
+    expect((await billingLinkOfA())?.billingCustomerId).toBeNull();
+    // 引けないので受け取るだけ（記録は残す）
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await postWebhook(webhookBody({ customer: 'cus_drop', plan: Plan.pro }))).json).toEqual(
+      {
+        received: true,
+        applied: false,
+      },
+    );
+    expect(await planOfA()).toBe(Plan.free);
+    logged.mockRestore();
+  });
+
+  it('サブスクリプション ID を運ばない再送で既存の連携を消さない', async () => {
+    // **Port の `null` は「連携を外す」という明示の指示**なので、本文に ID が無いだけで
+    // 渡してしまうと、正しい署名の再送 1 通で連携が消える（以降の解約イベントを紐付けられない）
+    await linkCustomerViaApi('cus_1');
+    await postWebhook(webhookBody({ plan: Plan.pro, subscriptionId: 'sub_keep' }));
+    expect((await billingLinkOfA())?.billingSubscriptionId).toBe('sub_keep');
+    // `data.object.id` を省いた本文（スキーマは nullish なので妥当）
+    const result = await postWebhook(
+      webhookBody({ eventId: 'evt_no_sub', plan: Plan.enterprise, subscriptionId: null }),
+    );
+    expect(result.json).toEqual({ received: true, applied: true });
+    // プランは変わり、連携は残る
+    expect(await planOfA()).toBe(Plan.enterprise);
+    expect((await billingLinkOfA())?.billingSubscriptionId).toBe('sub_keep');
+  });
+
+  it('署名が無ければ本文が壊れていても 401（署名より前に解析しない）', async () => {
+    // **順序の検査。** 解析を先に置くと、未認証の相手が 400 / 422 と 401 の出方の違いから
+    // 受け付ける本文の形を探れるうえ、解析の費用まで払わせることになる
+    const result = await call(receiveBillingWebhook, {
+      method: 'POST',
+      rawBody: '{壊れた JSON',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(result.status).toBe(401);
+    expect(result.json).toMatchObject({ message: API_MESSAGES.billingSignatureInvalid });
   });
 
   it('冪等性: 同じイベントの 2 通目は何もせず 200 を返す', async () => {

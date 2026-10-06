@@ -2546,8 +2546,17 @@ components:
       required: [plan]
       additionalProperties: false
       description: |-
-        プランの変更 (プラットフォーム管理者専用)。**課金事業者側の id は受け取らない** —
-        契約の実体は事業者側にあるので、連携は受信 Webhook が作る
+        プランと課金連携の変更 (プラットフォーム管理者専用)。受信 Webhook は顧客 ID で
+        **テナントを引く**だけで書かないので、連携を作るのはこの経路。テナント内の利用者は
+        呼べない (課金の実体は事業者側にあるため)
       properties:
         plan:
           $ref: '#/components/schemas/Plan'
+        billingCustomerId:
+          type: string
+          nullable: true
+          maxLength: 100
+          description: |-
+            事業者側の顧客 ID (`cus_...`)。**省略すると据え置き**、`null` で連携を外す。
+            事業者の画面で作った顧客を運用者が結び付けるための項目
+          example: cus_123

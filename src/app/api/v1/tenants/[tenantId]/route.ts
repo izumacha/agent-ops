@@ -1,4 +1,4 @@
-// /api/v1/tenants/{tenantId}: 自テナントの取得 (view 権限) と、プランの変更
+// /api/v1/tenants/{tenantId}: 自テナントの取得 (view 権限) と、プラン・課金連携の変更
 // (プラットフォーム管理者専用。Step6)。他テナントの id は GET では 404 で隠す
 import { readJsonBody } from '@/lib/api/body';
 import { notFoundError } from '@/lib/api/errors';
@@ -44,11 +44,18 @@ export const PATCH = route<{ tenantId: string }>(async ({ request, params, princ
   // **変える前に「監査ログを書ける状態か」を確かめる** — 変えてから記録に失敗すると、
   // 記録の無い変更が残り、しかも再試行は「既にそのプランだ」で永久に記録されない
   assertAuditConfigured();
-  // 反映して記録する（反映と記録の形は Webhook と共有する）
+  // 反映して記録する（反映と記録の形は Webhook と共有する）。
+  // **顧客 ID は項目があるときだけ渡す** — Port の `null` は「連携を外す」という明示の指示なので、
+  // 省略されたときに渡すと既存の連携が消える（`undefined` なら据え置き）
   const applied = await applyPlanChange(repos, {
     tenantId: current.id,
     from: current.plan,
-    update: { plan: input.plan },
+    update: {
+      plan: input.plan,
+      ...(input.billingCustomerId === undefined
+        ? {}
+        : { billingCustomerId: input.billingCustomerId }),
+    },
     source: PLAN_CHANGE_SOURCE.platformAdmin,
   });
   // 読んだ直後に消えた場合（並行削除）は 404

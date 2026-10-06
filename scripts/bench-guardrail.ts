@@ -21,7 +21,6 @@ import { generateSecret } from '../src/lib/tokens';
 import { AgentStatus, Plan, Provider, RuleAction, RuleKind } from '../src/domain/types';
 // プラン別のルール数の上限（**写さずに読む**。計測の主題は上限ではないので pro の値を使う）
 import { guardrailRuleLimitsFor } from '../src/domain/plan';
-import {} from '../src/lib/constants';
 
 // 仕込むルールの集計窓の長さ (分)。短すぎると投入した利用イベントが窓から外れる
 const RULE_WINDOW_MINUTES = 60;

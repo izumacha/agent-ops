@@ -41,6 +41,11 @@ export interface PlanLimits {
  * ADR-0007 の実測「最悪の本文でも 1 通 3.3ms」から、`maxEnabledGuardrailRules` = 50 は
  * 「種別 3 × エージェント十数件 ＋ テナント全体のルール」から引いた値）。プラン別にしたことで
  * **既定が緩くなった利用者は 1 人もいない** — free は絞り、pro は据え置き、enterprise だけ広げる。
+ *
+ * **「据え置き」はこの表だけでは成り立たない。** `plan` 列は Step0 から `@default(free)` で
+ * 存在したがどこからも読まれていなかったので、既存の配備の行はすべて free である。
+ * マイグレーション `20261006000100_promote_existing_tenants_to_pro` が既存の行を pro へ上げ、
+ * 新しいテナントは free のままにする（`tests/billing-migration.test.ts` が両方を固定する）。
  */
 export const PLAN_LIMITS: Readonly<Record<Plan, PlanLimits>> = {
   // 無料: 試用の規模。上流への課金が発生する中継は分あたりを絞り、重い読み取りは開けない

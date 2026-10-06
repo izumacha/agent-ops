@@ -6,13 +6,15 @@
 // 代わりに `tests/route-wrapping.test.ts` の理由付きの表へ登録し、**署名検証を通ること**と
 // **`no-store` を宣言すること**を機械で要求している（CSV の画面側ルートと同じ扱い）。
 //
-// 順序が決まっている: 鍵の確認（503）→ 本文（生テキスト付き）→ **署名検証（401）**
-// → 受信記録（冪等性）→ 顧客 ID からテナントを引く → プランの反映 → 200。
+// 順序が決まっている: 鍵の確認（503）→ 本文を生テキストで読む（415 / 413）→ **署名検証（401）**
+// → 解釈とスキーマ検証（400 / 422）→ 受信記録（冪等性）→ 顧客 ID からテナントを引く
+// → プランの反映 → 200。**署名より前に解析しない**（未認証の相手に解析の費用を払わせず、
+// 400 / 422 と 401 の出方の違いから本文の形を探らせないため）。
 //
 // **知らないイベントでも 200 を返す。** 事業者は契約と無関係な種別も送るので、エラーにすると
 // 再送が延々と続き、本当に処理すべきイベントの配信が遅れる（§9 の「壊れたデータでクラッシュ
 // させず、不正値はフォールバックする」）。
-import { readJsonBodyWithRaw } from '@/lib/api/body';
+import { parseJsonText, readRawJsonText } from '@/lib/api/body';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { toErrorResponse } from '@/lib/api/handler';
@@ -42,10 +44,12 @@ export async function POST(request: Request): Promise<Response> {
     const repos = await getRepos();
     // 共有シークレット（未設定・短すぎは 503。検証を飛ばして受け入れることはしない）
     const secret = billingWebhookSecret();
-    // 本文を読む（415 → 413 → 400 → 422。**生テキストも受け取る** — 署名の対象はそれ）
-    const { raw, value: event } = await readJsonBodyWithRaw(request, billingWebhookEventSchema);
+    // 本文を**生のテキストのまま**読む（415 → 413。署名の対象は受け取った本文そのまま）
+    const raw = await readRawJsonText(request);
     // 署名を確かめる（**形が違う・時刻が古い・一致しない のどれでも同じ 401**。
-    // 理由を区別して返すと総当たりの手がかりになる）
+    // 理由を区別して返すと総当たりの手がかりになる）。
+    // **解釈より前に確かめる** — 後ろに置くと、未認証の相手に JSON の解析とスキーマ検証の費用を
+    // 払わせたうえ、400 / 422 と 401 の出方の違いから受け付ける本文の形を探らせることになる
     const verified = verifyBillingSignature(
       request.headers.get(BILLING_SIGNATURE_HEADER),
       raw,
@@ -55,6 +59,8 @@ export async function POST(request: Request): Promise<Response> {
     if (verified !== 'ok') {
       throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.billingSignatureInvalid);
     }
+    // 署名が合ってから解釈・検証する（400 → 422）
+    const event = parseJsonText(raw, billingWebhookEventSchema);
     // **受信を記録する前に「監査ログを書ける状態か」を確かめる** — 記録してから反映に失敗すると、
     // 再送は「2 通目」として無視されるので**そのイベントは永久に反映されない**。鍵が無いなら
     // 1 行も記録せず 503 を返し、事業者の再送でやり直させる（§9 fail-closed）
@@ -94,11 +100,17 @@ export async function POST(request: Request): Promise<Response> {
       return received(false);
     }
     // プランと事業者側のサブスクリプション ID を同時に書き、監査ログに 1 行残す
-    // （記録の形は `PATCH /tenants/{tenantId}` と共有する）
+    // （記録の形は `PATCH /tenants/{tenantId}` と共有する）。
+    // **ID が本文に無いときは項目ごと渡さない** — Port の `null` は「未連携へ戻す」という
+    // 明示の指示なので、無条件に渡すと**本文が ID を運んでいないだけの再送で既存の連携が消える**
+    // （`data.object.id` は省略されうる。`undefined` なら据え置き）
     const applied = await applyPlanChange(repos, {
       tenantId: tenant.id,
       from: tenant.plan,
-      update: { plan: change.plan, billingSubscriptionId: change.subscriptionId },
+      update: {
+        plan: change.plan,
+        ...(change.subscriptionId === null ? {} : { billingSubscriptionId: change.subscriptionId }),
+      },
       source: PLAN_CHANGE_SOURCE.webhook,
     });
     // 読んだ直後に消えた場合（並行削除）は反映できていない

@@ -197,14 +197,14 @@ describe('PATCH /tenants/{tenantId}', () => {
         })
       ).status,
     ).toBe(422);
-    // 課金事業者側の id は受け取らない（連携は Webhook が作る）
+    // 定義に無い項目は 422（strictObject。未知の項目を黙って剥がさない）
     expect(
       (
         await call(updateTenantPlan, {
           method: 'PATCH',
           token: PLATFORM_TOKEN,
           params: { tenantId: seed.a.id },
-          body: { plan: Plan.pro, billingCustomerId: 'cus_1' },
+          body: { plan: Plan.pro, billingSubscriptionId: 'sub_1' },
         })
       ).status,
     ).toBe(422);

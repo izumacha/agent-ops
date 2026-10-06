@@ -113,9 +113,10 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 
 ### UC-10 プランを契約し機能ゲートを解除する（Step6）
 
-- 主体: `admin`
-- 流れ: Stripe Checkout で Free → Pro/Enterprise に変更 → Webhook でプランを更新 → 機能ゲート（エージェント数・評価回数・レート制限）が緩和
-- 基準: Webhook は冪等、テナント越境アクセスは全パターン拒否
+- 主体: `admin`（プランを変えるのは事業者側の契約か、プラットフォーム管理者）
+- 流れ: 事業者の画面で Free → Pro/Enterprise に変更 → `POST /billing/webhook` が署名を確かめてプランを更新（監査ログに `tenant.plan_changed`）→ 機能ゲート（エージェント数・プロキシの枠・ガードレールのルール数・監査ログの改ざん検証）が緩和 → `GET /billing` で現在のプランと上限を参照
+- 基準: Webhook は冪等（同じイベント ID の 2 通目は何もせず 200）、テナント越境アクセスは全パターン拒否
+- 範囲: **受信と参照だけ**。Checkout セッションの作成（アプリから事業者へ出す経路）は ADR-0012 の宿題。**テナント内の `admin` はプランを変えられない**（課金の実体は事業者側にあるため。変更の経路は Webhook とプラットフォーム管理者の `PATCH /tenants/{tenantId}` の 2 本だけ）
 
 ## 3. ER 図
 
@@ -135,6 +136,7 @@ erDiagram
   Tenant ||--o{ GuardrailRule : has
   Tenant ||--o{ Incident : has
   Tenant ||--o{ AuditLog : has
+  Tenant ||--o{ BillingEvent : has
   Agent ||--o{ ApiKey : "authenticates"
   Agent ||--o{ UsageEvent : "produces"
   Agent ||--o{ EvaluationRun : "evaluated by"
@@ -151,6 +153,16 @@ erDiagram
     string id PK
     string name
     Plan plan
+    string billingCustomerId UK
+    string billingSubscriptionId UK
+  }
+  BillingEvent {
+    string id PK
+    string provider
+    string eventId
+    string type
+    string tenantId FK
+    datetime receivedAt
   }
   User {
     string id PK
@@ -325,10 +337,28 @@ erDiagram
 | POST     | `/incidents/{incidentId}/resolve` | `resolveIncident` | `admin` ロール限定 | 4 |
 | GET      | `/audit-logs`              | `listAuditLogs`  | view           | 4    |
 | GET      | `/audit-logs/verify`       | `verifyAuditLogs` | `admin` ロール限定 | 4 |
+| PATCH    | `/tenants/{tenantId}`      | `updateTenantPlan` | プラットフォーム管理者 | 6 |
+| GET      | `/billing`                 | `getBilling`     | view           | 6    |
+| POST     | `/billing/webhook`         | `receiveBillingWebhook` | 課金事業者の署名（Bearer 認証なし） | 6 |
 
-Step6 以降（課金 `/billing`）は各 Step の着手時にこの表と OpenAPI 定義へ追加する。
+**`POST /billing/webhook` は Bearer 認証を持たない唯一の API**（呼ぶのは課金事業者であって利用者ではない）。`Stripe-Signature` の HMAC-SHA256 を定数時間で照合し、合わなければ 401・署名鍵が未設定なら 503（fail-closed）。`route()` を通らない代わりに、`tests/route-wrapping.test.ts` の理由付きの表へ登録して「署名検証を通ること」と「`no-store` を宣言すること」を機械で要求している（ADR-0012）。
 
 **ルールの設定は `admin` ロール限定**（停止そのものは `stop` 権限で行えるが、「止まる条件を変える」のは運用の設定変更なので役割そのもので縛る）。**明示実行は `stop` 権限**（発火すると停止しうるので停止と同じ重さ）。**監査ログの更新・削除の操作は無い**（追記専用）。
+
+## 4.1 プランと上限（Step6）
+
+**正本は `src/domain/plan.ts` の `PLAN_LIMITS`**（網羅的な表。API・画面・レート制限はすべてこれを読み、判定は `planLimitsFor` / `planAllows` が行う。未知のプランは最も厳しい側＝ `free` へ倒す fail-closed）。下の表はその写しなので、**値を変えるときは表側を直してからここを合わせる**（食い違いは `tests/docs-gate.test.ts` が落とす）。
+
+| プラン       | エージェント数 | プロキシの枠（回/分） | 有効なガードレールのルール数 | 監査ログの改ざん検証 |
+| ------------ | -------------- | --------------------- | ---------------------------- | -------------------- |
+| `free`       | 3              | 60                    | 5                            | 使えない（403）      |
+| `pro`        | 25             | 600                   | 50                           | 使える               |
+| `enterprise` | 200            | 3000                  | 200                          | 使える               |
+
+- **`pro` は Step4 までの固定値と同じ**（プラン別にしたことで既定が緩くなった利用者はいない。`free` は絞り、`enterprise` だけ広げた）。
+- ガードレールのルールの**行数の天井**は有効側の 4 倍を導出する（無効化した行も縛るため。ADR-0010）。
+- 上限の超過は **409**、プランで使えない機能は **403**（権限不足の 403 とは文言を分ける — 同じ文言だと利用者は役割を変えようとして直らない）。**エラーの文言に数値を書かない**（プラン別なので書けない）。現在の上限は `GET /billing` で引く。
+- プロキシの枠は**テナント単位の共有枠**（ADR-0010）。重い経路の小さい枠（`fanOut` / `outbound` / `heavyRead`）はプランで動かさない — 広げると「1 要求が極端に重い経路」を絞っている根拠が崩れる。
 
 ## 5. 非機能要件（抜粋）
 

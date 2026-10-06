@@ -9,7 +9,8 @@ import {
 import { POST as resumeAgent } from '@/app/api/v1/agents/[agentId]/resume/route';
 import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { decodeCursor, encodeCursor } from '@/data/page';
-import { AgentStatus, Provider } from '@/domain/types';
+import { AgentStatus, Plan, Provider } from '@/domain/types';
+import { PLAN_LIMITS } from '@/domain/plan';
 import {
   API_MESSAGES,
   JSON_BODY_MAX_BYTES,
@@ -67,6 +68,51 @@ describe('POST /agents', () => {
     // 送った 5 項目がそのまま載っていること。どれかを固定値へ差し替えると、台帳と実物が食い違う
     // (provider を固定すると Step2 のプロキシが別ベンダへ中継し、費用の按分も誤る)
     expect(result.json).toMatchObject(body);
+  });
+
+  it('エージェント数の上限に達したら 409（プラン別の上限）', async () => {
+    // **上限は契約プランから引く（Step6）.** seed は pro なので、このテストは free へ落として
+    // 少ない件数で上限に当てる（pro の 25 件を毎回作るのは遅い）
+    const tenant = seed.store.tenants.get(seed.a.id);
+    if (!tenant) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(tenant.id, { ...tenant, plan: Plan.free });
+    // free の上限（seed のエージェント 1 件を含めて数える）
+    const limit = PLAN_LIMITS[Plan.free].maxAgents;
+    // 既に 1 件いるので、上限まで埋める
+    const existing = (await call(listAgents, { token: seed.a.tokens.viewer })).json as {
+      items: unknown[];
+    };
+    for (let index = existing.items.length; index < limit; index += 1) {
+      const filled = await call(createAgent, {
+        token: seed.a.tokens.operator,
+        body: { ...VALID, name: `埋めボット${index}` },
+      });
+      expect(filled.status).toBe(201);
+    }
+    // 次の 1 件は作れない（409。422 の名前重複とは別の理由）
+    const refused = await call(createAgent, {
+      token: seed.a.tokens.operator,
+      body: { ...VALID, name: '溢れるボット' },
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.json).toMatchObject({ message: API_MESSAGES.agentLimitReached });
+  });
+
+  it('上限はプランごとに違う（pro なら free の上限を超えて作れる）', async () => {
+    // **固定値へ戻す変異をここで落とす** — seed は pro なので、free の上限 + 1 件まで作れる
+    const freeLimit = PLAN_LIMITS[Plan.free].maxAgents;
+    expect(PLAN_LIMITS[Plan.pro].maxAgents).toBeGreaterThan(freeLimit);
+    // free の上限を 1 件超えるところまで作る（seed の 1 件を含めて数える）
+    const existing = (await call(listAgents, { token: seed.a.tokens.viewer })).json as {
+      items: unknown[];
+    };
+    for (let index = existing.items.length; index <= freeLimit; index += 1) {
+      const created = await call(createAgent, {
+        token: seed.a.tokens.operator,
+        body: { ...VALID, name: `pro ボット${index}` },
+      });
+      expect(created.status).toBe(201);
+    }
   });
 
   it('同一テナント内で名前が重複すると 422 (UC-03 の例外)', async () => {

@@ -11,13 +11,11 @@ import { requireContractDatabase } from '../../scripts/lib/contract-database.mjs
 import { createPrismaRepos } from '../../src/data/adapters/prisma';
 import { createPrismaClient } from '../../src/lib/prisma-client';
 import { issueUserToken } from '../../src/lib/tokens';
-import {
-  GUARDRAIL_RULES_MAX_PER_TENANT,
-  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-} from '../../src/lib/constants';
 import { Provider, RuleAction, RuleKind } from '../../src/domain/types';
 // エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
 import { createTestAgent } from '../../tests/lib/agent-limits';
+// ガードレールのルールを作るときの上限（上限そのものを主題にしない仕込みなので共有の値）
+import { TEST_GUARDRAIL_RULE_LIMITS } from '../../tests/lib/guardrail-limits';
 
 // 仕込んだデータの受け渡し先。**ファイル経由にする**のは、Playwright の globalSetup と
 // 各ワーカー・Lighthouse の計測が別プロセスで動くため（環境変数では渡らない）
@@ -119,7 +117,7 @@ export async function seedE2eFixture(): Promise<E2eSeed> {
         windowMinutes: RULE_WINDOW_MINUTES,
         action: RuleAction.notify,
       },
-      { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
+      TEST_GUARDRAIL_RULE_LIMITS,
     );
     // 作れていなければ仕込みが壊れている
     if (rule.status !== 'created') throw new Error(`ルールを作れません: ${rule.status}`);

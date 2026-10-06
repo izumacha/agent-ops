@@ -5,7 +5,8 @@ import { requireAdminRole } from '@/lib/api/guard';
 import { noContent, route } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import type { ApiSchemas } from '@/lib/api-types';
-import { API_MESSAGES, GUARDRAIL_RULES_MAX_PER_TENANT } from '@/lib/constants';
+import { API_MESSAGES } from '@/lib/constants';
+import { guardrailRuleLimitsFor } from '@/domain/plan';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
 import { toGuardrailRuleDto } from '@/lib/api/serializers';
@@ -33,7 +34,7 @@ const AUDIT_ACTION_BY_ENABLED: Readonly<Record<'true' | 'false', AuditAction>> =
  */
 export const PATCH = route<{ ruleId: string }>(async ({ request, params, principal, repos }) => {
   // admin ロールであること (作成・削除と同じ理由。「止まる条件」を変える操作)
-  const { tenantId, user } = requireAdminRole(principal);
+  const { tenantId, user, plan } = requireAdminRole(principal);
   // 本文を検証する (415 → 413 → 400 → 422 の順)
   const input = await readJsonBody(request, guardrailRuleUpdateSchema);
   // **変える前に「監査ログを書ける状態か」を確かめる** — 変えてから記録に失敗すると、
@@ -47,7 +48,8 @@ export const PATCH = route<{ ruleId: string }>(async ({ request, params, princip
     tenantId,
     params.ruleId,
     input.enabled,
-    GUARDRAIL_RULES_MAX_PER_TENANT,
+    // **有効側の上限は契約プランから引く（Step6）**
+    guardrailRuleLimitsFor(plan).maxEnabled,
   );
   if (result.status === 'not_found') throw notFoundError();
   // 有効なルールの上限に達している (409: 状態が許さない。作成と同じ文言)

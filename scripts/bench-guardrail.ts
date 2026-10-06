@@ -19,10 +19,9 @@ import { createPrismaClient } from '../src/lib/prisma-client';
 import { evaluateGuardrails } from '../src/lib/guardrail/evaluate';
 import { generateSecret } from '../src/lib/tokens';
 import { AgentStatus, Plan, Provider, RuleAction, RuleKind } from '../src/domain/types';
-import {
-  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-  GUARDRAIL_RULES_MAX_PER_TENANT,
-} from '../src/lib/constants';
+// プラン別のルール数の上限（**写さずに読む**。計測の主題は上限ではないので pro の値を使う）
+import { guardrailRuleLimitsFor } from '../src/domain/plan';
+import {} from '../src/lib/constants';
 
 // 仕込むルールの集計窓の長さ (分)。短すぎると投入した利用イベントが窓から外れる
 const RULE_WINDOW_MINUTES = 60;
@@ -99,10 +98,8 @@ async function main(): Promise<Record<string, unknown>> {
           windowMinutes: RULE_WINDOW_MINUTES,
           action: RuleAction.stop,
         },
-        {
-          maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT,
-          maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-        },
+        // 上限そのものは計測の主題ではないので、標準の有料プランの値を使う
+        guardrailRuleLimitsFor(Plan.pro),
       );
       // 作れていなければ仕込みが壊れている (fail-closed。判定より前に落とす)
       if (rule.status !== 'created') throw new Error(`ルールを作れません: ${rule.status}`);

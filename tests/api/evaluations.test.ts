@@ -22,13 +22,10 @@ import {
   RuleAction,
   RuleKind,
 } from '@/domain/types';
-import {
-  API_MESSAGES,
-  EVALUATION_SET_MAX_CASES,
-  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-  GUARDRAIL_RULES_MAX_PER_TENANT,
-} from '@/lib/constants';
+import { API_MESSAGES, EVALUATION_SET_MAX_CASES } from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
+// ガードレールのルールを作るときの上限（上限そのものを主題にしないので共有の値）
+import { TEST_GUARDRAIL_RULE_LIMITS } from '../lib/guardrail-limits';
 import { AuditAction } from '@/domain/audit/action';
 import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 
@@ -657,7 +654,7 @@ describe('評価実行の直後のガードレール判定', () => {
         windowMinutes: 60,
         action: RuleAction.stop,
       },
-      { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
+      TEST_GUARDRAIL_RULE_LIMITS,
     );
     // 作れていなければテストとして落とす
     if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);

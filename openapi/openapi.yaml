@@ -385,6 +385,10 @@ paths:
       tags: [agents]
       operationId: createAgent
       summary: エージェント登録 (execute 権限)
+      description: |-
+        **登録できる件数は契約プランの上限まで** (Step6)。上限に達していれば 409 を返す
+        (不要なエージェントを削除するか、プランを見直す)。上限はプランごとに違うので、
+        現在の値は `GET /billing` で参照する。
       requestBody:
         required: true
         content:
@@ -398,6 +402,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Agent'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '403':
           $ref: '#/components/responses/Forbidden'
         '422':

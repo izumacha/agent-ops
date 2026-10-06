@@ -2329,6 +2329,10 @@ describe('判定の結線', () => {
       // import も無く副作用も終了経路も持たない）。プロキシのベンチが「予算を持つ
       // エージェントの中継」を測るために、到達しない上限を**写さずに**読むために要る
       'domain/money',
+      // **プラン別の上限の表**（`domain/plan` は `domain/types` だけを import する純粋な表と
+      // 述語で、副作用も終了経路も持たない）。ガードレールのベンチが「ルール数の上限」を
+      // **写さずに**読むために要る（上限は計測の主題ではないので標準の有料プランの値を使う）
+      'domain/plan',
       'domain/evaluation/scores',
       'domain/evaluation/judge-output',
       'data/adapters/prisma',

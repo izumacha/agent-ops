@@ -7,11 +7,8 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { pageQuerySchema, parseQuery } from '@/lib/api/pagination';
 import { toGuardrailRuleDto, toListDto } from '@/lib/api/serializers';
 import type { ApiSchemas } from '@/lib/api-types';
-import {
-  API_MESSAGES,
-  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-  GUARDRAIL_RULES_MAX_PER_TENANT,
-} from '@/lib/constants';
+import { API_MESSAGES } from '@/lib/constants';
+import { guardrailRuleLimitsFor } from '@/domain/plan';
 import { guardrailRuleCreateSchema } from '@/lib/validations/guardrail';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { assertAuditConfigured, recordAudit } from '@/lib/audit/record';
@@ -39,7 +36,7 @@ export const GET = route(async ({ request, principal, repos }) => {
  */
 export const POST = route(async ({ request, principal, repos }) => {
   // admin ロールであること
-  const { tenantId, user } = requireAdminRole(principal);
+  const { tenantId, user, plan } = requireAdminRole(principal);
   // 本文を検証する (しきい値と集計窓の範囲は Zod が種別ごとに見る)
   const input = await readJsonBody(request, guardrailRuleCreateSchema);
   // **作る前に「監査ログを書ける状態か」を確かめる** — 作ってから記録に失敗すると、
@@ -55,7 +52,9 @@ export const POST = route(async ({ request, principal, repos }) => {
       windowMinutes: input.windowMinutes,
       action: input.action,
     },
-    { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
+    // **上限は契約プランから導く（Step6）** — 行数の天井も同じ関数が有効側から導くので、
+    // 「有効側より小さい天井」のような成立しない組み合わせを書けない
+    guardrailRuleLimitsFor(plan),
   );
   // 指定したエージェントが自テナントに無い (他テナントの id も同じ扱いで存在を隠す)
   if (created.status === 'agent_not_found') throw notFoundError();

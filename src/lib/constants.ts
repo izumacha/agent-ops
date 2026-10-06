@@ -179,16 +179,10 @@ export const GUARDRAIL_WINDOW_MAX_MINUTES = 60 * 24 * 7;
 // なので、整数として正確に表せる範囲 (2^53-1) までに絞る。これを超えると「設定した額」と
 // 「保存された額」が静かにずれる (約 90 億 USD 相当なので実用上の制約にはならない)
 export const GUARDRAIL_COST_THRESHOLD_MAX = Number.MAX_SAFE_INTEGER;
-// 1 テナントが持てるガードレールのルールの上限。**判定は中継 1 回ごとに走る**ので、
-// ルールが増えるほど 1 回の呼び出しで回す集計が増える (§8 / §9)。
-// 50 件は「種別 3 × エージェント十数件 ＋ テナント全体のルール」を十分に収める大きさ
-export const GUARDRAIL_RULES_MAX_PER_TENANT = 50;
-// 1 テナントが持てるガードレールのルールの**行数**の上限 (有効・無効を問わない)。
-// **有効なルールの上限だけでは総行数が縛れない** — 無効化した行は上の上限に数えないので
-// (発火済みのルールは削除できず、数えると枠が永久に空かない)、「作る → 無効化する」を繰り返すと
-// 行が無制限に増える。有効な上限の 4 倍を行数の天井にして、どちらかに達したら 409 を返す
-// (§9 のリソース枯渇の防止)。無効で発火記録も無い行は削除できるので、通常の運用で当たることはない
-export const GUARDRAIL_RULE_ROWS_MAX_PER_TENANT = GUARDRAIL_RULES_MAX_PER_TENANT * 4;
+// **ガードレールのルール数の上限はここに置かない（Step6）。** 有効なルールの上限は契約プランごとに
+// 違うので、正本は `src/domain/plan.ts` の `PLAN_LIMITS[plan].maxEnabledGuardrailRules`（根拠も同所）で、
+// 行数の天井はそこから `guardrailRuleLimitsFor(plan)` が導く（有効側の 4 倍。理由は ADR-0010）。
+// ここに既定値を持つと、プランの表と同じ数字が 2 か所に並んで片方だけが古くなる（§6）
 // 連鎖の検証で 1 回に読む監査ログの上限。検証は 1 行目から順にたどるので途中から始められず、
 // ページ送りができない。代わりに読む件数を区切り、上限に達したかを応答で伝える (§8)
 export const AUDIT_CHAIN_VERIFY_MAX_ROWS = 10_000;
@@ -374,7 +368,11 @@ export const API_MESSAGES = {
   guardrailWindowOutOfRange: `集計窓は ${GUARDRAIL_WINDOW_MIN_MINUTES} 分以上 ${GUARDRAIL_WINDOW_MAX_MINUTES} 分以内の整数で指定してください。`,
   guardrailRuleLimit:
     'ガードレールのルール数が上限に達しています。不要なルールを削除してください。',
-  guardrailRuleRowLimit: `ガードレールのルールの総数 (無効化したものを含む) が上限 ${GUARDRAIL_RULE_ROWS_MAX_PER_TENANT} 件に達しています。不要なルールを削除してください。`,
+  // **数値を埋めない（Step6）** — 行数の天井は契約プランから導くので、定数 1 つでは表せない。
+  // 「不要なルールを削除してください」だけにしない理由は `guardrailRuleLimit` との区別
+  // （有効なルールが 0 件なのに作れない利用者に、消す対象が無効化した行の側だと伝える）
+  guardrailRuleRowLimit:
+    'ガードレールのルールの総数 (無効化したものを含む) が契約プランの上限に達しています。無効化したルールを削除してください。',
   guardrailRunPartiallyFailed:
     '一部のルールを判定できませんでした。時間をおいてやり直してください (発火したぶんは記録されています)。',
   guardrailRuleHasIncidents:

@@ -19,8 +19,6 @@ import {
   API_MESSAGES,
   JSON_BODY_MAX_BYTES,
   JSON_BODY_MAX_DEPTH,
-  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-  GUARDRAIL_RULES_MAX_PER_TENANT,
   UPSTREAM_MAX_RESPONSE_BYTES,
 } from '@/lib/constants';
 import { GUARDRAIL_ERROR_RATE_MIN_REQUESTS } from '@/domain/guardrail/rule';
@@ -28,6 +26,8 @@ import { call, seedApiKey, seedEachTest } from './helpers';
 import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 // エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
 import { createTestAgent } from '../lib/agent-limits';
+// ガードレールのルールを作るときの上限（上限そのものを主題にしないので共有の値）
+import { TEST_GUARDRAIL_RULE_LIMITS } from '../lib/guardrail-limits';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -1231,7 +1231,7 @@ describe('中継の直後のガードレール判定', () => {
         windowMinutes,
         action: RuleAction.stop,
       },
-      { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
+      TEST_GUARDRAIL_RULE_LIMITS,
     );
     // 作れていなければテストとして落とす
     if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);

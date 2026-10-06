@@ -8,14 +8,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuditAction } from '@/domain/audit/action';
 import { IncidentStatus, Role, RuleAction, RuleKind } from '@/domain/types';
-import {
-  GUARDRAIL_RULES_MAX_PER_TENANT,
-  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-  INCIDENTS_PATH,
-  LOGIN_PATH,
-  UI_TEXT,
-} from '@/lib/constants';
+import { INCIDENTS_PATH, LOGIN_PATH, UI_TEXT } from '@/lib/constants';
 import { CSRF_FIELD_NAME, csrfTokenFor } from '@/lib/csrf';
+// ガードレールのルールを作るときの上限（上限そのものを主題にしないので共有の値）
+import { TEST_GUARDRAIL_RULE_LIMITS } from './lib/guardrail-limits';
 import {
   DASHBOARD_ACTION_INITIAL,
   RESULT_INCIDENT_RESOLVED,
@@ -80,10 +76,7 @@ async function raiseIncident(tenant: SeededTenant): Promise<string> {
       windowMinutes: 60,
       action: RuleAction.notify,
     },
-    {
-      maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT,
-      maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-    },
+    TEST_GUARDRAIL_RULE_LIMITS,
   );
   // 作れていることを前提にする（作れないならテストの仕込みが壊れている）
   if (created.status !== 'created') throw new Error('ルールを作れませんでした');

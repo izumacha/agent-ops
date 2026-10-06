@@ -31,6 +31,11 @@ export const AuditAction = {
   // ガードレールのルールを無効にした（**発火記録を持つルールを止める唯一の手段**なので、
   // 「いつ誰が止める条件を外したか」が辿れるようにする）
   guardrail_rule_disabled: 'guardrail.rule_disabled',
+  // 契約プランが変わった（Step6）。**人の操作（プラットフォーム管理者）と課金事業者の Webhook の
+  // 2 経路があり、どちらも同じ名前で残す** — プランは上限と機能の可否を決めるので、
+  // 「いつ何が変わったか」が辿れないと 409 / 403 の原因を後から説明できない。
+  // 誰がやったかは `actorId`（Webhook 由来なら null）と payload の `source` が示す
+  tenant_plan_changed: 'tenant.plan_changed',
 } as const;
 /** AuditAction の値の型 */
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
@@ -43,6 +48,8 @@ export const AuditTargetType = {
   incident: 'Incident',
   // ガードレールのルール（登録・削除）
   guardrailRule: 'GuardrailRule',
+  // テナント（契約プランの変更。Step6）
+  tenant: 'Tenant',
 } as const;
 /** AuditTargetType の値の型 */
 export type AuditTargetType = (typeof AuditTargetType)[keyof typeof AuditTargetType];

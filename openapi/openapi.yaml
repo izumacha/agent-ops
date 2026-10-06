@@ -134,6 +134,49 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+    patch:
+      tags: [tenants]
+      operationId: updateTenantPlan
+      summary: 契約プランの変更 (プラットフォーム管理者専用)
+      description: |-
+        **テナント内の admin は呼べない** (403)。課金の実体は事業者側にあるので、アプリ側で
+        勝手に上げられると請求と権限が食い違う。通常の経路は事業者の契約 → 受信 Webhook で、
+        ここは運用の手当て (移行・障害時の暫定対応・事業者を介さない契約) のために残してある。
+
+        **変更は監査ログ (tenant.plan_changed) に残る。** 監査ログの鍵が未設定なら 503 で
+        **何も変えずに**断る (記録の無い変更を残さない)。課金事業者側の id は受け取らない
+        (連携は Webhook が作る)。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantPlanUpdate'
+      responses:
+        '200':
+          description: 変更後のテナント
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /me:
     get:
       tags: [users]
@@ -2498,3 +2541,13 @@ components:
           description: |-
             プランを反映したか。false になるのは「再送 (2 通目)」「顧客 ID に対応する
             テナントが無い」「知らない種別・知らない価格」のいずれか
+    TenantPlanUpdate:
+      type: object
+      required: [plan]
+      additionalProperties: false
+      description: |-
+        プランの変更 (プラットフォーム管理者専用)。**課金事業者側の id は受け取らない** —
+        契約の実体は事業者側にあるので、連携は受信 Webhook が作る
+      properties:
+        plan:
+          $ref: '#/components/schemas/Plan'

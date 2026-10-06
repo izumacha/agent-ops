@@ -13,6 +13,9 @@ import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 import { Plan } from '@/domain/types';
 import { API_MESSAGES } from '@/lib/constants';
 import { BILLING_SECRET, call, seedEachTest } from './helpers';
+import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
+import { AuditAction, AuditTargetType } from '@/domain/audit/action';
+import { PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
 
 // seed（各テストの前に作り直す）
 const seed = seedEachTest();
@@ -255,6 +258,36 @@ describe('POST /billing/webhook', () => {
     // 契約の変更イベントなので、決められなかったことはログに残す
     expect(logged).toHaveBeenCalled();
     logged.mockRestore();
+  });
+
+  it('反映は監査ログに残る（経路が webhook であることも）', async () => {
+    // **人の操作と同じ名前・同じ形で残す**（別々に書くと監査ログを読む側が 2 つの操作として数える）
+    await linkCustomer();
+    await postWebhook(webhookBody({ plan: Plan.enterprise }));
+    // そのテナントの admin で監査ログを読む
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    const items = (logs.json as { items: { action: string; payload: unknown }[] }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      action: AuditAction.tenant_plan_changed,
+      targetType: AuditTargetType.tenant,
+      // Webhook 由来なので actorId は無い（経路は payload の source が示す）
+      actorId: null,
+      payload: { from: Plan.free, to: Plan.enterprise, source: PLAN_CHANGE_SOURCE.webhook },
+    });
+  });
+
+  it('監査ログの鍵が無ければ 503 で、受信記録も残さない', async () => {
+    // **記録してから反映に失敗すると、再送は「2 通目」として無視され永久に反映されない。**
+    // 鍵が無いなら 1 行も記録せず 503 を返し、事業者の再送でやり直させる
+    await linkCustomer();
+    vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    const body = webhookBody({ plan: Plan.pro, eventId: 'evt_no_audit' });
+    expect((await postWebhook(body)).status).toBe(503);
+    // 鍵を戻すと、同じイベントがやり直せる（記録が残っていれば duplicate で無視されてしまう）
+    vi.unstubAllEnvs();
+    expect((await postWebhook(body)).json).toEqual({ received: true, applied: true });
+    expect(await planOfA()).toBe(Plan.pro);
   });
 
   it('共有キャッシュへ載らない（no-store を宣言している）', async () => {

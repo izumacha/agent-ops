@@ -19,7 +19,7 @@ import { GET as listApiKeys, POST as createApiKey } from '@/app/api/v1/api-keys/
 import { DELETE as revokeApiKey } from '@/app/api/v1/api-keys/[apiKeyId]/route';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants, POST as createTenant } from '@/app/api/v1/tenants/route';
-import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
+import { GET as getTenant, PATCH as updateTenantPlan } from '@/app/api/v1/tenants/[tenantId]/route';
 import { GET as listUsers, POST as createUser } from '@/app/api/v1/users/route';
 import { DELETE as disableUser } from '@/app/api/v1/users/[userId]/route';
 import { PUT as updateUserRole } from '@/app/api/v1/users/[userId]/role/route';
@@ -53,7 +53,7 @@ import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { GET as getBilling } from '@/app/api/v1/billing/route';
 import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
 import { canPerform, type Action } from '@/domain/rbac';
-import { Role } from '@/domain/types';
+import { Plan, Role } from '@/domain/types';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
@@ -93,6 +93,18 @@ const ENDPOINTS: Record<
     requires: 'view',
     invoke: async (t) =>
       (await call(getTenant, { token: t, params: { tenantId: seed.a.id } })).status,
+  },
+  updateTenantPlan: {
+    requires: 'platform',
+    invoke: async (t) =>
+      (
+        await call(updateTenantPlan, {
+          method: 'PATCH',
+          token: t,
+          params: { tenantId: seed.a.id },
+          body: { plan: Plan.pro },
+        })
+      ).status,
   },
   getMe: { requires: 'view', invoke: async (t) => (await call(getMe, { token: t })).status },
   listUsers: {

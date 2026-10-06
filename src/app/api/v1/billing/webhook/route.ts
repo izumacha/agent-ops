@@ -20,6 +20,8 @@ import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { getRepos } from '@/data';
 import { API_MESSAGES } from '@/lib/constants';
 import { isPlanChangeEvent, planChangeFor } from '@/lib/billing/events';
+import { applyPlanChange, PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
+import { assertAuditConfigured } from '@/lib/audit/record';
 import {
   BILLING_SIGNATURE_HEADER,
   billingWebhookSecret,
@@ -53,6 +55,10 @@ export async function POST(request: Request): Promise<Response> {
     if (verified !== 'ok') {
       throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.billingSignatureInvalid);
     }
+    // **受信を記録する前に「監査ログを書ける状態か」を確かめる** — 記録してから反映に失敗すると、
+    // 再送は「2 通目」として無視されるので**そのイベントは永久に反映されない**。鍵が無いなら
+    // 1 行も記録せず 503 を返し、事業者の再送でやり直させる（§9 fail-closed）
+    assertAuditConfigured();
     // 顧客 ID からテナントを引く（引けなければ null。**記録は残す** — 残さないと
     // 「知らない顧客からの再送」を何度でも処理してしまう）
     const customerId = event.data.object.customer ?? null;
@@ -87,11 +93,16 @@ export async function POST(request: Request): Promise<Response> {
       }
       return received(false);
     }
-    // プランと事業者側のサブスクリプション ID を同時に書く
-    await repos.tenants.updatePlan(tenant.id, {
-      plan: change.plan,
-      billingSubscriptionId: change.subscriptionId,
+    // プランと事業者側のサブスクリプション ID を同時に書き、監査ログに 1 行残す
+    // （記録の形は `PATCH /tenants/{tenantId}` と共有する）
+    const applied = await applyPlanChange(repos, {
+      tenantId: tenant.id,
+      from: tenant.plan,
+      update: { plan: change.plan, billingSubscriptionId: change.subscriptionId },
+      source: PLAN_CHANGE_SOURCE.webhook,
     });
+    // 読んだ直後に消えた場合（並行削除）は反映できていない
+    if (applied === null) return received(false);
     // 反映した
     return received(true);
   } catch (error) {

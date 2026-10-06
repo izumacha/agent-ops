@@ -28,7 +28,7 @@ import type { ZodObject, ZodTypeAny } from 'zod';
 import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
 import { evaluationRunCreateSchema, evaluationSetCreateSchema } from '@/lib/validations/evaluation';
-import { tenantCreateSchema } from '@/lib/validations/tenant';
+import { tenantCreateSchema, tenantPlanUpdateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
 import {
@@ -104,6 +104,7 @@ const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
 // 「対応を書き忘れたまま契約と実装が食い違う」ことが起きない (キーは $ref の名前、インラインは "METHOD /path")
 const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   TenantCreate: tenantCreateSchema,
+  TenantPlanUpdate: tenantPlanUpdateSchema,
   UserCreate: userCreateSchema,
   UserTokenCreate: userTokenCreateSchema,
   AgentCreate: agentCreateSchema,

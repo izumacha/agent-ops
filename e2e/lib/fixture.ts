@@ -12,10 +12,12 @@ import { createPrismaRepos } from '../../src/data/adapters/prisma';
 import { createPrismaClient } from '../../src/lib/prisma-client';
 import { issueUserToken } from '../../src/lib/tokens';
 import { Provider, RuleAction, RuleKind } from '../../src/domain/types';
-// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
-import { createTestAgent } from '../../tests/lib/agent-limits';
-// ガードレールのルールを作るときの上限（上限そのものを主題にしない仕込みなので共有の値）
-import { TEST_GUARDRAIL_RULE_LIMITS } from '../../tests/lib/guardrail-limits';
+// 上限はプランの表から引く（`repos` の作成系は上限を必須で受け取る）。
+// **`tests/` から import しない** — `.dockerignore` が `tests` を除くので、本番イメージの
+// `npm run build` だけが「モジュールが見つからない」で落ちる（ローカルとゲートは緑のまま通り、
+// docker-smoke ジョブで初めて分かる。実測で PR #21 がそうなった）。
+// 仕込むのは 1 件ずつなので、どのプランの上限でも足りる（実際の値は作ったテナントのプランから引く）
+import { guardrailRuleLimitsFor, planLimitsFor } from '../../src/domain/plan';
 
 // 仕込んだデータの受け渡し先。**ファイル経由にする**のは、Playwright の globalSetup と
 // 各ワーカー・Lighthouse の計測が別プロセスで動くため（環境変数では渡らない）
@@ -85,15 +87,26 @@ export async function seedE2eFixture(): Promise<E2eSeed> {
       // 保存用の入力は発行の一式から取る（平文と別の文字列からハッシュを作る取り違えを防ぐ）
       token: issued.input,
     });
+    // 作ったテナントのプラン（上限はここから引く。本番と同じ値で仕込む）
+    const limits = planLimitsFor(created.tenant.plan);
     // エージェントを 1 件作る
-    const agent = await createTestAgent(repos, {
-      tenantId: created.tenant.id,
-      name: AGENT_NAME,
-      description: '請求書 PDF を読み取って仕訳の候補を作るエージェント',
-      provider: Provider.anthropic,
-      model: AGENT_MODEL,
-      budgetMicroUsd: 500_000n,
-    });
+    const createdAgent = await repos.agents.create(
+      {
+        tenantId: created.tenant.id,
+        name: AGENT_NAME,
+        description: '請求書 PDF を読み取って仕訳の候補を作るエージェント',
+        provider: Provider.anthropic,
+        model: AGENT_MODEL,
+        budgetMicroUsd: 500_000n,
+      },
+      { maxAgents: limits.maxAgents },
+    );
+    // 作れていなければ仕込みが壊れている（fail-closed。undefined のまま進ませない）
+    if (createdAgent.status !== 'created') {
+      throw new Error(`エージェントを作れません: ${createdAgent.status}`);
+    }
+    // 作れた行
+    const agent = createdAgent.agent;
     // 利用イベントを仕込む（ダッシュボードのコスト・稼働率・日次表が数字を持つようにする）
     for (const event of USAGE_EVENTS) {
       // 1 件ずつ本番と同じ Port 経由で記録する
@@ -117,7 +130,7 @@ export async function seedE2eFixture(): Promise<E2eSeed> {
         windowMinutes: RULE_WINDOW_MINUTES,
         action: RuleAction.notify,
       },
-      TEST_GUARDRAIL_RULE_LIMITS,
+      guardrailRuleLimitsFor(created.tenant.plan),
     );
     // 作れていなければ仕込みが壊れている
     if (rule.status !== 'created') throw new Error(`ルールを作れません: ${rule.status}`);

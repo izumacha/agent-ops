@@ -7,6 +7,8 @@ import type { UsageEventRecord } from '@/data';
 import { Provider, Role } from '@/domain/types';
 import { USAGE_RANGE_MAX_DAYS } from '@/lib/constants';
 import { call, seedEachTest } from './helpers';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../lib/agent-limits';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -186,7 +188,7 @@ describe('日次集計の結果', () => {
 
   it('agentId で絞れる', async () => {
     // 同テナントに 2 つ目のエージェントを作る
-    const other = await seed.repos.agents.create({
+    const other = await createTestAgent(seed.repos, {
       tenantId: seed.a.id,
       name: '別のエージェント',
       description: null,

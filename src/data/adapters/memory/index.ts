@@ -8,8 +8,10 @@ import type {
   ActiveRuleQuery,
   AgentFilter,
   AgentRecord,
+  AgentLimits,
   AgentsPort,
   AppendAuditLogInput,
+  BillingEventsPort,
   AuditHashInput,
   AuditLogRecord,
   AuditLogsPort,
@@ -31,11 +33,15 @@ import type {
   ApiKeyRecord,
   ApiKeysPort,
   CreateAgentInput,
+  CreateAgentResult,
   CreateApiKeyInput,
   CreateEvaluationRunInput,
   CreateEvaluationSetInput,
   CreateTenantInput,
   CreateTenantResult,
+  RecordBillingEventInput,
+  RecordBillingEventResult,
+  UpdateTenantPlanInput,
   CreateUserInput,
   CreateUserTokenInput,
   DailyUsageQuery,
@@ -126,6 +132,46 @@ class MemoryTenants implements TenantsPort {
     return row ? clone(row) : null;
   }
 
+  // 課金事業者側の顧客 ID で引く (テナント境界の外側)
+  async findByBillingCustomerId(customerId: string): Promise<TenantRecord | null> {
+    // 顧客 ID が一致する行を探す (本番は一意索引なので 1 件以下)
+    const row = [...this.store.tenants.values()].find(
+      (tenant) => tenant.billingCustomerId === customerId,
+    );
+    // 見つかれば複製、無ければ null
+    return row ? clone(row) : null;
+  }
+
+  // プラン (と課金事業者側の id) を変える
+  async updatePlan(tenantId: string, input: UpdateTenantPlanInput): Promise<TenantRecord | null> {
+    // 対象行 (無ければ null)
+    const row = this.store.tenants.get(tenantId);
+    if (!row) return null;
+    // **顧客 ID の一意性を memory 側でも守る** — 本番は一意索引が 2 行目を拒否するので、
+    // ここが緩いと「2 テナントが同じ顧客を名乗る」状態を API テストだけが通してしまう
+    for (const key of ['billingCustomerId', 'billingSubscriptionId'] as const) {
+      // 指定が無い (undefined) か null へ戻すときは衝突しない
+      const value = input[key];
+      if (value === undefined || value === null) continue;
+      // 他のテナントが同じ値を持っていれば一意制約違反
+      const taken = [...this.store.tenants.values()].some(
+        (tenant) => tenant.id !== tenantId && tenant[key] === value,
+      );
+      if (taken) throw new DuplicateError(key);
+    }
+    // プランを入れ替える
+    row.plan = input.plan;
+    // 課金事業者側の id は**指定されたときだけ**書き換える (undefined は変更しない)
+    if (input.billingCustomerId !== undefined) row.billingCustomerId = input.billingCustomerId;
+    if (input.billingSubscriptionId !== undefined) {
+      row.billingSubscriptionId = input.billingSubscriptionId;
+    }
+    // 更新日時を進める
+    row.updatedAt = this.store.now();
+    // 複製を返す
+    return clone(row);
+  }
+
   // テナント + admin + トークンを作る (メモリなので原子性は自明)
   async createWithAdmin(input: CreateTenantInput): Promise<CreateTenantResult> {
     // 作成時刻
@@ -134,8 +180,11 @@ class MemoryTenants implements TenantsPort {
     const tenant: TenantRecord = {
       id: this.store.nextId('tenant'),
       name: input.name,
-      // プランは free から始める (prisma 実装と同じ。切り替えは後の Step)
+      // プランは free から始める (prisma 実装と同じ。切り替えは Webhook とプラットフォーム管理者)
       plan: Plan.free,
+      // 課金事業者とはまだ結び付いていない
+      billingCustomerId: null,
+      billingSubscriptionId: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -309,8 +358,12 @@ class MemoryUserTokens implements UserTokensPort {
     // (書き込み側の create は既に確かめているのに、読み取り側だけが素通しだった)。
     // 食い違う行は「無い」ものとして扱う (§9 fail-closed)
     if (token.tenantId !== user.tenantId) return null;
-    // 両方を複製して返す
-    return { token: clone(token), user: clone(user) };
+    // そのテナントの契約プラン (認証の経路が上限・機能ゲートのために要る)。
+    // テナント行が無い組み合わせは「無い」ものとして扱う (§9 fail-closed)
+    const tenant = this.store.tenants.get(token.tenantId);
+    if (!tenant) return null;
+    // 3 つを複製して返す
+    return { token: clone(token), user: clone(user), plan: tenant.plan };
   }
 
   // あるユーザーのトークン一覧
@@ -374,11 +427,19 @@ class MemoryAgents implements AgentsPort {
     );
   }
 
-  // 作成 (名前重複は DuplicateError)
-  async create(input: CreateAgentInput): Promise<AgentRecord> {
-    // 同テナントに同じ名前があれば一意制約違反
-    if (this.rowsOf(input.tenantId).some((row) => row.name === input.name)) {
+  // 作成 (名前重複は DuplicateError、プランの上限超過は 'too_many_agents')
+  async create(input: CreateAgentInput, limits: AgentLimits): Promise<CreateAgentResult> {
+    // そのテナントの行 (**1 度だけ数える** — 同じ走査を 2 回するとテナントの行数ぶん無駄になる)
+    const rows = this.rowsOf(input.tenantId);
+    // **名前の重複を先に見る** — prisma 側も同じ順序にしてある (ADR-0006 の死角。
+    // 順序が割れると「上限に達していて、かつ名前も重複している」要求で答えが 409 と 422 に分かれ、
+    // ルートは片方の答えで書かれて本番だけ別のステータスになる)
+    if (rows.some((row) => row.name === input.name)) {
       throw new DuplicateError('name');
+    }
+    // プランの上限に達していれば 409 へ写す戻り値を返す
+    if (rows.length >= limits.maxAgents) {
+      return { status: 'too_many_agents' };
     }
     // 作成時刻
     const now = this.store.now();
@@ -397,7 +458,7 @@ class MemoryAgents implements AgentsPort {
     };
     // 表へ入れて複製を返す
     this.store.agents.set(row.id, row);
-    return clone(row);
+    return { status: 'created', agent: clone(row) };
   }
 
   // 更新 (undefined は変更しない)
@@ -520,8 +581,12 @@ class MemoryApiKeys implements ApiKeysPort {
     // 認証は `found.agent.tenantId` を主体のテナントに採るので、食い違う行を返すと
     // 「テナント A のキーがテナント B のエージェントとして認証される」形になる (§9 fail-closed)
     if (agent !== null && agent.tenantId !== key.tenantId) return null;
-    // キーと複製したエージェントを返す
-    return { key: clone(key), agent: agent === null ? null : clone(agent) };
+    // そのテナントの契約プラン (中継のレート制限の枠がプラン別なので認証の経路で要る)。
+    // テナント行が無い組み合わせは「無い」ものとして扱う (§9 fail-closed)
+    const tenant = this.store.tenants.get(key.tenantId);
+    if (!tenant) return null;
+    // キーと複製したエージェント、そしてプランを返す
+    return { key: clone(key), agent: agent === null ? null : clone(agent), plan: tenant.plan };
   }
 
   // 失効
@@ -1153,6 +1218,30 @@ class MemoryAuditLogs implements AuditLogsPort {
   }
 }
 
+// 受信した課金イベント (冪等性の記録)
+class MemoryBillingEvents implements BillingEventsPort {
+  // 共有の表を受け取る
+  constructor(private readonly store: MemoryStore) {}
+
+  // 1 度だけ記録する (2 通目は duplicate)
+  async recordOnce(input: RecordBillingEventInput): Promise<RecordBillingEventResult> {
+    // 一意制約と同じキー (provider + eventId)。**本番の `@@unique([provider, eventId])` と
+    // 同じ粒度にする** — 事業者をまたいで eventId が衝突しても別イベントとして扱えるようにする
+    const key = `${input.provider}:${input.eventId}`;
+    // 既に記録済みなら何もしない (再送は正常系なので例外にしない)
+    if (this.store.billingEvents.has(key)) return 'duplicate';
+    // 記録して「初めて」を返す
+    this.store.billingEvents.set(key, {
+      provider: input.provider,
+      eventId: input.eventId,
+      type: input.type,
+      tenantId: input.tenantId,
+      receivedAt: this.store.now(),
+    });
+    return 'recorded';
+  }
+}
+
 // memory アダプタ一式を組み立てる (テストはこれを setReposForTesting へ渡し、store で seed する)
 export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repositories & {
   store: MemoryStore;
@@ -1170,6 +1259,7 @@ export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repos
     guardrailRules: new MemoryGuardrailRules(store),
     incidents: new MemoryIncidents(store),
     auditLogs: new MemoryAuditLogs(store),
+    billingEvents: new MemoryBillingEvents(store),
   };
 }
 

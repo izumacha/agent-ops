@@ -28,7 +28,7 @@ import type { ZodObject, ZodTypeAny } from 'zod';
 import { agentCreateSchema, agentUpdateSchema } from '@/lib/validations/agent';
 import { apiKeyCreateSchema } from '@/lib/validations/api-key';
 import { evaluationRunCreateSchema, evaluationSetCreateSchema } from '@/lib/validations/evaluation';
-import { tenantCreateSchema } from '@/lib/validations/tenant';
+import { tenantCreateSchema, tenantPlanUpdateSchema } from '@/lib/validations/tenant';
 import { userTokenCreateSchema } from '@/lib/validations/user-token';
 import { userCreateSchema, userRoleSchema } from '@/lib/validations/user';
 import {
@@ -36,6 +36,8 @@ import {
   guardrailRuleUpdateSchema,
   guardrailRunSchema,
 } from '@/lib/validations/guardrail';
+import { billingWebhookEventSchema } from '@/lib/validations/billing';
+import { BILLING_WEBHOOK_FIELD_MAX_LENGTH } from '@/lib/constants';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { ROUTE_RATE_LIMIT_BRAND } from '@/lib/api/handler';
@@ -98,10 +100,15 @@ type Spec = {
 };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
 
+// プランの正本（契約に並べる鍵をここから導く。綴りを 2 か所に書かない）
+const { PLAN_FEATURES, PLAN_LIMITS } = await import('@/domain/plan');
+const { Plan } = await import('@/domain/types');
+
 // 契約の本文スキーマ → 実装の Zod スキーマ。表に載っていない本文が契約に増えれば下のテストが落ちるので、
 // 「対応を書き忘れたまま契約と実装が食い違う」ことが起きない (キーは $ref の名前、インラインは "METHOD /path")
 const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   TenantCreate: tenantCreateSchema,
+  TenantPlanUpdate: tenantPlanUpdateSchema,
   UserCreate: userCreateSchema,
   UserTokenCreate: userTokenCreateSchema,
   AgentCreate: agentCreateSchema,
@@ -114,6 +121,7 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   GuardrailRuleCreate: guardrailRuleCreateSchema,
   GuardrailRuleUpdate: guardrailRuleUpdateSchema,
   GuardrailRunRequest: guardrailRunSchema,
+  BillingWebhookEvent: billingWebhookEventSchema,
 };
 
 // **未知キーを許すことが意図である本文の除外表 (理由付き)。**
@@ -121,6 +129,10 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
 // エントリが増える差分は、理由の妥当性をレビューで必ず確認する (この表は機械化できないエスケープハッチ)。
 // 除外しても項目の一致 (契約の properties と Zod の shape) と「必須項目が実際に必須か」は下のテストが見る
 const OPEN_BODY_SCHEMAS: Record<string, string> = {
+  BillingWebhookEvent:
+    '課金事業者 (Stripe) が作るペイロードをそのまま受けるため。未知キーを 422 にすると、' +
+    '事業者が項目を 1 つ増やした日に全イベントが 422 になりプランの反映が止まる ' +
+    '(docs/adr/0012-plans-and-billing.md)',
   ProxyRequest:
     'ベンダー (Anthropic / OpenAI) のペイロードをそのまま中継するため。未知キーを 422 にすると、' +
     'ベンダーが新しいパラメータを足しただけで中継が止まる (docs/adr/0007-cost-proxy.md)',
@@ -661,13 +673,15 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   // 上の表に載せ忘れた maxLength が野放しにならないようにする (包含リストだけだと、表に無いプロパティは
   // 定数を変えても古い値のまま残り、契約と実装が食い違ったまま緑になる)
   it('本文スキーマの maxLength は既知の定数のいずれかである', () => {
-    // 許す値 (文字列長の 3 種 + 予算の桁数)
+    // 許す値 (文字列長の 3 種 + 資源 id + 予算の桁数 + 受信 Webhook の項目)
     const allowed = new Set([
       SHORT_TEXT_MAX_LENGTH,
       LONG_TEXT_MAX_LENGTH,
       EMAIL_MAX_LENGTH,
       RESOURCE_ID_MAX_LENGTH,
       MICRO_USD_MAX.toString().length,
+      // 課金事業者側の id・種別・価格の名前 (Step6)
+      BILLING_WEBHOOK_FIELD_MAX_LENGTH,
     ]);
     // components.schemas のプロパティを走査する
     for (const [schemaName, schema] of Object.entries(spec.components.schemas)) {
@@ -822,5 +836,58 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       readKeysOf((probe) => ({ error: probe })),
       'error から読む項目名',
     ).toEqual(errorFields.filter((field) => field !== 'message').sort());
+  });
+});
+
+describe('Billing の契約がプランの表と一致する', () => {
+  // 契約の Billing スキーマ
+  const billing = spec.components.schemas.Billing;
+
+  it('features の鍵は PLAN_FEATURES から導かれる', () => {
+    // **`GET /billing` は `Object.fromEntries(PLAN_FEATURES…) as 契約の型` で組み立てる**ので、
+    // 機能を 1 つ足すと応答に鍵が増える。契約側が増えていないと、型は `as` で通り
+    // typecheck も既存のテストも緑のまま**契約違反の応答**になる（厳格なクライアントは拒否する）
+    const required = (billing?.required ?? []) as string[];
+    // features が必須であること（省略可だと「無い応答」も契約どおりになってしまう）
+    expect(required, 'features が必須でない').toContain('features');
+    // 機能ごとの可否を並べる object
+    const features = billing?.properties?.features as
+      | {
+          required?: string[];
+          properties?: Record<string, unknown>;
+          additionalProperties?: unknown;
+        }
+      | undefined;
+    // 鍵の集合が正本と一致すること（両向き。足し忘れも古い登録も落ちる）
+    expect([...(features?.required ?? [])].sort(), 'features の必須の鍵').toEqual(
+      [...PLAN_FEATURES].sort(),
+    );
+    expect(Object.keys(features?.properties ?? {}).sort(), 'features の鍵').toEqual(
+      [...PLAN_FEATURES].sort(),
+    );
+    // 未知の鍵を許さない（許すと「契約に無い機能名」を黙って返せる）
+    expect(features?.additionalProperties, 'features が未知の鍵を許している').toBe(false);
+  });
+
+  it('limits の鍵は PlanLimits から導かれる', () => {
+    // 上限の鍵（`features` は可否なので除く。実体の object から導いて綴りを書き写さない）
+    const limitKeys = Object.keys(PLAN_LIMITS[Plan.free])
+      .filter((key) => key !== 'features')
+      .sort();
+    // 1 つも読めなければ導出が壊れている（fail-closed）
+    expect(limitKeys.length, '上限の鍵を 1 つも読めない').toBeGreaterThan(0);
+    // 契約側の limits
+    const limits = billing?.properties?.limits as
+      | {
+          required?: string[];
+          properties?: Record<string, unknown>;
+          additionalProperties?: unknown;
+        }
+      | undefined;
+    // 鍵の集合が一致すること（上限を足して契約へ出し忘れる形を落とす）
+    expect([...(limits?.required ?? [])].sort(), 'limits の必須の鍵').toEqual(limitKeys);
+    expect(Object.keys(limits?.properties ?? {}).sort(), 'limits の鍵').toEqual(limitKeys);
+    // 未知の鍵を許さない
+    expect(limits?.additionalProperties, 'limits が未知の鍵を許している').toBe(false);
   });
 });

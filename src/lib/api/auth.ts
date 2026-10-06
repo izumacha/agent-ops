@@ -6,7 +6,7 @@
 // 混ぜないのが要点で、authenticate() は API キーを受け付けず、authenticateApiKey() はユーザートークンを
 // 受け付けない。混ぜると「エージェント用の資格情報でユーザー向け API が叩ける」形に育つ
 import type { AgentRecord, Repositories, UserRecord } from '@/data';
-import { AgentStatus } from '@/domain/types';
+import { AgentStatus, type Plan } from '@/domain/types';
 import { API_MESSAGES, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { hashSecret, isApiKey, isUserToken, secretsEqual } from '@/lib/tokens';
 import { ApiError } from './errors';
@@ -19,6 +19,9 @@ export interface UserPrincipal {
   user: UserRecord;
   // そのユーザーのテナント (全クエリの where に入れる)
   tenantId: string;
+  // そのテナントの契約プラン (Step6 の上限・機能ゲートが読む)。**認証と同じ 1 回の問い合わせで引く**
+  // ので DB の往復は増えない (中継の追加遅延 ≦ 50ms の基準に影響させないため)
+  plan: Plan;
 }
 
 // プラットフォーム管理者として認証された主体
@@ -35,6 +38,8 @@ export interface AgentPrincipal {
   tenantId: string;
   // 使われた API キーの id (監査・失効の追跡用。平文もハッシュも持ち回らない)
   apiKeyId: string;
+  // そのテナントの契約プラン (中継のレート制限の枠をプラン別にするために要る)
+  plan: Plan;
 }
 
 // 認証された主体
@@ -120,8 +125,8 @@ export async function authenticateUserToken(
   if (record.revokedAt !== null || record.expiresAt <= now || user.disabledAt !== null) {
     throw invalidTokenError();
   }
-  // テナント内のユーザーとして認証成功
-  return { kind: 'user', user, tenantId: user.tenantId };
+  // テナント内のユーザーとして認証成功 (プランは照合と同じ問い合わせで引いた値)
+  return { kind: 'user', user, tenantId: user.tenantId, plan: found.plan };
 }
 
 // API キーを照合し、有効ならエージェント主体を返す
@@ -150,6 +155,7 @@ async function authenticateApiKeySecret(
     agent: found.agent,
     tenantId: found.agent.tenantId,
     apiKeyId: found.key.id,
+    plan: found.plan,
   };
 }
 

@@ -1,21 +1,25 @@
 // レート制限（src/lib/api/rate-limit.ts）の検査。
 // **時刻を引数で受け取る形**にしてあるので、窓の境界を決定的に固定できる（実時間を待たない）。
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  configuredRateLimit,
   enforceRateLimit,
   extraRateLimiter,
+  extraRateLimitFor,
   RATE_LIMIT_TIER,
   rateLimitKeyFor,
   rateLimitedError,
+  rateLimitOverrideFromEnv,
   resetSharedRateLimiterForTesting,
   sharedRateLimiter,
+  sharedRateLimitFor,
   SlidingWindowRateLimiter,
 } from '@/lib/api/rate-limit';
+import type { Principal } from '@/lib/api/auth';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { Provider, Role } from '@/domain/types';
-import { PROXY_RATE_LIMIT_ENV, PROXY_RATE_LIMIT_PER_MINUTE } from '@/lib/constants';
+import { Plan, Provider, Role } from '@/domain/types';
+import { PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
+import { FALLBACK_PLAN, PLAN_LIMITS } from '@/domain/plan';
 
 // 検査で使う窓の長さ（1 分）
 const WINDOW_MS = 60_000;
@@ -24,11 +28,31 @@ const LIMIT = 3;
 // 起点の時刻（絶対値には意味が無いが、固定して境界を読みやすくする）
 const T0 = 1_000_000;
 
-// 既定の設定で制限器を作る
-function limiter(limit = LIMIT, windowMs = WINDOW_MS): SlidingWindowRateLimiter {
-  // 上限と窓を渡す
-  return new SlidingWindowRateLimiter({ limit, windowMs });
+// 既定の設定で制限器を作る。
+// **上限は制限器が持たず判定のたびに渡す形**（Step6 でプラン別にしたため）なので、
+// 検査のあいだ同じ上限を使うようここで閉じ込める（本体の書き方は変えない）
+function limiter(limit = LIMIT, windowMs = WINDOW_MS) {
+  // 記録表そのもの
+  const rl = new SlidingWindowRateLimiter({ windowMs });
+  // 上限を閉じ込めた形で返す（観測用のプロパティはそのまま覗けるようにする）
+  return {
+    check: (key: string, now: number) => rl.check(key, now, limit),
+    inspect: (key: string, now: number) => rl.inspect(key, now, limit),
+    get sweepCount() {
+      return rl.sweepCount;
+    },
+    get trackedKeys() {
+      return rl.trackedKeys;
+    },
+  };
 }
+
+// **各テストの前に共有の枠を本番と同じ決め方へ戻す。** テスト専用の上限の上書きは
+// モジュール変数なので、上書きしたテストの後ろに「本番の決め方」を見るテストが来ると
+// 実行順に依存して落ちる（上書きした値が漏れる）。戻す手段は 1 つに寄せてあるので毎回呼ぶ
+beforeEach(() => {
+  resetSharedRateLimiterForTesting();
+});
 
 describe('スライディングウィンドウのレート制限', () => {
   it('上限までは通し、超えた分を断る', () => {
@@ -128,19 +152,36 @@ describe('スライディングウィンドウのレート制限', () => {
     expect(rl.sweepCount).toBe(1);
   });
 
-  it('上限や窓が正の整数でなければ作れない（fail-closed）', () => {
+  it('窓が正の整数でなければ作れない（fail-closed）', () => {
     // **窓が 0 だと記録が常に空になりレート制限が丸ごと無効になる**ので作らせない
-    for (const options of [
-      { limit: 0, windowMs: WINDOW_MS },
-      { limit: -1, windowMs: WINDOW_MS },
-      { limit: 1.5, windowMs: WINDOW_MS },
-      { limit: LIMIT, windowMs: 0 },
-      { limit: LIMIT, windowMs: -1 },
-      { limit: LIMIT, windowMs: 1.5 },
-      { limit: Number.NaN, windowMs: WINDOW_MS },
-    ]) {
-      expect(() => new SlidingWindowRateLimiter(options)).toThrow(RangeError);
+    for (const windowMs of [0, -1, 1.5, Number.NaN]) {
+      expect(() => new SlidingWindowRateLimiter({ windowMs })).toThrow(RangeError);
     }
+  });
+
+  it('上限が正の整数でなければ判定できない（fail-closed）', () => {
+    // 上限は判定のたびに渡すので、壊れた値はその場で落とす。
+    // **0 や NaN を通すと「上限に達することが無い」形になり保護が黙って消える**
+    const rl = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
+    for (const limit of [0, -1, 1.5, Number.NaN]) {
+      expect(() => rl.check('k', T0, limit)).toThrow(RangeError);
+      expect(() => rl.inspect('k', T0, limit)).toThrow(RangeError);
+    }
+  });
+
+  it('上限は判定のたびに読むので、窓の途中で変わっても記録は引き継ぐ', () => {
+    // プランを窓の途中で上げ下げしたときの挙動。**記録を作り直さない**ことが要点で、
+    // 制限器を上限ごとに分ける形だと上げ下げのたびに数え直しになる
+    const rl = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
+    // 上限 2 で 2 回使い切る
+    expect(rl.check('k', T0, 2).allowed).toBe(true);
+    expect(rl.check('k', T0, 2).allowed).toBe(true);
+    expect(rl.check('k', T0, 2).allowed).toBe(false);
+    // 上限 3 へ上げると、同じ窓の記録 2 件を引き継いだうえで 1 回だけ通る
+    expect(rl.check('k', T0, 3).allowed).toBe(true);
+    expect(rl.check('k', T0, 3).allowed).toBe(false);
+    // 上限 1 へ下げると、既に 3 件あるので通らない（下げた側も即座に効く）
+    expect(rl.check('k', T0, 1).allowed).toBe(false);
   });
 });
 
@@ -154,6 +195,7 @@ describe('レート制限のキー', () => {
         kind: 'agent',
         tenantId: 'tn-1',
         apiKeyId: 'ak-1',
+        plan: Plan.pro,
         agent: {
           id: 'ag-1',
           tenantId: 'tn-1',
@@ -173,6 +215,7 @@ describe('レート制限のキー', () => {
       rateLimitKeyFor({
         kind: 'user',
         tenantId: 'tn-1',
+        plan: Plan.pro,
         user: {
           id: 'us-1',
           tenantId: 'tn-1',
@@ -220,10 +263,10 @@ describe('ルートに載るレート制限の印', () => {
 describe('覗き見だけの判定 (inspect)', () => {
   it('数えないので、何回呼んでも通し続ける', () => {
     // 上限 3 の制限器
-    const limiter = new SlidingWindowRateLimiter({ limit: LIMIT, windowMs: WINDOW_MS });
+    const limiter = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
     // 上限より多く覗き見しても通る（覗き見は記録を増やさない）
     for (let index = 0; index < LIMIT + 5; index += 1) {
-      expect(limiter.inspect('k', T0).allowed).toBe(true);
+      expect(limiter.inspect('k', T0, LIMIT).allowed).toBe(true);
     }
     // 記録は 1 件も無い（キーごと表に無い）
     expect(limiter.trackedKeys).toBe(0);
@@ -231,11 +274,11 @@ describe('覗き見だけの判定 (inspect)', () => {
 
   it('上限に達していれば check と同じ待ち時間を返す', () => {
     // 上限 1 の制限器
-    const limiter = new SlidingWindowRateLimiter({ limit: 1, windowMs: WINDOW_MS });
-    // 1 件数える
-    expect(limiter.check('k', T0).allowed).toBe(true);
+    const limiter = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
+    // 1 件数える（上限 1）
+    expect(limiter.check('k', T0, 1).allowed).toBe(true);
     // 覗き見でも断り、待ち時間は窓の長さぶん（秒へ切り上げ）
-    const peeked = limiter.inspect('k', T0);
+    const peeked = limiter.inspect('k', T0, 1);
     expect(peeked.allowed).toBe(false);
     expect(peeked.retryAfterSeconds).toBe(WINDOW_MS / 1000);
   });
@@ -344,24 +387,44 @@ describe('レート制限の例外', () => {
   });
 });
 
-describe('上限の環境変数による上書き', () => {
+describe('共有の枠の上限', () => {
   // 環境変数を組み立てる（NODE_ENV は ProcessEnv で必須）
   function env(value: string | undefined): NodeJS.ProcessEnv {
     // 指定された値だけを入れる
     return { NODE_ENV: 'test', [PROXY_RATE_LIMIT_ENV]: value } as NodeJS.ProcessEnv;
   }
 
-  it('未設定なら既定の上限', () => {
-    // 未設定・空文字・空白だけはすべて既定
+  // プラン別の上限を見るための主体（テナントのユーザー）
+  function userWith(plan: Plan): Principal {
+    // 判定に要るのは kind / tenantId / plan だけ
+    return {
+      kind: 'user',
+      tenantId: 'tn-1',
+      plan,
+      user: {
+        id: 'us-1',
+        tenantId: 'tn-1',
+        email: 'a@example.com',
+        name: 'A',
+        role: Role.admin,
+        disabledAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    };
+  }
+
+  it('未設定なら上書き無し（null）', () => {
+    // 未設定・空文字・空白だけはすべて上書き無し
     for (const value of [undefined, '', '   ']) {
-      expect(configuredRateLimit(env(value))).toBe(PROXY_RATE_LIMIT_PER_MINUTE);
+      expect(rateLimitOverrideFromEnv(env(value))).toBeNull();
     }
   });
 
   it('正の整数なら上書きが効く（ベンチが計測を妨げられないようにする用途）', () => {
     // 前後の空白は落とす
-    expect(configuredRateLimit(env('1234'))).toBe(1234);
-    expect(configuredRateLimit(env(' 1234 '))).toBe(1234);
+    expect(rateLimitOverrideFromEnv(env('1234'))).toBe(1234);
+    expect(rateLimitOverrideFromEnv(env(' 1234 '))).toBe(1234);
   });
 
   it.each([
@@ -372,8 +435,78 @@ describe('上限の環境変数による上書き', () => {
     ['指数表記でない混在', '12abc'],
     ['Infinity', 'Infinity'],
     ['NaN', 'NaN'],
-  ])('読めない値は既定へ倒す（fail-closed）: %s', (_label, value) => {
-    // **設定ミスで制限が消えるより、効いている方が安全**
-    expect(configuredRateLimit(env(value))).toBe(PROXY_RATE_LIMIT_PER_MINUTE);
+  ])('読めない値は上書き無しへ倒す（fail-closed）: %s', (_label, value) => {
+    // **設定ミスで制限が消えるより、プランの上限が効いている方が安全**
+    expect(rateLimitOverrideFromEnv(env(value))).toBeNull();
+  });
+
+  it.each(Object.values(Plan))('%s のテナントはプランの上限で数える', (plan) => {
+    // **プランの表が正本**（ここに数値を書き写さない）
+    expect(sharedRateLimitFor(userWith(plan), env(undefined))).toBe(
+      PLAN_LIMITS[plan].proxyRateLimitPerMinute,
+    );
+  });
+
+  it('API キーの主体も同じプランの上限で数える（中継の経路）', () => {
+    // 中継はエージェント主体で来るので、こちらも plan を読んでいること
+    const agent: Principal = {
+      kind: 'agent',
+      tenantId: 'tn-1',
+      apiKeyId: 'ak-1',
+      plan: Plan.enterprise,
+      agent: {
+        id: 'ag-1',
+        tenantId: 'tn-1',
+        name: 'bot',
+        description: null,
+        provider: Provider.anthropic,
+        model: 'claude-sonnet-4-6',
+        budgetMicroUsd: null,
+        status: 'active',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    };
+    expect(sharedRateLimitFor(agent, env(undefined))).toBe(
+      PLAN_LIMITS[Plan.enterprise].proxyRateLimitPerMinute,
+    );
+  });
+
+  it('環境変数を設定するとプランの差が消える', () => {
+    // ベンチのための逃げ道。**設定した配備先では全テナントが同じ上限になる**
+    for (const plan of Object.values(Plan)) {
+      expect(sharedRateLimitFor(userWith(plan), env('5000'))).toBe(5000);
+    }
+  });
+
+  it('プラットフォーム管理者は最も厳しいプランへ倒す（fail-closed）', () => {
+    // プランを持たない主体。**いま共有の枠を宣言しているルートは 4 本ともテナントの経路**なので
+    // この分岐は実際には通らないが、通ったときに緩む側へ倒れないようにしてある
+    expect(sharedRateLimitFor({ kind: 'platform' }, env(undefined))).toBe(
+      PLAN_LIMITS[FALLBACK_PLAN].proxyRateLimitPerMinute,
+    );
+  });
+});
+
+describe('追加の枠の上限', () => {
+  it('種類ごとの表から引き、持たない種類は null', () => {
+    // 標準の枠は追加の枠を持たない
+    expect(extraRateLimitFor(RATE_LIMIT_TIER.standard)).toBeNull();
+    // 残りの 3 種類は正の整数の上限を持つ（値そのものは constants.ts が正本）
+    for (const tier of [
+      RATE_LIMIT_TIER.fanOut,
+      RATE_LIMIT_TIER.outbound,
+      RATE_LIMIT_TIER.heavyRead,
+    ]) {
+      const limit = extraRateLimitFor(tier);
+      expect(limit).not.toBeNull();
+      expect(Number.isInteger(limit)).toBe(true);
+      expect(limit as number).toBeGreaterThan(0);
+    }
+  });
+
+  it('プラン別にしない（守っているのは 1 要求の重さそのもの）', () => {
+    // 上位プランでも 1 要求の重さは変わらないので、主体を取らない形にしてある
+    expect(extraRateLimitFor).toHaveLength(1);
   });
 });

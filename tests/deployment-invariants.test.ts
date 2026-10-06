@@ -2,8 +2,8 @@
 // ここに並ぶのは「アプリのコードをいくら見ても分からないが、外れると本番の守りが丸ごと消える」設定。
 // 実測ではいずれも、外しても lint・typecheck・全ユニットテストが件数まで同じまま緑だった
 import { describe, expect, it } from 'vitest';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
 import { parse } from 'yaml';
 // 契約テスト用 DB の判定 (入口ガード・setupFiles と同じ関数を使う。規則の写しを作らない)
 import { contractDatabaseProblem } from '../scripts/lib/contract-database.mjs';
@@ -14,6 +14,9 @@ import { latestGateScriptName, npmArgvsInSource, UNREADABLE_ARG } from './lib/sc
 
 // リポジトリのルート
 const ROOT = process.cwd();
+
+// リポジトリルートからの相対パスを `/` 区切りで返す (Windows の `\` を正規化する)
+const relative0 = (absolute: string): string => relative(ROOT, absolute).split(sep).join('/');
 
 // YAML を読んで解釈する (読めなければ前提が崩れているので落とす = fail-closed)
 function readYaml(...segments: string[]): Record<string, unknown> {
@@ -283,6 +286,69 @@ describe('.dockerignore', () => {
     // 開発者の .env を builder ステージの COPY . . が取り込むと、ビルドキャッシュに秘密が残る
     expect(ignore).toMatch(/^\.env\*$/m);
     expect(ignore).toMatch(/^!\.env\.example$/m);
+  });
+
+  it('イメージに残るファイルは除外されたディレクトリから import しない', () => {
+    // **この食い違いはローカルでは絶対に出ない。** `COPY . .` は `.dockerignore` の分を落とすので、
+    // イメージの中では `tests/` が存在しない。残ったファイルがそこから import していると
+    // **イメージの `npm run build` だけ**が「モジュールが見つからない」で落ちる
+    // (lint / typecheck / test / ゲートの build はすべて緑のまま通り、docker-smoke ジョブで
+    // 20 分後に初めて分かる。実測で PR #21 の `e2e/lib/fixture.ts` がそうなった)。
+    // **除外の一覧は `.dockerignore` から導く** (写しを持つと、除外を増やした人がこの検査から外れる)
+    const ignoredDirs = ignore
+      .split('\n')
+      .map((line) => line.trim())
+      // コメント・空行・否定 (`!`)・glob は対象外 (素のディレクトリ名だけを見る)
+      .filter((line) => line !== '' && !line.startsWith('#') && !line.startsWith('!'))
+      .filter((line) => !line.includes('*') && !line.includes('/'))
+      // 実在するディレクトリだけ (`.next` のような生成物は無いこともある)
+      .filter((name) => existsSync(join(ROOT, name)) && statSync(join(ROOT, name)).isDirectory());
+    // 1 つも読めなければ検査が空振りになる (fail-closed)
+    expect(
+      ignoredDirs.length,
+      '.dockerignore から除外ディレクトリを 1 つも読めない',
+    ).toBeGreaterThan(0);
+    // イメージに残るソース (除外ディレクトリの中と node_modules は見ない)
+    const scanned: string[] = [];
+    // 再帰で集める (拡張子は型チェック・実行の両方に乗るものだけ)
+    const collect = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        // リポジトリルートからの相対パス
+        const relative = relative0(join(dir, entry.name));
+        // 除外ディレクトリと隠しディレクトリ・node_modules は入らない
+        if (entry.isDirectory()) {
+          if (ignoredDirs.includes(relative) || entry.name === 'node_modules') continue;
+          if (entry.name.startsWith('.')) continue;
+          collect(join(dir, entry.name));
+          continue;
+        }
+        // 対象の拡張子だけ集める。**`.d.ts` は見ない** — 型宣言だけのファイルで、
+        // `next-env.d.ts` のようにフレームワークが生成物 (`.next/`) を参照する行を持つ
+        // (生成物はイメージの中でビルドが作るので、存在しないのは手元だけ)
+        if (/\.(ts|tsx|mts|mjs)$/.test(entry.name) && !entry.name.endsWith('.d.ts')) {
+          scanned.push(relative);
+        }
+      }
+    };
+    collect(ROOT);
+    // 1 本も読めなければ走査が壊れている (fail-closed)
+    expect(scanned.length, 'イメージに残るソースを 1 つも読めない').toBeGreaterThan(0);
+    // 相対 import の指定子を取り出す正規表現 (`from '...'` と `import('...')`)
+    const specifiers = /(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]/g;
+    for (const file of scanned) {
+      // 中身を読む
+      const source = readFileSync(join(ROOT, file), 'utf8');
+      for (const match of source.matchAll(specifiers)) {
+        // 指定子をファイルの位置から解決する
+        const resolved = relative0(join(ROOT, dirname(file), match[1]));
+        // 解決先の先頭のディレクトリが除外対象なら、イメージの中では存在しない
+        const top = resolved.split('/')[0];
+        expect(
+          ignoredDirs.includes(top),
+          `${file} が除外ディレクトリ ${top} から import している (${match[1]})`,
+        ).toBe(false);
+      }
+    }
   });
 });
 

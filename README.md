@@ -3,7 +3,7 @@
 AI エージェントの**登録・権限・コスト・品質・停止**を一元管理する運用基盤（SaaS）。複数のエージェントを複数チームで運用し、コストと品質を可視化して事故（暴走・コスト超過・品質低下）を自動で止める。
 
 - スタック: Next.js 16（App Router）/ TypeScript / Prisma 7 / PostgreSQL 16 / Docker
-- 現在の段階: **Step5（ダッシュボード）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
+- 現在の段階: **Step6（マルチテナント・課金）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
 
 ## デモ
 
@@ -28,7 +28,7 @@ AI エージェントの**登録・権限・コスト・品質・停止**を一�
 必要環境: Node.js 22（`.nvmrc`）・npm 10・Docker（PostgreSQL 用）。
 
 ```bash
-cp .env.example .env               # DATABASE_URL と PLATFORM_ADMIN_TOKEN (32 文字以上の乱数) を設定
+cp .env.example .env               # DATABASE_URL / PLATFORM_ADMIN_TOKEN / AUDIT_HMAC_SECRET (いずれも 32 文字以上の乱数) を設定
 docker compose up -d db            # PostgreSQL 16 を起動
 npm ci                             # 依存インストール
 npm run gen                        # OpenAPI → TypeScript 型を生成 (src/generated/openapi.d.ts)
@@ -149,7 +149,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 誤った `stop` のルールは `PATCH /guardrails/{ruleId}` で `enabled: false` にして判定の対象から外す
 （インシデントを解決してエージェントを復帰させれば、以降は止まらない）。切り替えられるのは `enabled`
 だけで、しきい値や窓を変えたいときは作り直す（変えると過去のインシデントが「どの設定で発火したのか」を
-示さなくなる）。**無効化した行はルール数の上限（50 件）に数えない**（代わりに行数の天井 200 件が掛かる — 不要になった行は削除する）。
+示さなくなる）。**無効化した行はルール数の上限に数えない**（代わりに行数の天井＝有効側の 4 倍が掛かる — 不要になった行は削除する）。**上限の値は契約プランで変わる**ので、いまの値は `GET /billing` で引く（下記「プランと課金」）。
 
 **`AUDIT_HMAC_SECRET`（32 文字以上）が必須。** 人が行う操作（停止・復帰・インシデントの解決・ルールの
 登録・無効化・削除）は、鍵が無いと **503 で何も変えずに**断る（変えてから記録に失敗すると、記録の無い変更が
@@ -164,7 +164,8 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 **送らない**（署名なしの通知は受け手がなりすましと区別できない）。
 
 **上流へ費用を発生させる経路にはレート制限が掛かる**（中継 ・ 評価の実行 ・ ガードレールの明示実行。
-既定は毎分 `PROXY_RATE_LIMIT_PER_MINUTE` 件で、環境変数で上書きできる。超過は 429 ＋ `Retry-After`）。
+**共有枠は契約プランごと**で、`PROXY_RATE_LIMIT_PER_MINUTE` を設定するとベンチ用にプラン差を消して
+上書きできる。超過は 429 ＋ `Retry-After`）。
 **1 要求の重さが違う経路には、それに加えて別の小さい枠**が掛かる（評価の実行は
 `FAN_OUT_ROUTE_RATE_LIMIT_PER_MINUTE` 件、ガードレールの明示実行は
 `OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE` 件）— 回数だけを数える 1 つの枠では、
@@ -207,6 +208,70 @@ Server Action の冒頭で確かめるので、ボタンを隠すだけに頼ら
 > （fail-closed なので危険ではないが、「要求を受け付けられませんでした」が出続けて原因が
 > 画面からは読めない）。
 
+### プランと課金（Step6）
+
+契約プラン（`free` / `pro` / `enterprise`）が**上限と機能の可否**を決める。正本は
+`src/domain/plan.ts` の `PLAN_LIMITS` で、値の一覧は
+[`docs/spec.md` §4.1](./docs/spec.md) にある（食い違いはテストが落とす）。
+
+```bash
+# いまのプランと上限を引く (view 権限。409 / 403 を受けたときに「上限はいくつか」を知る経路)
+curl -s http://localhost:3000/api/v1/billing -H "Authorization: Bearer $TOKEN" | jq
+# => { "plan": "pro", "limits": { "maxAgents": 25, "proxyRateLimitPerMinute": 600,
+#      "maxEnabledGuardrailRules": 50 }, "features": { "auditChainVerify": true } }
+```
+
+**上限の超過は 409、プランで使えない機能は 403**（権限不足の 403 とは文言を分ける — 同じ文言だと
+利用者は役割を変えようとして直らない）。`free` では監査ログの改ざん検証（`GET /audit-logs/verify`）が
+403 になる。**エラーの文言に数値は書かない**（プラン別なので書けない）ので、上限は上の API で引く。
+
+**エージェント数とルール数の上限はデータ層が挿入と同じ原子的操作の中で数える**（API 層で
+「数えてから作る」に分けると、同時に 2 本登録されたときに上限を超える）。
+
+**プランを変えられる経路は 2 つだけ。** 課金事業者（Stripe）からの受信 Webhook と、
+プラットフォーム管理者の `PATCH /tenants/{tenantId}`。**テナント内の `admin` は変えられない**
+（課金の実体は事業者側にあるので、アプリ側で上げられると請求と権限が食い違う）。どちらの経路も
+監査ログに `tenant.plan_changed` を残す（誰がやったかは `actorId`（Webhook 由来なら `null`）と
+payload の `source` が示す）。
+
+**事業者の顧客 ID とテナントを結び付けるのは運用者**（プラットフォーム管理者）。Webhook は顧客 ID で
+テナントを**引く**だけなので、結び付けていないイベントは受け取るだけで反映されません（`applied: false`）。
+
+```bash
+# プランと課金連携を変える (プラットフォーム管理者トークン。テナント内の admin では 403)
+curl -s -X PATCH http://localhost:3000/api/v1/tenants/$TENANT_ID \
+  -H "Authorization: Bearer $PLATFORM_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"plan":"pro","billingCustomerId":"cus_123"}'
+# billingCustomerId を省けば据え置き、null を渡せば連携を外す
+```
+
+```bash
+# 受信 Webhook (Bearer 認証は無い。署名で確かめる)
+curl -s -X POST http://localhost:3000/api/v1/billing/webhook \
+  -H 'Content-Type: application/json' \
+  -H "Stripe-Signature: t=$(date +%s),v1=<HMAC-SHA256>" \
+  -d '{"id":"evt_1","type":"customer.subscription.updated","data":{"object":{"customer":"cus_1","items":{"data":[{"price":{"lookup_key":"agent-ops-pro"}}]}}}}'
+```
+
+**`STRIPE_WEBHOOK_SECRET`（32 文字以上）が必須。** 未設定・短すぎは **503** で、署名の検証を飛ばして
+受け入れることはしない（fail-closed）。署名は `` `${t}.${生の本文}` `` の HMAC-SHA256 を定数時間で
+照合し、**形が違う・時刻が 5 分より古い・一致しない のどれでも同じ 401**（理由を分けると総当たりの
+手がかりになる）。Stripe の SDK は入れていない（依存を増やさないため。
+[ADR-0012](./docs/adr/0012-plans-and-billing.md)）。
+
+**価格だけでなく契約の状態（`status`）も見る。** `active` / `trialing` / `past_due` は価格のプランへ反映し、
+`canceled` / `unpaid` / `paused` は無料プランへ落とし、`incomplete`（支払い未完了）や知らない状態は
+**何もしません**（払う前に有料の枠が付かない／解約後に届いた「価格は有料のまま」の再送で戻らない）。
+
+**いまの契約とは別のサブスクリプションの解約は反映しません**（解約の再送が遅れているあいだに
+契約を結び直した場合、古い解約で有料プランが落ちないようにするため）。
+
+**同じイベントの 2 通目は何もせず 200**（冪等）。判定は DB の一意制約（`BillingEvent` の
+`(provider, eventId)`）に任せるので、**同時に届いた 2 通でも 1 通だけが反映される**。知らない種別・
+知らない顧客 ID でも「受け取った事実」は記録して 200 を返す（エラーにすると事業者の再送が延々と続く）。
+
+**課金は受信と参照だけ。** Checkout セッションの作成（アプリから事業者へ出す経路）は同 ADR の宿題。
+
 ## 検証コマンド
 
 ```bash
@@ -221,6 +286,8 @@ npm run gate:step2   # Step2 の受け入れ基準を一括検査 (上記 + 料�
 npm run gate:step3   # Step3 の受け入れ基準を一括検査 (上記 + 不正出力の除外が全理由分 pass / ベンチ 3 本)
 npm run gate:step4   # Step4 の受け入れ基準を一括検査 (上記 + 発火が全種別分 pass / 改ざん検知が全種類分 pass / E2E / ベンチ 4 本)
 npm run gate:step5   # Step5 の受け入れ基準を一括検査 (上記 + 突合 / 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90)
+npm run gate:step6   # Step6 の受け入れ基準を一括検査 (上記 + テナント越境が全パターン pass / Webhook の冪等性 / ロジック層のカバレッジ 4 指標 ≧ 80%)
+npm run test:coverage # ロジック層のカバレッジを測る (判定はせず数値を出すだけ。合否は gate:step6 が決める)
 npm run test:e2e     # 主要 5 画面の E2E (Playwright・chromium。先に npm run build。専用 DB が必要)
 npm run lighthouse   # 5 画面の Lighthouse を 3 回ずつ測って中央値を出す (同上)
 npm run capture:screenshots # README 用のスクショ 5 枚とデモ動画を撮り直す (同上)
@@ -230,11 +297,11 @@ npm run bench:evaluation # 固定評価セット 100 件を 2 回採点して再
 npm run bench:guardrail  # 発火から停止まで ≦ 3 秒 (専用 DB が必要)
 ```
 
-`gate:step5`（と `gate:step2` 〜 `gate:step4`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチと E2E は全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩き、画面は上流を呼ばないので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
+`gate:step6`（と `gate:step2` 〜 `gate:step5`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチと E2E は全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩き、画面は上流を呼ばないので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
 
 **E2E・Lighthouse・スクショの撮影はブラウザ（chromium）を使う。** 初回は `npx playwright install chromium` で入れる。ダウンロードできない環境では、既存の Chromium の実行ファイルを `PLAYWRIGHT_CHROMIUM_PATH` で指定する（E2E・Lighthouse・撮影の 3 つが同じ環境変数を読む）。
 
-CI（`.github/workflows/ci.yml`）は `gate:step5` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
+CI（`.github/workflows/ci.yml`）は `gate:step6` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
 
 ## ディレクトリ
 
@@ -263,11 +330,13 @@ CI（`.github/workflows/ci.yml`）は `gate:step5` に加え、PostgreSQL サー
 - **上流の使いすぎは Step4 で絞ったが、ベンダー側の上限は別に要る**（ADR-0007「残る宿題」→
   [ADR-0010](./docs/adr/0010-guardrails-and-audit-chain.md)）。上流へ費用を発生させる経路（中継・評価の
   実行）にはレート制限が掛かり、`Agent.budgetMicroUsd` を設定すれば当月の累計超過で中継を断る。
-  ただし**レート制限はインプロセスの Map なので、水平スケールするとインスタンス数ぶん上限が緩む**
-  （共有ストアは Step6）。**公開前に、ベンダー側の月次利用上限（spend limit）は必ず設定すること。**
+  枠の値は契約プランごとだが、**レート制限はインプロセスの Map のままなので、水平スケールすると
+  インスタンス数ぶん上限が緩む**（共有ストアは [ADR-0012](./docs/adr/0012-plans-and-billing.md) の宿題。
+  単一インスタンス前提で運用する）。**公開前に、ベンダー側の月次利用上限（spend limit）は必ず設定すること。**
 - **前段にリバースプロキシを置く前提**（ADR-0005「残る宿題」）。未対応メソッド（`TRACE` 等）の遮断、
   本文サイズとタイムアウトの上限、`/api/v1/health` を内部からだけ見せることは前段の責務にしてある。
-  **認証経路のレート制限は前段で掛ける**（アプリ側で全ルートに掛けるのは Step6）。
+  **認証経路と `POST /billing/webhook` のレート制限は前段で掛ける**（どちらもテナントが決まらないので
+  アプリ側の枠のキーが無い）。
 - **画面のセッション Cookie は本番で HTTPS 必須**（`Secure` 属性が付くので http では保持されない。
   [ADR-0011](./docs/adr/0011-dashboard-session-and-aggregation.md)）。Cookie の値はユーザートークン
   そのものなので、**失効は既存の `DELETE /users/{userId}/tokens/{tokenId}` が効く**一方、盗まれた
@@ -285,8 +354,8 @@ CI（`.github/workflows/ci.yml`）は `gate:step5` に加え、PostgreSQL サー
 | 2 | コスト計測プロキシ（Anthropic/OpenAI 互換。実装済み） | 2 週 |
 | 3 | 品質評価（LLM-as-judge。実装済み） | 2 週 |
 | 4 | ガードレール・自動停止・通知・監査ログ（実装済み） | 2 週 |
-| 5 | ダッシュボード（画面・CSV・Lighthouse。実装済み・本 README の状態） | 2 週 |
-| 6 | マルチテナント・課金（Stripe） | 2 週 |
+| 5 | ダッシュボード（画面・CSV・Lighthouse。実装済み） | 2 週 |
+| 6 | マルチテナント・課金（プラン別の上限・機能ゲート・受信 Webhook。実装済み・本 README の状態） | 2 週 |
 | 7 | リリース準備 | 1 週 |
 
 各 Step の受け入れ基準は `npm run gate:stepN` で機械的に検査し、赤なら次 Step のブランチを切らない。

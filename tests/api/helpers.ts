@@ -21,6 +21,15 @@ export const PLATFORM_TOKEN = 'test-platform-admin-token-0123456789abcdef';
  * テストが `vi.stubEnv` で明示的に消して確かめる
  */
 export const AUDIT_SECRET = 'test-audit-hmac-secret-0123456789abcdef';
+
+/**
+ * 受信 Webhook（Step6）の共有シークレット。
+ *
+ * **API テスト全体で設定する**（監査ログの鍵と同じ理由）。未設定だと受信 Webhook が 503 で
+ * 何も受け取らないので、設定しないと「本番では通る経路」をテストから一度も通せない。
+ * 未設定の側の挙動は、その経路を主題にしたテストが `vi.stubEnv` で明示的に消して確かめる
+ */
+export const BILLING_SECRET = 'test-billing-webhook-secret-0123456789';
 // seed するトークンの有効期間 (日)
 const SEED_TOKEN_TTL_DAYS = 30;
 
@@ -55,7 +64,14 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
   store.tenants.set(id, {
     id,
     name: `テナント${label}`,
-    plan: Plan.free,
+    // **seed は pro にする（Step6）。** プラン別の上限が入ったので、既定の free（毎分 60 回）で
+    // seed すると「1 テストの中で中継を何十回も呼ぶ」既存のテストが 429 で落ちる。pro は
+    // Step4 までの固定値と同じ上限なので、プランを入れる前と**同じ条件**でテストが走る。
+    // プラン別の挙動を見るテストは、この行を書き換えるのではなく `plan` を直接差し替える
+    plan: Plan.pro,
+    // 課金事業者とは結び付いていない（プラン別の検査は plan を直接書き換えて行う）
+    billingCustomerId: null,
+    billingSubscriptionId: null,
     createdAt: now,
     updatedAt: now,
   });
@@ -115,6 +131,8 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
 // setupSeed 前の環境変数 (teardownSeed で戻す)
 let platformTokenBefore: string | undefined;
 let auditSecretBefore: string | undefined;
+// 受信 Webhook の共有シークレットの元の値（後始末で戻す）
+let billingSecretBefore: string | undefined;
 // 空にした設定の退避（キーごとに元の値を覚える）
 const notifyBefore = new Map<string, string | undefined>();
 
@@ -140,8 +158,8 @@ const NOTIFY_ENV_NAMES = [
 /**
  * **レート制限の上限も実行環境から切り離す。**
  *
- * `resetSharedRateLimiterForTesting()` を引数なしで呼ぶと `configuredRateLimit()` が
- * `process.env.PROXY_RATE_LIMIT_PER_MINUTE` を読む。シェルや CI でこれが小さい値
+ * `resetSharedRateLimiterForTesting()` を引数なしで呼ぶと、上限は本番と同じ決め方
+ * （環境変数の上書き → 契約プラン）になるので `process.env.PROXY_RATE_LIMIT_PER_MINUTE` を読む。シェルや CI でこれが小さい値
  * （`PROXY_RATE_LIMIT_PER_MINUTE=1` 等）になっていると、1 テストの中で中継や評価を 2 回以上
  * 呼ぶテストが**一斉に 429 で落ちる** — 通知の宛先を空にしたのと同じ理由（テストの結果が
  * 開発機の環境変数で変わってはいけない）。空にすると既定値（定数）が使われる。
@@ -163,6 +181,9 @@ function setupSeed(): Seed {
   // 監査ログの鍵を設定する (無いと人の操作で状態を変えるルートが 503 になる。理由は AUDIT_SECRET)
   auditSecretBefore = process.env.AUDIT_HMAC_SECRET;
   process.env.AUDIT_HMAC_SECRET = AUDIT_SECRET;
+  // 受信 Webhook の共有シークレットを設定する (無いと受信が 503 になる。理由は BILLING_SECRET)
+  billingSecretBefore = process.env.STRIPE_WEBHOOK_SECRET;
+  process.env.STRIPE_WEBHOOK_SECRET = BILLING_SECRET;
   // 通知とレート制限の設定を空にする (理由は各一覧のコメント)
   for (const name of BLANKED_ENV_NAMES) {
     notifyBefore.set(name, process.env[name]);
@@ -193,6 +214,8 @@ function teardownSeed(): void {
   else process.env.PLATFORM_ADMIN_TOKEN = platformTokenBefore;
   if (auditSecretBefore === undefined) delete process.env.AUDIT_HMAC_SECRET;
   else process.env.AUDIT_HMAC_SECRET = auditSecretBefore;
+  if (billingSecretBefore === undefined) delete process.env.STRIPE_WEBHOOK_SECRET;
+  else process.env.STRIPE_WEBHOOK_SECRET = billingSecretBefore;
   // 空にした設定を元へ戻す (元が未設定なら消す)
   for (const name of BLANKED_ENV_NAMES) {
     const before = notifyBefore.get(name);

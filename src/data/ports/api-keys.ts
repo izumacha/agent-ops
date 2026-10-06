@@ -1,4 +1,5 @@
 // API キー操作の Port (契約)。**認証の入口 (findByHash) 以外は**すべてテナントで絞る
+import type { Plan } from '@/domain/types';
 import type { AgentRecord, ApiKeyRecord, Page, PageQuery } from './types';
 
 // API キー発行の入力 (平文は渡さない)
@@ -16,6 +17,9 @@ export interface CreateApiKeyInput {
 export interface ApiKeyLookup {
   key: ApiKeyRecord;
   agent: AgentRecord | null;
+  // **テナントのプラン**。認証のたびに別のクエリでテナントを引かないよう、この照合に相乗りさせる
+  // (中継の追加遅延 ≦ 50ms を守るため、往復は増やさない)
+  plan: Plan;
 }
 
 // API キー Port

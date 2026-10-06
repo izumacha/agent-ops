@@ -17,10 +17,12 @@ import {
   ROUTE_HANDLER_BRAND,
   ROUTE_RATE_LIMIT_BRAND,
   ROUTE_REQUIRED_ACTION_BRAND,
+  ROUTE_REQUIRED_PLAN_FEATURE_BRAND,
   ROUTE_REQUIRED_ROLE_BRAND,
 } from '@/lib/api/handler';
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
+import { PLAN_FEATURES } from '@/domain/plan';
 
 // App Router の入口 (この下にある route.ts はすべて配信される)
 const APP_DIR = join(process.cwd(), 'src', 'app');
@@ -31,6 +33,21 @@ const HTTP_METHOD_EXPORTS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'O
 // 認証を通さないことが正しい経路 (理由付きの唯一の除外。キーは src/app からの相対パス)
 const UNAUTHENTICATED_ROUTES: Record<string, string> = {
   'api/v1/health/route.ts': 'DB 到達性だけを返す公開エンドポイント (compose の healthcheck が使う)',
+};
+
+// **署名で認証する受信 Webhook**（Step6）。Bearer 認証を使わないので `route()` を通らないが、
+// REST の契約（openapi.yaml）には載る経路。**除外ではなく「別の認証」として扱う** —
+// `route()` を通らないことを許す代わりに、下の 2 つを必ず要求する:
+//   (a) 署名検証のモジュール（`@/lib/billing/signature`）へ到達すること
+//       （= 誰でも叩ける経路に認証がある。到達しなければ誰でもプランを書き換えられる）
+//   (b) `no-store` を宣言すること（`route()` が包む応答と同じ扱い）
+// **`RouteOptions` に `auth: 'none'` を足す形は採らなかった** — 既定を 1 つ緩めると、
+// どのルートも宣言 1 行で未認証にできる口になる（理由は ADR-0012）。
+// **ここに増える差分は理由の妥当性をレビューで必ず確認する**
+const SIGNED_WEBHOOK_ROUTES: Record<string, string> = {
+  'api/v1/billing/webhook/route.ts':
+    '課金事業者 (Stripe) が呼ぶ受信 Webhook。呼び出し元は利用者ではないので Bearer 認証を' +
+    '使えず、Stripe-Signature ヘッダの HMAC-SHA256 署名で認証する',
 };
 
 // **画面側の Route Handler** (Step5)。セッション Cookie で認証し、JSON ではないものを返す経路で、
@@ -131,6 +148,45 @@ describe('Route Handler の結線', () => {
     }
   });
 
+  it('署名 Webhook の表に載っているファイルは実在し、理由が書かれている', () => {
+    // 走査で見つかった route.ts の一覧 (src/app からの相対パス)
+    const found = new Set(routeFiles.map(({ relativeToApp }) => relativeToApp));
+    // 表が空なら走査が空振りしている (fail-closed)
+    expect(Object.keys(SIGNED_WEBHOOK_ROUTES).length).toBeGreaterThan(0);
+    for (const [key, reason] of Object.entries(SIGNED_WEBHOOK_ROUTES)) {
+      // 消えたファイルの登録が残っていないこと
+      expect(found.has(key), `${key} は実在しない (表の登録が古い)`).toBe(true);
+      // 理由が空・空白でないこと
+      expect(reason.trim().length, `${key} の理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  it('署名 Webhook は署名検証を通り、キャッシュを禁止している', () => {
+    // 署名検証のモジュール (走査できていなければ fail-closed で落とす)
+    const signatureModule = join(SRC_DIR, 'lib', 'billing', 'signature.ts');
+    expect(importGraph.has(signatureModule), '署名検証の入口を走査できていない').toBe(true);
+    // 表に載っている Webhook を 1 本ずつ見る
+    const entries = Object.keys(SIGNED_WEBHOOK_ROUTES);
+    expect(entries.length, '署名 Webhook が 1 本も無い').toBeGreaterThan(0);
+    for (const key of entries) {
+      // 走査で見つけた実体を引く
+      const file = routeFiles.find(({ relativeToApp }) => relativeToApp === key);
+      expect(file, `${key} を走査できていない`).toBeDefined();
+      // (a) 署名検証へ到達していること (= 誰でも叩ける経路に認証がある)
+      expect(
+        reachesModule(importGraph, file!.full, signatureModule),
+        `${key} が署名の検証を通っていない`,
+      ).toBe(true);
+      // (b) 共有キャッシュへ載らないことを宣言していること。
+      // **綴りを見るだけの弱い検査**だが、宣言の有無は固定する (画面側ルートと同じ扱い)
+      expect(
+        readFileSync(file!.full, 'utf8').includes('no-store') ||
+          readFileSync(file!.full, 'utf8').includes('withPrivateCacheHeaders'),
+        `${key} が Cache-Control の禁止を宣言していない`,
+      ).toBe(true);
+    }
+  });
+
   // 意図して置いている Next の入口と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。
   // キーはリポジトリ相対のパス。表に無い綴り・場所はすべて「無いこと」を要求する
   const ALLOWED_NEXT_ENTRIES: Record<string, string> = {
@@ -210,6 +266,8 @@ describe('Route Handler の結線', () => {
       if (relativeToApp in UNAUTHENTICATED_ROUTES) continue;
       // 画面側ルートは route() を通らない代わりに上の 3 つを要求されている (理由は表に書く)
       if (Object.hasOwn(SESSION_PAGE_ROUTES, relativeToApp)) continue;
+      // 署名で認証する受信 Webhook も同じ扱い (理由は表に書く。要求は下の専用テスト)
+      if (Object.hasOwn(SIGNED_WEBHOOK_ROUTES, relativeToApp)) continue;
       // モジュールを実際に読み込む (綴りではなく値を見る)
       const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
       for (const method of HTTP_METHOD_EXPORTS) {
@@ -369,6 +427,68 @@ describe('Route Handler の結線', () => {
     expect(checked, '追加の枠を持つ export が 0 件').toBeGreaterThan(0);
   });
 
+  // **プランで可否が決まる機能は、宣言した機能ぶんのルートが実在すること。**
+  //
+  // 手がかりは `PLAN_FEATURES`（プランの表の正本）で、**機能を足して `route()` の宣言を
+  // 忘れたら落ちる** — 宣言の無い機能は「表では有料プラン限定なのに、実際は誰でも使える」
+  // 飾りになる（`tests/audit-coverage.test.ts` が操作名に発行箇所の実在を求めるのと同じ形）。
+  //
+  // **逆向き（本来ゲートすべきルートが宣言を持たないこと）は導けない** — 「重い読み取りか」
+  // 「有料に限るべきか」を署名から判定する手がかりが無く、一律に要求すると実行不能な指示に
+  // なる。そちらは規約とレビューで守る（この repo が繰り返し避けている形に倒さない）
+  it('宣言したプラン機能はどれも route() の宣言を持つ', async () => {
+    // 印から読み取った「ルートがゲートしている機能」の集合
+    const gated = new Set<string>();
+    for (const { full } of routeFiles) {
+      // モジュールを読み込む（綴りではなく値を見る）
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // 機能ゲートの印を読む
+        const feature = (exported as unknown as Record<symbol, unknown>)[
+          ROUTE_REQUIRED_PLAN_FEATURE_BRAND
+        ];
+        // 宣言があれば集合へ入れる
+        if (typeof feature === 'string') gated.add(feature);
+      }
+    }
+    // 表の全機能がどこかのルートでゲートされていること
+    for (const feature of PLAN_FEATURES) {
+      expect(gated, `プラン機能 ${feature} をゲートしているルートが無い`).toContain(feature);
+    }
+    // 1 つも読めていなければ印の読み取りか走査が壊れている（fail-closed）
+    expect(gated.size, '機能ゲートを宣言した export が 0 件').toBeGreaterThan(0);
+  });
+
+  // **機能ゲートを持つルートもレート制限より前に認可する**（枠を持つなら）。
+  // 理由は追加の枠と同じで、403 になる要求で枠を減らさないため
+  it('機能ゲートを持つルートは枠を持つなら認可も宣言している', async () => {
+    // 確かめた数
+    let checked = 0;
+    for (const { full, relativeToApp } of routeFiles) {
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        const brands = exported as unknown as Record<symbol, unknown>;
+        // 機能ゲートを持たないルートは対象外
+        if (typeof brands[ROUTE_REQUIRED_PLAN_FEATURE_BRAND] !== 'string') continue;
+        // 枠を持たないルートは対象外（枠が無ければ消費される枠も無い）
+        const tier = brands[ROUTE_RATE_LIMIT_BRAND];
+        if (tier === null || tier === undefined) continue;
+        checked += 1;
+        expect(
+          brands[ROUTE_REQUIRED_ACTION_BRAND] ?? brands[ROUTE_REQUIRED_ROLE_BRAND],
+          `${relativeToApp} の ${method} は機能ゲートと枠を持つのに requiredAction / requiredRole を宣言していない`,
+        ).not.toBeNull();
+      }
+    }
+    // 1 つも見ていなければ走査が壊れている（fail-closed）
+    expect(checked, '機能ゲートと枠を併せ持つ export が 0 件').toBeGreaterThan(0);
+  });
+
   // 応答を返す前に通知の往復を待つ経路。連鎖からは中継と区別できないので個別に固定する
   // (ここを standard へ落とすと、外部の応答時間を乗せた要求を毎分 600 回出せる)
   it('通知の往復を待つ明示実行は outbound の枠で数えている', async () => {
@@ -526,6 +646,40 @@ describe('秘密の生成と比較', () => {
         `PLATFORM_ADMIN_TOKEN を照合の関数の外で読んでいる (位置 ${offset})`,
       ).toBe(true);
     }
+  });
+
+  /**
+   * 受信 Webhook の署名の照合も定数時間比較を通すこと（Step6）。
+   *
+   * **これは綴りを見る弱い二次的な網**で、証明ではない（`Buffer.compare` や自前のループへ
+   * 書き換えれば素通りする。実測でも素の `===` へ戻す変異は**この網を足す前は全件緑**だった）。
+   * 署名の一致は観測可能な振る舞いに現れないので、テストで原理的に捉えられるのは綴りまで。
+   * **本当の担保は規約とレビュー**（理由は docs/adr/0012-plans-and-billing.md）。
+   */
+  it('受信 Webhook の署名の照合は定数時間比較を通す', () => {
+    // 署名検証のソース
+    const signature = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'billing', 'signature.ts'),
+      'utf8',
+    );
+    // node:crypto から定数時間比較を読んでいること
+    expect(
+      /import\s+\{[^}]*\btimingSafeEqual\b[^}]*\}\s+from\s+'node:crypto'/.test(signature),
+      '定数時間比較を node:crypto から読んでいない',
+    ).toBe(true);
+    // 検証の本体を切り出す（書き方を変えたらここで気付く）
+    const body =
+      /export function verifyBillingSignature\([\s\S]*?\n\): BillingSignatureResult \{([\s\S]*?)\n\}/.exec(
+        signature,
+      )?.[1];
+    expect(body, 'verifyBillingSignature の定義が読めない').toBeDefined();
+    // 比較に定数時間比較を使っていること
+    expect(/timingSafeEqual\(/.test(body ?? ''), '定数時間比較を使っていない').toBe(true);
+    // 素の等価比較で署名を照合していないこと（早期終了すると一致長が応答時間から漏れる）
+    expect(
+      /signature\s*===|===\s*expected\b/.test(body ?? ''),
+      '署名を素の等価比較で照合している',
+    ).toBe(false);
   });
 
   // 実装が定数時間でも、呼び出し側が === に戻れば同じこと (実測で全件緑のまま通った)

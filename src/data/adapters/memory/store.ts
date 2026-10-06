@@ -20,6 +20,21 @@ import type {
 // 連番 id の桁数 (0 埋め。テストで作る行数より十分大きい)
 const ID_SEQUENCE_DIGITS = 6;
 
+/**
+ * 受信した課金イベントの行 (memory 専用)。
+ *
+ * **Port には記録の可否 (`recorded` / `duplicate`) しか無いので、読み出しの契約が無い。**
+ * 本番の表には調査用の索引があるが、アプリから読む経路はまだ作っていない (ADR-0012 の宿題)。
+ * ここで持つのは「同じイベントを 2 回記録しない」ことを確かめるための最小限の形。
+ */
+export interface BillingEventRow {
+  provider: string;
+  eventId: string;
+  type: string;
+  tenantId: string | null;
+  receivedAt: Date;
+}
+
 export class MemoryStore {
   // テナント (id → 行)
   readonly tenants = new Map<string, TenantRecord>();
@@ -49,6 +64,10 @@ export class MemoryStore {
   // 監査ログ。**追記専用を memory 側でも守る** — prisma 側では DB のトリガが守っている規律を
   // こちらにも置かないと、API テストだけが「書き換えられる世界」で通ってしまう (ADR-0006 の死角)
   readonly auditLogs = new Map<string, AuditLogRecord>();
+  // 受信した課金イベント (冪等性の記録)。**キーは `provider:eventId`** — 本番は
+  // `@@unique([provider, eventId])` が 2 行目を拒否するので、memory 側も「同じキーなら 2 行目を
+  // 作らない」形にしておく (ADR-0006 の死角。緩いと API テストだけが二重処理を通してしまう)
+  readonly billingEvents = new Map<string, BillingEventRow>();
   // 採番用の連番 (cuid の代わり。テストで読みやすいよう接頭辞 + 連番にする)
   private sequence = 0;
 

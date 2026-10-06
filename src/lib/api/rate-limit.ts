@@ -16,9 +16,9 @@ import {
   HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
   OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE,
   PROXY_RATE_LIMIT_ENV,
-  PROXY_RATE_LIMIT_PER_MINUTE,
   RATE_LIMIT_WINDOW_MS,
 } from '@/lib/constants';
+import { FALLBACK_PLAN, planLimitsFor } from '@/domain/plan';
 import type { Principal } from './auth';
 
 /** 1 回の判定の結果 */
@@ -29,12 +29,32 @@ export interface RateLimitDecision {
   retryAfterSeconds: number;
 }
 
-/** 制限器の設定 */
+/**
+ * 制限器の設定。
+ *
+ * **上限は持たない（Step6）。** 窓の中で許す回数は契約プランごとに違うので、`check` / `inspect`
+ * の引数で 1 回ごとに渡す。制限器が覚えるのは「キーごとの呼び出し時刻」だけで、上限は判定の
+ * 時点の方針として外から与える形にしてある — 制限器を上限ごとに分けると、プランを変えた
+ * テナントの記録が別の制限器へ移って**窓の途中で数え直し**になる（上げた直後は得をし、
+ * 下げた直後は上限を超えて通る）。
+ */
 export interface RateLimiterOptions {
-  // 窓の中で許す回数
-  limit: number;
   // 窓の長さ（ミリ秒）
   windowMs: number;
+}
+
+/**
+ * テスト専用の上限の上書き（`resetSharedRateLimiterForTesting` が受け取る形）。
+ *
+ * 本番の上限はプラン（と環境変数）から決まるが、テストは「上限を超える」挙動を数回の呼び出しで
+ * 確かめたい（既定の毎分 600 回を実際に叩くのは遅い）。**本番では設定できない**ので、
+ * 上書きの経路が運用に漏れることはない。
+ */
+export interface RateLimitOverrideForTesting {
+  // 窓の中で許す回数（省略すると本番と同じ決め方）
+  limit?: number;
+  // 窓の長さ（ミリ秒。省略すると既定）
+  windowMs?: number;
 }
 
 // 1 秒のミリ秒数（`Retry-After` を秒へ直すのに使う）
@@ -53,8 +73,6 @@ const SWEEP_INTERVALS_PER_WINDOW = 60;
  * ユニットテストで決定的に固定できる（§11）。
  */
 export class SlidingWindowRateLimiter {
-  // 窓の中で許す回数
-  private readonly limit: number;
   // 窓の長さ（ミリ秒）
   private readonly windowMs: number;
   // 掃除を走らせる間隔（ミリ秒）
@@ -68,18 +86,13 @@ export class SlidingWindowRateLimiter {
   //  使い捨てキーで表を膨らませたうえで全リクエストに走査の費用を負わせられる）
   private sweeps = 0;
 
-  // 上限と窓の長さを受け取る。**正の整数でなければ落とす**
+  // 窓の長さを受け取る。**正の整数でなければ落とす**
   constructor(options: RateLimiterOptions) {
     // 窓が 0 以下だと記録が常に空になり、レート制限が丸ごと無効になる（fail-closed で落とす）
-    if (!Number.isInteger(options.limit) || options.limit <= 0) {
-      throw new RangeError('レート制限の上限は正の整数でなければなりません');
-    }
-    // 窓の長さも同じ理由で縛る
     if (!Number.isInteger(options.windowMs) || options.windowMs <= 0) {
       throw new RangeError('レート制限の窓の長さは正の整数でなければなりません');
     }
     // 設定を覚える
-    this.limit = options.limit;
     this.windowMs = options.windowMs;
     // 掃除の間隔は窓の長さから導く（数値を 2 か所に書かない）
     this.sweepIntervalMs = Math.max(1, Math.floor(options.windowMs / SWEEP_INTERVALS_PER_WINDOW));
@@ -102,10 +115,11 @@ export class SlidingWindowRateLimiter {
    *
    * @param key 送信元を表すキー（認証済みの id。偽装できる値を渡さない）
    * @param now 現在時刻（ミリ秒）。呼び出し側が渡すので、テストが時刻を決められる
+   * @param limit 窓の中で許す回数（プランごとに違うので呼び出しごとに渡す）
    */
-  check(key: string, now: number): RateLimitDecision {
+  check(key: string, now: number, limit: number): RateLimitDecision {
     // 数えながら判定する
-    return this.evaluate(key, now, true);
+    return this.evaluate(key, now, limit, true);
   }
 
   /**
@@ -116,13 +130,18 @@ export class SlidingWindowRateLimiter {
    * 数えないのはこの制限器の約束（数えると断られ続けるあいだ窓が延びて永久に通れない）なので、
    * 「全部の枠が通ると分かってから数える」ために覗き見だけの形を用意する。
    */
-  inspect(key: string, now: number): RateLimitDecision {
+  inspect(key: string, now: number, limit: number): RateLimitDecision {
     // 数えずに判定する
-    return this.evaluate(key, now, false);
+    return this.evaluate(key, now, limit, false);
   }
 
   // 判定の本体。`record` が true のときだけ今回の呼び出しを覚える
-  private evaluate(key: string, now: number, record: boolean): RateLimitDecision {
+  private evaluate(key: string, now: number, limit: number, record: boolean): RateLimitDecision {
+    // **上限が壊れていたら落とす（fail-closed）** — 0 や NaN を通すと「上限に達することが無い」
+    // か「全部断る」のどちらかになり、前者は保護が黙って消える。渡す側のバグを隠さない
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new RangeError('レート制限の上限は正の整数でなければなりません');
+    }
     // まず期限切れの記録を間隔ごとに回収する（表が膨らみ続けないように）
     this.sweepIfDue(now);
     // 窓の開始時刻（これ以前の記録は数えない）
@@ -130,7 +149,7 @@ export class SlidingWindowRateLimiter {
     // そのキーの記録のうち窓の中に残っているもの
     const recent = (this.hits.get(key) ?? []).filter((at) => at > windowStart);
     // 上限に達していれば通さない
-    if (recent.length >= this.limit) {
+    if (recent.length >= limit) {
       // 窓から最も古い記録が外れるまでの時間（それより前に試しても必ず断られる）。
       // **先頭ではなく最小値を取る** — 配列は push 順なので「昇順に並んでいる」は
       // `now` が単調増加することに依存する。呼び出し側は `Date.now()` を渡すので NTP の
@@ -223,26 +242,30 @@ export function rateLimitedError(retryAfterSeconds: number): ApiError {
 }
 
 /**
- * 環境変数があればその上限を、無ければ既定（`PROXY_RATE_LIMIT_PER_MINUTE`）を返す。
+ * 環境変数による上限の上書きを読む（未設定・読めない値なら `null`）。
  *
  * **ベンチが上書きする**（`scripts/bench-proxy.ts`）: 1 接続で毎秒数百件を出すので既定の
  * 上限では 9 割近くが 429 になり、測れるのは「中継の追加遅延」ではなく「429 を返す速さ」に
  * なる（実測で 3516 件のうち 3116 件が 429 になり、ベンチの「2xx 以外があれば失敗」の
  * 門番が正しく落とした）。
  *
- * **読めない値は既定へ倒す（fail-closed）。** 設定ミスで制限が消えるより、効いている方が安全。
- * 逆に「とても大きい値」を入れれば実質的に制限を外せるが、環境変数は運用者が意図して置く
- * 信頼値なので、それはその配備先の判断として受け入れる。
+ * **設定するとプランの差が消える**（全テナントが同じ上限になる）。Step6 でプラン別にしても
+ * この逃げ道を残しているのはベンチのためで、運用で設定するのは「全テナントに同じ上限を
+ * 掛け直す」という意味になる。
+ *
+ * **読めない値は上書き無し（`null`）へ倒す（fail-closed）。** 設定ミスで制限が消えるより、
+ * プランの上限が効いている方が安全。逆に「とても大きい値」を入れれば実質的に制限を外せるが、
+ * 環境変数は運用者が意図して置く信頼値なので、それはその配備先の判断として受け入れる。
  */
-export function configuredRateLimit(env: NodeJS.ProcessEnv = process.env): number {
+export function rateLimitOverrideFromEnv(env: NodeJS.ProcessEnv = process.env): number | null {
   // 環境変数を読み、前後の空白を落とす
   const raw = env[PROXY_RATE_LIMIT_ENV]?.trim();
-  // 未設定・空は既定
-  if (raw === undefined || raw === '') return PROXY_RATE_LIMIT_PER_MINUTE;
+  // 未設定・空は上書き無し
+  if (raw === undefined || raw === '') return null;
   // 数値として読む（`Number` は空文字を 0 にするので、空の判定を先に済ませてある）
   const parsed = Number(raw);
-  // 正の整数でなければ既定へ倒す（0 や負の値を通すと制限が丸ごと無効になる）
-  if (!Number.isInteger(parsed) || parsed <= 0) return PROXY_RATE_LIMIT_PER_MINUTE;
+  // 正の整数でなければ上書き無しへ倒す（0 や負の値を通すと制限が丸ごと無効になる）
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
   // 設定された上限
   return parsed;
 }
@@ -251,10 +274,12 @@ export function configuredRateLimit(env: NodeJS.ProcessEnv = process.env): numbe
 // **1 つのインスタンスをすべてのルートで共有する。** ルートごとに持つと、同じ API キーが
 // 別のルートを交互に叩くだけで合計が上限の 2 倍まで通る（枠は「送信元ごと」で、
 // 「送信元とルートの組ごと」ではない）
-let shared = new SlidingWindowRateLimiter({
-  limit: configuredRateLimit(),
-  windowMs: RATE_LIMIT_WINDOW_MS,
-});
+let shared = new SlidingWindowRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS });
+
+// テスト専用: 共有の枠・追加の枠の上限の上書き（`null` なら本番と同じ決め方）。
+// **本番では設定できない** — 設定する関数が `NODE_ENV=production` で throw する
+let sharedLimitOverrideForTesting: number | null = null;
+let extraLimitOverrideForTesting: number | null = null;
 
 /**
  * そのルートに掛ける枠の種類。
@@ -292,29 +317,23 @@ const EXTRA_FRAME_LIMIT: Readonly<Record<RateLimitTier, number | null>> = {
   heavyRead: HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
 };
 
-// 種類ごとの追加の枠を作る（上の表から導くので、種類を足したら自動で増える）
-function buildExtraFrames(
-  options?: RateLimiterOptions,
-): Map<RateLimitTier, SlidingWindowRateLimiter> {
+// 種類ごとの追加の枠を作る（上の表から導くので、種類を足したら自動で増える）。
+// **上限は制限器が持たない**ので、作るのは「追加の枠を持つ種類ぶんの記録表」だけ
+function buildExtraFrames(windowMs: number): Map<RateLimitTier, SlidingWindowRateLimiter> {
   // 表の各項目から制限器を 1 つずつ作る
   return new Map(
     Object.entries(EXTRA_FRAME_LIMIT).flatMap(([tier, limit]) =>
       // 追加の枠を持たない種類は作らない
       limit === null
         ? []
-        : [
-            [
-              tier as RateLimitTier,
-              new SlidingWindowRateLimiter(options ?? { limit, windowMs: RATE_LIMIT_WINDOW_MS }),
-            ] as const,
-          ],
+        : [[tier as RateLimitTier, new SlidingWindowRateLimiter({ windowMs })] as const],
     ),
   );
 }
 
 // **種類ごとに追加で消費する枠.** 共有の枠と置き換えるのではなく両方を消費する
 // （置き換えだと重い経路と中継を交互に叩くだけで合計が共有の上限を超える）
-let extraFrames = buildExtraFrames();
+let extraFrames = buildExtraFrames(RATE_LIMIT_WINDOW_MS);
 
 /** プロセス共有の制限器を返す（テストが表の状態を覗くのに使う） */
 export function sharedRateLimiter(): SlidingWindowRateLimiter {
@@ -329,6 +348,44 @@ export function extraRateLimiter(tier: RateLimitTier): SlidingWindowRateLimiter 
 }
 
 /**
+ * その主体が共有の枠で窓の中に出せる回数（Step6 でプラン別になった）。
+ *
+ * 優先順位は **テストの上書き → 環境変数の上書き → 契約プランの上限**。
+ * プラットフォーム管理者はテナントではないのでプランを持たない。**倒れ先は最も厳しいプラン**
+ * （`FALLBACK_PLAN`）で、いま共有の枠を宣言しているルートは 4 本ともテナントの経路なので
+ * この分岐は実際には通らない（将来プラットフォームのルートへ枠を掛けるときに値を決める。
+ * そのときまでは「分からないなら厳しい側」にしておく。§9 fail-closed）。
+ */
+export function sharedRateLimitFor(
+  principal: Principal,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  // テスト専用の上書き（本番では設定できない）
+  if (sharedLimitOverrideForTesting !== null) return sharedLimitOverrideForTesting;
+  // 環境変数の上書き（設定するとプランの差が消える）
+  const override = rateLimitOverrideFromEnv(env);
+  if (override !== null) return override;
+  // プランから引く（プラットフォーム管理者は最も厳しいプランへ倒す）
+  const plan = principal.kind === 'platform' ? FALLBACK_PLAN : principal.plan;
+  return planLimitsFor(plan).proxyRateLimitPerMinute;
+}
+
+/**
+ * その種類の追加の枠の上限（追加の枠を持たない種類なら `null`）。
+ *
+ * **環境変数では動かせない**（広げると `src/lib/constants.ts` の 3 つの根拠が崩れる）。
+ * **プラン別にもしない** — 守っているのはテナントの取り分ではなく「1 要求の重さ」そのもの
+ * （ベンダーへの課金・外部の応答時間・DB と CPU）なので、上位プランでも 1 要求の重さは同じ。
+ */
+export function extraRateLimitFor(tier: RateLimitTier): number | null {
+  // 追加の枠を持たない種類
+  const limit = EXTRA_FRAME_LIMIT[tier];
+  if (limit === null) return null;
+  // テスト専用の上書きがあればそれを使う
+  return extraLimitOverrideForTesting ?? limit;
+}
+
+/**
  * その主体の 1 回の呼び出しを数え、上限を超えていれば 429 を投げる。
  *
  * **判定の順序をここ 1 か所に閉じ込める**（`route()` から枠の組み合わせを追い出す）。
@@ -338,20 +395,27 @@ export function extraRateLimiter(tier: RateLimitTier): SlidingWindowRateLimiter 
 export function enforceRateLimit(principal: Principal, tier: RateLimitTier, now: number): void {
   // 数える単位（認証済みの id。偽装できる値は使わない）
   const key = rateLimitKeyFor(principal);
+  // 共有の枠の上限（プラン別）
+  const sharedLimit = sharedRateLimitFor(principal);
   // その種類の追加の枠（持たない種類もある）
   const extra = extraFrames.get(tier);
-  // 見るべき枠（追加の枠を持つ種類は共有の枠も消費する）
-  const limiters = extra === undefined ? [shared] : [shared, extra];
+  // 追加の枠の上限（枠が無ければ null）
+  const extraLimit = extraRateLimitFor(tier);
+  // 見るべき「枠と上限」の組。**共有の枠は必ず消費する**ので先に 1 つだけ書き、
+  // 追加の枠を持つ種類はその後ろへ足す（両方の分岐に書くと、組み方を直したときに片方だけ直る）
+  const frames: [SlidingWindowRateLimiter, number][] = [[shared, sharedLimit]];
+  // 追加の枠を持つ種類だけ 2 つ目を足す（置き換えではなく「加えて」消費する）
+  if (extra !== undefined && extraLimit !== null) frames.push([extra, extraLimit]);
   // まず全部を覗き見して、断るものがあるか調べる
-  const denials = limiters
-    .map((limiter) => limiter.inspect(key, now))
+  const denials = frames
+    .map(([limiter, limit]) => limiter.inspect(key, now, limit))
     .filter((decision) => !decision.allowed);
   // 1 つでも断るなら、待ち時間の長いほうで 429 にする（どの枠も数えない）
   if (denials.length > 0) {
     throw rateLimitedError(Math.max(...denials.map((decision) => decision.retryAfterSeconds)));
   }
   // 全部通るので、ここで初めて数える
-  for (const limiter of limiters) limiter.check(key, now);
+  for (const [limiter, limit] of frames) limiter.check(key, now, limit);
 }
 
 /**
@@ -359,21 +423,24 @@ export function enforceRateLimit(principal: Principal, tier: RateLimitTier, now:
  *
  * 表はプロセスの寿命いっぱい残るので、これが無いとテストの実行順によって
  * 「前のテストが使った枠」が次のテストへ漏れる（`setReposForTesting` と同じ扱い）。
+ *
+ * `limit` を渡すと**上限の上書き**になる（本番はプランから決まるので、数回の呼び出しで
+ * 「上限を超える」挙動を確かめたいテストのための逃げ道）。省略すれば本番と同じ決め方に戻る。
  */
 export function resetSharedRateLimiterForTesting(
-  options?: RateLimiterOptions,
-  extraOptions?: RateLimiterOptions,
+  options?: RateLimitOverrideForTesting,
+  extraOptions?: RateLimitOverrideForTesting,
 ): void {
   // 本番で作り直せると、呼ぶだけで全員の枠が空になる
   if (process.env.NODE_ENV === 'production') {
     throw new Error('resetSharedRateLimiterForTesting は本番では使えません。');
   }
-  // 指定が無ければ既定の設定で作り直す
-  shared = new SlidingWindowRateLimiter(
-    options ?? { limit: configuredRateLimit(), windowMs: RATE_LIMIT_WINDOW_MS },
-  );
+  // 上限の上書き（省略なら本番と同じ決め方へ戻す）
+  sharedLimitOverrideForTesting = options?.limit ?? null;
+  extraLimitOverrideForTesting = extraOptions?.limit ?? null;
+  // 記録表を作り直す（窓の長さは指定があればそれを使う）
+  shared = new SlidingWindowRateLimiter({ windowMs: options?.windowMs ?? RATE_LIMIT_WINDOW_MS });
   // **追加の枠も必ず全部作り直す** — 片方だけ空にすると、前のテストが使った枠が
-  // 次のテストへ漏れる（しかも漏れるのは小さいほうの枠なので、無関係なテストが 429 で落ちる）。
-  // 指定が無ければ種類ごとの既定で作る
-  extraFrames = buildExtraFrames(extraOptions);
+  // 次のテストへ漏れる（しかも漏れるのは小さいほうの枠なので、無関係なテストが 429 で落ちる）
+  extraFrames = buildExtraFrames(extraOptions?.windowMs ?? RATE_LIMIT_WINDOW_MS);
 }

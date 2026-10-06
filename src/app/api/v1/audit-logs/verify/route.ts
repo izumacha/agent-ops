@@ -1,7 +1,7 @@
 // /api/v1/audit-logs/verify: 監査ログのハッシュ連鎖の検証 (admin ロール限定)。
 // Step4 の受け入れ基準「監査ログの改ざん検知」を運用から確かめる経路。
 import { ApiError } from '@/lib/api/errors';
-import { requireAdminRole } from '@/lib/api/guard';
+import { requireAdminRole, requirePlanFeature } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { HTTP_STATUS } from '@/lib/api/http-status';
@@ -32,6 +32,9 @@ export const GET = route(
   async ({ request, principal, repos }) => {
     // admin ロールであること (改ざんの有無は運用の判断に直結する情報)
     const { tenantId } = requireAdminRole(principal);
+    // 契約プランがこの機能を使えること (route() の宣言と二重だが、宣言を落としたときに
+    // ゲートが丸ごと消えないよう本体にも置く。`requiredAction` / `requiredRole` と同じ流儀)
+    requirePlanFeature(principal, 'auditChainVerify');
     // 読み始める連番 (省略時は先頭。形が違えば 422)
     const { fromSeq } = parseQuery(new URL(request.url), auditChainVerifyQuerySchema);
     // 鍵を読む (未設定・短すぎは 503)
@@ -96,5 +99,10 @@ export const GET = route(
     // `requiredAction: 'view'` にすると viewer が枠を使い切れる（view は 3 役割すべてが
     // 持つので、本体で 403 になる要求でも枠は減る）。本体の requireAdminRole は残す
     requiredRole: 'admin',
+    // **Pro 以上の機能（Step6）.** この API でいちばん重い読み取りなので、無料プランでは
+    // 開けない（一覧 `GET /audit-logs` の参照は free でも許す — 読めるのは自分の記録だけで、
+    // 費用が大きいのは「同数の HMAC を計算し直す」この経路だけ）。可否の正本は
+    // `src/domain/plan.ts` の `PLAN_LIMITS[plan].features`
+    requiredPlanFeature: 'auditChainVerify',
   },
 );

@@ -673,6 +673,156 @@ export function lighthouseOutputProblems({ status, stdout, screens, categories, 
 }
 
 /**
+ * 名前に手がかりを含むテストの群を見る（件数の下限 ＋ 全部 pass）。
+ *
+ * **「流れたものから期待を導く」形になっていることに注意して使う。** 群の件数だけを見ると、
+ * テストを 1 本消す変異は要求も一緒に縮むので素通りする（この repo が繰り返し避けている形）。
+ * だから呼び出し側は**群とは別の手がかり**（導出と表を突き合わせるテストの名前）も必ず要求する。
+ * ここが見るのは「下限を満たしていること」と「群の中に落ちているものが無いこと」だけ。
+ *
+ * @param {{ testResults?: { assertionResults?: { fullName?: string, status?: string }[] }[] }} report vitest の JSON レポート
+ * @param {{ prefix: string, minCount: number, label: string }} expectation 手がかり・下限・表示名
+ * @returns {string[]} 満たしていない基準の一覧（満たしていれば空）
+ */
+export function prefixedGroupProblems(report, { prefix, minCount, label }) {
+  // 満たしていない基準
+  const failures = [];
+  // 手がかりが無ければ照合できない（fail-closed）
+  if (typeof prefix !== 'string' || prefix.length === 0) {
+    failures.push(`${label} のテスト名の手がかりがありません`);
+    return failures;
+  }
+  // 下限が正の整数でなければ判定にならない（0 を許すと「1 本も無くても緑」になる）
+  if (!Number.isInteger(minCount) || minCount <= 0) {
+    failures.push(`${label} の最小件数が正の整数ではありません`);
+    return failures;
+  }
+  // 全テストの (フルネーム, 結果) を平坦化する
+  const results = (report?.testResults ?? []).flatMap((file) =>
+    (file.assertionResults ?? []).map((test) => ({ name: test.fullName, status: test.status })),
+  );
+  // 手がかりを含むテスト
+  const group = results.filter(
+    (test) => typeof test.name === 'string' && test.name.includes(prefix),
+  );
+  // 件数の下限
+  if (group.length < minCount) {
+    failures.push(
+      `${label} のテストが ${group.length} 件しかありません (必要: ${minCount} 件以上)`,
+    );
+  }
+  // 落ちているものを名指しする
+  const failed = group.filter((test) => test.status !== 'passed').map((test) => test.name);
+  if (failed.length > 0) failures.push(`${label} のテストが失敗: ${failed.join(', ')}`);
+  // 判定結果
+  return failures;
+}
+
+/**
+ * カバレッジの 4 指標がすべて下限以上であること。
+ *
+ * **4 指標すべてに掛ける** — 1 つだけ（lines など）を見る形にすると、通る指標を選んで
+ * 基準を満たしたように見せられる。測る範囲の正本は `scripts/lib/step6-criteria.mjs`。
+ *
+ * @param {unknown} summary `coverage/coverage-summary.json` を解析した値
+ * @param {number} minPercent 下限（%）
+ * @returns {string[]} 満たしていない基準の一覧（満たしていれば空）
+ */
+export function coverageProblems(summary, minPercent) {
+  // 満たしていない基準
+  const failures = [];
+  // 下限が数値でなければ判定にならない（fail-closed）
+  if (typeof minPercent !== 'number' || !Number.isFinite(minPercent) || minPercent <= 0) {
+    failures.push('カバレッジの下限が正の数ではありません');
+    return failures;
+  }
+  // 合計が読めること
+  const total = summary && typeof summary === 'object' ? summary.total : undefined;
+  if (total === null || typeof total !== 'object') {
+    failures.push('カバレッジの合計を読めません');
+    return failures;
+  }
+  // 見る指標（4 つすべて。1 つでも読めなければ落とす）
+  for (const metric of ['statements', 'branches', 'functions', 'lines']) {
+    // その指標の％
+    const pct = total[metric]?.pct;
+    // 読めなければ落とす（「読めないから緑」にしない）
+    if (typeof pct !== 'number' || !Number.isFinite(pct)) {
+      failures.push(`カバレッジの ${metric} を読めません`);
+      continue;
+    }
+    // 下限を満たしていること
+    if (pct < minPercent) {
+      failures.push(`カバレッジの ${metric} が ${pct}% (必要: ${minPercent}% 以上)`);
+    }
+  }
+  // 判定結果
+  return failures;
+}
+
+/**
+ * Step6 の受け入れ基準の判定（Step5 までを引き継ぎ、3 つを足す）。
+ *
+ * 1. **越境アクセス**: 契約と表を突き合わせる導出のテストが pass し、`越境: ` の群が全部 pass
+ *    （導出のテストを別に要求するのが要点 — 群だけを見ると、表から 1 件消す変異が素通りする）
+ * 2. **Webhook の冪等性**: `冪等性: ` の群が下限以上あって全部 pass
+ * 3. **カバレッジ**: 4 指標すべてが下限以上
+ *
+ * @param {object} input 判定に要る材料
+ * @returns {string[]} 満たしていない基準の一覧（満たしていれば空）
+ */
+export function evaluateStep6Report({
+  crossTenantDerivationTestName,
+  crossTenantPrefix,
+  crossTenantMinCount,
+  idempotencyPrefix,
+  idempotencyMinCount,
+  coverageSummary,
+  coverageMinPercent,
+  ...step5
+}) {
+  // Step5 までの基準をそのまま引き継ぐ
+  const failures = evaluateStep5Report(step5);
+  // 1-a. 導出と表を突き合わせるテストが pass していること（**群とは別の手がかり**）
+  if (
+    typeof crossTenantDerivationTestName !== 'string' ||
+    crossTenantDerivationTestName.length === 0
+  ) {
+    failures.push('越境テストの導出を確かめるテストの名前がありません');
+  } else {
+    const missing = missingPassedCases(
+      step5.report,
+      [crossTenantDerivationTestName],
+      (name) => [name],
+      (name) => name,
+    );
+    if (missing.length > 0) {
+      failures.push(`越境テストの導出の照合が不足/失敗: ${missing.join(', ')}`);
+    }
+  }
+  // 1-b. 越境の群が全部 pass していること
+  failures.push(
+    ...prefixedGroupProblems(step5.report, {
+      prefix: crossTenantPrefix,
+      minCount: crossTenantMinCount,
+      label: '越境アクセス',
+    }),
+  );
+  // 2. 冪等性の群
+  failures.push(
+    ...prefixedGroupProblems(step5.report, {
+      prefix: idempotencyPrefix,
+      minCount: idempotencyMinCount,
+      label: 'Webhook の冪等性',
+    }),
+  );
+  // 3. カバレッジ
+  failures.push(...coverageProblems(coverageSummary, coverageMinPercent));
+  // 判定結果
+  return failures;
+}
+
+/**
  * Step5 の受け入れ基準のうち**テストレポートで見る分**を判定する。
  * Step4 までをそのまま引き継ぎ、「表示データと DB 集計の突合テストが pass しているか」を足す。
  *

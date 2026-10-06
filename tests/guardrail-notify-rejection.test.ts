@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryRepos, MemoryStore } from '@/data/adapters/memory';
 import { Provider, RuleAction, RuleKind } from '@/domain/types';
 import { USAGE_RULE_KINDS } from '@/lib/guardrail/evaluate';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from './lib/agent-limits';
 
 // 通知のモジュールを差し替える（**必ず拒否する**通知にする）
 vi.mock('@/lib/notify/send', () => ({
@@ -58,7 +60,7 @@ describe('待たない経路での通知の拒否', () => {
     });
     const tenantId = created.tenant.id;
     // 判定対象のエージェント
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId,
       name: 'bot',
       description: null,

@@ -25,6 +25,8 @@ import type { UsageWindow } from '@/domain/usage-window';
 import { formatUtcDay } from '@/domain/usage-window';
 import { DASHBOARD_OPEN_INCIDENTS_MAX } from '@/lib/constants';
 import { loadDashboardSummary } from '@/lib/dashboard/summary';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from './lib/agent-limits';
 
 // 検査に使うモデル名 (料金表にある値である必要はない。集計は料金を足すだけ)
 const MODEL = 'claude-sonnet-4-6';
@@ -130,7 +132,7 @@ describe('ダッシュボードの数値と DB 集計の突合', () => {
     });
     otherTenantId = other.tenant.id;
     // 主テナントのエージェント
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId,
       name: 'bot',
       description: null,
@@ -186,7 +188,7 @@ describe('ダッシュボードの数値と DB 集計の突合', () => {
 
   it('別テナントの行は 1 つも混ざらない', async () => {
     // 主テナントに 1 件、別テナントに 3 件入れる
-    const otherAgent = await repos.agents.create({
+    const otherAgent = await createTestAgent(repos, {
       tenantId: otherTenantId,
       name: 'bot-other',
       description: null,
@@ -295,7 +297,7 @@ describe('ダッシュボードの数値と DB 集計の突合', () => {
     // 上限 + 1 件の未解決インシデントを作る。
     // **同じルール × 同じエージェントは 1 行しか作られない**ので、エージェントを分ける
     for (let index = 0; index <= DASHBOARD_OPEN_INCIDENTS_MAX; index += 1) {
-      const agent = await repos.agents.create({
+      const agent = await createTestAgent(repos, {
         tenantId,
         name: `bot-${index}`,
         description: null,

@@ -11,6 +11,8 @@ import type { EvaluationRunRecord, Repositories } from '@/data/ports';
 import { EvaluationExclusionReason, EvaluationRunStatus, Provider } from '@/domain/types';
 import { userTokenExpiresAt } from '@/lib/tokens';
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../lib/agent-limits';
 
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
@@ -34,7 +36,7 @@ async function makeTenantWithSet(repos: Repositories, label: string) {
     },
   });
   // そのテナントのエージェント
-  const agent = await repos.agents.create({
+  const agent = await createTestAgent(repos, {
     tenantId: created.tenant.id,
     name: `bot-${label}`,
     description: null,

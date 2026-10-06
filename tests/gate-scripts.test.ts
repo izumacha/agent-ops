@@ -30,8 +30,11 @@ import {
   evaluateStep1Report,
   evaluateStep2Report,
   evaluateStep3Report,
+  coverageProblems,
   evaluateStep4Report,
   evaluateStep5Report,
+  evaluateStep6Report,
+  prefixedGroupProblems,
   lighthouseOutputProblems,
   missingExclusionCases,
   missingFiringCases,
@@ -93,6 +96,14 @@ import {
   SCREEN_TEST_PREFIX,
   STEP5_SCREENS,
 } from '../scripts/lib/step5-criteria.mjs';
+import {
+  COVERAGE_MIN_PERCENT,
+  CROSS_TENANT_DERIVATION_TEST_NAME,
+  CROSS_TENANT_MIN_CASES,
+  CROSS_TENANT_TEST_PREFIX,
+  IDEMPOTENCY_MIN_CASES,
+  IDEMPOTENCY_TEST_PREFIX,
+} from '../scripts/lib/step6-criteria.mjs';
 import {
   auditRowsProblem,
   firedRulesProblem,
@@ -242,6 +253,8 @@ const ROOT = process.cwd();
  * @param benches npm スクリプト名ごとの、ベンチが出す JSON の材料 (ラベル・項目名・上限)
  * @param printed npm スクリプト名ごとに、そのスクリプトが標準出力へ出す中身
  *   (E2E のレポートや Lighthouse の結果のように、ゲートが**出力を読んで**判定するもの)
+ * @param coverage カバレッジの合計 (`coverage-summary.json`) として書かせる中身。
+ *   ゲートは出力先を `--coverage.reportsDirectory=` で指定するので、シムはその場所へ書く
  * @returns 終了コードと、呼ばれた npm のサブコマンド
  */
 function runGateUnderShim(
@@ -250,6 +263,7 @@ function runGateUnderShim(
   report: string,
   benches: Record<string, { label: string; valueField: string; limitField: string; limit: number }>,
   printed: Record<string, string> = {},
+  coverage: string = '',
 ): { status: number | null; invoked: string[] } {
   // シムを置く一時ディレクトリ
   const shimDir = mkdtempSync(join(tmpdir(), 'agent-ops-npm-shim-'));
@@ -260,7 +274,8 @@ function runGateUnderShim(
     const shimJs = join(shimDir, 'npm-shim.mjs');
     writeFileSync(
       shimJs,
-      `import { appendFileSync, writeFileSync } from 'node:fs';
+      `import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 const argv = process.argv.slice(2);
 const key = argv[0] === 'run' ? argv[1] : argv[0];
 appendFileSync(${JSON.stringify(logPath)}, key + '\\n');
@@ -285,10 +300,18 @@ if (bench !== undefined) {
   process.exit(0);
 }
 // **レポートは壊すときも書く** — 書かないとゲートは「レポートを読めません」で落ちてしまい、
-// テストの終了コードを見ているか (testStatus の結線) が一度も試されない
+// テストの終了コードを見ているか (testStatus の結線) が一度も試されない。
+// **カバレッジも同じ** — ゲートが指定した出力先へ書く (指定が消えればここも書かれず赤くなる)
 if (key === 'test')
-  for (const arg of argv)
+  for (const arg of argv) {
     if (arg.startsWith('--outputFile=')) writeFileSync(arg.slice('--outputFile='.length), ${JSON.stringify(report)});
+    const coverage = ${JSON.stringify(coverage)};
+    if (coverage !== '' && arg.startsWith('--coverage.reportsDirectory=')) {
+      const dir = arg.slice('--coverage.reportsDirectory='.length);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'coverage-summary.json'), coverage);
+    }
+  }
 process.exit(broken ? 1 : 0);
 `,
     );
@@ -923,6 +946,243 @@ describe('evaluateStep5Report', () => {
       report: fullReport(),
     });
     expect(failures.some((message) => message.includes('突合テストの名前がありません'))).toBe(true);
+  });
+});
+
+describe('prefixedGroupProblems', () => {
+  // 群の手がかり・下限・表示名 (値は合成入力なので何でもよい)
+  const EXPECTATION = { prefix: '群: ', minCount: 3, label: 'テスト群' };
+
+  // 指定した件数の群を持つレポートを作る (落とす 1 件を選べる)
+  const reportWithGroup = (count: number, failAt = -1): Record<string, unknown> => ({
+    testResults: [
+      {
+        assertionResults: Array.from({ length: count }, (_v, i) => ({
+          fullName: `${EXPECTATION.prefix}ケース ${i}`,
+          status: i === failAt ? 'failed' : 'passed',
+        })),
+      },
+    ],
+  });
+
+  it('下限以上あって全部 pass していれば失敗なし', () => {
+    // 下限ちょうど
+    expect(prefixedGroupProblems(reportWithGroup(3), EXPECTATION)).toEqual([]);
+  });
+
+  it('件数が下限を割れば失敗になる', () => {
+    // 1 件足りない
+    const failures = prefixedGroupProblems(reportWithGroup(2), EXPECTATION);
+    expect(failures.some((message) => message.includes('2 件しかありません'))).toBe(true);
+  });
+
+  it('1 件でも落ちていれば失敗になる (件数だけ見る形を通さない)', () => {
+    // 件数は足りているが 1 件 failed
+    const failures = prefixedGroupProblems(reportWithGroup(3, 1), EXPECTATION);
+    expect(failures.some((message) => message.includes('テストが失敗'))).toBe(true);
+  });
+
+  it('手がかりが空なら失敗になる (照合の空振りを通さない)', () => {
+    // 接頭辞を渡し忘れた状態。空文字は `includes` で全件に当たるので黙って緑になりうる
+    const failures = prefixedGroupProblems(reportWithGroup(3), { ...EXPECTATION, prefix: '' });
+    expect(failures.some((message) => message.includes('手がかりがありません'))).toBe(true);
+  });
+
+  it('下限が 0 以下なら失敗になる (「1 本も無くても緑」を通さない)', () => {
+    // 下限を 0 にした状態
+    const failures = prefixedGroupProblems(reportWithGroup(0), { ...EXPECTATION, minCount: 0 });
+    expect(failures.some((message) => message.includes('最小件数'))).toBe(true);
+  });
+});
+
+describe('coverageProblems', () => {
+  // 4 指標ぶんの％を持つ合計を作る
+  const summaryWith = (pct: Record<string, number>): unknown => ({
+    total: Object.fromEntries(
+      Object.entries(pct).map(([metric, value]) => [metric, { pct: value }]),
+    ),
+  });
+  // すべて 90% の合計
+  const full = { statements: 90, branches: 90, functions: 90, lines: 90 };
+
+  it('4 指標すべてが下限以上なら失敗なし', () => {
+    expect(coverageProblems(summaryWith(full), 80)).toEqual([]);
+  });
+
+  it('下限ちょうどは合格', () => {
+    // 境界値 (「より大きい」で判定していれば落ちる)
+    expect(coverageProblems(summaryWith({ ...full, lines: 80 }), 80)).toEqual([]);
+  });
+
+  it.each(['statements', 'branches', 'functions', 'lines'])(
+    '%s が下限を割れば失敗になる (1 指標だけ見る形を通さない)',
+    (metric) => {
+      const failures = coverageProblems(summaryWith({ ...full, [metric]: 79 }), 80);
+      expect(failures.some((message) => message.includes(metric))).toBe(true);
+    },
+  );
+
+  it.each(['statements', 'branches', 'functions', 'lines'])(
+    '%s が読めなければ失敗になる (「読めないから緑」を通さない)',
+    (metric) => {
+      // その指標だけ欠けた合計
+      const rest = Object.fromEntries(Object.entries(full).filter(([name]) => name !== metric));
+      const failures = coverageProblems(summaryWith(rest), 80);
+      expect(failures.some((message) => message.includes(`${metric} を読めません`))).toBe(true);
+    },
+  );
+
+  it('合計そのものが読めなければ失敗になる', () => {
+    // 計測が走らなかった状態 (ゲートは null を渡す)
+    const failures = coverageProblems(null, 80);
+    expect(failures.some((message) => message.includes('合計を読めません'))).toBe(true);
+  });
+
+  it('下限が正の数でなければ失敗になる', () => {
+    // 下限を 0 にすると「どんな％でも合格」になる
+    const failures = coverageProblems(summaryWith(full), 0);
+    expect(failures.some((message) => message.includes('下限が正の数ではありません'))).toBe(true);
+  });
+});
+
+describe('evaluateStep6Report', () => {
+  // Step5 までの材料 (値は合成入力)
+  const REASONS = ['unknown_case_id'];
+  const KINDS = Object.values(RuleKind);
+  const BREAKS = Object.values(AuditChainBreak);
+  const DERIVATION = '導出と表が一致する';
+  const base = {
+    testStatus: 0,
+    requiredPassedTests: 60,
+    ...MATRIX,
+    models: PRICED_MODELS,
+    pricePrefix: PRICE_TEST_PREFIX,
+    reasons: REASONS,
+    exclusionPrefix: EXCLUSION_TEST_PREFIX,
+    kinds: KINDS,
+    firingPrefix: FIRING_TEST_PREFIX,
+    breaks: BREAKS,
+    tamperPrefix: TAMPER_TEST_PREFIX,
+    e2eTestName: GUARDRAIL_E2E_TEST_NAME,
+    reconcileTestName: RECONCILE_TEST_NAME,
+    crossTenantDerivationTestName: DERIVATION,
+    crossTenantPrefix: '越境: ',
+    crossTenantMinCount: 2,
+    idempotencyPrefix: '冪等性: ',
+    idempotencyMinCount: 2,
+    coverageSummary: {
+      total: {
+        statements: { pct: 90 },
+        branches: { pct: 90 },
+        functions: { pct: 90 },
+        lines: { pct: 90 },
+      },
+    },
+    coverageMinPercent: 80,
+  };
+
+  // Step6 の基準をすべて満たすレポート (越境・冪等性・導出を個別に落とせる)
+  const fullReport = (
+    options: { derivation?: boolean; crossTenant?: number; idempotency?: number } = {},
+  ): Record<string, unknown> => {
+    // 料金までのレポート (Step5 の組み立てと同じ流儀)
+    const priced = priceReport(PRICED_MODELS) as {
+      testResults: { assertionResults: unknown[] }[];
+      numPassedTests: number;
+    };
+    // Step3〜5 の分を足す
+    const assertionResults = [
+      ...priced.testResults[0].assertionResults,
+      ...REASONS.map((reason) => ({
+        fullName: `${EXCLUSION_TEST_PREFIX}${reason} — 説明`,
+        status: 'passed',
+      })),
+      ...KINDS.map((kind) => ({
+        fullName: `${FIRING_TEST_PREFIX}${kind} は発火する`,
+        status: 'passed',
+      })),
+      ...BREAKS.map((reason) => ({
+        fullName: `${TAMPER_TEST_PREFIX}壊すと ${reason} で落ちる`,
+        status: 'passed',
+      })),
+      { fullName: `ガードレールの E2E ${GUARDRAIL_E2E_TEST_NAME}`, status: 'passed' },
+      { fullName: `ダッシュボード ${RECONCILE_TEST_NAME}（数え直す）`, status: 'passed' },
+      // Step6: 導出の照合 (落とせる)
+      ...(options.derivation === false
+        ? []
+        : [{ fullName: `テナント越境 ${DERIVATION}`, status: 'passed' }]),
+      // Step6: 越境の群 (件数を選べる)
+      ...Array.from({ length: options.crossTenant ?? 2 }, (_v, i) => ({
+        fullName: `越境: GET /resource-${i} は 404`,
+        status: 'passed',
+      })),
+      // Step6: 冪等性の群 (同じ)
+      ...Array.from({ length: options.idempotency ?? 2 }, (_v, i) => ({
+        fullName: `冪等性: 再送 ${i}`,
+        status: 'passed',
+      })),
+    ];
+    return { ...priced, testResults: [{ assertionResults }] };
+  };
+
+  it('前 Step の基準と Step6 の 3 つが揃っていれば失敗なし', () => {
+    expect(evaluateStep6Report({ ...base, report: fullReport() })).toEqual([]);
+  });
+
+  it('Step5 の基準 (突合) を引き継いでいる', () => {
+    // 突合の名前を渡し忘れた状態 (前 Step の判定が効いているか)
+    const failures = evaluateStep6Report({ ...base, reconcileTestName: '', report: fullReport() });
+    expect(failures.some((message) => message.includes('突合テストの名前がありません'))).toBe(true);
+  });
+
+  it('導出の照合が無ければ失敗になる (受け入れ基準 1)', () => {
+    // **群は満点のまま**導出だけを落とす — 群しか見ない形をここで落とす
+    const failures = evaluateStep6Report({
+      ...base,
+      report: fullReport({ derivation: false }),
+    });
+    expect(failures.some((message) => message.includes('越境テストの導出'))).toBe(true);
+  });
+
+  it('導出の照合のテスト名が無ければ失敗になる (照合の空振りを通さない)', () => {
+    const failures = evaluateStep6Report({
+      ...base,
+      crossTenantDerivationTestName: '',
+      report: fullReport(),
+    });
+    expect(failures.some((message) => message.includes('導出を確かめるテストの名前'))).toBe(true);
+  });
+
+  it('越境の群が下限を割れば失敗になる (受け入れ基準 1)', () => {
+    const failures = evaluateStep6Report({ ...base, report: fullReport({ crossTenant: 1 }) });
+    expect(failures.some((message) => message.includes('越境アクセス'))).toBe(true);
+  });
+
+  it('冪等性の群が下限を割れば失敗になる (受け入れ基準 2)', () => {
+    const failures = evaluateStep6Report({ ...base, report: fullReport({ idempotency: 1 }) });
+    expect(failures.some((message) => message.includes('冪等性'))).toBe(true);
+  });
+
+  it('カバレッジが下限を割れば失敗になる (受け入れ基準 4)', () => {
+    const failures = evaluateStep6Report({
+      ...base,
+      coverageSummary: {
+        total: {
+          statements: { pct: 90 },
+          branches: { pct: 70 },
+          functions: { pct: 90 },
+          lines: { pct: 90 },
+        },
+      },
+      report: fullReport(),
+    });
+    expect(failures.some((message) => message.includes('カバレッジの branches'))).toBe(true);
+  });
+
+  it('カバレッジが測れていなければ失敗になる', () => {
+    // ゲートは読めなかったとき null を渡す
+    const failures = evaluateStep6Report({ ...base, coverageSummary: null, report: fullReport() });
+    expect(failures.some((message) => message.includes('カバレッジの合計を読めません'))).toBe(true);
   });
 });
 
@@ -2329,6 +2589,10 @@ describe('判定の結線', () => {
       // import も無く副作用も終了経路も持たない）。プロキシのベンチが「予算を持つ
       // エージェントの中継」を測るために、到達しない上限を**写さずに**読むために要る
       'domain/money',
+      // **プラン別の上限の表**（`domain/plan` は `domain/types` だけを import する純粋な表と
+      // 述語で、副作用も終了経路も持たない）。ガードレールのベンチが「ルール数の上限」を
+      // **写さずに**読むために要る（上限は計測の主題ではないので標準の有料プランの値を使う）
+      'domain/plan',
       'domain/evaluation/scores',
       'domain/evaluation/judge-output',
       'data/adapters/prisma',
@@ -2722,7 +2986,10 @@ describe('判定の結線', () => {
   // 受け入れ基準を**すべて満たす**テストレポートを組み立てる (シムに書かせる中身)。
   // **名前の形はここで組み立てるが、組み立てた結果を判定に通して空を要求する**ので、
   // 形がずれたら「基準を満たすはずのレポートが落ちる」という形で必ず赤くなる (写しが腐らない)
-  function fullMarksReport(dropPricedIndex = -1): string {
+  function fullMarksReport(
+    dropPricedIndex = -1,
+    drop: { crossTenantAt?: number; derivation?: boolean } = {},
+  ): string {
     // 料金表の正本 (ゲートが読むのと同じファイル)
     const models = (
       JSON.parse(
@@ -2753,6 +3020,17 @@ describe('判定の結線', () => {
     const tampers = Object.values(AuditChainBreak).map(
       (reason) => `${TAMPER_TEST_PREFIX}壊すと ${reason} で落ちる`,
     );
+    // 越境アクセスのテスト名 (Step6)。**下限ぶんだけ組み立てる** — ここを実際の表から
+    // 導くと、表が縮んだときに材料も一緒に縮んで空振りのまま緑になる (手がかりを変える)
+    const crossTenant = Array.from(
+      { length: CROSS_TENANT_MIN_CASES },
+      (_v, i) => `${CROSS_TENANT_TEST_PREFIX}GET /resource-${i} は 404`,
+    );
+    // Webhook の冪等性のテスト名 (Step6)。同じく下限ぶん
+    const idempotency = Array.from(
+      { length: IDEMPOTENCY_MIN_CASES },
+      (_v, i) => `${IDEMPOTENCY_TEST_PREFIX}再送 ${i} は 1 回しか反映しない`,
+    );
     const named = [
       ...ROLES.flatMap((role) =>
         ACTIONS.map((action) => `${MATRIX_TEST_PREFIX}${role} × ${action}`),
@@ -2766,6 +3044,13 @@ describe('判定の結線', () => {
       // 突合も 1 本だけ (Step5 の受け入れ基準 3)。**説明が後ろに続く形**にする
       // (実際のテスト名と同じく、完全一致を前提にしない)
       `ダッシュボード ${RECONCILE_TEST_NAME}（独立に数え直す）`,
+      // 越境の導出と表を突き合わせるテスト (Step6 の受け入れ基準 1 の前半)。
+      // **群とは別の名前**で要求されるので、落とせば群が揃っていても赤くなる
+      ...(drop.derivation === true ? [] : [`テナント越境 ${CROSS_TENANT_DERIVATION_TEST_NAME}`]),
+      // 越境の群 (下限ぶん。1 件落とすと件数が下限を割る)
+      ...crossTenant.filter((_name, index) => index !== drop.crossTenantAt),
+      // 冪等性の群 (下限ぶん)
+      ...idempotency,
     ];
     // 件数の下限まで埋める
     const filler = Math.max(0, REQUIRED_PASSED_TESTS - named.length);
@@ -2782,7 +3067,7 @@ describe('判定の結線', () => {
     };
     // **組み立てた結果が意図どおりであることを、判定そのものに確かめさせる**。
     // 最新 Step の判定に通すので、前の Step の基準もそこから引き継がれて確かめられる
-    const failures = evaluateStep5Report({
+    const failures = evaluateStep6Report({
       testStatus: 0,
       report,
       requiredPassedTests: REQUIRED_PASSED_TESTS,
@@ -2799,12 +3084,20 @@ describe('判定の結線', () => {
       tamperPrefix: TAMPER_TEST_PREFIX,
       e2eTestName: GUARDRAIL_E2E_TEST_NAME,
       reconcileTestName: RECONCILE_TEST_NAME,
+      crossTenantDerivationTestName: CROSS_TENANT_DERIVATION_TEST_NAME,
+      crossTenantPrefix: CROSS_TENANT_TEST_PREFIX,
+      crossTenantMinCount: CROSS_TENANT_MIN_CASES,
+      idempotencyPrefix: IDEMPOTENCY_TEST_PREFIX,
+      idempotencyMinCount: IDEMPOTENCY_MIN_CASES,
+      // カバレッジは満点の材料で確かめる (欠けさせる形は別の probe が見る)
+      coverageSummary: JSON.parse(coverageMaterial()),
+      coverageMinPercent: COVERAGE_MIN_PERCENT,
     });
     // 落としたなら基準を満たさないこと、満点なら満たすこと
-    if (dropPricedIndex >= 0)
+    if (dropPricedIndex >= 0 || drop.crossTenantAt !== undefined || drop.derivation === true)
       expect(
         failures.length,
-        '料金表の 1 件を落としたのに基準を満たしてしまう (組み立ての形が古い)',
+        '1 件を落としたのに基準を満たしてしまう (組み立ての形が古い)',
       ).toBeGreaterThan(0);
     else
       expect(failures, '満点のつもりのレポートが基準を満たしていない (組み立ての形が古い)').toEqual(
@@ -2824,7 +3117,10 @@ describe('判定の結線', () => {
       const printed = printedMaterials();
       // **positive control**: 何も壊さなければ 0 で終わる。これが検査自身の射程を固定する —
       // 射程が縮めば「壊していないのに落ちる」か「壊したのに落ちない」のどちらかで赤くなる
-      const clean = runGateUnderShim(name, '', report, benches, printed);
+      // カバレッジの合計（満点）。ゲートは `--coverage.reportsDirectory=` で出力先を指定するので、
+      // シムはその場所へこれを書く（指定が消えればゲートは「読めません」で赤くなる）
+      const coverage = coverageMaterial();
+      const clean = runGateUnderShim(name, '', report, benches, printed, coverage);
       expect(clean.status, `${name} がすべて成功しても緑にならない`).toBe(0);
       // **流すと書いてあるもの**を、実行とは別の手がかり（ソース）から導く。
       // **「実際に呼ばれたもの」から検査対象を導いてはいけない** — 途中で黙って終わる変異は
@@ -2855,7 +3151,7 @@ describe('判定の結線', () => {
         ).toContain(script);
       // **negative control**: 流すと書いてあるものを 1 つずつ壊す
       for (const target of required) {
-        const broken = runGateUnderShim(name, target, report, benches, printed);
+        const broken = runGateUnderShim(name, target, report, benches, printed, coverage);
         expect(
           typeof broken.status === 'number' && broken.status !== 0,
           `${name} が ${target} の失敗を無視して成功終了した (終了コード ${String(broken.status)})`,
@@ -2881,6 +3177,7 @@ describe('判定の結線', () => {
         fullMarksReport(dropAt),
         benchMaterials(),
         printedMaterials(),
+        coverageMaterial(),
       );
       // 非 0 で終わっていること (0 なら料金表の全モデルを見ていない)
       expect(
@@ -2890,6 +3187,99 @@ describe('判定の結線', () => {
     },
     120_000,
   );
+
+  it.each(['statements', 'branches', 'functions', 'lines'])(
+    '最新のゲートはカバレッジの %s が下限を割ることを見逃さない (受け入れ基準 4)',
+    (metric) => {
+      // **npm はすべて成功させたまま、カバレッジの合計だけを 1 指標ぶん下限未満にする。**
+      // 検証コマンドの成否を壊す行列では「1 指標しか見ていない」「読めなくても緑」といった
+      // 緩め方が素通りする（どの npm も失敗しない）。4 指標すべてに掛かっていることはここで固定する
+      const low = runGateUnderShim(
+        latestGateScriptName(),
+        '',
+        fullMarksReport(),
+        benchMaterials(),
+        printedMaterials(),
+        coverageMaterial(metric),
+      );
+      // 非 0 で終わっていること（0 ならその指標を見ていない）
+      expect(
+        typeof low.status === 'number' && low.status !== 0,
+        `カバレッジの ${metric} が下限未満なのに見逃した (終了コード ${String(low.status)})`,
+      ).toBe(true);
+    },
+    120_000,
+  );
+
+  it('最新のゲートはカバレッジが測れていないことを見逃さない (受け入れ基準 4)', () => {
+    // **カバレッジを 1 行も書かせない。** 「読めないから緑」に倒れていれば、
+    // `--coverage` を外す変異（＝1 行も測らない）がそのまま基準を満たしてしまう
+    const missing = runGateUnderShim(
+      latestGateScriptName(),
+      '',
+      fullMarksReport(),
+      benchMaterials(),
+      printedMaterials(),
+      '',
+    );
+    expect(
+      typeof missing.status === 'number' && missing.status !== 0,
+      `カバレッジが無いのに見逃した (終了コード ${String(missing.status)})`,
+    ).toBe(true);
+  });
+
+  it('最新のゲートは越境テストの導出の照合が無いことを見逃さない (受け入れ基準 1)', () => {
+    // **群（`越境: `）は満点のまま、導出と表を突き合わせるテストだけを外す。**
+    // 群だけを見る形だと、表から 1 件消す変異は「要求も一緒に縮む」ので素通りする
+    // （流れたものから期待を導く形）。導出のテストを別に要求していることをここで固定する
+    const noDerivation = runGateUnderShim(
+      latestGateScriptName(),
+      '',
+      fullMarksReport(-1, { derivation: true }),
+      benchMaterials(),
+      printedMaterials(),
+      coverageMaterial(),
+    );
+    expect(
+      typeof noDerivation.status === 'number' && noDerivation.status !== 0,
+      `越境の導出の照合が無いのに見逃した (終了コード ${String(noDerivation.status)})`,
+    ).toBe(true);
+  });
+
+  it('最新のゲートは越境テストが 1 件欠けることを見逃さない (受け入れ基準 1)', () => {
+    // **群から 1 件だけ外す。** 件数の下限（床）に掛かるので、群をまるごと消す形も
+    // 一部だけ残す形も同じここで落ちる（どの添字を外しても下限を割るので 1 本で足りる）
+    const short = runGateUnderShim(
+      latestGateScriptName(),
+      '',
+      fullMarksReport(-1, { crossTenantAt: 0 }),
+      benchMaterials(),
+      printedMaterials(),
+      coverageMaterial(),
+    );
+    expect(
+      typeof short.status === 'number' && short.status !== 0,
+      `越境テストが 1 件欠けたのに見逃した (終了コード ${String(short.status)})`,
+    ).toBe(true);
+  });
+
+  /**
+   * カバレッジの合計（`coverage-summary.json`）として書かせる中身を組み立てる。
+   *
+   * **下限は正本から取る**（写しを持つと基準を変えたときにここだけが古くなる）。
+   * `below` に指標名を渡すと、その 1 指標だけを下限未満にする。
+   */
+  function coverageMaterial(below?: string): string {
+    // 4 指標ぶんの％（既定は下限ちょうど = 合格）
+    const total = Object.fromEntries(
+      ['statements', 'branches', 'functions', 'lines'].map((metric) => [
+        metric,
+        { pct: metric === below ? COVERAGE_MIN_PERCENT - 1 : COVERAGE_MIN_PERCENT },
+      ]),
+    );
+    // json-summary レポータの形
+    return JSON.stringify({ total });
+  }
 
   it('共有モジュールは import しただけでプロセスを終わらせない', () => {
     // 共有モジュールの一覧 (0 本なら導出が壊れている)

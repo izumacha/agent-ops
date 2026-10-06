@@ -87,11 +87,18 @@ enum IncidentStatus {
 
 // テナント (契約単位。全データの分離境界)
 model Tenant {
-  id        String   @id @default(cuid()) // 主キー (CUID: 推測困難な ID)
-  name      String // 表示名
-  plan      Plan     @default(free) // 契約プラン
-  createdAt DateTime @default(now()) // 作成日時
-  updatedAt DateTime @updatedAt // 更新日時 (自動更新)
+  id                    String   @id @default(cuid()) // 主キー (CUID: 推測困難な ID)
+  name                  String // 表示名
+  plan                  Plan     @default(free) // 契約プラン (上限と可否の正本は src/domain/plan.ts)
+  createdAt             DateTime @default(now()) // 作成日時
+  updatedAt             DateTime @updatedAt // 更新日時 (自動更新)
+  // 課金事業者 (Stripe) 側の顧客 ID。Webhook はこの値でテナントを引く (Step6)。
+  // **一意にする** — 2 つのテナントが同じ顧客を名乗ると、1 通の Webhook がどちらのプランを
+  // 変えるのか決まらない (しかも先に見つかった方だけが変わるので、食い違いが静かに残る)
+  billingCustomerId     String?  @unique
+  // 課金事業者側のサブスクリプション ID。顧客 1 人が複数のテナントを契約する形はまだ無いが、
+  // 同じ理由で一意にしておく (1 つの契約が 2 テナントのプランを動かす状態を作らない)
+  billingSubscriptionId String?  @unique
 
   users             User[] // 所属ユーザー
   userTokens        UserToken[] // 発行済みログイントークン
@@ -104,6 +111,7 @@ model Tenant {
   guardrailRules    GuardrailRule[] // ガードレール
   incidents         Incident[] // インシデント
   auditLogs         AuditLog[] // 監査ログ
+  billingEvents     BillingEvent[] // 受信した課金イベント (冪等性の記録。Step6)
 
   @@index([createdAt]) // 一覧 (GET /tenants の createdAt 順のカーソル送り)
 }
@@ -338,18 +346,18 @@ model GuardrailRule {
 
 // インシデント (ルール発火の記録。Step4)
 model Incident {
-  id          String         @id @default(cuid()) // 主キー
-  tenantId    String // 所属テナント
-  agentId     String // 対象エージェント
-  ruleId      String // 発火したルール
-  status      IncidentStatus @default(open) // 状態
-  summary     String // 発火理由の要約 (通知本文にも使う)
+  id         String         @id @default(cuid()) // 主キー
+  tenantId   String // 所属テナント
+  agentId    String // 対象エージェント
+  ruleId     String // 発火したルール
+  status     IncidentStatus @default(open) // 状態
+  summary    String // 発火理由の要約 (通知本文にも使う)
   // 発火日時 (= 行の作成日時。発火した瞬間にこの行ができるので 2 つの概念に分けない)。
   // **名前を createdAt にそろえる**のは、一覧のカーソル (src/data/page.ts) が
   // 「(createdAt, id) の組」を位置として符号化する唯一の規則になっているため。
   // この表だけ別名にすると、共有のページネーションをこの表のために一般化することになる
-  createdAt   DateTime       @default(now())
-  resolvedAt  DateTime? // 解決日時
+  createdAt  DateTime       @default(now())
+  resolvedAt DateTime? // 解決日時
 
   tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade) // 親テナント
   // 対象エージェント (同テナントを複合 FK で保証)。「なぜ止まったか」の記録なので削除で消さない (Restrict)
@@ -392,4 +400,26 @@ model AuditLog {
   @@unique([tenantId, seq]) // 連鎖を seq 順に読む経路。採番の衝突 (同じ番号の 2 行) もここで防ぐ
   @@index([tenantId, createdAt]) // 期間検索 (一覧の既定の並び。seq の索引では期間で絞れない)
   @@index([actorId]) // Restrict の解決・操作者別検索用
+}
+
+// 受信した課金イベント (Step6)。**冪等性のための記録**で、業務データではない。
+//
+// Webhook は再送されるのが前提 (受け手が 2xx を返せなかった・タイムアウトした等) なので、
+// 同じイベントが 2 回届く。**「処理済みか先に SELECT してから INSERT」では同時に届いた 2 通で
+// 両方が通る**ので、一意制約の違反そのものを「2 通目」の判定に使う (アダプタが duplicate に翻訳)。
+model BillingEvent {
+  id         String   @id @default(cuid()) // 主キー
+  provider   String // 課金事業者の名前 (いまは stripe の 1 つだけ。将来の切り替えに備えて列で持つ)
+  eventId    String // 事業者側のイベント ID (Stripe なら evt_...)
+  type       String // イベント種別 (例: customer.subscription.updated)
+  tenantId   String? // 対応付けられたテナント (顧客 ID から引けなかったときは null)
+  receivedAt DateTime @default(now()) // 受信日時 (再送の調査に使う)
+
+  // 親テナント。テナント解約時はデータ一式を消す (他の表と同じ扱い)。
+  // **null を許す** — 知らない顧客 ID の Webhook も「受け取った事実」は記録する (捨てると
+  // 設定の食い違いが運用者に見えない)
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, eventId]) // **冪等性の要**。同じイベントの 2 行目を DB が拒否する
+  @@index([tenantId, receivedAt]) // テナント別の受信履歴 (調査用)
 }

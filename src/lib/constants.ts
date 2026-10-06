@@ -179,16 +179,10 @@ export const GUARDRAIL_WINDOW_MAX_MINUTES = 60 * 24 * 7;
 // なので、整数として正確に表せる範囲 (2^53-1) までに絞る。これを超えると「設定した額」と
 // 「保存された額」が静かにずれる (約 90 億 USD 相当なので実用上の制約にはならない)
 export const GUARDRAIL_COST_THRESHOLD_MAX = Number.MAX_SAFE_INTEGER;
-// 1 テナントが持てるガードレールのルールの上限。**判定は中継 1 回ごとに走る**ので、
-// ルールが増えるほど 1 回の呼び出しで回す集計が増える (§8 / §9)。
-// 50 件は「種別 3 × エージェント十数件 ＋ テナント全体のルール」を十分に収める大きさ
-export const GUARDRAIL_RULES_MAX_PER_TENANT = 50;
-// 1 テナントが持てるガードレールのルールの**行数**の上限 (有効・無効を問わない)。
-// **有効なルールの上限だけでは総行数が縛れない** — 無効化した行は上の上限に数えないので
-// (発火済みのルールは削除できず、数えると枠が永久に空かない)、「作る → 無効化する」を繰り返すと
-// 行が無制限に増える。有効な上限の 4 倍を行数の天井にして、どちらかに達したら 409 を返す
-// (§9 のリソース枯渇の防止)。無効で発火記録も無い行は削除できるので、通常の運用で当たることはない
-export const GUARDRAIL_RULE_ROWS_MAX_PER_TENANT = GUARDRAIL_RULES_MAX_PER_TENANT * 4;
+// **ガードレールのルール数の上限はここに置かない（Step6）。** 有効なルールの上限は契約プランごとに
+// 違うので、正本は `src/domain/plan.ts` の `PLAN_LIMITS[plan].maxEnabledGuardrailRules`（根拠も同所）で、
+// 行数の天井はそこから `guardrailRuleLimitsFor(plan)` が導く（有効側の 4 倍。理由は ADR-0010）。
+// ここに既定値を持つと、プランの表と同じ数字が 2 か所に並んで片方だけが古くなる（§6）
 // 連鎖の検証で 1 回に読む監査ログの上限。検証は 1 行目から順にたどるので途中から始められず、
 // ページ送りができない。代わりに読む件数を区切り、上限に達したかを応答で伝える (§8)
 export const AUDIT_CHAIN_VERIFY_MAX_ROWS = 10_000;
@@ -203,14 +197,19 @@ export const NOTIFY_SIGNATURE_HEADER = 'x-agent-ops-signature';
 // 通知の署名鍵 (環境変数 NOTIFY_SIGNING_SECRET) に要求する最小長。
 // 短い鍵は総当たりで求められ、求められたら任意の通知を偽装できる
 export const NOTIFY_SIGNING_SECRET_MIN_LENGTH = 32;
-// プロキシ経路のレート制限: 1 つの API キーが窓の中で出せる中継の回数。
+// 受信 Webhook (Step6) の共有シークレットに要求する最小長。短い鍵は総当たりで求められ、
+// 求められたら任意の本文を署名できる = 誰でも任意のテナントのプランを変えられる。
+// 監査ログの鍵・通知の署名鍵と同じ 32 文字以上を要求する (別の値にする理由が無い)
+export const BILLING_WEBHOOK_SECRET_MIN_LENGTH = 32;
+// 受信 Webhook の本文から読む文字列項目 (事業者側の id・種別・価格の名前) の長さの上限。
+// **上限が無いと 1 本文で任意の長さの文字列を DB の列へ渡せる** (§9 の入力検証)。
+// 事業者側の識別子は実際には数十文字なので、余裕を見てこの長さに置く
+export const BILLING_WEBHOOK_FIELD_MAX_LENGTH = 255;
+// **共有の枠の上限はここに置かない（Step6）。** 窓の中で出せる回数は契約プランごとに違うので、
+// 正本は `src/domain/plan.ts` の `PLAN_LIMITS[plan].proxyRateLimitPerMinute`（根拠も同所）。
+// ここに既定値を持つと、プランの表と同じ数字が 2 か所に並んで片方だけが古くなる（§6）。
 //
-// 根拠は ADR-0007 の実測「本文を最悪の形に詰めた要求でも 1 通あたり 3.3ms」。1 分 600 回でも
-// 1 プロセスあたり約 2 秒ぶんの計算量に収まる一方、上流の課金は 600 回ぶん発生するので、
-// 「壊れたクライアントの暴走を止める」には十分に効く。正当な使い方（1 件ずつ中継する
-// エージェント）には届かない高さに置いてある
-export const PROXY_RATE_LIMIT_PER_MINUTE = 600;
-// 上限を上書きできる環境変数の名前。**既定は上の定数**で、配備先ごとに上げ下げできる。
+// 上限を上書きできる環境変数の名前。**設定するとプランの差が消える**ので、用途は限られる。
 // 用途は (a) 運用者の調整、(b) ベンチ (scripts/bench-proxy.ts) が計測を妨げられないようにすること。
 // **名前を定数にしてここに置くのは、ベンチが取り込めるようにするため** — ベンチの import は
 // 許可リストで絞ってあり (tests/gate-scripts.test.ts)、実行時の副作用を持つモジュール
@@ -338,6 +337,11 @@ export const API_MESSAGES = {
   unauthorized: '認証が必要です。Authorization: Bearer <トークン> を付けてください。',
   invalidToken: 'トークンが無効です (失効・期限切れ・ユーザー無効化を含む)。',
   forbidden: 'この操作を行う権限がありません。',
+  // **「権限が無い」と区別する**（Step6）。同じ文言にすると、プランで使えない機能を
+  // 「役割が足りない」と読んで admin へ昇格を頼むことになり、いつまでも直らない。
+  // **他テナントの情報は出さない**し、現在のプラン名も出さない（GET /billing で参照できる）
+  planFeatureUnavailable:
+    'この機能は現在の契約プランでは利用できません。プランを見直してから再試行してください。',
   tenantScopeRequired: 'この操作はテナントのユーザーとして認証したときだけ行えます。',
   platformAdminRequired: 'この操作はプラットフォーム管理者だけが行えます。',
   notFound: '見つかりません。',
@@ -357,6 +361,12 @@ export const API_MESSAGES = {
   agentHasHistory:
     '利用・評価・インシデントの履歴があるエージェントは削除できません。停止 (stop) を使ってください。',
   agentNotInTenant: '指定したエージェントが見つかりません。',
+  // **プラン別の上限なので文言に数値を埋めない** (Step6)。上限はプランごとに違い、
+  // 定数 1 つでは表せないため。現在の上限は GET /billing で参照できる
+  // **「削除してください」と書かない** — 履歴があるエージェントは削除できない (409) ので、
+  // 上限に達したテナントが唯一の案内に従えないことがある (停止しても数には残る)
+  agentLimitReached:
+    '登録できるエージェントの数が契約プランの上限に達しています。使っていないエージェントを整理するか、プランを見直してください。',
   apiKeyRequired: 'このエンドポイントは API キー (aop_k_...) で呼び出してください。',
   apiKeyNotBoundToAgent:
     'この API キーはエージェントに紐づいていません。エージェントを指定して発行したキーを使ってください。',
@@ -368,13 +378,22 @@ export const API_MESSAGES = {
   guardrailWindowOutOfRange: `集計窓は ${GUARDRAIL_WINDOW_MIN_MINUTES} 分以上 ${GUARDRAIL_WINDOW_MAX_MINUTES} 分以内の整数で指定してください。`,
   guardrailRuleLimit:
     'ガードレールのルール数が上限に達しています。不要なルールを削除してください。',
-  guardrailRuleRowLimit: `ガードレールのルールの総数 (無効化したものを含む) が上限 ${GUARDRAIL_RULE_ROWS_MAX_PER_TENANT} 件に達しています。不要なルールを削除してください。`,
+  // **数値を埋めない（Step6）** — 行数の天井は契約プランから導くので、定数 1 つでは表せない。
+  // 「不要なルールを削除してください」だけにしない理由は `guardrailRuleLimit` との区別
+  // （有効なルールが 0 件なのに作れない利用者に、消す対象が無効化した行の側だと伝える）
+  guardrailRuleRowLimit:
+    'ガードレールのルールの総数 (無効化したものを含む) が契約プランの上限に達しています。無効化したルールを削除してください。',
   guardrailRunPartiallyFailed:
     '一部のルールを判定できませんでした。時間をおいてやり直してください (発火したぶんは記録されています)。',
   guardrailRuleHasIncidents:
     '発火記録があるルールは削除できません (記録からルールを辿れなくなるため)。',
   incidentAlreadyResolved: 'このインシデントは既に解決済みです。',
   rateLimited: '要求が多すぎます。Retry-After 秒だけ待ってからやり直してください。',
+  // 受信 Webhook の署名が合わない (401)。**理由を区別しない** — 形が違う・時刻が古い・
+  // 署名が一致しない のどれかを返すと、総当たりの手がかりになる
+  billingSignatureInvalid: 'Webhook の署名が確認できません。',
+  // 受信 Webhook の共有シークレットが未設定・短すぎる (503)。何が足りないかは応答に出さない
+  billingNotConfigured: '課金の設定が完了していないため、この操作は現在実行できません。',
   budgetExceeded:
     'このエージェントの予算 (当月) を超えました。予算を見直すか、翌月まで待ってから呼び出してください。',
   unsupportedModel:

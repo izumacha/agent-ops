@@ -10,6 +10,8 @@ import { createMemoryRepos } from '@/data/adapters/memory';
 import { MemoryStore } from '@/data/adapters/memory/store';
 import type { EvaluationRunRecord, Repositories } from '@/data/ports';
 import { EvaluationExclusionReason, EvaluationRunStatus, Provider } from '@/domain/types';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../lib/agent-limits';
 
 // エージェントが使うモデル名 (値そのものに意味は無い)
 const MODEL = 'claude-sonnet-4-6';
@@ -43,7 +45,7 @@ describe('memory アダプタの評価', () => {
     });
     tenantId = created.tenant.id;
     // 評価対象エージェント
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId,
       name: 'bot',
       description: null,
@@ -109,7 +111,7 @@ describe('memory アダプタの評価', () => {
       completed.id,
     );
     // 別のエージェントの実行は選ばない (エージェントごとに判定するため)
-    const other = await repos.agents.create({
+    const other = await createTestAgent(repos, {
       tenantId,
       name: 'bot-2',
       description: null,

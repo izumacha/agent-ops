@@ -40,6 +40,10 @@ export interface TenantRecord {
   id: string;
   name: string;
   plan: Plan;
+  // 課金事業者側の顧客 ID (未連携なら null)。Webhook はこの値でテナントを引く
+  billingCustomerId: string | null;
+  // 課金事業者側のサブスクリプション ID (未連携なら null)
+  billingSubscriptionId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

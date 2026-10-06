@@ -2,10 +2,15 @@
 import { describe, expect, it } from 'vitest';
 import { GET as getMe } from '@/app/api/v1/me/route';
 import { GET as listTenants, POST as createTenant } from '@/app/api/v1/tenants/route';
-import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
+import { GET as getTenant, PATCH as updateTenantPlan } from '@/app/api/v1/tenants/[tenantId]/route';
+import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
+import { AuditAction, AuditTargetType } from '@/domain/audit/action';
+import { PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
+import { Plan } from '@/domain/types';
 import { USER_TOKEN_DEFAULT_TTL_DAYS, USER_TOKEN_MAX_TTL_DAYS } from '@/lib/constants';
 import { USER_TOKEN_PREFIX } from '@/lib/tokens';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
+import { vi } from 'vitest';
 
 // 1 日のミリ秒 (有効期限の日数を求めるため)
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -130,5 +135,93 @@ describe('GET /tenants/{tenantId}', () => {
       params: { tenantId: seed.b.id },
     });
     expect(result.status).toBe(404);
+  });
+});
+
+describe('PATCH /tenants/{tenantId}', () => {
+  // プラン変更を 1 回呼ぶ（プラットフォーム管理者として）
+  async function patchPlan(plan: Plan, tenantId = seed.a.id, token = PLATFORM_TOKEN) {
+    // PATCH で本文を送る
+    return call(updateTenantPlan, {
+      method: 'PATCH',
+      token,
+      params: { tenantId },
+      body: { plan },
+    });
+  }
+
+  it('プラットフォーム管理者はプランを変えられる', async () => {
+    // seed は pro なので enterprise へ上げる
+    const result = await patchPlan(Plan.enterprise);
+    expect(result.status).toBe(200);
+    expect(result.json).toMatchObject({ id: seed.a.id, plan: Plan.enterprise });
+    // 行にも反映されている
+    expect((await seed.repos.tenants.findById(seed.a.id))?.plan).toBe(Plan.enterprise);
+  });
+
+  it('変更は監査ログに残る（前後のプランと経路つき）', async () => {
+    // free へ下げる
+    await patchPlan(Plan.free);
+    // そのテナントの admin で監査ログを読む
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    const items = (logs.json as { items: { action: string; payload: unknown }[] }).items;
+    // 1 行だけ、プラン変更として残っている
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      action: AuditAction.tenant_plan_changed,
+      targetType: AuditTargetType.tenant,
+      targetId: seed.a.id,
+      // **テナント内のユーザーではないので actorId は持たない**（経路は payload が示す）
+      actorId: null,
+      payload: { from: Plan.pro, to: Plan.free, source: PLAN_CHANGE_SOURCE.platformAdmin },
+    });
+  });
+
+  it('テナントの admin では変えられない（403。課金の実体は事業者側にある）', async () => {
+    // テナント内の admin トークンで呼ぶ
+    const refused = await patchPlan(Plan.enterprise, seed.a.id, seed.a.tokens.admin);
+    expect(refused.status).toBe(403);
+    // プランは変わっていない
+    expect((await seed.repos.tenants.findById(seed.a.id))?.plan).toBe(Plan.pro);
+  });
+
+  it('知らないプラン・未知のキーは 422', async () => {
+    // enum 外の値
+    expect(
+      (
+        await call(updateTenantPlan, {
+          method: 'PATCH',
+          token: PLATFORM_TOKEN,
+          params: { tenantId: seed.a.id },
+          body: { plan: 'platinum' },
+        })
+      ).status,
+    ).toBe(422);
+    // 定義に無い項目は 422（strictObject。未知の項目を黙って剥がさない）
+    expect(
+      (
+        await call(updateTenantPlan, {
+          method: 'PATCH',
+          token: PLATFORM_TOKEN,
+          params: { tenantId: seed.a.id },
+          body: { plan: Plan.pro, billingSubscriptionId: 'sub_1' },
+        })
+      ).status,
+    ).toBe(422);
+  });
+
+  it('存在しないテナントは 404', async () => {
+    // プラットフォーム管理者はテナント境界の外側だが、存在しない id は 404
+    expect((await patchPlan(Plan.pro, 'tenant_missing')).status).toBe(404);
+  });
+
+  it('監査ログの鍵が無ければ 503 で何も変えない', async () => {
+    // **変えてから記録に失敗すると、記録の無い変更が残り再試行も効かない**
+    vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    const refused = await patchPlan(Plan.enterprise);
+    expect(refused.status).toBe(503);
+    // プランは変わっていない
+    expect((await seed.repos.tenants.findById(seed.a.id))?.plan).toBe(Plan.pro);
+    vi.unstubAllEnvs();
   });
 });

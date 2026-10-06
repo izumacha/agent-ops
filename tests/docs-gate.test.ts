@@ -32,6 +32,16 @@ import {
 import { GUARDRAIL_STOP_MAX_MS } from '../scripts/lib/step4-criteria.mjs';
 // Step5 の受け入れ基準 (Lighthouse の合格点と画面の枚数。同じく散文と突き合わせる)
 import { LIGHTHOUSE_MIN_SCORE, STEP5_SCREENS } from '../scripts/lib/step5-criteria.mjs';
+// Step6 の受け入れ基準 (カバレッジの下限と計測対象。同じく散文と突き合わせる)
+import {
+  COVERAGE_EXCLUDE,
+  COVERAGE_INCLUDE,
+  COVERAGE_MIN_PERCENT,
+} from '../scripts/lib/step6-criteria.mjs';
+// プラン別の上限の正本 (spec.md の表はこれの写しなので突き合わせる)
+import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
+// プランの一覧 (enum の正準)
+import { Plan } from '@/domain/types';
 
 // Step0 の受け入れ基準 (docs/roadmap.md と一致させる)
 const REQUIRED_USE_CASES = 10;
@@ -240,6 +250,93 @@ describe('Step0 の設計成果物', () => {
     expect(stepRow, '画面の枚数がずれている').toMatch(
       new RegExp(`(?<![0-9])${STEP5_SCREENS.length} 画面`),
     );
+  });
+
+  // Step6 の受け入れ基準のうち数で書けるもの (カバレッジの下限) と、計測対象の宣言を散文と
+  // 突き合わせる。**この Step は「全体カバレッジ」の解釈を狭めている**ので (ロジック層に限る)、
+  // ゲート運用ルール 4「基準を緩める変更はロードマップと ADR を同じ PR で更新する」の
+  // 裏打ちがここに要る — 実測でしきい値を 0 にしてもゲートは緑のまま通った
+  it('Step6 の受け入れ基準がロードマップと一致する', () => {
+    // ロードマップの Step6 の行
+    const stepRow = roadmapStepRow(6);
+    // カバレッジの下限 (散文は「≧ 80%」。数字の途中への一致は許さない)
+    expect(stepRow, 'カバレッジの下限がずれている').toMatch(
+      new RegExp(`(?<![0-9])${COVERAGE_MIN_PERCENT}%`),
+    );
+    // ロードマップ全体 (計測対象と除外は行に収まらないので別節に書いてある)
+    const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
+    // **計測対象のディレクトリが散文に並んでいること** — 対象をこっそり狭める
+    // (例: `src/app/api` を外す) 変更は、ゲートの判定だけ見ていると％が上がって緑になる
+    for (const pattern of COVERAGE_INCLUDE) {
+      // glob の部分を外した「ディレクトリの名前」で照合する
+      const directory = pattern.replace(/\/\*\*.*$/, '');
+      expect(roadmap, `計測対象 ${directory} がロードマップに書かれていない`).toContain(directory);
+    }
+    // **除外も同じく書かれていること** (除外表に増える差分をレビューで見るための前提)
+    for (const pattern of COVERAGE_EXCLUDE) {
+      // 同じくディレクトリ/ファイルの名前で照合する
+      const target = pattern.replace(/\/\*\*.*$/, '');
+      expect(roadmap, `除外 ${target} がロードマップに書かれていない`).toContain(target);
+    }
+  });
+
+  // spec.md のプラン表で、その機能の可否が書かれている列の添字を返す。
+  // **見出しに機能の識別子 (`auditChainVerify` など) を書いておく**ので、機能を足したときに
+  // 列を作り忘れればここで落ちる (列の順番を変えても追随する)
+  function featureColumnOf(feature: string): number {
+    // 仕様書を読む
+    const spec = readFileSync(join(DOCS, 'spec.md'), 'utf8');
+    // プラン表の見出し行 (先頭のセルが「プラン」)
+    const header = spec.split('\n').find((line) => /^\|\s*プラン\s*\|/.test(line));
+    // 見出しが無ければ照合が成り立たない (fail-closed)
+    expect(header, 'spec.md にプラン表の見出しが無い').toBeDefined();
+    // 識別子をバッククォートで囲んだ形で探す
+    const column = (header ?? '')
+      .split('|')
+      .findIndex((cell) => cell.includes('`' + feature + '`'));
+    // 列が無ければ、その機能は表に載っていない
+    expect(column, `spec.md のプラン表に ${feature} の列が無い`).toBeGreaterThan(0);
+    return column;
+  }
+
+  // プラン別の上限は `src/domain/plan.ts` が正本で、spec.md の表はその写し。
+  // **写しが腐ると「文書どおりに使えない API」になる**ので、値ごとに突き合わせる
+  // (プランを足したときの書き忘れもここで落ちる)
+  it('spec.md のプラン表が PLAN_LIMITS と一致する', () => {
+    // 仕様書
+    const spec = readFileSync(join(DOCS, 'spec.md'), 'utf8');
+    // プランごとの行 (表の 1 行目のセルがプラン名)
+    for (const plan of Object.values(Plan)) {
+      // その行を探す (バッククォートで囲んだプラン名で始まる行)
+      const row = spec.split('\n').find((line) => line.startsWith(`| \`${plan}\``));
+      // 行が無ければ照合が成り立たない (fail-closed)
+      expect(row, `spec.md に ${plan} の行が無い`).toBeDefined();
+      // その行に 3 つの上限が書かれていること (数字の途中への一致は許さない)
+      const limits = PLAN_LIMITS[plan];
+      for (const value of [
+        limits.maxAgents,
+        limits.proxyRateLimitPerMinute,
+        limits.maxEnabledGuardrailRules,
+      ]) {
+        expect(row, `${plan} の上限 ${value} が spec.md と食い違う`).toMatch(
+          new RegExp(`(?<![0-9])${value}(?![0-9])`),
+        );
+      }
+      // 可否も一致していること。**機能の一覧は正本から回す** — 機能名を決め打ちすると、
+      // 2 つ目の機能を足したときに表から列ごと消えてもこの検査は緑のまま通る (しかも
+      // 「どこかに『使えない』がある」だけの判定では、同じプランで可否が分かれる 2 機能を
+      // 表現できず、判定そのものが誤りになる)
+      const cells = row?.split('|').map((cell) => cell.trim()) ?? [];
+      for (const feature of PLAN_FEATURES) {
+        // その機能の列 (見出しに識別子が書いてある)
+        const cell = cells[featureColumnOf(feature)] ?? '';
+        // 列のセルが可否と一致すること (`使えない` は `使える` を含まないので取り違えない)
+        expect(
+          cell.includes(planAllows(plan, feature) ? '使える' : '使えない'),
+          `${plan} の ${feature} の可否が spec.md と食い違う (列の中身は「${cell}」)`,
+        ).toBe(true);
+      }
+    }
   });
 
   // README の見出しの「現在の段階」がロードマップと食い違っていないことを固定する。

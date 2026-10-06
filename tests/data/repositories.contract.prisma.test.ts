@@ -13,6 +13,8 @@ import { AgentStatus, Plan, Provider, Role } from '@/domain/types';
 import { userTokenExpiresAt } from '@/lib/tokens';
 // 接続先が契約テスト専用 DB であることの確認 (入口ガード・setupFiles と同じ関数を呼ぶ)
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../lib/agent-limits';
 
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
@@ -130,7 +132,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // 2 テナントに 1 件ずつ
     const a = await makeTenant(repos, 'A');
     const b = await makeTenant(repos, 'B');
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: 'bot',
       description: null,
@@ -145,7 +147,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(await repos.agents.delete(b.tenant.id, agent.id)).toBe('not_found');
     // 同テナントで名前重複
     await expect(
-      repos.agents.create({
+      createTestAgent(repos, {
         tenantId: a.tenant.id,
         name: 'bot',
         description: null,
@@ -162,7 +164,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // 2 テナントに 1 件ずつ、自テナントにはもう 1 件
     const a = await makeTenant(repos, 'A');
     const b = await makeTenant(repos, 'B');
-    const mine = await repos.agents.create({
+    const mine = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: '要約ボット',
       description: null,
@@ -170,7 +172,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       model: 'claude-sonnet-4-6',
       budgetMicroUsd: null,
     });
-    const other = await repos.agents.create({
+    const other = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: '呼ばれないボット',
       description: null,
@@ -178,7 +180,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       model: 'claude-sonnet-4-6',
       budgetMicroUsd: null,
     });
-    const theirs = await repos.agents.create({
+    const theirs = await createTestAgent(repos, {
       tenantId: b.tenant.id,
       name: '他テナント',
       description: null,
@@ -249,7 +251,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // テナント A のエージェント、テナント B のキー発行
     const a = await makeTenant(repos, 'A');
     const b = await makeTenant(repos, 'B');
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: 'bot',
       description: null,
@@ -321,7 +323,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     const a = await makeTenant(repos, 'FkA');
     const b = await makeTenant(repos, 'FkB');
     // A のエージェント
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: 'fk-bot',
       description: null,
@@ -469,7 +471,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     expect(user.id).not.toBe('attacker-chosen-user');
     expect(user.disabledAt).toBeNull();
     // エージェントも同じ (状態を suspended で作らせない)
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId,
       name: 'create-extra-bot',
       description: null,
@@ -517,7 +519,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // 2 テナントと A のエージェント
     const a = await makeTenant(repos, 'PatchA');
     const b = await makeTenant(repos, 'PatchB');
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: 'patch-bot',
       description: null,
@@ -581,8 +583,8 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       model: 'm',
       budgetMicroUsd: null,
     };
-    const first = await repos.agents.create({ ...base, name: '一号機' });
-    const second = await repos.agents.create({ ...base, name: '二号機' });
+    const first = await createTestAgent(repos, { ...base, name: '一号機' });
+    const second = await createTestAgent(repos, { ...base, name: '二号機' });
     // 既存の名前へ改名すると一意制約違反 (作成経路と同じ型へ翻訳される)
     await expect(
       repos.agents.update(a.tenant.id, second.id, { name: first.name }),
@@ -668,7 +670,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   it('履歴 (UsageEvent) を持つエージェントは削除できず、履歴が無ければ専用キーごと消える', async () => {
     // エージェント + 専用キー
     const a = await makeTenant(repos, 'A');
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: 'bot',
       description: null,
@@ -721,8 +723,8 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       budgetMicroUsd: null,
     };
     // 2 行作る (Port は行 id を決めさせないので、作ってから直接書き換える)
-    const first = await repos.agents.create({ ...common, name: 'zzz' });
-    const second = await repos.agents.create({ ...common, name: 'aaa' });
+    const first = await createTestAgent(repos, { ...common, name: 'zzz' });
+    const second = await createTestAgent(repos, { ...common, name: 'aaa' });
     // 同一ミリ秒で作られた状況を再現し、**物理的な並び順と id の昇順が食い違う**ようにする
     // (先に入った行の id を後ろにする)。こうしないと、並びから id を落としても偶然そろってしまう
     const instant = new Date('2026-09-18T00:00:00.000Z');
@@ -771,7 +773,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     };
     const rows = [];
     for (const name of ['t1', 't2', 't3']) {
-      rows.push(await repos.agents.create({ ...common, name }));
+      rows.push(await createTestAgent(repos, { ...common, name }));
     }
     // 位置をねじる: いちばん古い行の id をいちばん大きく、以降は時刻順に小さい id を与える
     const twisted = [
@@ -802,7 +804,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     // 3 件
     const a = await makeTenant(repos, 'A');
     for (const name of ['x', 'y', 'z']) {
-      await repos.agents.create({
+      await createTestAgent(repos, {
         tenantId: a.tenant.id,
         name,
         description: null,
@@ -1178,7 +1180,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   it('エージェント行のロックが存在する (削除とすれ違っても例外にならない)', async () => {
     // 紐づけ先のエージェント
     const a = await makeTenant(repos, 'AgentLockHeld');
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: 'lock-held-bot',
       description: null,
@@ -1234,7 +1236,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
   it('エージェント行のロックも子テーブルの FK 検査と衝突しない (FOR UPDATE へ強めていない)', async () => {
     // 紐づけ先のエージェント
     const a = await makeTenant(repos, 'AgentKeyShare');
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: a.tenant.id,
       name: 'keyshare-bot',
       description: null,
@@ -1320,7 +1322,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
     const a = await makeTenant(repos, 'A');
     const b = await makeTenant(repos, 'B');
     const mk = (tenantId: string, name: string) =>
-      repos.agents.create({
+      createTestAgent(repos, {
         tenantId,
         name,
         description: null,
@@ -1429,7 +1431,7 @@ describe.skipIf(!ENABLED)('prisma アダプタの契約', () => {
       model: 'gpt-往復',
       budgetMicroUsd: 1_234n,
     };
-    const agent = await repos.agents.create(agentInput);
+    const agent = await createTestAgent(repos, agentInput);
     expectStoredAsGiven(agent, agentInput);
     expectStoredAsGiven((await repos.agents.findById(tenantId, agent.id))!, agentInput);
     // 状態は入力で決めさせず既定の active から始まる

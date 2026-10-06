@@ -23,15 +23,13 @@ import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
 import { AuditAction } from '@/domain/audit/action';
 import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
-import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
-import {
-  API_MESSAGES,
-  GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
-  GUARDRAIL_RULES_MAX_PER_TENANT,
-  HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
-} from '@/lib/constants';
-import { extraRateLimiter, RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
+import { AgentStatus, IncidentStatus, Plan, Provider, RuleAction, RuleKind } from '@/domain/types';
+import { API_MESSAGES, HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE } from '@/lib/constants';
+import { extraRateLimiter, RATE_LIMIT_TIER, sharedRateLimiter } from '@/lib/api/rate-limit';
 import { call, seedEachTest } from './helpers';
+// ルールを仕込むときの上限（上限そのものを主題にしない seed なので共有の値）
+import { TEST_GUARDRAIL_RULE_LIMITS } from '../lib/guardrail-limits';
+import { guardrailRuleLimitsFor } from '@/domain/plan';
 
 // seed（2 テナント × 3 役割 + 既存エージェント）
 const seed = seedEachTest();
@@ -39,6 +37,9 @@ const seed = seedEachTest();
 // 監査ログの鍵（下限を満たす固定値）
 const AUDIT_SECRET = 'guardrails-api-test-audit-secret-0123';
 // 既定の集計窓（分）
+// **ルートが読む上限は seed のテナントのプランから導く（Step6）** — 数値を書き写すと、
+// プランの表を変えたときにテストだけが古い前提で回る（§6）。seed は pro（helpers.ts）
+const SEED_PLAN_RULE_LIMITS = guardrailRuleLimitsFor(Plan.pro);
 const WINDOW_MINUTES = 60;
 
 // ルールを 1 件作る（データ層を直接使う。API 経由の作成は別のテストで見る）
@@ -59,7 +60,7 @@ async function makeRule(options: {
       windowMinutes: WINDOW_MINUTES,
       action: options.action ?? RuleAction.stop,
     },
-    { maxEnabled: GUARDRAIL_RULES_MAX_PER_TENANT, maxRows: GUARDRAIL_RULE_ROWS_MAX_PER_TENANT },
+    TEST_GUARDRAIL_RULE_LIMITS,
   );
   // 作れていなければテストとして落とす
   if (created.status !== 'created') throw new Error(`ルールを作れません: ${created.status}`);
@@ -174,10 +175,36 @@ describe('ガードレールのルール', () => {
 
   it('ルール数の上限に達したら 409', async () => {
     // 上限ぶん作る
-    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+    for (let i = 0; i < SEED_PLAN_RULE_LIMITS.maxEnabled; i += 1) {
       await makeRule({ action: RuleAction.notify });
     }
     // 次の 1 件は作れない
+    const created = await call(createGuardrailRule, {
+      token: seed.a.tokens.admin,
+      body: {
+        kind: RuleKind.cost,
+        threshold: 1_000,
+        windowMinutes: WINDOW_MINUTES,
+        action: RuleAction.notify,
+      },
+    });
+    expect(created.status).toBe(409);
+    expect(created.json).toMatchObject({ message: API_MESSAGES.guardrailRuleLimit });
+  });
+
+  it('上限はプランごとに違う（無料プランはもっと早く 409 になる）', async () => {
+    // **ルートが読むのは認証に載ったプラン**。free の上限は pro より小さいので、
+    // pro では通る件数で 409 になる（上限を固定値へ戻す変異はここで落ちる）
+    const tenant = seed.store.tenants.get(seed.a.id);
+    if (!tenant) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(tenant.id, { ...tenant, plan: Plan.free });
+    // free の上限ぶんまで作る（pro の上限より小さいことも確かめる）
+    const freeLimits = guardrailRuleLimitsFor(Plan.free);
+    expect(freeLimits.maxEnabled).toBeLessThan(SEED_PLAN_RULE_LIMITS.maxEnabled);
+    for (let i = 0; i < freeLimits.maxEnabled; i += 1) {
+      await makeRule({ action: RuleAction.notify });
+    }
+    // 次の 1 件は作れない（pro ならまだ余裕がある件数）
     const created = await call(createGuardrailRule, {
       token: seed.a.tokens.admin,
       body: {
@@ -385,7 +412,7 @@ describe('ガードレールのルールの無効化', () => {
     // **数え方を「有効なルールだけ」にしてある** — 無効化した行も数えると、上限ぶん発火して
     // しまったテナントは「消せない・止めても枠が空かない」でルールを 1 件も作れなくなる
     const rules = [];
-    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+    for (let i = 0; i < SEED_PLAN_RULE_LIMITS.maxEnabled; i += 1) {
       rules.push(await makeRule({ action: RuleAction.notify }));
     }
     // この時点では上限に達している
@@ -423,7 +450,7 @@ describe('ガードレールのルールの無効化', () => {
     // また上限まで作る → 最初の分を有効へ戻す、で有効なルールが上限の 2 倍になり、
     // 中継 1 回ごとの集計もその倍数まで重くなる（上限は行数の天井でしか縛られなくなる）
     const first = [];
-    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+    for (let i = 0; i < SEED_PLAN_RULE_LIMITS.maxEnabled; i += 1) {
       first.push(await makeRule({ action: RuleAction.notify }));
     }
     // 全部無効化する（有効なルールは 0 件になる）
@@ -436,7 +463,7 @@ describe('ガードレールのルールの無効化', () => {
       });
     }
     // 空いた枠でもう一度上限まで作る
-    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+    for (let i = 0; i < SEED_PLAN_RULE_LIMITS.maxEnabled; i += 1) {
       await makeRule({ action: RuleAction.notify });
     }
     // 最初の分を 1 件だけ有効へ戻そうとすると 409
@@ -455,13 +482,13 @@ describe('ガードレールのルールの無効化', () => {
       [...seed.store.guardrailRules.values()].filter(
         (row) => row.tenantId === seed.a.id && row.enabled,
       ),
-    ).toHaveLength(GUARDRAIL_RULES_MAX_PER_TENANT);
+    ).toHaveLength(SEED_PLAN_RULE_LIMITS.maxEnabled);
   });
 
   it('既に有効な行を有効へ送り直しても 409 にしない（冪等。数に入っている行を二重に数えない）', async () => {
     // 上限まで作る（すべて有効）
     const rules = [];
-    for (let i = 0; i < GUARDRAIL_RULES_MAX_PER_TENANT; i += 1) {
+    for (let i = 0; i < SEED_PLAN_RULE_LIMITS.maxEnabled; i += 1) {
       rules.push(await makeRule({ action: RuleAction.notify }));
     }
     // 既に有効な行へ enabled: true を送る
@@ -479,7 +506,7 @@ describe('ガードレールのルールの無効化', () => {
     // **有効なルールの上限だけでは総行数が縛れない** — 無効化した行を数えないので、
     // 「作る → 無効化する」を繰り返すと行が無制限に増える (§9 のリソース枯渇)。
     // 行数の天井まで埋めて、有効なルールが 0 件でも作れなくなることを見る
-    for (let i = 0; i < GUARDRAIL_RULE_ROWS_MAX_PER_TENANT; i += 1) {
+    for (let i = 0; i < SEED_PLAN_RULE_LIMITS.maxRows; i += 1) {
       const rule = await makeRule({ action: RuleAction.notify });
       // すぐ無効化するので「有効なルール」は常に 0 件のまま行だけが増える
       await call(updateGuardrailRule, {
@@ -971,6 +998,43 @@ describe('監査ログと連鎖の検証', () => {
     expect(items[0]).not.toHaveProperty('prevHash');
     // 連番は文字列で運ぶ（BigInt を JSON の数値にすると 2^53 で精度が落ちる）
     expect(items[0]?.seq).toBe('1');
+  });
+
+  it('無料プランでは 403（プランの機能ゲート）', async () => {
+    // **この API でいちばん重い読み取り**（1 要求で最大 1 万行を読み同数の HMAC を計算し直す）
+    // なので Pro 以上に限る。seed は pro なので、このテストだけ free へ落とす
+    const tenant = seed.store.tenants.get(seed.a.id);
+    if (!tenant) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(tenant.id, { ...tenant, plan: Plan.free });
+    // 1 行書いてから admin で検証する（権限は足りているのでプランだけが理由になる）
+    await appendViaResolve();
+    const refused = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
+    expect(refused.status).toBe(403);
+    // **「権限が無い」とは別の文言**（役割を変えようとしても直らないことが分かるように）
+    expect(refused.json).toMatchObject({ message: API_MESSAGES.planFeatureUnavailable });
+    // 一覧の参照は free でも通る（重いのは検証の経路だけ）
+    const listed = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    expect(listed.status).toBe(200);
+  });
+
+  it('プランで断った要求はレート制限の枠を消費しない', async () => {
+    // **機能ゲートはレート制限より前**。後ろに置くと、403 になる要求がテナントの共有の枠を
+    // 減らし、同じテナントのエージェントの中継が窓のあいだ 429 になる（`requiredAction` を
+    // 枠より前に置いているのと同じ理由）。枠が減っていないことを記録表の件数で見る
+    const tenant = seed.store.tenants.get(seed.a.id);
+    if (!tenant) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(tenant.id, { ...tenant, plan: Plan.free });
+    // 何度叩いても 403
+    for (let index = 0; index < 3; index += 1) {
+      const refused = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
+      expect(refused.status).toBe(403);
+    }
+    // 共有の枠にも重い枠にも 1 件も記録されていない
+    expect(sharedRateLimiter().trackedKeys, '共有の枠を消費している').toBe(0);
+    expect(
+      extraRateLimiter(RATE_LIMIT_TIER.heavyRead)?.trackedKeys,
+      '重い経路の枠を消費している',
+    ).toBe(0);
   });
 
   it('無傷なら ok を返す', async () => {

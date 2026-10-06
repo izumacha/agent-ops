@@ -88,6 +88,22 @@ async function readBodyWithinByteLimit(request: Request, maxBytes: number): Prom
  * 415 (Content-Type 違い) → 413 (サイズ超過) → 400 (JSON 構文) → 422 (スキーマ) の順に落とす
  */
 export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Promise<T> {
+  // 読む (415 / 413) → 解釈して検証する (400 / 422)。段を分けてあるのは、
+  // 署名付きの受信 Webhook が**読んだ直後に署名を確かめてから**解釈するため
+  return parseJsonText(await readRawJsonText(request), schema);
+}
+
+/**
+ * JSON 本文を**生のテキストのまま**読む（Content-Type とサイズ上限だけを見る）。
+ *
+ * **署名付きの受信 Webhook（Step6）に要る。** 署名の対象は受け取った本文そのままなので、
+ * 解析して組み立て直した JSON では一致しない（キーの順・空白・数値の書き方が変わる）。
+ * **解釈とスキーマ検証はこの関数の外**にあるので、呼び出し側は「読む → 署名を確かめる →
+ * 解釈する」の順に並べられる（未認証の相手に解析の費用を払わせず、400 / 422 と 401 の
+ * 出方の違いから本文の形を探らせない）。読み方・上限・HTTP への写し方は 1 か所のままで、
+ * `readJsonBody` もこの関数を通る。
+ */
+export async function readRawJsonText(request: Request): Promise<string> {
   // 本文の上限は 1 か所で読み、申告サイズの事前拒否と実測の両方が同じ値を使う
   // (片方だけ定数を直に読むと、ルート別の枠を入れたとき「正直に申告した本文だけ 413」という向きの逆転が起きる)
   const maxBytes = JSON_BODY_MAX_BYTES;
@@ -105,11 +121,20 @@ export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Pro
     throw new ApiError(HTTP_STATUS.PAYLOAD_TOO_LARGE, API_MESSAGES.payloadTooLarge);
   }
   // 本文を上限バイトまでで読む (申告が無い・嘘でも超えた時点で 413)
-  const text = await readBodyWithinByteLimit(request, maxBytes);
+  return readBodyWithinByteLimit(request, maxBytes);
+}
+
+/**
+ * 生のテキストを JSON として解釈し、Zod スキーマで検証する（400 → 422 の順に落とす）。
+ *
+ * `readRawJsonText` と対で使う。**深さの上限もここが掛ける**ので、本文を取る経路は
+ * どこを通ってもこの 1 か所で同じ上限が効く。
+ */
+export function parseJsonText<T>(raw: string, schema: ZodType<T>): T {
   // JSON として解釈する (壊れていれば 400)
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(raw);
   } catch {
     throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.invalidJson);
   }

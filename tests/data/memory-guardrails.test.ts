@@ -11,6 +11,8 @@ import type { Repositories } from '@/data/ports';
 import { auditRowHash, verifyAuditChain, type StoredAuditRow } from '@/domain/audit/chain';
 import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import { secretsEqual } from '@/lib/tokens';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../lib/agent-limits';
 
 // 監査ログのハッシュ計算に使う鍵 (検査用の固定値)
 const SECRET = 'memory-test-audit-secret-0123456789ab';
@@ -48,7 +50,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
     });
     tenantId = created.tenant.id;
     // そのテナントのエージェント
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId,
       name: 'bot',
       description: null,
@@ -132,7 +134,7 @@ describe('memory アダプタ: ガードレールと監査ログ', () => {
         expiresAt: new Date(Date.now() + 86_400_000),
       },
     });
-    const otherAgent = await repos.agents.create({
+    const otherAgent = await createTestAgent(repos, {
       tenantId: other.tenant.id,
       name: 'bot-b',
       description: null,

@@ -12,6 +12,8 @@ import { Provider } from '@/domain/types';
 import { USAGE_TOKENS_MAX } from '@/lib/constants';
 import { userTokenExpiresAt } from '@/lib/tokens';
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../lib/agent-limits';
 
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
@@ -35,7 +37,7 @@ async function makeTenantWithAgent(repos: Repositories, label: string) {
     },
   });
   // そのテナントのエージェント
-  const agent = await repos.agents.create({
+  const agent = await createTestAgent(repos, {
     tenantId: created.tenant.id,
     name: `bot-${label}`,
     description: null,
@@ -237,7 +239,7 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
         expiresAt: userTokenExpiresAt(TOKEN_TTL_DAYS),
       },
     });
-    const memoryAgent = await memory.agents.create({
+    const memoryAgent = await createTestAgent(memory, {
       tenantId: memoryTenant.tenant.id,
       name: 'bot-A',
       description: null,
@@ -374,7 +376,7 @@ describe.skipIf(!ENABLED)('利用イベントの契約', () => {
   it('エージェントで絞れる (同テナントの別エージェントは入らない)', async () => {
     // 同テナントに 2 つのエージェント
     const a = await makeTenantWithAgent(repos, 'A');
-    const other = await repos.agents.create({
+    const other = await createTestAgent(repos, {
       tenantId: a.tenantId,
       name: 'bot-2',
       description: null,

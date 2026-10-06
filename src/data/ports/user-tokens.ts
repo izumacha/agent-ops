@@ -1,4 +1,5 @@
 // ユーザーのログイントークン操作の Port (契約)
+import type { Plan } from '@/domain/types';
 import type { Page, PageQuery, UserRecord, UserTokenRecord } from './types';
 
 // トークン発行の入力 (平文は渡さない。ハッシュと表示用の先頭だけ)
@@ -17,10 +18,13 @@ export interface CreateUserTokenInput {
 export type UserTokenCreateResult =
   { status: 'ok'; token: UserTokenRecord } | { status: 'not_found' } | { status: 'disabled' };
 
-// ハッシュ照合の結果 (トークンと発行先ユーザー)
+// ハッシュ照合の結果 (トークンと発行先ユーザー、そのテナントのプラン)
 export interface UserTokenLookup {
   token: UserTokenRecord;
   user: UserRecord;
+  // **テナントのプラン**。認証のたびに別のクエリでテナントを引かないよう、この照合に相乗りさせる
+  // (プランは機能ゲートとレート制限の枠が読む。Step6)
+  plan: Plan;
 }
 
 // ユーザートークン Port

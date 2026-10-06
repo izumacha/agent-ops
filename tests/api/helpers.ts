@@ -56,6 +56,9 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
     id,
     name: `テナント${label}`,
     plan: Plan.free,
+    // 課金事業者とは結び付いていない（プラン別の検査は plan を直接書き換えて行う）
+    billingCustomerId: null,
+    billingSubscriptionId: null,
     createdAt: now,
     updatedAt: now,
   });

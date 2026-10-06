@@ -14,7 +14,7 @@ import {
 } from '@/lib/api/rate-limit';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { Provider, Role } from '@/domain/types';
+import { Plan, Provider, Role } from '@/domain/types';
 import { PROXY_RATE_LIMIT_ENV, PROXY_RATE_LIMIT_PER_MINUTE } from '@/lib/constants';
 
 // 検査で使う窓の長さ（1 分）
@@ -154,6 +154,7 @@ describe('レート制限のキー', () => {
         kind: 'agent',
         tenantId: 'tn-1',
         apiKeyId: 'ak-1',
+        plan: Plan.pro,
         agent: {
           id: 'ag-1',
           tenantId: 'tn-1',
@@ -173,6 +174,7 @@ describe('レート制限のキー', () => {
       rateLimitKeyFor({
         kind: 'user',
         tenantId: 'tn-1',
+        plan: Plan.pro,
         user: {
           id: 'us-1',
           tenantId: 'tn-1',

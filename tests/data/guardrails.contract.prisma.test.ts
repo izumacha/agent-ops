@@ -21,6 +21,8 @@ import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import { secretsEqual, userTokenExpiresAt } from '@/lib/tokens';
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../lib/agent-limits';
 
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
@@ -71,7 +73,7 @@ async function makeTenantWithAgent(repos: Repositories, label: string) {
     },
   });
   // そのテナントのエージェント
-  const agent = await repos.agents.create({
+  const agent = await createTestAgent(repos, {
     tenantId: created.tenant.id,
     name: `bot-${label}`,
     description: null,

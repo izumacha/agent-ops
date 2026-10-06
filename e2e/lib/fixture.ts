@@ -16,6 +16,8 @@ import {
   GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
 } from '../../src/lib/constants';
 import { Provider, RuleAction, RuleKind } from '../../src/domain/types';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from '../../tests/lib/agent-limits';
 
 // 仕込んだデータの受け渡し先。**ファイル経由にする**のは、Playwright の globalSetup と
 // 各ワーカー・Lighthouse の計測が別プロセスで動くため（環境変数では渡らない）
@@ -86,7 +88,7 @@ export async function seedE2eFixture(): Promise<E2eSeed> {
       token: issued.input,
     });
     // エージェントを 1 件作る
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId: created.tenant.id,
       name: AGENT_NAME,
       description: '請求書 PDF を読み取って仕訳の候補を作るエージェント',

@@ -19,6 +19,8 @@ import {
 } from '@/domain/types';
 import { GUARDRAIL_ERROR_RATE_MIN_REQUESTS } from '@/domain/guardrail/rule';
 import { GUARDRAIL_WINDOW_MAX_MINUTES } from '@/lib/constants';
+// エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
+import { createTestAgent } from './lib/agent-limits';
 
 // 監査ログの鍵（下限を満たす固定値）
 const AUDIT_SECRET = 'evaluate-test-audit-secret-0123456789';
@@ -82,7 +84,7 @@ describe('ガードレールの判定', () => {
     });
     tenantId = created.tenant.id;
     // 判定対象のエージェント
-    const agent = await repos.agents.create({
+    const agent = await createTestAgent(repos, {
       tenantId,
       name: 'bot',
       description: null,

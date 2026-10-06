@@ -11,10 +11,12 @@ import type {
   ActiveRuleQuery,
   AgentFilter,
   AgentRecord,
+  AgentLimits,
   AgentsPort,
   ApiKeyRecord,
   ApiKeysPort,
   AppendAuditLogInput,
+  BillingEventsPort,
   AuditHashInput,
   AuditLogRecord,
   AuditLogsPort,
@@ -38,7 +40,11 @@ import type {
   CreateEvaluationRunInput,
   CreateEvaluationSetInput,
   CreateTenantInput,
+  CreateAgentResult,
   CreateTenantResult,
+  RecordBillingEventInput,
+  RecordBillingEventResult,
+  UpdateTenantPlanInput,
   CreateUserInput,
   CreateUserTokenInput,
   DailyUsageQuery,
@@ -103,6 +109,61 @@ function rethrowDuplicate(error: unknown, field: string): never {
   if (isPrismaError(error, UNIQUE_VIOLATION)) throw new DuplicateError(field);
   // それ以外は握り潰さず投げ直す
   throw error;
+}
+
+/**
+ * 一意な列が**複数ある**更新で、実際に衝突した列を選んで翻訳する。
+ *
+ * 列名は `DuplicateError.field` に入り 422 の `issues.path` へ出るので、固定の名前を渡すと
+ * 「サブスクリプション ID が衝突したのに顧客 ID のせいだと答える」形になる。memory アダプタは
+ * 実際に衝突した列を返すので、固定にすると**両アダプタの答えが割れる**（ADR-0006 の死角）。
+ *
+ * **どこに列名が入るかはドライバの形に依る。** Prisma 7 のドライバアダプタ経由では `meta.target`
+ * が無く、違反した**索引の名前**が `meta.driverAdapterError.cause.constraint.index` に入る
+ * （実測: `Tenant_billingSubscriptionId_key`）。将来どちらの形になっても拾えるよう両方を見て、
+ * 候補の列名が「索引名の `_` 区切りの一部」として現れるかで判定する。
+ * 読めなかったときは先頭の候補へ倒す（名前を落とすと利用者がどの項目を直せばよいか分からない）。
+ * 正しい列を選べていることは `tests/data/billing.contract.prisma.test.ts` が実 DB で固定する。
+ */
+function rethrowDuplicateAmong(error: unknown, candidates: readonly string[]): never {
+  // 一意制約違反でなければそのまま投げ直す
+  if (!isPrismaError(error, UNIQUE_VIOLATION)) throw error;
+  // エラーの付随情報（形はドライバに依るので unknown のまま辿る）
+  const meta: unknown = (error as Prisma.PrismaClientKnownRequestError).meta;
+  // 列名が直接入る形（`meta.target`）を文字列の配列へ正規化する
+  const target = readUnknownPath(meta, ['target']);
+  const targets = Array.isArray(target)
+    ? target.map(String)
+    : typeof target === 'string'
+      ? [target]
+      : [];
+  // 索引の名前が入る形（ドライバアダプタ経由）
+  const index = readUnknownPath(meta, ['driverAdapterError', 'cause', 'constraint', 'index']);
+  // 索引名を `_` で囲んでおくと、端の列名も「区切りに挟まれた一部」として同じ規則で探せる
+  const indexName = typeof index === 'string' ? `_${index}_` : '';
+  // 候補のうち実際に違反したものを選ぶ（読めなければ先頭の候補）
+  const field =
+    candidates.find(
+      (candidate) => targets.includes(candidate) || indexName.includes(`_${candidate}_`),
+    ) ?? candidates[0];
+  throw new DuplicateError(field);
+}
+
+// unknown のまま入れ子のプロパティを辿る（形がドライバ依存なので型を主張しない。
+// 途中が無い・オブジェクトでないときは undefined を返す = 読めなかった扱い）
+function readUnknownPath(value: unknown, path: readonly string[]): unknown {
+  // 現在位置（最初は受け取った値そのもの）
+  let current: unknown = value;
+  // キーを 1 つずつ降りる
+  for (const key of path) {
+    // オブジェクトでなければそこで読めない
+    if (typeof current !== 'object' || current === null) return undefined;
+    // 自身のキーとしてあるものだけを信用する（プロトタイプ由来の名前を拾わない）
+    if (!Object.hasOwn(current, key)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  // 辿り切った値
+  return current;
 }
 
 // カーソルより後ろの行だけに絞る where 条件 (キーセット: createdAt が後、または同時刻で id が後)。
@@ -281,6 +342,39 @@ class PrismaTenants implements TenantsPort {
   async findById(id: string): Promise<TenantRecord | null> {
     // 主キーで検索する
     return this.db.tenant.findUnique({ where: { id } });
+  }
+
+  // 課金事業者側の顧客 ID で引く (一意索引があるので 1 件以下)
+  async findByBillingCustomerId(customerId: string): Promise<TenantRecord | null> {
+    // 一意索引で検索する (テナント境界の外側 — Webhook が「どのテナントか」を決める唯一の経路)
+    return this.db.tenant.findUnique({ where: { billingCustomerId: customerId } });
+  }
+
+  // プラン (と課金事業者側の id) を変える。対象が無ければ null
+  async updatePlan(tenantId: string, input: UpdateTenantPlanInput): Promise<TenantRecord | null> {
+    // 主キーで 1 クエリで更新し、無ければ null・一意制約違反は翻訳する。
+    // **`billing*` を渡されたときだけ書く** — 素の `input` を data へ渡すと、省略した項目が
+    // undefined として入って「変更しない」ではなく「null で上書き」に化ける writer がありうる
+    try {
+      return await updateOrNull(() =>
+        this.db.tenant.update({
+          where: { id: tenantId },
+          data: {
+            plan: input.plan,
+            ...(input.billingCustomerId !== undefined
+              ? { billingCustomerId: input.billingCustomerId }
+              : {}),
+            ...(input.billingSubscriptionId !== undefined
+              ? { billingSubscriptionId: input.billingSubscriptionId }
+              : {}),
+          },
+        }),
+      );
+    } catch (error) {
+      // 顧客 ID / サブスクリプション ID の一意制約違反 (2 テナントが同じ契約を名乗る) を翻訳する。
+      // **どちらが衝突したかは Prisma の meta から選ぶ** (memory 側と答えをそろえる)
+      rethrowDuplicateAmong(error, ['billingCustomerId', 'billingSubscriptionId']);
+    }
   }
 
   // テナント + admin + トークンを 1 トランザクションで作る
@@ -470,16 +564,17 @@ class PrismaUserTokens implements UserTokensPort {
 
   // ハッシュで引く (認証経路。発行先ユーザーも同時に取る)
   async findByHash(tokenHash: string): Promise<UserTokenLookup | null> {
-    // 一意なハッシュで検索し、ユーザーを同時に読む (N+1 を避ける)
+    // 一意なハッシュで検索し、ユーザーと**テナントのプラン**を同時に読む (N+1 を避ける。
+    // プランは認証のたびに要るので、別の問い合わせにすると全 API に 1 往復が増える)
     const row = await this.db.userToken.findUnique({
       where: { tokenHash },
-      include: { user: true },
+      include: { user: true, tenant: { select: { plan: true } } },
     });
     // 無ければ null
     if (!row) return null;
-    // ユーザー部分を分離して返す
-    const { user, ...token } = row;
-    return { token, user };
+    // ユーザーとテナントの部分を分離して返す (トークン行に余分な項目を混ぜない)
+    const { user, tenant, ...token } = row;
+    return { token, user, plan: tenant.plan };
   }
 
   // あるユーザーのトークン一覧
@@ -536,14 +631,39 @@ class PrismaAgents implements AgentsPort {
     return new Map(rows.map((row) => [row.id, row.name]));
   }
 
-  // 作成 (名前重複は DuplicateError)
-  async create(input: CreateAgentInput): Promise<AgentRecord> {
-    // 挿入し、一意制約違反なら翻訳する
-    try {
-      return await this.db.agent.create({ data: agentCreateData(input) });
-    } catch (error) {
-      rethrowDuplicate(error, 'name');
-    }
+  // 作成 (名前重複は DuplicateError、プランの上限超過は 'too_many_agents')
+  async create(input: CreateAgentInput, limits: AgentLimits): Promise<CreateAgentResult> {
+    // **件数の判定と挿入を同じトランザクションに置き、テナント行をロックして直列化する** —
+    // 数えてから挿入する形に分けると、同時に 2 件来たときにどちらの count も上限未満を返して
+    // 上限を超える (`PrismaGuardrailRules.create` と同じ理由・同じ手口)
+    return this.db.$transaction(async (tx: Db) => {
+      // 同じテナントの要求を 1 本ずつ通す (子テーブル INSERT の FK 検査 (FOR KEY SHARE) とは衝突しない)。
+      // **行が無い場合 (テナントが存在しない) はここでは判定しない** — 件数の上限とは別の事情を
+      // `too_many_agents` に押し込むと「上限に達しています」という嘘の 409 になる。認証を通った
+      // 主体のテナントは必ず存在するので、起きたときは挿入の FK 違反で大きな音を立てて落ちてよい
+      // (memory 側は FK を持たないのでこの経路に差は現れない)
+      await tx.$queryRaw`SELECT id FROM "Tenant" WHERE id = ${input.tenantId} FOR NO KEY UPDATE`;
+      // **名前の重複を先に見る** — memory 側と答えをそろえる (ADR-0006 の死角。順序が割れると
+      // 「上限に達していて、かつ名前も重複している」要求で 409 と 422 に答えが分かれる)
+      const duplicate = await tx.agent.findFirst({
+        where: { tenantId: input.tenantId, name: input.name },
+        select: { id: true },
+      });
+      // 同名があれば一意制約違反として投げる (ルートが 422 へ写す)
+      if (duplicate !== null) throw new DuplicateError('name');
+      // 現在の件数を数える (同じトランザクションの中。外に出すと同時の 2 件が上限を超える)
+      const existing = await tx.agent.count({ where: { tenantId: input.tenantId } });
+      // 上限に達していれば作らない
+      if (existing >= limits.maxAgents) return { status: 'too_many_agents' as const };
+      // 挿入する。**一意制約違反の翻訳は残す** — 上の確認とこの挿入の間に同名が入る窓は
+      // テナント行のロックで閉じているが、前提が崩れたときに別の原因へ化けさせない
+      try {
+        const agent = await tx.agent.create({ data: agentCreateData(input) });
+        return { status: 'created' as const, agent };
+      } catch (error) {
+        rethrowDuplicate(error, 'name');
+      }
+    });
   }
 
   // 更新 (undefined は変更しない。対象が無ければ null、名前重複は DuplicateError)
@@ -624,16 +744,17 @@ class PrismaApiKeys implements ApiKeysPort {
 
   // ハッシュで引く (プロキシの認証経路。**テナントを跨いで検索する唯一の操作**)
   async findByHash(keyHash: string): Promise<ApiKeyLookup | null> {
-    // 一意なハッシュで検索し、紐づくエージェントを同時に読む (N+1 を避ける)
+    // 一意なハッシュで検索し、紐づくエージェントと**テナントのプラン**を同時に読む (N+1 を避ける。
+    // 中継はプラン別の枠でレート制限するので、プランは中継 1 回ごとに要る)
     const row = await this.db.apiKey.findUnique({
       where: { keyHash },
-      include: { agent: true },
+      include: { agent: true, tenant: { select: { plan: true } } },
     });
     // 無ければ null
     if (!row) return null;
-    // エージェント部分を分離して返す (テナント共通キーなら null)
-    const { agent, ...key } = row;
-    return { key, agent };
+    // エージェントとテナントの部分を分離して返す (テナント共通キーなら agent は null)
+    const { agent, tenant, ...key } = row;
+    return { key, agent, plan: tenant.plan };
   }
 
   // 失効 (見つからなければ null。既に失効済みなら日時はそのまま)
@@ -1338,6 +1459,35 @@ class PrismaAuditLogs implements AuditLogsPort {
   }
 }
 
+// 受信した課金イベント (冪等性の記録)
+class PrismaBillingEvents implements BillingEventsPort {
+  // クライアントを受け取る
+  constructor(private readonly db: PrismaClient) {}
+
+  // 1 度だけ記録する (2 通目は duplicate)
+  async recordOnce(input: RecordBillingEventInput): Promise<RecordBillingEventResult> {
+    // **一意制約の違反そのものを「2 通目」の判定に使う** — 「処理済みか先に SELECT してから
+    // INSERT」の形にすると、同時に届いた 2 通がどちらも「未処理」を読んで両方が通る
+    // (Webhook は並行して届く)。制約に任せれば、競合しても必ず 1 通だけが recorded になる
+    try {
+      await this.db.billingEvent.create({
+        data: {
+          provider: input.provider,
+          eventId: input.eventId,
+          type: input.type,
+          tenantId: input.tenantId,
+        },
+      });
+      // 挿入できたので、この呼び出しが初めて記録した
+      return 'recorded';
+    } catch (error) {
+      // 一意制約違反 (P2002) なら「もう記録済み」。それ以外は原因を隠さずそのまま投げる
+      if (isPrismaError(error, UNIQUE_VIOLATION)) return 'duplicate';
+      throw error;
+    }
+  }
+}
+
 // prisma アダプタ一式を組み立てる (Composition Root と契約テストが呼ぶ)
 export function createPrismaRepos(db: PrismaClient): Repositories {
   // 各 Port を同じクライアントで結線して返す
@@ -1352,5 +1502,6 @@ export function createPrismaRepos(db: PrismaClient): Repositories {
     guardrailRules: new PrismaGuardrailRules(db),
     incidents: new PrismaIncidents(db),
     auditLogs: new PrismaAuditLogs(db),
+    billingEvents: new PrismaBillingEvents(db),
   };
 }

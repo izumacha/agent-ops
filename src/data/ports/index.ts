@@ -2,6 +2,7 @@
 import type { AgentsPort } from './agents';
 import type { ApiKeysPort } from './api-keys';
 import type { AuditLogsPort } from './audit-logs';
+import type { BillingEventsPort } from './billing-events';
 import type { EvaluationsPort } from './evaluations';
 import type { GuardrailRulesPort, IncidentsPort } from './guardrails';
 import type { TenantsPort } from './tenants';
@@ -21,12 +22,14 @@ export interface Repositories {
   guardrailRules: GuardrailRulesPort;
   incidents: IncidentsPort;
   auditLogs: AuditLogsPort;
+  billingEvents: BillingEventsPort;
 }
 
 // 各 Port の型と入力型をここから再公開する (利用側は個別ファイルのパスを知らなくてよい)
 export type * from './agents';
 export type * from './api-keys';
 export type * from './audit-logs';
+export type * from './billing-events';
 export type * from './evaluations';
 export type * from './guardrails';
 export type * from './tenants';

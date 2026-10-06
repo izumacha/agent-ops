@@ -16,7 +16,7 @@ import { API_MESSAGES } from '@/lib/constants';
 import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
-import { PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
+import { PLAN_CHANGE_LINK, PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
 
 // seed（各テストの前に作り直す）
 const seed = seedEachTest();
@@ -34,6 +34,8 @@ function webhookBody(options: {
   plan?: Plan;
   // `null` を渡すと `data.object.id` を**省いた**本文になる（事業者が ID を運ばない再送の形）
   subscriptionId?: string | null;
+  // 契約の状態（既定は有効な契約。`null` で項目を省く）
+  status?: string | null;
 }): Record<string, unknown> {
   return {
     id: options.eventId ?? 'evt_1',
@@ -42,6 +44,7 @@ function webhookBody(options: {
       object: {
         id: options.subscriptionId === undefined ? 'sub_1' : (options.subscriptionId ?? undefined),
         customer: options.customer === undefined ? 'cus_1' : options.customer,
+        status: options.status === undefined ? 'active' : (options.status ?? undefined),
         items:
           options.plan === undefined
             ? undefined
@@ -246,6 +249,20 @@ describe('POST /billing/webhook', () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     const result = await postWebhook(webhookBody({ plan: Plan.pro, customer: null }));
     expect(result.json).toEqual({ received: true, applied: false });
+    // 契約の変更イベントなので、引けなかったことは残す（設定の取り違えに気付けるように）
+    expect(logged).toHaveBeenCalledTimes(1);
+    logged.mockRestore();
+  });
+
+  it('顧客 ID を持たない無関係な種別では「テナントが無い」を鳴らさない', async () => {
+    // **事業者は契約と無関係な種別も送る**（`payout.paid` 等は顧客 ID を持たない）。
+    // 種別を見ずにログへ残すと、そのたびに「設定が違う」と鳴って本当の取り違えが埋もれる
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await postWebhook(
+      webhookBody({ type: 'payout.paid', customer: null, subscriptionId: null }),
+    );
+    expect(result.json).toEqual({ received: true, applied: false });
+    expect(logged).not.toHaveBeenCalled();
     logged.mockRestore();
   });
 
@@ -307,6 +324,35 @@ describe('POST /billing/webhook', () => {
     });
   });
 
+  it('連携の付け替えは監査ログから読み取れる（プランが同じでも）', async () => {
+    // **顧客 ID は「以後どのテナントのプランが事業者のイベントで変わるか」を決める。**
+    // プランだけを残すと `from` と `to` が同じなので、付け替えが「何も変わっていない行」に見える
+    await linkCustomerViaApi('cus_move', Plan.pro);
+    // 連携を外す（プランは据え置き）
+    await call(updateTenantPlan, {
+      method: 'PATCH',
+      token: PLATFORM_TOKEN,
+      params: { tenantId: seed.a.id },
+      body: { plan: Plan.pro, billingCustomerId: null },
+    });
+    // そのテナントの admin で監査ログを読む（古い順。createdAt → id）
+    const logs = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    const items = (logs.json as { items: { payload: Record<string, unknown> }[] }).items;
+    // 2 行とも from === to だが、連携の書き方で区別できる
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.payload.customerLink)).toEqual([
+      PLAN_CHANGE_LINK.set,
+      PLAN_CHANGE_LINK.cleared,
+    ]);
+    // 省略した項目は「据え置き」として残る（事業者側の id の値そのものは残さない）
+    expect(items[0]).toMatchObject({
+      payload: {
+        subscriptionLink: PLAN_CHANGE_LINK.unchanged,
+        source: PLAN_CHANGE_SOURCE.platformAdmin,
+      },
+    });
+  });
+
   it('監査ログの鍵が無ければ 503 で、受信記録も残さない', async () => {
     // **記録してから反映に失敗すると、再送は「2 通目」として無視され永久に反映されない。**
     // 鍵が無いなら 1 行も記録せず 503 を返し、事業者の再送でやり直させる
@@ -325,6 +371,40 @@ describe('POST /billing/webhook', () => {
     await linkCustomer();
     const result = await postWebhook(webhookBody({ plan: Plan.pro }));
     expect(result.headers.get('Cache-Control')).toContain('no-store');
+  });
+
+  it('解約後に届いた「価格は有料のまま」の再送で有料へ戻らない', async () => {
+    // **1 回の解約で updated（canceled）と deleted の 2 通が届き、配信順は保証されない。**
+    // 状態を見ないと、deleted を処理して free になった後の updated が価格から pro へ戻す
+    await linkCustomerViaApi('cus_1', Plan.pro);
+    // 解約（deleted）が先に届く
+    expect(
+      (
+        await postWebhook(
+          webhookBody({ eventId: 'evt_del', type: 'customer.subscription.deleted' }),
+        )
+      ).json,
+    ).toEqual({ received: true, applied: true });
+    expect(await planOfA()).toBe(Plan.free);
+    // そのあとに「価格は pro・状態は canceled」の updated が届く
+    expect(
+      (await postWebhook(webhookBody({ eventId: 'evt_upd', plan: Plan.pro, status: 'canceled' })))
+        .json,
+    ).toEqual({ received: true, applied: true });
+    // free のまま（有料へ戻らない）
+    expect(await planOfA()).toBe(Plan.free);
+  });
+
+  it('支払いが完了していない契約では有料プランを付けない', async () => {
+    // incomplete の本文（価格は enterprise のまま）。**既存のプランも取り消さない**
+    await linkCustomerViaApi('cus_1', Plan.free);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await postWebhook(webhookBody({ plan: Plan.enterprise, status: 'incomplete' }));
+    expect(result.json).toEqual({ received: true, applied: false });
+    expect(await planOfA()).toBe(Plan.free);
+    // 契約の変更イベントなので、反映できなかったことは残す
+    expect(logged).toHaveBeenCalledTimes(1);
+    logged.mockRestore();
   });
 
   it('連携: プラットフォーム管理者が結び付けた顧客 ID で Webhook がテナントを引ける', async () => {

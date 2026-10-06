@@ -6,7 +6,8 @@
 // プランの反映が止まる。**読むのは必要な項目だけ**で、それ以外は通過させる。
 //
 // 読む項目は「どのイベントか（id / type）」「どの顧客か（customer）」「どのプランか（価格の
-// lookup_key）」だけ。金額・税・請求書などは**読まない**（読まない値は保存もしない）。
+// lookup_key）」「契約が有効か（status）」だけ。金額・税・請求書などは**読まない**
+// （読まない値は保存もしない）。
 import { z } from './zod';
 import { BILLING_WEBHOOK_FIELD_MAX_LENGTH } from '@/lib/constants';
 
@@ -33,6 +34,10 @@ export const billingWebhookEventSchema = z.object({
       id: billingId.nullish(),
       // 顧客 ID（これでテナントを引く。無ければどのテナントか決められない）
       customer: billingId.nullish(),
+      // 契約の状態（`active` / `canceled` / `incomplete` …）。**価格だけでプランを決めない**ため
+      // に読む — 支払いが完了していない契約や解約済みの契約にも価格は載っているので、状態を
+      // 見ないと「払っていない契約で有料プランが付く」「解約後に有料へ戻る」が起きる
+      status: z.string().min(1).max(BILLING_WEBHOOK_FIELD_MAX_LENGTH).nullish(),
       // 契約の明細（プランの判定に使う最初の 1 件だけを読む）
       items: z
         .object({

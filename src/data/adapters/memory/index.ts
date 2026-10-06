@@ -429,14 +429,16 @@ class MemoryAgents implements AgentsPort {
 
   // 作成 (名前重複は DuplicateError、プランの上限超過は 'too_many_agents')
   async create(input: CreateAgentInput, limits: AgentLimits): Promise<CreateAgentResult> {
-    // 同テナントに同じ名前があれば一意制約違反
-    if (this.rowsOf(input.tenantId).some((row) => row.name === input.name)) {
-      throw new DuplicateError('name');
-    }
+    // そのテナントの行 (**1 度だけ数える** — 同じ走査を 2 回するとテナントの行数ぶん無駄になる)
+    const rows = this.rowsOf(input.tenantId);
     // **名前の重複を先に見る** — prisma 側も同じ順序にしてある (ADR-0006 の死角。
     // 順序が割れると「上限に達していて、かつ名前も重複している」要求で答えが 409 と 422 に分かれ、
     // ルートは片方の答えで書かれて本番だけ別のステータスになる)
-    if (this.rowsOf(input.tenantId).length >= limits.maxAgents) {
+    if (rows.some((row) => row.name === input.name)) {
+      throw new DuplicateError('name');
+    }
+    // プランの上限に達していれば 409 へ写す戻り値を返す
+    if (rows.length >= limits.maxAgents) {
       return { status: 'too_many_agents' };
     }
     // 作成時刻

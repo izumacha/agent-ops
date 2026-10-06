@@ -259,6 +259,10 @@ curl -s -X POST http://localhost:3000/api/v1/billing/webhook \
 手がかりになる）。Stripe の SDK は入れていない（依存を増やさないため。
 [ADR-0012](./docs/adr/0012-plans-and-billing.md)）。
 
+**価格だけでなく契約の状態（`status`）も見る。** `active` / `trialing` / `past_due` は価格のプランへ反映し、
+`canceled` / `unpaid` / `paused` は無料プランへ落とし、`incomplete`（支払い未完了）や知らない状態は
+**何もしません**（払う前に有料の枠が付かない／解約後に届いた「価格は有料のまま」の再送で戻らない）。
+
 **同じイベントの 2 通目は何もせず 200**（冪等）。判定は DB の一意制約（`BillingEvent` の
 `(provider, eventId)`）に任せるので、**同時に届いた 2 通でも 1 通だけが反映される**。知らない種別・
 知らない顧客 ID でも「受け取った事実」は記録して 200 を返す（エラーにすると事業者の再送が延々と続く）。

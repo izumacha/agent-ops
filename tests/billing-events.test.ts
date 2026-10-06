@@ -9,8 +9,10 @@ import { describe, expect, it } from 'vitest';
 import {
   BILLING_EVENT_EFFECT,
   BILLING_PRICE_LOOKUP_KEYS,
+  BILLING_SUBSCRIPTION_STATUS_EFFECT,
   isPlanChangeEvent,
   planChangeFor,
+  subscriptionStatusEffect,
 } from '@/lib/billing/events';
 import { Plan } from '@/domain/types';
 import type { BillingWebhookEvent } from '@/lib/validations/billing';
@@ -20,6 +22,8 @@ function event(options: {
   type: string;
   lookupKey?: string | null;
   subscriptionId?: string | null;
+  // 契約の状態（既定は有効な契約。`null` を渡すと項目そのものが無い本文になる）
+  status?: string | null;
 }): BillingWebhookEvent {
   return {
     id: 'evt_1',
@@ -29,6 +33,9 @@ function event(options: {
         // `null` を渡したときは本当に null にする（`??` だと既定値へ戻ってしまう）
         id: options.subscriptionId === undefined ? 'sub_1' : options.subscriptionId,
         customer: 'cus_1',
+        // 既定は有効な契約（状態を見ない版では「価格だけで有料プランが付く」ので、
+        // 既定を有効にしておかないと他のケースが状態の判定を一度も通らない）
+        status: options.status === undefined ? 'active' : options.status,
         items:
           options.lookupKey === undefined
             ? undefined
@@ -54,6 +61,76 @@ describe('イベントからプランへの写像', () => {
       plan,
       subscriptionId: 'sub_1',
     });
+  });
+
+  it.each(
+    // **状態の表を全網羅で回す**（表に値を足してケースを書き忘れる形を落とす）
+    Object.entries(BILLING_SUBSCRIPTION_STATUS_EFFECT).map(
+      ([status, effect]) => [status, effect] as const,
+    ),
+  )('状態 %s は %s として扱う', (status, effect) => {
+    // 価格は常に pro。状態だけで答えが変わることを見る
+    const change = planChangeFor(
+      event({ type: 'customer.subscription.updated', lookupKey: 'agent-ops-pro', status }),
+    );
+    // 有効なら価格のプラン、終わっていれば free、まだ有効でないなら何もしない
+    if (effect === 'fromPrice') expect(change).toEqual({ plan: Plan.pro, subscriptionId: 'sub_1' });
+    if (effect === 'toFree') expect(change).toEqual({ plan: Plan.free, subscriptionId: 'sub_1' });
+    if (effect === 'ignore') expect(change).toBeNull();
+  });
+
+  it('解約の 2 通目（canceled のまま価格が残る本文）で有料へ戻らない', () => {
+    // **1 回の解約で updated（canceled）と deleted の 2 通が届き、順序は保証されない。**
+    // 状態を見ないと、deleted を先に処理した後の updated が価格から pro へ戻してしまう
+    expect(
+      planChangeFor(
+        event({
+          type: 'customer.subscription.updated',
+          lookupKey: 'agent-ops-pro',
+          status: 'canceled',
+        }),
+      ),
+    ).toEqual({ plan: Plan.free, subscriptionId: 'sub_1' });
+  });
+
+  it('支払いが完了していない契約では有料プランを付けない', () => {
+    // Stripe の推奨フロー（default_incomplete）や 3DS 中断は incomplete で届く。
+    // **価格は enterprise のまま**なので、状態を見ないと払う前に最上位の枠が付く
+    expect(
+      planChangeFor(
+        event({
+          type: 'customer.subscription.created',
+          lookupKey: 'agent-ops-enterprise',
+          status: 'incomplete',
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it('状態が無い・知らない状態では何もしない（権限を増やさない側へ倒す）', () => {
+    // 項目そのものが無い本文
+    expect(
+      planChangeFor(
+        event({ type: 'customer.subscription.updated', lookupKey: 'agent-ops-pro', status: null }),
+      ),
+    ).toBeNull();
+    // 表に無い状態（事業者が新しい状態を足した場合）
+    expect(subscriptionStatusEffect('brand_new_status')).toBe('ignore');
+    // プロトタイプ由来の名前で表を素通りしない
+    expect(subscriptionStatusEffect('constructor')).toBe('ignore');
+  });
+
+  it('解約（deleted）は状態を見ずに free へ落とす', () => {
+    // **deleted は状態に関わらず解約**（status が active のまま届くことがある）
+    expect(
+      planChangeFor(
+        event({
+          type: 'customer.subscription.deleted',
+          lookupKey: 'agent-ops-pro',
+          status: 'active',
+        }),
+      ),
+    ).toEqual({ plan: Plan.free, subscriptionId: 'sub_1' });
   });
 
   it('解約は価格を見ずに free へ落とす', () => {

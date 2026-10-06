@@ -100,6 +100,10 @@ type Spec = {
 };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
 
+// プランの正本（契約に並べる鍵をここから導く。綴りを 2 か所に書かない）
+const { PLAN_FEATURES, PLAN_LIMITS } = await import('@/domain/plan');
+const { Plan } = await import('@/domain/types');
+
 // 契約の本文スキーマ → 実装の Zod スキーマ。表に載っていない本文が契約に増えれば下のテストが落ちるので、
 // 「対応を書き忘れたまま契約と実装が食い違う」ことが起きない (キーは $ref の名前、インラインは "METHOD /path")
 const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
@@ -832,5 +836,58 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       readKeysOf((probe) => ({ error: probe })),
       'error から読む項目名',
     ).toEqual(errorFields.filter((field) => field !== 'message').sort());
+  });
+});
+
+describe('Billing の契約がプランの表と一致する', () => {
+  // 契約の Billing スキーマ
+  const billing = spec.components.schemas.Billing;
+
+  it('features の鍵は PLAN_FEATURES から導かれる', () => {
+    // **`GET /billing` は `Object.fromEntries(PLAN_FEATURES…) as 契約の型` で組み立てる**ので、
+    // 機能を 1 つ足すと応答に鍵が増える。契約側が増えていないと、型は `as` で通り
+    // typecheck も既存のテストも緑のまま**契約違反の応答**になる（厳格なクライアントは拒否する）
+    const required = (billing?.required ?? []) as string[];
+    // features が必須であること（省略可だと「無い応答」も契約どおりになってしまう）
+    expect(required, 'features が必須でない').toContain('features');
+    // 機能ごとの可否を並べる object
+    const features = billing?.properties?.features as
+      | {
+          required?: string[];
+          properties?: Record<string, unknown>;
+          additionalProperties?: unknown;
+        }
+      | undefined;
+    // 鍵の集合が正本と一致すること（両向き。足し忘れも古い登録も落ちる）
+    expect([...(features?.required ?? [])].sort(), 'features の必須の鍵').toEqual(
+      [...PLAN_FEATURES].sort(),
+    );
+    expect(Object.keys(features?.properties ?? {}).sort(), 'features の鍵').toEqual(
+      [...PLAN_FEATURES].sort(),
+    );
+    // 未知の鍵を許さない（許すと「契約に無い機能名」を黙って返せる）
+    expect(features?.additionalProperties, 'features が未知の鍵を許している').toBe(false);
+  });
+
+  it('limits の鍵は PlanLimits から導かれる', () => {
+    // 上限の鍵（`features` は可否なので除く。実体の object から導いて綴りを書き写さない）
+    const limitKeys = Object.keys(PLAN_LIMITS[Plan.free])
+      .filter((key) => key !== 'features')
+      .sort();
+    // 1 つも読めなければ導出が壊れている（fail-closed）
+    expect(limitKeys.length, '上限の鍵を 1 つも読めない').toBeGreaterThan(0);
+    // 契約側の limits
+    const limits = billing?.properties?.limits as
+      | {
+          required?: string[];
+          properties?: Record<string, unknown>;
+          additionalProperties?: unknown;
+        }
+      | undefined;
+    // 鍵の集合が一致すること（上限を足して契約へ出し忘れる形を落とす）
+    expect([...(limits?.required ?? [])].sort(), 'limits の必須の鍵').toEqual(limitKeys);
+    expect(Object.keys(limits?.properties ?? {}).sort(), 'limits の鍵').toEqual(limitKeys);
+    // 未知の鍵を許さない
+    expect(limits?.additionalProperties, 'limits が未知の鍵を許している').toBe(false);
   });
 });

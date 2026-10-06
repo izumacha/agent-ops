@@ -26,6 +26,36 @@ export const PLAN_CHANGE_SOURCE = {
 /** プランを変えた経路の型 */
 export type PlanChangeSource = (typeof PLAN_CHANGE_SOURCE)[keyof typeof PLAN_CHANGE_SOURCE];
 
+/**
+ * 課金連携（顧客 ID / サブスクリプション ID）をどう書いたか。
+ *
+ * **プランだけを記録に残すと、連携の変更が痕跡なしで通る** — 顧客 ID は「以後どのテナントの
+ * プランを事業者のイベントが変えるか」を決めるので、付け替えは契約の付け替えそのもの。
+ * ところが `from` と `to` は同じプランのままなので、payload が 2 つとも「何も変わっていない行」に
+ * 見える（監査ログを読む側が「なぜ別のテナントがこの契約のイベントを受け取り始めたか」を
+ * 再構成できない）。**値そのものは残さない**（事業者側の id を監査テーブルへ複製しない）。
+ */
+export const PLAN_CHANGE_LINK = {
+  // 値を入れた（結び付けた・付け替えた）
+  set: 'set',
+  // null を渡して外した
+  cleared: 'cleared',
+  // 項目を省いたので据え置き
+  unchanged: 'unchanged',
+} as const;
+/** 連携の書き方の型 */
+export type PlanChangeLink = (typeof PLAN_CHANGE_LINK)[keyof typeof PLAN_CHANGE_LINK];
+
+// 渡された値から「どう書いたか」を導く（呼び出し側に判断を写さない）
+function linkOf(value: string | null | undefined): PlanChangeLink {
+  // 項目を省いたなら据え置き
+  if (value === undefined) return PLAN_CHANGE_LINK.unchanged;
+  // null は連携を外す指示
+  if (value === null) return PLAN_CHANGE_LINK.cleared;
+  // それ以外は値を入れた
+  return PLAN_CHANGE_LINK.set;
+}
+
 /** プラン変更の入力（`updatePlan` へ渡すものと、記録に要るもの） */
 export interface ApplyPlanChangeInput {
   // 対象のテナント
@@ -61,7 +91,14 @@ export async function applyPlanChange(
     action: AuditAction.tenant_plan_changed,
     targetType: AuditTargetType.tenant,
     targetId: input.tenantId,
-    payload: { from: input.from, source: input.source, to: updated.plan },
+    // **連携の書き方も残す**（値ではなく「入れた / 外した / 据え置き」だけ。理由は上の表）
+    payload: {
+      customerLink: linkOf(input.update.billingCustomerId),
+      from: input.from,
+      source: input.source,
+      subscriptionLink: linkOf(input.update.billingSubscriptionId),
+      to: updated.plan,
+    },
   });
   // 反映後のプラン
   return { plan: updated.plan };

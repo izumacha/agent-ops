@@ -26,6 +26,62 @@ export const BILLING_EVENT_EFFECT = {
 export type BillingEventEffect = (typeof BILLING_EVENT_EFFECT)[keyof typeof BILLING_EVENT_EFFECT];
 
 /**
+ * 契約の状態（`status`）→ 反映の仕方 の表。
+ *
+ * **価格だけでプランを決めてはいけない。** 価格（`lookup_key`）は「どのプランの契約か」しか
+ * 示さないので、状態を見ないと次の 2 つが通る:
+ *
+ * - **払っていない契約で有料プランが付く** — Stripe の推奨フロー（`payment_behavior:
+ *   'default_incomplete'`）や 3DS を途中で閉じた場合、`customer.subscription.created` は
+ *   `status: 'incomplete'` で届くが価格は enterprise のまま。
+ * - **解約したのに有料へ戻る** — 1 回の解約で `customer.subscription.updated`
+ *   （`status: 'canceled'`・価格は pro のまま）と `customer.subscription.deleted` の
+ *   **2 通**が届き、**配信順は保証されない**（失敗した配信は最大 3 日再送される）。
+ *   `deleted` を先に処理すると free になり、その後に届いた `updated` が価格から pro へ戻す。
+ *
+ * - `'fromPrice'`: 価格からプランを決める（支払いが有効な状態）
+ * - `'toFree'`: 無料プランへ落とす（契約が終わっている状態）
+ * - `'ignore'`: 何もしない（**まだ有効でないだけ**。既存の契約を取り消さない）
+ *
+ * **`past_due` は据え置き**（支払いの再試行中に機能を止めると、一時的なカード失敗で
+ * 払っている利用者を切ることになる）。**`unpaid` は再試行が尽きた後の状態なので落とす**。
+ * **表に無い状態は `'ignore'`**（権限を増やさない側へ倒す。`planChangeFor` が `null` を返すので
+ * 呼び出し側がログに残す）。
+ */
+export const BILLING_SUBSCRIPTION_STATUS_EFFECT = {
+  // 支払いが有効（通常の有料契約）
+  active: 'fromPrice',
+  // 試用期間中（Stripe 上は有効な契約なので機能は開ける）
+  trialing: 'fromPrice',
+  // 支払いの再試行中（据え置き。止めるのは再試行が尽きた `unpaid` から）
+  past_due: 'fromPrice',
+  // 解約済み
+  canceled: 'toFree',
+  // 再試行が尽きて未払い
+  unpaid: 'toFree',
+  // 事業者側で停止された契約
+  paused: 'toFree',
+  // 初回の支払いが完了していない（**まだ有効でないだけ**なので既存の契約を取り消さない）
+  incomplete: 'ignore',
+  // 初回の支払いが期限切れで失効した（同上。解約は `deleted` / `canceled` が示す）
+  incomplete_expired: 'ignore',
+} as const satisfies Record<string, 'fromPrice' | 'toFree' | 'ignore'>;
+
+/** 状態から反映の仕方を引く純粋関数（表に無い状態・未指定は `'ignore'`） */
+export function subscriptionStatusEffect(
+  status: string | null | undefined,
+): 'fromPrice' | 'toFree' | 'ignore' {
+  // 状態が無ければ判断できない（権限を増やさない側へ倒す）
+  if (status === null || status === undefined) return 'ignore';
+  // 表に**自身のキーとして**あるものだけを信用する（素の添字だと `constructor` 等が値を返す）
+  if (!Object.hasOwn(BILLING_SUBSCRIPTION_STATUS_EFFECT, status)) return 'ignore';
+  // 表の値
+  return BILLING_SUBSCRIPTION_STATUS_EFFECT[
+    status as keyof typeof BILLING_SUBSCRIPTION_STATUS_EFFECT
+  ];
+}
+
+/**
  * 価格の `lookup_key` → プラン の表。
  *
  * **事業者側のダッシュボードで設定する値と揃える必要がある**ので、ここが唯一の参照元
@@ -62,6 +118,12 @@ export function planChangeFor(event: BillingWebhookEvent): BillingPlanChange | n
   const subscriptionId = event.data.object.id ?? null;
   // 解約は無料プランへ落とす（価格を見ない — 消えた契約の価格は意味を持たない）
   if (effect === 'toFree') return { plan: Plan.free, subscriptionId };
+  // **価格を見る前に契約の状態を見る**（理由は BILLING_SUBSCRIPTION_STATUS_EFFECT）
+  const byStatus = subscriptionStatusEffect(event.data.object.status);
+  // まだ有効でない・判断できない状態は何もしない（既存の契約を取り消さない）
+  if (byStatus === 'ignore') return null;
+  // 終わっている状態は価格を見ずに無料プランへ落とす（解約の 2 通目が有料へ戻すのを防ぐ）
+  if (byStatus === 'toFree') return { plan: Plan.free, subscriptionId };
   // 価格の lookup_key を取り出す（最初の明細だけを見る。1 契約 1 プランの前提）
   const lookupKey = event.data.object.items?.data?.[0]?.price?.lookup_key ?? null;
   // 価格が無い・表に無いなら決められない（呼び出し側がログに残す）

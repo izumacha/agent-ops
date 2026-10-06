@@ -39,7 +39,7 @@ import {
   COVERAGE_MIN_PERCENT,
 } from '../scripts/lib/step6-criteria.mjs';
 // プラン別の上限の正本 (spec.md の表はこれの写しなので突き合わせる)
-import { PLAN_LIMITS, planAllows } from '@/domain/plan';
+import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 // プランの一覧 (enum の正準)
 import { Plan } from '@/domain/types';
 
@@ -280,6 +280,25 @@ describe('Step0 の設計成果物', () => {
     }
   });
 
+  // spec.md のプラン表で、その機能の可否が書かれている列の添字を返す。
+  // **見出しに機能の識別子 (`auditChainVerify` など) を書いておく**ので、機能を足したときに
+  // 列を作り忘れればここで落ちる (列の順番を変えても追随する)
+  function featureColumnOf(feature: string): number {
+    // 仕様書を読む
+    const spec = readFileSync(join(DOCS, 'spec.md'), 'utf8');
+    // プラン表の見出し行 (先頭のセルが「プラン」)
+    const header = spec.split('\n').find((line) => /^\|\s*プラン\s*\|/.test(line));
+    // 見出しが無ければ照合が成り立たない (fail-closed)
+    expect(header, 'spec.md にプラン表の見出しが無い').toBeDefined();
+    // 識別子をバッククォートで囲んだ形で探す
+    const column = (header ?? '')
+      .split('|')
+      .findIndex((cell) => cell.includes('`' + feature + '`'));
+    // 列が無ければ、その機能は表に載っていない
+    expect(column, `spec.md のプラン表に ${feature} の列が無い`).toBeGreaterThan(0);
+    return column;
+  }
+
   // プラン別の上限は `src/domain/plan.ts` が正本で、spec.md の表はその写し。
   // **写しが腐ると「文書どおりに使えない API」になる**ので、値ごとに突き合わせる
   // (プランを足したときの書き忘れもここで落ちる)
@@ -303,11 +322,20 @@ describe('Step0 の設計成果物', () => {
           new RegExp(`(?<![0-9])${value}(?![0-9])`),
         );
       }
-      // 可否も一致していること (使えないプランの行だけが「使えない」と書かれている)
-      const allowed = planAllows(plan, 'auditChainVerify');
-      expect(row?.includes('使えない'), `${plan} の改ざん検証の可否が spec.md と食い違う`).toBe(
-        !allowed,
-      );
+      // 可否も一致していること。**機能の一覧は正本から回す** — 機能名を決め打ちすると、
+      // 2 つ目の機能を足したときに表から列ごと消えてもこの検査は緑のまま通る (しかも
+      // 「どこかに『使えない』がある」だけの判定では、同じプランで可否が分かれる 2 機能を
+      // 表現できず、判定そのものが誤りになる)
+      const cells = row?.split('|').map((cell) => cell.trim()) ?? [];
+      for (const feature of PLAN_FEATURES) {
+        // その機能の列 (見出しに識別子が書いてある)
+        const cell = cells[featureColumnOf(feature)] ?? '';
+        // 列のセルが可否と一致すること (`使えない` は `使える` を含まないので取り違えない)
+        expect(
+          cell.includes(planAllows(plan, feature) ? '使える' : '使えない'),
+          `${plan} の ${feature} の可否が spec.md と食い違う (列の中身は「${cell}」)`,
+        ).toBe(true);
+      }
     }
   });
 

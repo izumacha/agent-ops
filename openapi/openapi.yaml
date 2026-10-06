@@ -34,6 +34,8 @@ tags:
     description: ガードレールの発火記録と解決 (Step4)
   - name: audit-logs
     description: 監査ログの閲覧とハッシュ連鎖の検証 (Step4)
+  - name: billing
+    description: 契約プランの参照と課金事業者からの受信 Webhook (Step6)
 security:
   - bearerAuth: []
 paths:
@@ -1248,6 +1250,75 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /billing:
+    get:
+      tags: [billing]
+      operationId: getBilling
+      summary: 現在の契約プランとその上限 (view 権限)
+      description: |-
+        **409 / 403 を受けたときに「いまの上限はいくつか」を知る経路。** 上限はプランごとに違うので
+        エラーの文言には数値を書かない (書くと 1 つの定数では表せない) 代わりに、ここで参照する。
+        プランを変える経路はここには無い (課金事業者の Webhook とプラットフォーム管理者の
+        `PATCH /tenants/{tenantId}` の 2 つだけ)。
+      responses:
+        '200':
+          description: 現在のプランと上限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Billing'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /billing/webhook:
+    post:
+      tags: [billing]
+      operationId: receiveBillingWebhook
+      summary: 課金事業者からの受信 Webhook (署名で認証)
+      description: |-
+        **Bearer 認証を使わない唯一の書き込み経路。** 呼ぶのは課金事業者 (Stripe) なので、
+        認証は `Stripe-Signature` ヘッダの HMAC-SHA256 署名で行う (共有シークレットは
+        環境変数 `STRIPE_WEBHOOK_SECRET`)。署名が確認できなければ 401、シークレットが
+        未設定・短すぎれば 503 (fail-closed: 検証せずに受け入れることはしない)。
+
+        **同じイベントの再送は正常系**で、2 通目は何もせず 200 を返す (`applied: false`)。
+        冪等性は DB の一意制約 `(provider, eventId)` が保証するので、同時に届いた 2 通でも
+        反映は 1 回だけになる。**知らない種別・知らない価格でも 200** を返す (エラーにすると
+        事業者が再送を続け、処理すべきイベントの配信が遅れる)。
+
+        本文は事業者が作るペイロードなので**未知のキーを拒否しない** (`additionalProperties`
+        を閉じない)。読むのは「どのイベントか・どの顧客か・どのプランか」だけ。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BillingWebhookEvent'
+      responses:
+        '200':
+          description: 受信した (反映したかは applied が示す)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingWebhookResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 components:
   securitySchemes:
     bearerAuth:
@@ -2339,3 +2410,91 @@ components:
               payload_not_canonical,
               tenant_mismatch,
             ]
+    Billing:
+      type: object
+      required: [plan, limits, features]
+      additionalProperties: false
+      description: |-
+        現在の契約プランと、そのプランの上限・機能の可否。正本は src/domain/plan.ts の
+        PLAN_LIMITS で、ここはその形を契約として書いたもの
+      properties:
+        plan:
+          $ref: '#/components/schemas/Plan'
+        limits:
+          type: object
+          required: [maxAgents, proxyRateLimitPerMinute, maxEnabledGuardrailRules]
+          additionalProperties: false
+          properties:
+            maxAgents:
+              type: integer
+              description: 登録できるエージェントの数 (超過は POST /agents が 409)
+            proxyRateLimitPerMinute:
+              type: integer
+              description: 中継の共有の枠 (1 分あたり。超過は 429 + Retry-After)
+            maxEnabledGuardrailRules:
+              type: integer
+              description: 同時に有効にできるガードレールのルール数 (超過は 409)
+        features:
+          type: object
+          required: [auditChainVerify]
+          additionalProperties: false
+          description: |-
+            プランで可否が決まる機能。使えない機能を呼ぶと 403 (権限不足とは別の文言)。
+            項目は src/domain/plan.ts の PLAN_FEATURES から導く
+          properties:
+            auditChainVerify:
+              type: boolean
+              description: 監査ログのハッシュ連鎖の検証 (GET /audit-logs/verify) を使えるか
+    BillingWebhookEvent:
+      type: object
+      required: [id, type, data]
+      additionalProperties: true
+      description: |-
+        課金事業者 (Stripe) が送るイベント。**additionalProperties を閉じない** —
+        事業者が項目を増やした日に全イベントが 422 になり、プランの反映が止まる。
+        読むのは「どのイベントか (id / type)」「どの顧客か (customer)」「どのプランか
+        (items.data[0].price.lookup_key)」だけで、金額・税・請求書は読まない
+      properties:
+        id:
+          type: string
+          maxLength: 255
+          description: 事業者側のイベント ID (evt_...)。冪等性のキー
+        type:
+          type: string
+          maxLength: 255
+          description: イベント種別 (customer.subscription.created / updated / deleted を解釈する)
+        data:
+          type: object
+          required: [object]
+          properties:
+            object:
+              type: object
+              description: イベントの対象 (サブスクリプション)
+              properties:
+                id:
+                  type: string
+                  maxLength: 255
+                  nullable: true
+                  description: サブスクリプション ID (sub_...)
+                customer:
+                  type: string
+                  maxLength: 255
+                  nullable: true
+                  description: 顧客 ID (cus_...)。これでテナントを引く
+                items:
+                  type: object
+                  nullable: true
+                  description: 契約の明細 (最初の 1 件だけを読む)
+    BillingWebhookResult:
+      type: object
+      required: [received, applied]
+      additionalProperties: false
+      properties:
+        received:
+          type: boolean
+          description: 受信して記録したか (署名が通れば常に true)
+        applied:
+          type: boolean
+          description: |-
+            プランを反映したか。false になるのは「再送 (2 通目)」「顧客 ID に対応する
+            テナントが無い」「知らない種別・知らない価格」のいずれか

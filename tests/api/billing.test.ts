@@ -1,0 +1,325 @@
+// 課金の 2 本（`GET /billing` と `POST /billing/webhook`）の API テスト。
+//
+// **受け入れ基準②「Webhook 冪等性テスト pass」の本体がここ。** テスト名の接頭辞
+// `冪等性:` は `scripts/gate-step6.mjs` が照合するので変えない（料金表・RBAC 行列と同じ流儀で、
+// ゲートは「その名前のテストが pass しているか」を見る）。
+import { createHmac } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
+import { GET as getBilling } from '@/app/api/v1/billing/route';
+import { POST as receiveBillingWebhook } from '@/app/api/v1/billing/webhook/route';
+import { BILLING_SIGNATURE_HEADER } from '@/lib/billing/signature';
+import { BILLING_PRICE_LOOKUP_KEYS } from '@/lib/billing/events';
+import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
+import { Plan } from '@/domain/types';
+import { API_MESSAGES } from '@/lib/constants';
+import { BILLING_SECRET, call, seedEachTest } from './helpers';
+
+// seed（各テストの前に作り直す）
+const seed = seedEachTest();
+
+// 価格の名前（表から引く。綴りを書き写さない）
+const PRICE_BY_PLAN = Object.fromEntries(
+  Object.entries(BILLING_PRICE_LOOKUP_KEYS).map(([lookupKey, plan]) => [plan, lookupKey]),
+) as Record<Plan, string>;
+
+// 受信イベントの本文を組み立てる
+function webhookBody(options: {
+  eventId?: string;
+  type?: string;
+  customer?: string | null;
+  plan?: Plan;
+  subscriptionId?: string;
+}): Record<string, unknown> {
+  return {
+    id: options.eventId ?? 'evt_1',
+    type: options.type ?? 'customer.subscription.updated',
+    data: {
+      object: {
+        id: options.subscriptionId ?? 'sub_1',
+        customer: options.customer === undefined ? 'cus_1' : options.customer,
+        items:
+          options.plan === undefined
+            ? undefined
+            : { data: [{ price: { lookup_key: PRICE_BY_PLAN[options.plan] } }] },
+      },
+    },
+  };
+}
+
+// 生のテキストに正しい署名を付けて受信 Webhook を呼ぶ（署名の対象は本文そのもの）
+async function postRaw(raw: string, secret = BILLING_SECRET) {
+  // 署名の時刻（いまの秒）
+  const timestamp = Math.floor(Date.now() / 1_000);
+  // 署名
+  const signature = createHmac('sha256', secret).update(`${timestamp}.${raw}`).digest('hex');
+  // ヘッダを付けて呼ぶ
+  return call(receiveBillingWebhook, {
+    method: 'POST',
+    rawBody: raw,
+    headers: {
+      'content-type': 'application/json',
+      [BILLING_SIGNATURE_HEADER]: `t=${timestamp},v1=${signature}`,
+    },
+  });
+}
+
+// 組み立てた本文に正しい署名を付けて呼ぶ
+async function postWebhook(body: Record<string, unknown>, secret = BILLING_SECRET) {
+  // JSON 化してから署名する（解析して組み立て直すと署名が一致しない）
+  return postRaw(JSON.stringify(body), secret);
+}
+
+// テナント A を顧客 ID と結び付ける（Webhook がテナントを引けるようにする）
+async function linkCustomer(customerId = 'cus_1'): Promise<void> {
+  // プランは変えずに顧客 ID だけ入れる
+  await seed.repos.tenants.updatePlan(seed.a.id, {
+    plan: Plan.free,
+    billingCustomerId: customerId,
+  });
+}
+
+// テナント A の現在のプランを読む
+async function planOfA(): Promise<Plan | undefined> {
+  // 行を引いてプランを返す
+  return (await seed.repos.tenants.findById(seed.a.id))?.plan;
+}
+
+describe('GET /billing', () => {
+  it('現在のプランと上限・機能の可否を返す', async () => {
+    // seed は pro（helpers.ts）
+    const result = await call(getBilling, { token: seed.a.tokens.viewer });
+    expect(result.status).toBe(200);
+    // **表の値をそのまま返す**（数値を書き写さない）
+    const limits = PLAN_LIMITS[Plan.pro];
+    expect(result.json).toEqual({
+      plan: Plan.pro,
+      limits: {
+        maxAgents: limits.maxAgents,
+        proxyRateLimitPerMinute: limits.proxyRateLimitPerMinute,
+        maxEnabledGuardrailRules: limits.maxEnabledGuardrailRules,
+      },
+      // 機能の可否は宣言した機能の一覧から導く
+      features: Object.fromEntries(
+        PLAN_FEATURES.map((feature) => [feature, planAllows(Plan.pro, feature)]),
+      ),
+    });
+  });
+
+  it.each(Object.values(Plan))('%s のテナントはそのプランの上限を返す', async (plan) => {
+    // プランを差し替えてから読む（プランを読まず固定値を返す変異はここで落ちる）
+    const tenant = seed.store.tenants.get(seed.a.id);
+    if (!tenant) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(tenant.id, { ...tenant, plan });
+    const result = await call(getBilling, { token: seed.a.tokens.viewer });
+    expect(result.json).toMatchObject({
+      plan,
+      limits: { maxAgents: PLAN_LIMITS[plan].maxAgents },
+    });
+  });
+
+  it('他テナントのプランは見えない（自分のテナントの値だけ）', async () => {
+    // B を enterprise にしても A の応答は変わらない（ADR-0002 の行スコープ）
+    const b = seed.store.tenants.get(seed.b.id);
+    if (!b) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(b.id, { ...b, plan: Plan.enterprise });
+    const result = await call(getBilling, { token: seed.a.tokens.viewer });
+    expect(result.json).toMatchObject({ plan: Plan.pro });
+  });
+});
+
+describe('POST /billing/webhook', () => {
+  it('署名が正しければプランを反映する', async () => {
+    // 顧客 ID を結び付けてから pro への変更を送る
+    await linkCustomer();
+    const result = await postWebhook(webhookBody({ plan: Plan.pro }));
+    expect(result.status).toBe(200);
+    expect(result.json).toEqual({ received: true, applied: true });
+    // プランが変わっている
+    expect(await planOfA()).toBe(Plan.pro);
+  });
+
+  it('解約イベントは free へ落とす', async () => {
+    // pro にしてから解約を送る
+    await linkCustomer();
+    await seed.repos.tenants.updatePlan(seed.a.id, { plan: Plan.enterprise });
+    const result = await postWebhook(
+      webhookBody({ type: 'customer.subscription.deleted', eventId: 'evt_del' }),
+    );
+    expect(result.json).toEqual({ received: true, applied: true });
+    expect(await planOfA()).toBe(Plan.free);
+  });
+
+  it('サブスクリプション ID も一緒に保存する', async () => {
+    // プランと id を同時に書く（別の操作に分けると片方だけ成功した状態が残る）
+    await linkCustomer();
+    await postWebhook(webhookBody({ plan: Plan.pro, subscriptionId: 'sub_xyz' }));
+    expect((await seed.repos.tenants.findById(seed.a.id))?.billingSubscriptionId).toBe('sub_xyz');
+  });
+
+  it.each([
+    ['署名ヘッダが無い', {}],
+    ['署名が壊れている', { [BILLING_SIGNATURE_HEADER]: 't=1,v1=' + 'a'.repeat(64) }],
+    ['形が違う', { [BILLING_SIGNATURE_HEADER]: 'nonsense' }],
+  ])('署名が確認できなければ 401 で何も変えない: %s', async (_label, headers) => {
+    // 顧客 ID は結び付けておく（弾かれる理由が署名だけになるように）
+    await linkCustomer();
+    // 署名を付けずに（あるいは壊れた署名で）呼ぶ
+    const result = await call(receiveBillingWebhook, {
+      method: 'POST',
+      rawBody: JSON.stringify(webhookBody({ plan: Plan.enterprise })),
+      headers: { 'content-type': 'application/json', ...headers },
+    });
+    expect(result.status).toBe(401);
+    expect(result.json).toMatchObject({ message: API_MESSAGES.billingSignatureInvalid });
+    // プランは変わっていない
+    expect(await planOfA()).toBe(Plan.free);
+  });
+
+  it('別の鍵で署名した本文は 401（鍵を知らない相手は通れない）', async () => {
+    // **これが通ると誰でも任意のテナントを enterprise へ上げられる**
+    await linkCustomer();
+    const result = await postWebhook(
+      webhookBody({ plan: Plan.enterprise }),
+      'another-secret-0123456789abcdefghij',
+    );
+    expect(result.status).toBe(401);
+    expect(await planOfA()).toBe(Plan.free);
+  });
+
+  it('共有シークレットが未設定なら 503（検証を飛ばして受け入れない）', async () => {
+    // 鍵を消す（この経路を主題にするテストだけが明示的に消す）
+    vi.stubEnv('STRIPE_WEBHOOK_SECRET', '');
+    await linkCustomer();
+    const result = await postWebhook(webhookBody({ plan: Plan.enterprise }));
+    expect(result.status).toBe(503);
+    expect(await planOfA()).toBe(Plan.free);
+    // 後片付け
+    vi.unstubAllEnvs();
+  });
+
+  it('顧客 ID に対応するテナントが無ければ記録だけして 200', async () => {
+    // 結び付けていない顧客からのイベント（記録しないと再送のたびに同じ処理を繰り返す）
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await postWebhook(webhookBody({ plan: Plan.pro, customer: 'cus_unknown' }));
+    expect(result.status).toBe(200);
+    expect(result.json).toEqual({ received: true, applied: false });
+    // **黙って捨てない**（設定の取り違えに気付けるようログへ 1 行残す）
+    expect(logged).toHaveBeenCalledTimes(1);
+    logged.mockRestore();
+  });
+
+  it('顧客 ID が無い本文も記録だけして 200', async () => {
+    // customer が null のイベント（どのテナントか決められない）
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await postWebhook(webhookBody({ plan: Plan.pro, customer: null }));
+    expect(result.json).toEqual({ received: true, applied: false });
+    logged.mockRestore();
+  });
+
+  it('知らない種別は何もせず 200（ログも出さない）', async () => {
+    // 契約と無関係な通知（エラーにすると事業者が再送を続ける）
+    await linkCustomer();
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await postWebhook(
+      webhookBody({ type: 'invoice.payment_succeeded', plan: Plan.enterprise }),
+    );
+    expect(result.json).toEqual({ received: true, applied: false });
+    expect(await planOfA()).toBe(Plan.free);
+    // 無関係な通知でログを汚さない
+    expect(logged).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it('知らない価格は反映せず 200（勝手に free へ落とさない）', async () => {
+    // pro のテナントへ、表に無い価格の変更が届いた形
+    await linkCustomer();
+    await seed.repos.tenants.updatePlan(seed.a.id, { plan: Plan.pro });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // 価格だけ表に無い本文（署名は正しく付ける）
+    const result = await postRaw(
+      JSON.stringify({
+        id: 'evt_price',
+        type: 'customer.subscription.updated',
+        data: {
+          object: {
+            id: 'sub_1',
+            customer: 'cus_1',
+            items: { data: [{ price: { lookup_key: 'unknown-price' } }] },
+          },
+        },
+      }),
+    );
+    expect(result.json).toEqual({ received: true, applied: false });
+    // **プランは pro のまま**（払っているテナントが機能を失わない）
+    expect(await planOfA()).toBe(Plan.pro);
+    // 契約の変更イベントなので、決められなかったことはログに残す
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it('共有キャッシュへ載らない（no-store を宣言している）', async () => {
+    // `route()` を通らない経路なので、ヘッダの付け忘れがここでしか見えない
+    await linkCustomer();
+    const result = await postWebhook(webhookBody({ plan: Plan.pro }));
+    expect(result.headers.get('Cache-Control')).toContain('no-store');
+  });
+
+  it('冪等性: 同じイベントの 2 通目は何もせず 200 を返す', async () => {
+    // 1 通目で pro へ上げる
+    await linkCustomer();
+    const body = webhookBody({ plan: Plan.pro, eventId: 'evt_same' });
+    expect((await postWebhook(body)).json).toEqual({ received: true, applied: true });
+    // **手で free へ戻してから 2 通目を送る** — 2 通目が処理されていれば pro に戻ってしまう
+    await seed.repos.tenants.updatePlan(seed.a.id, { plan: Plan.free });
+    const second = await postWebhook(body);
+    expect(second.status).toBe(200);
+    expect(second.json).toEqual({ received: true, applied: false });
+    // 反映されていない（= 2 通目は何もしていない）
+    expect(await planOfA()).toBe(Plan.free);
+  });
+
+  it('冪等性: 同時に届いた 2 通でも反映は 1 回だけ', async () => {
+    // **「処理済みか先に SELECT してから INSERT」の形との差が出るのはここ**
+    await linkCustomer();
+    const body = webhookBody({ plan: Plan.pro, eventId: 'evt_race' });
+    // 2 通を同時に投げる
+    const [first, second] = await Promise.all([postWebhook(body), postWebhook(body)]);
+    // どちらも 200 で、反映したのは片方だけ
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const applied = [first, second].filter(
+      (result) => (result.json as { applied: boolean }).applied,
+    );
+    expect(applied).toHaveLength(1);
+  });
+
+  it('冪等性: イベント ID が違えば 2 通目も反映する', async () => {
+    // 冪等性が「全部無視する」に化けていないこと（緩すぎない検査）
+    await linkCustomer();
+    expect(
+      (await postWebhook(webhookBody({ plan: Plan.pro, eventId: 'evt_a' }))).json,
+    ).toMatchObject({ applied: true });
+    expect(
+      (await postWebhook(webhookBody({ plan: Plan.enterprise, eventId: 'evt_b' }))).json,
+    ).toMatchObject({ applied: true });
+    // 2 通目のプランが効いている
+    expect(await planOfA()).toBe(Plan.enterprise);
+  });
+
+  it('冪等性: 署名が確認できなかった要求は記録しない（記録を使い切らせない）', async () => {
+    // **弾いた要求を記録すると、攻撃者が任意のイベント ID を「処理済み」にできる** —
+    // 本物の通知がその ID で届いても 2 通目として無視され、プランが永久に反映されない
+    await linkCustomer();
+    const body = webhookBody({ plan: Plan.pro, eventId: 'evt_poison' });
+    // 署名なしで弾かれる
+    const refused = await call(receiveBillingWebhook, {
+      method: 'POST',
+      rawBody: JSON.stringify(body),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(refused.status).toBe(401);
+    // 同じイベント ID の正しい署名付きの通知は普通に反映される
+    expect((await postWebhook(body)).json).toEqual({ received: true, applied: true });
+    expect(await planOfA()).toBe(Plan.pro);
+  });
+});

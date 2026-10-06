@@ -197,6 +197,14 @@ export const NOTIFY_SIGNATURE_HEADER = 'x-agent-ops-signature';
 // 通知の署名鍵 (環境変数 NOTIFY_SIGNING_SECRET) に要求する最小長。
 // 短い鍵は総当たりで求められ、求められたら任意の通知を偽装できる
 export const NOTIFY_SIGNING_SECRET_MIN_LENGTH = 32;
+// 受信 Webhook (Step6) の共有シークレットに要求する最小長。短い鍵は総当たりで求められ、
+// 求められたら任意の本文を署名できる = 誰でも任意のテナントのプランを変えられる。
+// 監査ログの鍵・通知の署名鍵と同じ 32 文字以上を要求する (別の値にする理由が無い)
+export const BILLING_WEBHOOK_SECRET_MIN_LENGTH = 32;
+// 受信 Webhook の本文から読む文字列項目 (事業者側の id・種別・価格の名前) の長さの上限。
+// **上限が無いと 1 本文で任意の長さの文字列を DB の列へ渡せる** (§9 の入力検証)。
+// 事業者側の識別子は実際には数十文字なので、余裕を見てこの長さに置く
+export const BILLING_WEBHOOK_FIELD_MAX_LENGTH = 255;
 // **共有の枠の上限はここに置かない（Step6）。** 窓の中で出せる回数は契約プランごとに違うので、
 // 正本は `src/domain/plan.ts` の `PLAN_LIMITS[plan].proxyRateLimitPerMinute`（根拠も同所）。
 // ここに既定値を持つと、プランの表と同じ数字が 2 か所に並んで片方だけが古くなる（§6）。
@@ -379,6 +387,11 @@ export const API_MESSAGES = {
     '発火記録があるルールは削除できません (記録からルールを辿れなくなるため)。',
   incidentAlreadyResolved: 'このインシデントは既に解決済みです。',
   rateLimited: '要求が多すぎます。Retry-After 秒だけ待ってからやり直してください。',
+  // 受信 Webhook の署名が合わない (401)。**理由を区別しない** — 形が違う・時刻が古い・
+  // 署名が一致しない のどれかを返すと、総当たりの手がかりになる
+  billingSignatureInvalid: 'Webhook の署名が確認できません。',
+  // 受信 Webhook の共有シークレットが未設定・短すぎる (503)。何が足りないかは応答に出さない
+  billingNotConfigured: '課金の設定が完了していないため、この操作は現在実行できません。',
   budgetExceeded:
     'このエージェントの予算 (当月) を超えました。予算を見直すか、翌月まで待ってから呼び出してください。',
   unsupportedModel:

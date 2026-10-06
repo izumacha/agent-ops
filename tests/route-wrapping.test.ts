@@ -35,6 +35,21 @@ const UNAUTHENTICATED_ROUTES: Record<string, string> = {
   'api/v1/health/route.ts': 'DB 到達性だけを返す公開エンドポイント (compose の healthcheck が使う)',
 };
 
+// **署名で認証する受信 Webhook**（Step6）。Bearer 認証を使わないので `route()` を通らないが、
+// REST の契約（openapi.yaml）には載る経路。**除外ではなく「別の認証」として扱う** —
+// `route()` を通らないことを許す代わりに、下の 2 つを必ず要求する:
+//   (a) 署名検証のモジュール（`@/lib/billing/signature`）へ到達すること
+//       （= 誰でも叩ける経路に認証がある。到達しなければ誰でもプランを書き換えられる）
+//   (b) `no-store` を宣言すること（`route()` が包む応答と同じ扱い）
+// **`RouteOptions` に `auth: 'none'` を足す形は採らなかった** — 既定を 1 つ緩めると、
+// どのルートも宣言 1 行で未認証にできる口になる（理由は ADR-0012）。
+// **ここに増える差分は理由の妥当性をレビューで必ず確認する**
+const SIGNED_WEBHOOK_ROUTES: Record<string, string> = {
+  'api/v1/billing/webhook/route.ts':
+    '課金事業者 (Stripe) が呼ぶ受信 Webhook。呼び出し元は利用者ではないので Bearer 認証を' +
+    '使えず、Stripe-Signature ヘッダの HMAC-SHA256 署名で認証する',
+};
+
 // **画面側の Route Handler** (Step5)。セッション Cookie で認証し、JSON ではないものを返す経路で、
 // REST の契約 (openapi.yaml) には載らない。**除外ではなく「別の契約」として扱う** —
 // api/v1 の下に置かないこと・route() を通らないことを許す代わりに、下の 3 つを必ず要求する:
@@ -133,6 +148,45 @@ describe('Route Handler の結線', () => {
     }
   });
 
+  it('署名 Webhook の表に載っているファイルは実在し、理由が書かれている', () => {
+    // 走査で見つかった route.ts の一覧 (src/app からの相対パス)
+    const found = new Set(routeFiles.map(({ relativeToApp }) => relativeToApp));
+    // 表が空なら走査が空振りしている (fail-closed)
+    expect(Object.keys(SIGNED_WEBHOOK_ROUTES).length).toBeGreaterThan(0);
+    for (const [key, reason] of Object.entries(SIGNED_WEBHOOK_ROUTES)) {
+      // 消えたファイルの登録が残っていないこと
+      expect(found.has(key), `${key} は実在しない (表の登録が古い)`).toBe(true);
+      // 理由が空・空白でないこと
+      expect(reason.trim().length, `${key} の理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  it('署名 Webhook は署名検証を通り、キャッシュを禁止している', () => {
+    // 署名検証のモジュール (走査できていなければ fail-closed で落とす)
+    const signatureModule = join(SRC_DIR, 'lib', 'billing', 'signature.ts');
+    expect(importGraph.has(signatureModule), '署名検証の入口を走査できていない').toBe(true);
+    // 表に載っている Webhook を 1 本ずつ見る
+    const entries = Object.keys(SIGNED_WEBHOOK_ROUTES);
+    expect(entries.length, '署名 Webhook が 1 本も無い').toBeGreaterThan(0);
+    for (const key of entries) {
+      // 走査で見つけた実体を引く
+      const file = routeFiles.find(({ relativeToApp }) => relativeToApp === key);
+      expect(file, `${key} を走査できていない`).toBeDefined();
+      // (a) 署名検証へ到達していること (= 誰でも叩ける経路に認証がある)
+      expect(
+        reachesModule(importGraph, file!.full, signatureModule),
+        `${key} が署名の検証を通っていない`,
+      ).toBe(true);
+      // (b) 共有キャッシュへ載らないことを宣言していること。
+      // **綴りを見るだけの弱い検査**だが、宣言の有無は固定する (画面側ルートと同じ扱い)
+      expect(
+        readFileSync(file!.full, 'utf8').includes('no-store') ||
+          readFileSync(file!.full, 'utf8').includes('withPrivateCacheHeaders'),
+        `${key} が Cache-Control の禁止を宣言していない`,
+      ).toBe(true);
+    }
+  });
+
   // 意図して置いている Next の入口と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。
   // キーはリポジトリ相対のパス。表に無い綴り・場所はすべて「無いこと」を要求する
   const ALLOWED_NEXT_ENTRIES: Record<string, string> = {
@@ -212,6 +266,8 @@ describe('Route Handler の結線', () => {
       if (relativeToApp in UNAUTHENTICATED_ROUTES) continue;
       // 画面側ルートは route() を通らない代わりに上の 3 つを要求されている (理由は表に書く)
       if (Object.hasOwn(SESSION_PAGE_ROUTES, relativeToApp)) continue;
+      // 署名で認証する受信 Webhook も同じ扱い (理由は表に書く。要求は下の専用テスト)
+      if (Object.hasOwn(SIGNED_WEBHOOK_ROUTES, relativeToApp)) continue;
       // モジュールを実際に読み込む (綴りではなく値を見る)
       const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
       for (const method of HTTP_METHOD_EXPORTS) {
@@ -590,6 +646,40 @@ describe('秘密の生成と比較', () => {
         `PLATFORM_ADMIN_TOKEN を照合の関数の外で読んでいる (位置 ${offset})`,
       ).toBe(true);
     }
+  });
+
+  /**
+   * 受信 Webhook の署名の照合も定数時間比較を通すこと（Step6）。
+   *
+   * **これは綴りを見る弱い二次的な網**で、証明ではない（`Buffer.compare` や自前のループへ
+   * 書き換えれば素通りする。実測でも素の `===` へ戻す変異は**この網を足す前は全件緑**だった）。
+   * 署名の一致は観測可能な振る舞いに現れないので、テストで原理的に捉えられるのは綴りまで。
+   * **本当の担保は規約とレビュー**（理由は docs/adr/0012-plans-and-billing.md）。
+   */
+  it('受信 Webhook の署名の照合は定数時間比較を通す', () => {
+    // 署名検証のソース
+    const signature = readFileSync(
+      join(process.cwd(), 'src', 'lib', 'billing', 'signature.ts'),
+      'utf8',
+    );
+    // node:crypto から定数時間比較を読んでいること
+    expect(
+      /import\s+\{[^}]*\btimingSafeEqual\b[^}]*\}\s+from\s+'node:crypto'/.test(signature),
+      '定数時間比較を node:crypto から読んでいない',
+    ).toBe(true);
+    // 検証の本体を切り出す（書き方を変えたらここで気付く）
+    const body =
+      /export function verifyBillingSignature\([\s\S]*?\n\): BillingSignatureResult \{([\s\S]*?)\n\}/.exec(
+        signature,
+      )?.[1];
+    expect(body, 'verifyBillingSignature の定義が読めない').toBeDefined();
+    // 比較に定数時間比較を使っていること
+    expect(/timingSafeEqual\(/.test(body ?? ''), '定数時間比較を使っていない').toBe(true);
+    // 素の等価比較で署名を照合していないこと（早期終了すると一致長が応答時間から漏れる）
+    expect(
+      /signature\s*===|===\s*expected\b/.test(body ?? ''),
+      '署名を素の等価比較で照合している',
+    ).toBe(false);
   });
 
   // 実装が定数時間でも、呼び出し側が === に戻れば同じこと (実測で全件緑のまま通った)

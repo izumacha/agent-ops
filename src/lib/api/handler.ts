@@ -161,8 +161,13 @@ function assertResourceIdParams(params: unknown): void {
   }
 }
 
-// 例外を HTTP 応答へ写す
-function toErrorResponse(error: unknown): Response {
+/**
+ * 例外を HTTP 応答へ写す。
+ *
+ * **`route()` を通らない経路（署名付きの受信 Webhook。Step6）も同じ関数を通す** —
+ * 写し方を 2 か所に分けると、一意制約違反の 422 への翻訳や 500 のログの有無がずれる。
+ */
+export function toErrorResponse(error: unknown): Response {
   // 明示的な API エラーはそのまま (ApiError → Response の写しはここ 1 か所)
   if (error instanceof ApiError) {
     return errorResponse(error.status, error.message, error.issues, error.headers);

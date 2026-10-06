@@ -88,6 +88,21 @@ async function readBodyWithinByteLimit(request: Request, maxBytes: number): Prom
  * 415 (Content-Type 違い) → 413 (サイズ超過) → 400 (JSON 構文) → 422 (スキーマ) の順に落とす
  */
 export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Promise<T> {
+  // 生テキストは使わないので捨てる (読み方そのものは下の 1 か所が持つ)
+  return (await readJsonBodyWithRaw(request, schema)).value;
+}
+
+/**
+ * JSON 本文を読み、**生のテキストも一緒に**返す（検証と落とす順は `readJsonBody` と同じ）。
+ *
+ * **署名付きの受信 Webhook（Step6）に要る。** 署名の対象は受け取った本文そのままなので、
+ * 解析して組み立て直した JSON では一致しない（キーの順・空白・数値の書き方が変わる）。
+ * 読み方・上限・HTTP への写し方を 2 か所に分けないため、`readJsonBody` はこの関数を通る。
+ */
+export async function readJsonBodyWithRaw<T>(
+  request: Request,
+  schema: ZodType<T>,
+): Promise<{ raw: string; value: T }> {
   // 本文の上限は 1 か所で読み、申告サイズの事前拒否と実測の両方が同じ値を使う
   // (片方だけ定数を直に読むと、ルート別の枠を入れたとき「正直に申告した本文だけ 413」という向きの逆転が起きる)
   const maxBytes = JSON_BODY_MAX_BYTES;
@@ -118,8 +133,8 @@ export async function readJsonBody<T>(request: Request, schema: ZodType<T>): Pro
   if (exceedsMaxDepth(parsed, JSON_BODY_MAX_DEPTH)) {
     throw new ApiError(HTTP_STATUS.UNPROCESSABLE_ENTITY, API_MESSAGES.bodyTooDeep);
   }
-  // スキーマで検証する (失敗は 422)
-  return validateWith(schema, parsed);
+  // スキーマで検証する (失敗は 422)。生テキストも返す（署名の検証に要る）
+  return { raw: text, value: validateWith(schema, parsed) };
 }
 
 /**

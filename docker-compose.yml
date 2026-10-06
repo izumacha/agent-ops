@@ -70,6 +70,7 @@ services:
       NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
       NOTIFY_MAIL_WEBHOOK_URL: ${NOTIFY_MAIL_WEBHOOK_URL:-}
       NOTIFY_SIGNING_SECRET: ${NOTIFY_SIGNING_SECRET:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
     # db のヘルスチェックが green になってから起動する
     depends_on:
       db:

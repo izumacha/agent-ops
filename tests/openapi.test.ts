@@ -36,6 +36,8 @@ import {
   guardrailRuleUpdateSchema,
   guardrailRunSchema,
 } from '@/lib/validations/guardrail';
+import { billingWebhookEventSchema } from '@/lib/validations/billing';
+import { BILLING_WEBHOOK_FIELD_MAX_LENGTH } from '@/lib/constants';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
 import { ROUTE_RATE_LIMIT_BRAND } from '@/lib/api/handler';
@@ -114,6 +116,7 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   GuardrailRuleCreate: guardrailRuleCreateSchema,
   GuardrailRuleUpdate: guardrailRuleUpdateSchema,
   GuardrailRunRequest: guardrailRunSchema,
+  BillingWebhookEvent: billingWebhookEventSchema,
 };
 
 // **未知キーを許すことが意図である本文の除外表 (理由付き)。**
@@ -121,6 +124,10 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
 // エントリが増える差分は、理由の妥当性をレビューで必ず確認する (この表は機械化できないエスケープハッチ)。
 // 除外しても項目の一致 (契約の properties と Zod の shape) と「必須項目が実際に必須か」は下のテストが見る
 const OPEN_BODY_SCHEMAS: Record<string, string> = {
+  BillingWebhookEvent:
+    '課金事業者 (Stripe) が作るペイロードをそのまま受けるため。未知キーを 422 にすると、' +
+    '事業者が項目を 1 つ増やした日に全イベントが 422 になりプランの反映が止まる ' +
+    '(docs/adr/0012-plans-and-billing.md)',
   ProxyRequest:
     'ベンダー (Anthropic / OpenAI) のペイロードをそのまま中継するため。未知キーを 422 にすると、' +
     'ベンダーが新しいパラメータを足しただけで中継が止まる (docs/adr/0007-cost-proxy.md)',
@@ -661,13 +668,15 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
   // 上の表に載せ忘れた maxLength が野放しにならないようにする (包含リストだけだと、表に無いプロパティは
   // 定数を変えても古い値のまま残り、契約と実装が食い違ったまま緑になる)
   it('本文スキーマの maxLength は既知の定数のいずれかである', () => {
-    // 許す値 (文字列長の 3 種 + 予算の桁数)
+    // 許す値 (文字列長の 3 種 + 資源 id + 予算の桁数 + 受信 Webhook の項目)
     const allowed = new Set([
       SHORT_TEXT_MAX_LENGTH,
       LONG_TEXT_MAX_LENGTH,
       EMAIL_MAX_LENGTH,
       RESOURCE_ID_MAX_LENGTH,
       MICRO_USD_MAX.toString().length,
+      // 課金事業者側の id・種別・価格の名前 (Step6)
+      BILLING_WEBHOOK_FIELD_MAX_LENGTH,
     ]);
     // components.schemas のプロパティを走査する
     for (const [schemaName, schema] of Object.entries(spec.components.schemas)) {

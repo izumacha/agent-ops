@@ -17,10 +17,12 @@ import {
   ROUTE_HANDLER_BRAND,
   ROUTE_RATE_LIMIT_BRAND,
   ROUTE_REQUIRED_ACTION_BRAND,
+  ROUTE_REQUIRED_PLAN_FEATURE_BRAND,
   ROUTE_REQUIRED_ROLE_BRAND,
 } from '@/lib/api/handler';
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
+import { PLAN_FEATURES } from '@/domain/plan';
 
 // App Router の入口 (この下にある route.ts はすべて配信される)
 const APP_DIR = join(process.cwd(), 'src', 'app');
@@ -367,6 +369,68 @@ describe('Route Handler の結線', () => {
     }
     // 1 つも見ていなければ走査が壊れている（fail-closed。「対象ゼロ＝緑」にしない）
     expect(checked, '追加の枠を持つ export が 0 件').toBeGreaterThan(0);
+  });
+
+  // **プランで可否が決まる機能は、宣言した機能ぶんのルートが実在すること。**
+  //
+  // 手がかりは `PLAN_FEATURES`（プランの表の正本）で、**機能を足して `route()` の宣言を
+  // 忘れたら落ちる** — 宣言の無い機能は「表では有料プラン限定なのに、実際は誰でも使える」
+  // 飾りになる（`tests/audit-coverage.test.ts` が操作名に発行箇所の実在を求めるのと同じ形）。
+  //
+  // **逆向き（本来ゲートすべきルートが宣言を持たないこと）は導けない** — 「重い読み取りか」
+  // 「有料に限るべきか」を署名から判定する手がかりが無く、一律に要求すると実行不能な指示に
+  // なる。そちらは規約とレビューで守る（この repo が繰り返し避けている形に倒さない）
+  it('宣言したプラン機能はどれも route() の宣言を持つ', async () => {
+    // 印から読み取った「ルートがゲートしている機能」の集合
+    const gated = new Set<string>();
+    for (const { full } of routeFiles) {
+      // モジュールを読み込む（綴りではなく値を見る）
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // 機能ゲートの印を読む
+        const feature = (exported as unknown as Record<symbol, unknown>)[
+          ROUTE_REQUIRED_PLAN_FEATURE_BRAND
+        ];
+        // 宣言があれば集合へ入れる
+        if (typeof feature === 'string') gated.add(feature);
+      }
+    }
+    // 表の全機能がどこかのルートでゲートされていること
+    for (const feature of PLAN_FEATURES) {
+      expect(gated, `プラン機能 ${feature} をゲートしているルートが無い`).toContain(feature);
+    }
+    // 1 つも読めていなければ印の読み取りか走査が壊れている（fail-closed）
+    expect(gated.size, '機能ゲートを宣言した export が 0 件').toBeGreaterThan(0);
+  });
+
+  // **機能ゲートを持つルートもレート制限より前に認可する**（枠を持つなら）。
+  // 理由は追加の枠と同じで、403 になる要求で枠を減らさないため
+  it('機能ゲートを持つルートは枠を持つなら認可も宣言している', async () => {
+    // 確かめた数
+    let checked = 0;
+    for (const { full, relativeToApp } of routeFiles) {
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        const brands = exported as unknown as Record<symbol, unknown>;
+        // 機能ゲートを持たないルートは対象外
+        if (typeof brands[ROUTE_REQUIRED_PLAN_FEATURE_BRAND] !== 'string') continue;
+        // 枠を持たないルートは対象外（枠が無ければ消費される枠も無い）
+        const tier = brands[ROUTE_RATE_LIMIT_BRAND];
+        if (tier === null || tier === undefined) continue;
+        checked += 1;
+        expect(
+          brands[ROUTE_REQUIRED_ACTION_BRAND] ?? brands[ROUTE_REQUIRED_ROLE_BRAND],
+          `${relativeToApp} の ${method} は機能ゲートと枠を持つのに requiredAction / requiredRole を宣言していない`,
+        ).not.toBeNull();
+      }
+    }
+    // 1 つも見ていなければ走査が壊れている（fail-closed）
+    expect(checked, '機能ゲートと枠を併せ持つ export が 0 件').toBeGreaterThan(0);
   });
 
   // 応答を返す前に通知の往復を待つ経路。連鎖からは中継と区別できないので個別に固定する

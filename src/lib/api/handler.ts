@@ -7,8 +7,9 @@ import { authenticate, authenticateApiKey, type Principal } from './auth';
 import { withPrivateCacheHeaders } from './cache-headers';
 import { ApiError, errorResponse, notFoundError, validationError } from './errors';
 import { enforceRateLimit, type RateLimitTier } from './rate-limit';
-import { requireAction, requireAdminRole } from './guard';
+import { requireAction, requireAdminRole, requirePlanFeature } from './guard';
 import type { Action } from '@/domain/rbac';
+import type { PlanFeature } from '@/domain/plan';
 import { HTTP_STATUS } from './http-status';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
@@ -89,6 +90,17 @@ export interface RouteOptions {
    * ここの宣言を落としたときに認可が丸ごと消えないため）
    */
   requiredRole?: 'admin';
+  /**
+   * レート制限を数える**前に**要求する契約プランの機能 (省略時は機能ゲートを掛けない。Step6)。
+   *
+   * **認可と同じ理由でレート制限より前に置く** — プランで使えない要求が枠を消費すると、
+   * 無料プランのテナントが（本体では 403 になる要求で）自分の小さい枠を使い切れる。
+   *
+   * 本体側の `requirePlanFeature` は残す（`tenantId` と `user` を取り出すのに要るうえ、
+   * ここの宣言を落としたときにゲートが丸ごと消えないため。二重に呼んでも副作用は無い）。
+   * 宣言漏れは `tests/route-wrapping.test.ts` が**印から導いて**見張る
+   */
+  requiredPlanFeature?: PlanFeature;
 }
 
 // route() が包んだ関数に付ける印 (テストが Route Handler の結線を綴りに依存せず確かめるのに使う)
@@ -122,6 +134,12 @@ export const ROUTE_REQUIRED_ACTION_BRAND = Symbol.for('agent-ops.routeRequiredAc
  * ルートはこちら**（RBAC の許可表に「admin だけが持つ操作」が無いため。理由は `requiredRole`）
  */
 export const ROUTE_REQUIRED_ROLE_BRAND = Symbol.for('agent-ops.routeRequiredRole');
+
+/**
+ * そのルートがレート制限より前に要求する契約プランの機能を外から読むための印
+ * （要求しなければ `null`）。他の 3 つと同じ理由で、綴りではなく結線を読む（Step6）
+ */
+export const ROUTE_REQUIRED_PLAN_FEATURE_BRAND = Symbol.for('agent-ops.routeRequiredPlanFeature');
 
 /**
  * URL の動的セグメント (パスに現れる id) の形を確かめる。形が違えばそんな資源は存在しないので 404。
@@ -186,6 +204,10 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
       if (options.requiredRole === 'admin') {
         requireAdminRole(principal);
       }
+      // プランで可否が決まる機能はここで確かめる（枠を消費する前。理由は requiredPlanFeature）
+      if (options.requiredPlanFeature !== undefined) {
+        requirePlanFeature(principal, options.requiredPlanFeature);
+      }
       // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
       if (options.rateLimit !== undefined) {
         enforceRateLimit(principal, options.rateLimit, Date.now());
@@ -211,6 +233,10 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
   });
   Object.defineProperty(wrapped, ROUTE_REQUIRED_ROLE_BRAND, {
     value: options.requiredRole ?? null,
+  });
+  // プランの機能ゲートも同じ形で載せる（検出網が結線そのものを読めるようにする）
+  Object.defineProperty(wrapped, ROUTE_REQUIRED_PLAN_FEATURE_BRAND, {
+    value: options.requiredPlanFeature ?? null,
   });
   // 包んだ関数を返す
   return wrapped;

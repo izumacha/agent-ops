@@ -55,7 +55,11 @@ function seedTenant(store: MemoryStore, label: string): SeededTenant {
   store.tenants.set(id, {
     id,
     name: `テナント${label}`,
-    plan: Plan.free,
+    // **seed は pro にする（Step6）。** プラン別の上限が入ったので、既定の free（毎分 60 回）で
+    // seed すると「1 テストの中で中継を何十回も呼ぶ」既存のテストが 429 で落ちる。pro は
+    // Step4 までの固定値と同じ上限なので、プランを入れる前と**同じ条件**でテストが走る。
+    // プラン別の挙動を見るテストは、この行を書き換えるのではなく `plan` を直接差し替える
+    plan: Plan.pro,
     // 課金事業者とは結び付いていない（プラン別の検査は plan を直接書き換えて行う）
     billingCustomerId: null,
     billingSubscriptionId: null,
@@ -143,8 +147,8 @@ const NOTIFY_ENV_NAMES = [
 /**
  * **レート制限の上限も実行環境から切り離す。**
  *
- * `resetSharedRateLimiterForTesting()` を引数なしで呼ぶと `configuredRateLimit()` が
- * `process.env.PROXY_RATE_LIMIT_PER_MINUTE` を読む。シェルや CI でこれが小さい値
+ * `resetSharedRateLimiterForTesting()` を引数なしで呼ぶと、上限は本番と同じ決め方
+ * （環境変数の上書き → 契約プラン）になるので `process.env.PROXY_RATE_LIMIT_PER_MINUTE` を読む。シェルや CI でこれが小さい値
  * （`PROXY_RATE_LIMIT_PER_MINUTE=1` 等）になっていると、1 テストの中で中継や評価を 2 回以上
  * 呼ぶテストが**一斉に 429 で落ちる** — 通知の宛先を空にしたのと同じ理由（テストの結果が
  * 開発機の環境変数で変わってはいけない）。空にすると既定値（定数）が使われる。

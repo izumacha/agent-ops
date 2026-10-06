@@ -53,7 +53,11 @@ export const PLAN_LIMITS: Readonly<Record<Plan, PlanLimits>> = {
   // 標準の有料: Step4 までの固定値と同じ（既存の配備はこのプランに相当する）
   [Plan.pro]: {
     maxAgents: 25, // エージェント十数件という想定（ルール数の根拠と揃える）
-    proxyRateLimitPerMinute: 600, // ADR-0007 の実測から引いた値（Step4 までの固定値）
+    // ADR-0007 の実測「本文を最悪の形に詰めた要求でも 1 通あたり 3.3ms」から引いた値
+    // （Step4 までの固定値と同じ）。毎分 600 回でも 1 プロセスあたり約 2 秒ぶんの計算量に
+    // 収まる一方、上流の課金は 600 回ぶん発生するので「壊れたクライアントの暴走を止める」には
+    // 十分に効き、正当な使い方（1 件ずつ中継するエージェント）には届かない高さ
+    proxyRateLimitPerMinute: 600,
     maxEnabledGuardrailRules: 50, // Step4 までの固定値
     features: new Set<PlanFeature>(['auditChainVerify']), // 改ざん検証を開ける
   },

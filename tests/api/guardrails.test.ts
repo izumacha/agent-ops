@@ -23,14 +23,14 @@ import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
 import { AuditAction } from '@/domain/audit/action';
 import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
-import { AgentStatus, IncidentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
+import { AgentStatus, IncidentStatus, Plan, Provider, RuleAction, RuleKind } from '@/domain/types';
 import {
   API_MESSAGES,
   GUARDRAIL_RULE_ROWS_MAX_PER_TENANT,
   GUARDRAIL_RULES_MAX_PER_TENANT,
   HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
 } from '@/lib/constants';
-import { extraRateLimiter, RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
+import { extraRateLimiter, RATE_LIMIT_TIER, sharedRateLimiter } from '@/lib/api/rate-limit';
 import { call, seedEachTest } from './helpers';
 
 // seed（2 テナント × 3 役割 + 既存エージェント）
@@ -971,6 +971,43 @@ describe('監査ログと連鎖の検証', () => {
     expect(items[0]).not.toHaveProperty('prevHash');
     // 連番は文字列で運ぶ（BigInt を JSON の数値にすると 2^53 で精度が落ちる）
     expect(items[0]?.seq).toBe('1');
+  });
+
+  it('無料プランでは 403（プランの機能ゲート）', async () => {
+    // **この API でいちばん重い読み取り**（1 要求で最大 1 万行を読み同数の HMAC を計算し直す）
+    // なので Pro 以上に限る。seed は pro なので、このテストだけ free へ落とす
+    const tenant = seed.store.tenants.get(seed.a.id);
+    if (!tenant) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(tenant.id, { ...tenant, plan: Plan.free });
+    // 1 行書いてから admin で検証する（権限は足りているのでプランだけが理由になる）
+    await appendViaResolve();
+    const refused = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
+    expect(refused.status).toBe(403);
+    // **「権限が無い」とは別の文言**（役割を変えようとしても直らないことが分かるように）
+    expect(refused.json).toMatchObject({ message: API_MESSAGES.planFeatureUnavailable });
+    // 一覧の参照は free でも通る（重いのは検証の経路だけ）
+    const listed = await call(listAuditLogs, { token: seed.a.tokens.admin });
+    expect(listed.status).toBe(200);
+  });
+
+  it('プランで断った要求はレート制限の枠を消費しない', async () => {
+    // **機能ゲートはレート制限より前**。後ろに置くと、403 になる要求がテナントの共有の枠を
+    // 減らし、同じテナントのエージェントの中継が窓のあいだ 429 になる（`requiredAction` を
+    // 枠より前に置いているのと同じ理由）。枠が減っていないことを記録表の件数で見る
+    const tenant = seed.store.tenants.get(seed.a.id);
+    if (!tenant) throw new Error('テナント行が見つかりません');
+    seed.store.tenants.set(tenant.id, { ...tenant, plan: Plan.free });
+    // 何度叩いても 403
+    for (let index = 0; index < 3; index += 1) {
+      const refused = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
+      expect(refused.status).toBe(403);
+    }
+    // 共有の枠にも重い枠にも 1 件も記録されていない
+    expect(sharedRateLimiter().trackedKeys, '共有の枠を消費している').toBe(0);
+    expect(
+      extraRateLimiter(RATE_LIMIT_TIER.heavyRead)?.trackedKeys,
+      '重い経路の枠を消費している',
+    ).toBe(0);
   });
 
   it('無傷なら ok を返す', async () => {

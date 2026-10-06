@@ -1,6 +1,7 @@
 // 認可ガード: 認証済みの主体 (Principal) に対して、操作ごとの権限を確かめる。
 // 権限の語彙は 3 種類 (docs/spec.md §4): RBAC の 3 操作 / admin ロール限定 / プラットフォーム管理者
 import { canPerform, isAdminRole, type Action } from '@/domain/rbac';
+import { planAllows, type PlanFeature } from '@/domain/plan';
 import { API_MESSAGES } from '@/lib/constants';
 import type { AgentPrincipal, Principal, UserPrincipal } from './auth';
 import { ApiError } from './errors';
@@ -50,6 +51,27 @@ export function requireProxyAgent(principal: Principal): AgentPrincipal {
   }
   // エージェント主体
   return principal;
+}
+
+/**
+ * 契約プランがその機能を使えることを要求する (Step6)。
+ *
+ * **プランの表 `src/domain/plan.ts` が唯一の真実の源**で、判定は `planAllows` に任せる
+ * (未知のプラン・未知の機能はどちらも拒否 = fail-closed)。403 の文言は「プランで使えない」と
+ * 「権限が無い」を**区別する** — 同じ文言にすると、利用者は役割を変えようとして直らない。
+ *
+ * **テナントのユーザーであることを先に要求する。** プラットフォーム管理者はプランを持たない
+ * (テナント境界の外側) ので、この種の機能ゲートの対象にならない。
+ */
+export function requirePlanFeature(principal: Principal, feature: PlanFeature): UserPrincipal {
+  // まずテナントのユーザーであること
+  const user = requireTenantUser(principal);
+  // プランの表で判定する
+  if (!planAllows(user.plan, feature)) {
+    throw new ApiError(HTTP_STATUS.FORBIDDEN, API_MESSAGES.planFeatureUnavailable);
+  }
+  // 使える
+  return user;
 }
 
 // プラットフォーム管理者であることを要求する (テナント作成・列挙)

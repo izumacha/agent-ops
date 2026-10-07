@@ -2,6 +2,7 @@
 
 AI エージェントの**登録・権限・コスト・品質・停止**を一元管理する運用基盤（SaaS）。複数のエージェントを複数チームで運用し、コストと品質を可視化して事故（暴走・コスト超過・品質低下）を自動で止める。
 
+- **初めて読むなら [`docs/overview.md`](./docs/overview.md)**（図つき 1 枚で全体像）
 - スタック: Next.js 16（App Router）/ TypeScript / Prisma 7 / PostgreSQL 16 / Docker
 - 現在の段階: **Step7（リリース準備）実装済み＝ロードマップの全 8 Step 完了**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
 
@@ -21,7 +22,7 @@ AI エージェントの**登録・権限・コスト・品質・停止**を一�
 | --- |
 | ![ユーザートークンを貼り付けてログインする画面](./docs/screenshots/login.png) |
 
-画像と動画は**シードデータだけ**を写しており、実在のメールアドレス・トークンは入っていない（ログインの入力欄は伏せ字）。再生成は `npm run capture:screenshots`（下記）。**公開デモ URL は Step7**（Vercel/Supabase 向けデプロイ設定）で用意する。
+画像と動画は**シードデータだけ**を写しており、実在のメールアドレス・トークンは入っていない（ログインの入力欄は伏せ字）。再生成は `npm run capture:screenshots`（下記）。**公開デモ URL は提供していない**（Step7 の成果物は Vercel/Supabase 向けのデプロイ設定まで。DB と常駐サーバーが要る形態なので §15 はデモ動画で代替できる。公開する場合の手順は [`docs/deploy.md`](./docs/deploy.md)）。
 
 ## セットアップ
 
@@ -316,6 +317,7 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 
 | パス | 内容 |
 |---|---|
+| `docs/overview.md` | **全体像の読み物**（図つき 1 枚。何のためのシステムで、どう組んであるか） |
 | `docs/spec.md` | 仕様書（正本）: ユースケース 10 件・ER 図・API 一覧 |
 | `docs/roadmap.md` | 8 Step のロードマップと受け入れ基準（`gate:stepN`） |
 | `docs/adr/` | 設計判断の記録（ADR） |

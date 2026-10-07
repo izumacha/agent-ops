@@ -482,7 +482,14 @@ describe('docs/ の入口の鮮度', () => {
       .filter((name) => name !== INDEX)
       .sort();
     // **1 件も導けなければ落とす** (「対象ゼロ＝緑」を避ける fail-closed)
-    expect(entries.length, 'docs/ から対象を 1 件も導けていない').toBeGreaterThan(0);
+    // **`git ls-files` は未追跡でも exit 0 で空を返す**ので、上の catch はここへ来ない —
+    // リリース tarball を別のリポジトリ配下へ展開した場合がこれで、原因を名指ししないと
+    // 読む側は「カタログの対象が消えた」と読んでしまう (実測で exit 0 ＋ 空だった)
+    expect(
+      entries.length,
+      'docs/ から対象を 1 件も導けていない（`git ls-files` は未追跡でも exit 0 で空を返すので、' +
+        'このディレクトリが agent-ops の git 作業ツリーでない可能性もある）',
+    ).toBeGreaterThan(0);
     // **名前に空白や括弧を使わない**ことを規約として要求する — 照合は `](./名前)` の素朴な
     // 一致なので、空白を含む名前はその形でしか通らないが、Markdown は宛先を最初の空白で
     // 切るので**その行は壊れたリンクとして描画される**。つまり満たせる形が壊れた形しか無い。
@@ -512,6 +519,91 @@ describe('docs/ の入口の鮮度', () => {
         `docs/${entry} の行が \`](./${entry})\` の形で docs/${INDEX} に無い` +
           '（題名・アンカー・山括弧は付けない）',
       ).toContain(`](./${entry})`);
+    }
+  });
+});
+
+// 行スコープ方式（全資源が `tenantId` を持つ）の**例外**を `prisma/schema.prisma` から導き、
+// 散文がその全部を名指ししていることを固定する。
+//
+// **なぜ要るか**: この repo の docs に出てくる数値は例外なく定数と突き合わせてある
+// （ユースケース件数 ↔ `REQUIRED_USE_CASES`、プラン表 ↔ `PLAN_LIMITS`、しきい値 ↔
+// `stepN-criteria.mjs`、画面の枚数 ↔ `STEP5_SCREENS`）。「例外は 2 つ」はその規律から
+// 外れた唯一の絶対数で、出所はスキーマにしか無い。3 つめができたとき（`tenantId String?` の
+// テーブルを足す・親経由だけの子テーブルを足す）、全テストが緑のまま散文が「2 つ」と
+// 言い続け、**同じ段落が「非 null を前提にするな」と警告している相手を取りこぼす**。
+//
+// **nullable 側は型が止めてくれない。** 列を持たないモデル（`EvaluationCase`）に
+// `where: { tenantId }` を書くと Prisma の型が拒むので typecheck で止まるが、
+// `tenantId String?` のモデルは通る — 顧客 ID からテナントを引けなかった行だけが
+// 黙って集計から落ちる。だから散文の鮮度が実害に直結する。
+//
+// **見ているのは「名前が散文に現れるか」と「件数の表記が一致するか」だけ。** 説明の正しさ
+// （どちらがどの理由の例外か・どう扱えばよいか）は見ていないので、規約とレビューで守る。
+describe('tenantId の例外（行スコープ方式）の散文', () => {
+  // テナントそのもの（`tenantId` ではなく `id` でテナントを表す分離境界）なので例外に数えない
+  const BOUNDARY_MODEL = 'Tenant';
+  // 件数の表記を要求するファイル（正本は spec.md。残りは同じ数を書いている写し）
+  const COUNT_MENTIONS = ['docs/spec.md', 'README.md', 'CLAUDE.md', 'prisma/schema.prisma'];
+
+  it('例外のモデル名と件数が prisma/schema.prisma から導いたものと一致する', () => {
+    // スキーマ本文
+    const schema = readFileSync(join(process.cwd(), 'prisma', 'schema.prisma'), 'utf8');
+    // `model X { ... }` を全部取る（モデルの本体に `}` は現れないので素朴な走査で足りる）
+    const models = [...schema.matchAll(/^model\s+(\w+)\s*\{([^}]*)\}/gm)].map((match) => ({
+      // モデル名
+      name: match[1],
+      // 本体（フィールドの並び）
+      body: match[2],
+    }));
+    // **1 つも取れなければ落とす**（「対象ゼロ＝緑」を避ける fail-closed）
+    expect(models.length, 'prisma/schema.prisma から model を 1 つも導けていない').toBeGreaterThan(
+      0,
+    );
+    // **境界のモデルが居ることも前提**（名前を変えたら除外が黙って効かなくなる）
+    expect(
+      models.some((model) => model.name === BOUNDARY_MODEL),
+      `prisma/schema.prisma に model ${BOUNDARY_MODEL}（分離境界）が無い`,
+    ).toBe(true);
+    // 境界以外から、`tenantId String`（非 null）を持たないモデルを例外として拾う。
+    // 型が `String` 以外の場合も「持たない」側へ倒れる（fail-closed。多めに要求して落ちる側）
+    const exceptions = models
+      .filter((model) => model.name !== BOUNDARY_MODEL)
+      .filter((model) => !/^\s*tenantId\s+String(?!\?)/m.test(model.body))
+      .map((model) => model.name)
+      .sort();
+    // **名指しの照合先は「件数を書いた段落」だけに絞る。** spec.md 全体を見る版は
+    // 実測で素通りした — ER 図（mermaid）にモデル名が必ず出てくるので、§3 の説明から
+    // 名前を消しても `toContain` が ER 図のほうで満たされ、**事実上何も見ていない**状態に
+    // なっていた。段落の切り出しは「空行で割る」だけで、見出しもリンクも解析しない
+    const paragraphs = readFileSync(join(DOCS, 'spec.md'), 'utf8')
+      .split(/\n\s*\n/)
+      .filter((paragraph) => paragraph.includes(`例外は ${exceptions.length} つ`));
+    // **段落がちょうど 1 つであることを要求する** — 0 なら件数がずれている（下の照合が
+    // 名指しだけ素通りするのを防ぐ）。2 つ以上なら、どちらが古いかを機械では決められない
+    expect(
+      paragraphs.length,
+      `docs/spec.md に「例外は ${exceptions.length} つ」を含む段落がちょうど 1 つ無い（${paragraphs.length} 個）`,
+    ).toBe(1);
+    // その段落の本文
+    const [paragraph] = paragraphs;
+    // 1 件ずつ、その段落で名指しされているかを見る
+    for (const name of exceptions) {
+      // 正本（spec.md §3 の該当段落）がモデル名を名指ししていること
+      expect(
+        paragraph,
+        `tenantId の例外 ${name} が docs/spec.md の「例外は N つ」の段落で名指しされていない`,
+      ).toContain(`\`${name}\``);
+    }
+    // 件数の表記（「例外は 2 つ」）を、同じ数を書いている全ファイルへ要求する
+    for (const file of COUNT_MENTIONS) {
+      // ファイル本文
+      const text = readFileSync(join(process.cwd(), file), 'utf8');
+      // 件数が合っていること
+      expect(
+        text,
+        `${file} の「例外は N つ」が導出（${exceptions.length} 件: ${exceptions.join(' / ')}）と合っていない`,
+      ).toContain(`例外は ${exceptions.length} つ`);
     }
   });
 });

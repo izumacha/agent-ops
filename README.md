@@ -320,7 +320,7 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 | `docs/` | 文書一式。**どの文書が何を持っているかは [`docs/index.md`](./docs/index.md) が唯一のカタログ**（初見なら [`docs/overview.md`](./docs/overview.md)、正本は `spec.md` と `roadmap.md`）。ここに一覧を写さないのは、写した側が黙って古くなるため（載せ忘れは `tests/docs-gate.test.ts` が `git ls-files` と突き合わせて落とす） |
 | `vercel.json` | Vercel のビルドの結線（生成物をコミットしないのでビルド前に `gen` / `db:generate` を流す） |
 | `openapi/openapi.yaml` | REST API 定義（OpenAPI 3.1、契約の正本） |
-| `prisma/schema.prisma` | DB スキーマ（全テーブルに `tenantId`） |
+| `prisma/schema.prisma` | DB スキーマ（テナントに属する資源は `tenantId` を持つ。**例外は 2 つ**で、正本は [`docs/spec.md`](./docs/spec.md) §3） |
 | `src/domain/` | フレームワーク非依存の純粋ロジック（RBAC 許可表・金額） |
 | `src/data/` | Ports & Adapters（`ports/` 契約、`adapters/prisma/` 本番、`adapters/memory/` テスト） |
 | `src/lib/` | 横断インフラ（Prisma 結線・定数・トークン・API 基盤 `api/`・Zod スキーマ `validations/`） |
@@ -330,7 +330,6 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 | `scripts/gate-stepN.mjs` | Step ごとのゲート（`scripts/issue-user-token.ts` は開発用トークン発行 CLI） |
 | `tests/` | ユニット・API テスト（`tests/api/`）と契約テスト（`tests/data/*.contract.prisma.test.ts`） |
 | `e2e/` | 主要 5 画面の Playwright テスト（`e2e/lib/` は仕込みとアプリ起動の共有部分） |
-| `docs/screenshots/` | README 用のスクショとデモ動画（`npm run capture:screenshots` の生成物） |
 
 ## 本番配備の前提（公開する前に必ず読む）
 

@@ -82,28 +82,20 @@ export async function POST(request: Request): Promise<Response> {
       customerId === null ? null : await repos.tenants.findByBillingCustomerId(customerId);
     // 反映すべきプランを決める（知らない種別・知らない価格・未確定の状態なら null）
     const change = planChangeFor(event);
-    // **契約の変更イベントのときだけログに残す** — 顧客 ID を引けないのは設定の取り違えだが、
-    // 事業者は契約と無関係な種別（`payout.paid` 等。顧客 ID を持たない）も送るので、
-    // 種別を見ずに残すと**無関係な通知のたびに「設定が違う」と鳴り**、本当の取り違えが埋もれる
-    const planChangeEvent = isPlanChangeEvent(event.type);
     // 反映に渡すもの（渡さなければ「受信の記録だけ」になる）と、記録に残す変更前のプラン
     let pending: { apply: BillingPlanApplication; from: Plan } | null = null;
+    // 反映しない理由（ログに残すのは初めての受信のときだけなので、ここでは**種類だけ**を持つ）
+    let skipped: SkipReason | null = null;
     if (tenant === null) {
       // 顧客 ID に対応するテナントが無い（連携していない・取り違えている）
-      if (planChangeEvent) {
-        console.error('[billing] 受信した顧客 ID に対応するテナントがありません');
-      }
+      skipped = SKIP_REASON.tenantMissing;
     } else if (change === null) {
-      // **種別が表にある（= 契約の変更のはず）のに決められなかったときだけログに残す** —
-      // 価格の名前の取り違えで「払っているのに反映されない」状態になるため
-      if (planChangeEvent) {
-        console.error('[billing] 契約の変更イベントからプランを決められませんでした');
-      }
+      // 種別は表にあるのにプランを決められなかった（価格の名前の取り違え・未確定の状態）
+      skipped = SKIP_REASON.planUndecidable;
     } else if (isStaleCancellation(change, tenant.billingSubscriptionId)) {
       // **いまの契約とは別のサブスクリプションの解約は反映しない**（配信順は保証されないので、
-      // 解約の再送が遅れているあいだに結び直した新しい契約を古い解約が打ち消しうる）。
-      // 取り落としたことは残す（値そのものは出さない）
-      console.error('[billing] いまの契約とは別のサブスクリプションの解約なので反映しません');
+      // 解約の再送が遅れているあいだに結び直した新しい契約を古い解約が打ち消しうる）
+      skipped = SKIP_REASON.staleCancellation;
     } else {
       // 反映できる。**ID が本文に無いときは項目ごと渡さない** — Port の `null` は「未連携へ
       // 戻す」という明示の指示なので、無条件に渡すと**本文が ID を運んでいないだけの再送で
@@ -117,6 +109,9 @@ export async function POST(request: Request): Promise<Response> {
               ? {}
               : { billingSubscriptionId: change.subscriptionId }),
           },
+          // **解約のときだけ「いまの契約のままか」を条件にする** — 読んでから書くまでの間に
+          // 結び直されていたら反映しない（契約の開始・変更は新しい契約が勝つので条件なし）
+          expectSubscriptionId: change.cancellation ? tenant.billingSubscriptionId : null,
         },
         from: tenant.plan,
       };
@@ -129,7 +124,11 @@ export async function POST(request: Request): Promise<Response> {
     );
     // 2 通目は何もせず 200（再送は正常系。エラーにすると事業者が再送を増やす）
     if (recorded.outcome === 'duplicate') return received(false);
-    // 反映を渡していない（上の理由のどれか）か、読んだ直後に消えた（並行削除）なら反映できていない
+    // **反映しなかった理由は「初めての受信」のときだけ残す** — 判定より前に出すと、同じ
+    // イベントの再送（事業者の at-least-once・画面からの手動再送）のたびに同じ行が鳴り、
+    // 「無関係な通知で鳴らさない」ために種別で絞った意味が薄れる
+    if (skipped !== null) logSkipped(skipped, event.type);
+    // 反映を渡していない（上の理由のどれか）か、条件に合わなかった／並行削除なら反映できていない
     if (pending === null || recorded.tenant === null) return received(false);
     // 監査ログに 1 行残す（記録の形は `PATCH /tenants/{tenantId}` と共有する）
     await recordPlanChangeAudit(repos, {
@@ -146,6 +145,44 @@ export async function POST(request: Request): Promise<Response> {
     // 応答へ写す（**`route()` と同じ関数**。500 のログもそこが残す）。
     // 失敗の応答にも `no-store` を付ける（成功と同じ扱い）
     return withPrivateCacheHeaders(toErrorResponse(error));
+  }
+}
+
+/**
+ * 反映しなかった理由（ログの文はこの種類から選ぶ）。
+ *
+ * **文字列を組み立てて `console.error` へ渡さない** — このリポジトリはログの実引数を
+ * リテラルと `describeError()` だけに縛っている（`tests/error-logging.test.ts`）。
+ * 理由を値として持ち、出すのは `logSkipped` の中のリテラルに限る。
+ */
+const SKIP_REASON = {
+  // 顧客 ID に対応するテナントが無い
+  tenantMissing: 'tenant_missing',
+  // 種別は表にあるのにプランを決められなかった
+  planUndecidable: 'plan_undecidable',
+  // いまの契約とは別のサブスクリプションの解約
+  staleCancellation: 'stale_cancellation',
+} as const;
+/** 反映しなかった理由の型 */
+type SkipReason = (typeof SKIP_REASON)[keyof typeof SKIP_REASON];
+
+/**
+ * 反映しなかったことをサーバログに残す。
+ *
+ * **契約の変更イベントのときだけ残す** — 事業者は契約と無関係な種別（`payout.paid` 等。
+ * 顧客 ID を持たない）も送るので、種別を見ずに残すと**無関係な通知のたびに「設定が違う」と鳴り**、
+ * 本当の取り違えが埋もれる。解約の取り違えは種別が必ず表にあるので同じ条件で足りる。
+ */
+function logSkipped(reason: SkipReason, type: string): void {
+  // 無関係な通知では鳴らさない
+  if (!isPlanChangeEvent(type)) return;
+  // 理由ごとに固定の文を出す（値そのものは出さない）
+  if (reason === SKIP_REASON.tenantMissing) {
+    console.error('[billing] 受信した顧客 ID に対応するテナントがありません');
+  } else if (reason === SKIP_REASON.planUndecidable) {
+    console.error('[billing] 契約の変更イベントからプランを決められませんでした');
+  } else {
+    console.error('[billing] いまの契約とは別のサブスクリプションの解約なので反映しません');
   }
 }
 

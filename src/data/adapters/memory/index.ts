@@ -115,7 +115,6 @@ function cloneAuditLog(row: AuditLogRecord): AuditLogRecord {
   return { ...row, payload: cloneAuditPayload(row.payload) };
 }
 
-// テナント Port の memory 実装
 /**
  * テナントのプランと課金事業者側の id を書き換える (無ければ null)。
  *
@@ -156,6 +155,7 @@ function applyTenantPlan(
   return clone(row);
 }
 
+// テナント Port の memory 実装
 class MemoryTenants implements TenantsPort {
   // 共有の表を受け取る
   constructor(private readonly store: MemoryStore) {}
@@ -1250,10 +1250,11 @@ class MemoryBillingEvents implements BillingEventsPort {
     const key = `${input.provider}:${input.eventId}`;
     // 既に記録済みなら何もしない (再送は正常系なので例外にしない)
     if (this.store.billingEvents.has(key)) return { outcome: 'duplicate', tenant: null };
-    // **反映を先に行う** — prisma 側は 1 つのトランザクションなので、失敗したときに記録も
-    // 残らない。memory も順序をそろえておく (`applyTenantPlan` が投げれば記録へ進まない)
-    const tenant =
-      apply === null ? null : applyTenantPlan(this.store, apply.tenantId, apply.update);
+    // **反映を先に行う** — prisma 側は 1 つのトランザクションなので、失敗したら記録も残らない。
+    // memory も「失敗したら記録へ進まない」をそろえる (`applyTenantPlan` が投げれば下へ進まない)。
+    // **条件 (`expectSubscriptionId`) が合わなければ反映しない** — 呼び出し側が読んだ行で
+    // 判断すると、読んでから書くまでに契約が変わった場合に古い解約が新しい契約を打ち消す
+    const tenant = apply === null ? null : this.applyIfExpected(apply);
     // 記録して「初めて」を返す
     this.store.billingEvents.set(key, {
       provider: input.provider,
@@ -1263,6 +1264,22 @@ class MemoryBillingEvents implements BillingEventsPort {
       receivedAt: this.store.now(),
     });
     return { outcome: 'recorded', tenant };
+  }
+
+  // 条件に合うときだけ反映する (合わない・対象が居ないなら null = 記録だけ残す)
+  private applyIfExpected(apply: BillingPlanApplication): TenantRecord | null {
+    // 現在の行 (無ければ反映しない)
+    const row = this.store.tenants.get(apply.tenantId);
+    if (!row) return null;
+    // 契約 ID の条件がある場合は現在の値と突き合わせる
+    if (
+      apply.expectSubscriptionId !== null &&
+      row.billingSubscriptionId !== apply.expectSubscriptionId
+    ) {
+      return null;
+    }
+    // 条件を満たしたので書き換える
+    return applyTenantPlan(this.store, apply.tenantId, apply.update);
   }
 }
 

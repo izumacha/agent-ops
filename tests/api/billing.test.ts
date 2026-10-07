@@ -614,6 +614,63 @@ describe('POST /billing/webhook', () => {
     expect((await billingLinkOfA())?.billingSubscriptionId).toBe('sub_1');
   });
 
+  it('結び直した後に届いた古い解約で課金中の契約を落とさない', async () => {
+    // 配信順の遅れ（逐次）を API 経由で固定する。**並行して届いた場合**は「読んだ行で判断して
+    // いるあいだに契約が変わる」競合になり、閉じているのは**データ層の条件付き反映**（Port の
+    // `expectSubscriptionId`）— そちらは `tests/data/*billing*` が決定的に固定する
+    // （API からは 2 つの要求の差し込み順を決められないので、ここで競合は作れない）
+    await linkCustomer();
+    await seed.repos.tenants.updatePlan(seed.a.id, {
+      plan: Plan.pro,
+      billingCustomerId: 'cus_1',
+      billingSubscriptionId: 'sub_1',
+    });
+    // 結び直し（sub_2 が有効）を先に反映させる
+    expect(
+      (
+        await postWebhook(
+          webhookBody({
+            plan: Plan.pro,
+            eventId: 'evt_resub',
+            subscriptionId: 'sub_2',
+            status: 'active',
+          }),
+        )
+      ).json,
+    ).toMatchObject({ applied: true });
+    // **古い解約が後から届く**（判定に使う行は sub_2 になっている）
+    const cancel = await postWebhook(
+      webhookBody({
+        plan: Plan.pro,
+        eventId: 'evt_old_cancel',
+        type: 'customer.subscription.deleted',
+        subscriptionId: 'sub_1',
+      }),
+    );
+    expect(cancel.json).toEqual({ received: true, applied: false });
+    // 課金中の契約は pro のまま
+    expect(await planOfA()).toBe(Plan.pro);
+    expect((await billingLinkOfA())?.billingSubscriptionId).toBe('sub_2');
+  });
+
+  it('反映しなかった理由は再送のたびには鳴らない（初めての受信だけ）', async () => {
+    // **判定より前にログを出すと、at-least-once の再送や画面からの手動再送のたびに同じ行が鳴る** —
+    // 「無関係な通知で鳴らさない」ために種別で絞った意味が薄れる
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // 顧客 ID を結び付けていない（= 反映できない）契約の変更イベント
+      const body = webhookBody({ plan: Plan.pro, eventId: 'evt_noise', customer: 'cus_unknown' });
+      // 1 通目で 1 行だけ鳴る
+      expect((await postWebhook(body)).json).toEqual({ received: true, applied: false });
+      expect(errors).toHaveBeenCalledTimes(1);
+      // 2 通目（再送）では鳴らない
+      expect((await postWebhook(body)).json).toEqual({ received: true, applied: false });
+      expect(errors).toHaveBeenCalledTimes(1);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('冪等性: 署名が確認できなかった要求は記録しない（記録を使い切らせない）', async () => {
     // **弾いた要求を記録すると、攻撃者が任意のイベント ID を「処理済み」にできる** —
     // 本物の通知がその ID で届いても 2 通目として無視され、プランが永久に反映されない

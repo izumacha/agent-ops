@@ -149,18 +149,23 @@ function violatedUniqueCandidate(
   const meta: unknown = (error as Prisma.PrismaClientKnownRequestError).meta;
   // 列名が直接入る形（`meta.target`）を文字列の配列へ正規化する
   const target = readUnknownPath(meta, ['target']);
-  const targets = Array.isArray(target)
-    ? target.map(String)
-    : typeof target === 'string'
-      ? [target]
-      : [];
-  // 索引の名前が入る形（ドライバアダプタ経由）
-  const index = readUnknownPath(meta, ['driverAdapterError', 'cause', 'constraint', 'index']);
-  // 索引名を `_` で囲んでおくと、端の列名も「区切りに挟まれた一部」として同じ規則で探せる
-  const indexName = typeof index === 'string' ? `_${index}_` : '';
+  const targets = Array.isArray(target) ? target.map(String) : [];
+  // **文字列 1 つの `target` は列名ではなく制約の名前が入ることがある**ので、索引名と同じ扱いにする
+  // （完全一致だけを見ていると `BillingEvent_provider_eventId_key` のような値で常に「読めなかった」へ倒れる）
+  const named = [
+    typeof target === 'string' ? target : '',
+    // 索引の名前が入る形（ドライバアダプタ経由）
+    (() => {
+      const index = readUnknownPath(meta, ['driverAdapterError', 'cause', 'constraint', 'index']);
+      return typeof index === 'string' ? index : '';
+    })(),
+  ]
+    // 名前を `_` で囲んでおくと、端の列名も「区切りに挟まれた一部」として同じ規則で探せる
+    .map((name) => (name === '' ? '' : `_${name}_`));
   // 候補のうち実際に違反したものを探す
   return candidates.find(
-    (candidate) => targets.includes(candidate) || indexName.includes(`_${candidate}_`),
+    (candidate) =>
+      targets.includes(candidate) || named.some((name) => name.includes(`_${candidate}_`)),
   );
 }
 
@@ -341,7 +346,6 @@ function usageEventCreateData(input: RecordUsageEventInput): {
   };
 }
 
-// テナント Port の prisma 実装
 /**
  * プラン更新の `data`（`tenants.updatePlan` と受信 Webhook の原子的な反映が共有する）。
  *
@@ -361,6 +365,7 @@ function tenantPlanData(input: UpdateTenantPlanInput) {
   };
 }
 
+// テナント Port の prisma 実装
 class PrismaTenants implements TenantsPort {
   // クライアントを受け取る
   constructor(private readonly db: PrismaClient) {}
@@ -1490,30 +1495,17 @@ class PrismaBillingEvents implements BillingEventsPort {
     input: RecordBillingEventInput,
     apply: BillingPlanApplication | null,
   ): Promise<RecordBillingEventResult> {
-    // **反映と記録を 1 つのトランザクションにする** — 記録だけが先に確定すると、反映に失敗した
+    // **どちらの文で一意制約に当たったか**を外側の catch へ伝える。
+    // meta の形から列名を当てる推測に頼らない — ドライバが形を変えた瞬間に「読めなかった」へ倒れ、
+    // ただの再送が `DuplicateError` → 422 になる (事業者は失敗と読んで再送を増やす)
+    let failedAt: 'event' | 'tenant' = 'event';
+    // **記録と反映を 1 つのトランザクションにする** — 記録だけが先に確定すると、反映に失敗した
     // イベントが「もう処理した」になり再送でもやり直せない (= 永久に反映されない)
     try {
       return await this.db.$transaction(async (tx: Db) => {
-        // 反映が要るなら**先に**書く (記録はこの後。どちらかが失敗すれば両方巻き戻る)
-        let tenant: TenantRecord | null = null;
-        if (apply !== null) {
-          // **対象の有無は SELECT で確かめる** — `update` の P2025 を catch すると
-          // PostgreSQL のトランザクションが中断済みになり、後続の INSERT が必ず落ちる
-          const exists = await tx.tenant.findUnique({
-            where: { id: apply.tenantId },
-            select: { id: true },
-          });
-          // 居るときだけ書き換える (居なければ記録だけ残す = 再送しても結果は変わらない)
-          if (exists !== null) {
-            tenant = await tx.tenant.update({
-              where: { id: apply.tenantId },
-              data: tenantPlanData(apply.update),
-            });
-          }
-        }
-        // **一意制約の違反そのものを「2 通目」の判定に使う** — 「処理済みか先に SELECT してから
-        // INSERT」の形にすると、同時に届いた 2 通がどちらも「未処理」を読んで両方が通る
-        // (Webhook は並行して届く)。制約に任せれば、競合しても必ず 1 通だけが recorded になる
+        // **受信を先に記録する** — 一意制約に当たればこの文が最初に落ちるので、
+        // 「2 通目」と「連携の衝突」を取り違えようがない (エラーは tx の外で受けるので
+        // PostgreSQL の「中断済みトランザクション」にも触れない)
         await tx.billingEvent.create({
           data: {
             provider: input.provider,
@@ -1522,17 +1514,32 @@ class PrismaBillingEvents implements BillingEventsPort {
             tenantId: input.tenantId,
           },
         });
-        // 挿入できたので、この呼び出しが初めて記録した
+        // 反映が要らないなら記録だけで終わり
+        if (apply === null) return { outcome: 'recorded' as const, tenant: null };
+        // ここから先の一意制約違反は連携の列
+        failedAt = 'tenant';
+        // **条件付き更新で「対象が居るか」と「いまの契約か」を同時に見る** — 読んでから書くまでの
+        // 間に契約が変わりうるので、呼び出し側が読んだ行で判断すると古い解約が新しい契約を打ち消す。
+        // 0 件なら反映しない (居ない / 条件に合わない のどちらでも記録だけ残す)
+        const { count } = await tx.tenant.updateMany({
+          where: {
+            id: apply.tenantId,
+            ...(apply.expectSubscriptionId === null
+              ? {}
+              : { billingSubscriptionId: apply.expectSubscriptionId }),
+          },
+          data: tenantPlanData(apply.update),
+        });
+        // 反映できたときだけ行を読み直して返す
+        const tenant =
+          count === 0 ? null : await tx.tenant.findUnique({ where: { id: apply.tenantId } });
         return { outcome: 'recorded' as const, tenant };
       });
     } catch (error) {
       // 一意制約違反でなければ原因を隠さずそのまま投げる
       if (!isPrismaError(error, UNIQUE_VIOLATION)) throw error;
-      // **どの制約で落ちたかで意味が違う。** `eventId` は BillingEvent にしか無い列なので、
-      // そこが違反なら「もう記録済み」= 2 通目 (反映も一緒に巻き戻っている)
-      if (violatedUniqueCandidate(error, ['eventId']) !== undefined) {
-        return { outcome: 'duplicate', tenant: null };
-      }
+      // 受信記録の挿入で当たったなら「もう記録済み」= 2 通目 (反映も一緒に巻き戻っている)
+      if (failedAt === 'event') return { outcome: 'duplicate', tenant: null };
       // それ以外は連携の衝突 (2 テナントが同じ契約を名乗る)。`updatePlan` と同じ翻訳にそろえる
       rethrowDuplicateAmong(error, ['billingCustomerId', 'billingSubscriptionId']);
     }

@@ -10,10 +10,11 @@
 // RUN_PRISMA_CONTRACT=1 のときだけ走り、beforeEach で全テーブルを TRUNCATE するため開発 DB を指さない
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DuplicateError } from '@/data/errors';
-import type { CreateAgentInput, RecordBillingEventInput, Repositories } from '@/data/ports';
+import type { CreateAgentInput, Repositories } from '@/data/ports';
 import { Plan, Provider } from '@/domain/types';
 import { userTokenExpiresAt } from '@/lib/tokens';
 import { runContractDatabaseGuard } from '../../scripts/lib/contract-database.mjs';
+import { applyWithoutExpectation, recordWithoutApply } from '../lib/billing-events';
 
 // 明示フラグが無ければ丸ごとスキップする
 const ENABLED = process.env.RUN_PRISMA_CONTRACT === '1';
@@ -43,21 +44,6 @@ async function makeTenant(repos: Repositories, label: string): Promise<string> {
     },
   });
   return created.tenant.id;
-}
-
-/**
- * 反映を渡さずに受信だけを記録する（`outcome` だけを見たいテスト用の薄い包み）。
- *
- * **`recordOnce` の反映は省略可にしていない**（渡し忘れが静かに「記録だけ」へ戻るのを防ぐため）
- * ので、テスト側で `null` を書き並べる代わりにここへ寄せる。memory 側の対テストと同じ形。
- */
-async function recordWithoutApply(
-  repos: Repositories,
-  input: RecordBillingEventInput,
-): Promise<string> {
-  // 反映なしで記録し、結果の種類だけを返す
-  const result = await repos.billingEvents.recordOnce(input, null);
-  return result.outcome;
 }
 
 // エージェント作成の最小限の入力 (上限の判定を主題にするテストが使う)
@@ -243,7 +229,7 @@ describe.skipIf(!ENABLED)('課金とプランの契約', () => {
     // 受信を記録しつつ pro へ上げる
     const result = await repos.billingEvents.recordOnce(
       { provider: PROVIDER, eventId: 'evt_apply', type: 'x.updated', tenantId },
-      { tenantId, update: { plan: Plan.pro, billingSubscriptionId: 'sub_apply' } },
+      applyWithoutExpectation(tenantId, { plan: Plan.pro, billingSubscriptionId: 'sub_apply' }),
     );
     // 初めての記録で、反映後の行が返る
     expect(result.outcome).toBe('recorded');
@@ -258,11 +244,14 @@ describe.skipIf(!ENABLED)('課金とプランの契約', () => {
     // pro へ上げたあと、同じイベント ID で free へ落とす指示を送る
     const tenantId = await makeTenant(repos, 'twice');
     const input = { provider: PROVIDER, eventId: 'evt_twice', type: 'x.updated', tenantId };
-    await repos.billingEvents.recordOnce(input, { tenantId, update: { plan: Plan.pro } });
-    const second = await repos.billingEvents.recordOnce(input, {
-      tenantId,
-      update: { plan: Plan.free },
-    });
+    await repos.billingEvents.recordOnce(
+      input,
+      applyWithoutExpectation(tenantId, { plan: Plan.pro }),
+    );
+    const second = await repos.billingEvents.recordOnce(
+      input,
+      applyWithoutExpectation(tenantId, { plan: Plan.free }),
+    );
     // 2 通目は何も書かない
     expect(second.outcome).toBe('duplicate');
     expect(second.tenant).toBeNull();
@@ -274,12 +263,39 @@ describe.skipIf(!ENABLED)('課金とプランの契約', () => {
     // 居ないテナントへの反映 (再送しても結果は変わらないので記録は残す)
     const result = await repos.billingEvents.recordOnce(
       { provider: PROVIDER, eventId: 'evt_gone', type: 'x.deleted', tenantId: null },
-      { tenantId: 'tenant_missing', update: { plan: Plan.free } },
+      applyWithoutExpectation('tenant_missing', { plan: Plan.free }),
     );
     expect(result.outcome).toBe('recorded');
     expect(result.tenant).toBeNull();
     // 行は残っている (= 再送は duplicate になる)
     expect(await client.billingEvent.count({ where: { eventId: 'evt_gone' } })).toBe(1);
+  });
+
+  it('契約 ID の条件に合わなければ反映せず記録だけ残す', async () => {
+    // **解約の競合を閉じるのはこの条件**（memory 側の対テストと同じ期待）
+    const tenantId = await makeTenant(repos, 'stale');
+    await repos.tenants.updatePlan(tenantId, { plan: Plan.pro, billingSubscriptionId: 'sub_new' });
+    const result = await repos.billingEvents.recordOnce(
+      { provider: PROVIDER, eventId: 'evt_stale', type: 'x.deleted', tenantId },
+      { tenantId, update: { plan: Plan.free }, expectSubscriptionId: 'sub_old' },
+    );
+    // 記録は残るが反映はしない
+    expect(result.outcome).toBe('recorded');
+    expect(result.tenant).toBeNull();
+    const row = await client.tenant.findUnique({ where: { id: tenantId } });
+    expect(row?.plan).toBe(Plan.pro);
+  });
+
+  it('契約 ID の条件に合えば反映する', async () => {
+    // 条件が「反映しない」側へ倒れっぱなしになっていないこと
+    const tenantId = await makeTenant(repos, 'match');
+    await repos.tenants.updatePlan(tenantId, { plan: Plan.pro, billingSubscriptionId: 'sub_1' });
+    const result = await repos.billingEvents.recordOnce(
+      { provider: PROVIDER, eventId: 'evt_match', type: 'x.deleted', tenantId },
+      { tenantId, update: { plan: Plan.free }, expectSubscriptionId: 'sub_1' },
+    );
+    expect(result.outcome).toBe('recorded');
+    expect(result.tenant?.plan).toBe(Plan.free);
   });
 
   it('反映が失敗したら受信記録も残らない (同じトランザクションであること)', async () => {
@@ -292,7 +308,7 @@ describe.skipIf(!ENABLED)('課金とプランの契約', () => {
     await expect(
       repos.billingEvents.recordOnce(
         { provider: PROVIDER, eventId: 'evt_rollback', type: 'x.updated', tenantId: first },
-        { tenantId: first, update: { plan: Plan.pro, billingSubscriptionId: 'sub_taken' } },
+        applyWithoutExpectation(first, { plan: Plan.pro, billingSubscriptionId: 'sub_taken' }),
       ),
     ).rejects.toBeInstanceOf(DuplicateError);
     // 受信記録の行が 1 件も無い (巻き戻っている)

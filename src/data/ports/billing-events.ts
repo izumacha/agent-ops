@@ -31,6 +31,16 @@ export interface BillingPlanApplication {
   tenantId: string;
   // プランと課金事業者側の id (tenants Port と同じ入力の形)
   update: UpdateTenantPlanInput;
+  /**
+   * この契約 ID のままであることを条件に反映する (`null` = 条件なし)。
+   *
+   * **読んでから書くまでの間に契約が変わりうる。** 解約と結び直しは並行して届くので、
+   * 「いまの契約か」を呼び出し側が**読んだ行**で判断すると、判断と書き込みの間に新しい契約が
+   * 入った場合に古い解約がそれを打ち消す (= 課金が続いているテナントが free へ落ちる)。
+   * 条件をアダプタへ渡し、**書き込みと同じ原子的操作の中で**突き合わせる。
+   * 条件に合わなければ反映せず記録だけ残す (`tenant` は `null`)。
+   */
+  expectSubscriptionId: string | null;
 }
 
 /**
@@ -65,10 +75,16 @@ export interface BillingEventsPort {
    *
    * 約束:
    * - `apply` が `null` のときは記録だけを行い、`tenant` は `null`
-   * - `apply` の対象が居なければ**記録だけ残して** `tenant` は `null`
-   *   (再送しても結果は変わらないので、やり直させる意味が無い)
+   * - `apply` の対象が居ない、または `expectSubscriptionId` が現在の行と合わなければ
+   *   **記録だけ残して** `tenant` は `null`（再送しても結果は変わらないので、やり直させる意味が無い）
    * - 反映が失敗したら**記録も残らない** (例外が出る。事業者の再送でやり直せる)
    * - 2 通目なら**何も書かない** (`outcome: 'duplicate'`、`tenant` は `null`)
+   *
+   * **残る境界**: `input.tenantId` が指す行が**記録の瞬間に消えている**場合、prisma 側は外部キーの
+   * 違反になる（翻訳しないので 500 → 事業者の再送でやり直す。次の試行では顧客 ID から引けず
+   * `tenantId: null` で記録される）。memory 側は外部キーが無いので記録できてしまい、**ここだけ
+   * 2 つのアダプタの答えが違う**（ADR-0006 の死角。実際の呼び出し側はテナントを引いた直後に
+   * 呼ぶので窓は極めて狭く、翻訳を足すより「再送でやり直る」を選んでいる）。
    */
   recordOnce(
     input: RecordBillingEventInput,

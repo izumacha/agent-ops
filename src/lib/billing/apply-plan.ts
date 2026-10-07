@@ -104,17 +104,14 @@ export async function recordPlanChangeAudit(
   });
 }
 
-/** プラン変更の入力（`updatePlan` へ渡すものと、記録に要るもの） */
-export interface ApplyPlanChangeInput {
-  // 対象のテナント
-  tenantId: string;
-  // 変更前のプラン（記録に残すために呼び出し側が渡す）
-  from: Plan;
-  // 変更後のプランと課金事業者側の id
-  update: UpdateTenantPlanInput;
-  // どの経路からの変更か
-  source: PlanChangeSource;
-}
+/**
+ * プラン変更の入力（`updatePlan` へ渡すものと、記録に要るもの）。
+ *
+ * **記録側の入力から `to` を除いたもの**として表す — こちらは反映も行うので、変更後のプランは
+ * 呼び出し側が渡すのではなく**実際に書かれた行**から取る。2 つの interface に同じ項目を並べると、
+ * 監査の payload に項目が増えたとき片方だけが直る（§6 DRY）。
+ */
+export type ApplyPlanChangeInput = Omit<PlanChangeAuditInput, 'to'>;
 
 /**
  * プランを反映して監査ログに 1 行残す。対象が無ければ `null`（呼び出し側が 404 にする）。
@@ -123,7 +120,7 @@ export interface ApplyPlanChangeInput {
  * 応答を組み立てていたので、`TenantDto` に可変の項目（`updatedAt` や課金連携）が増えた瞬間に
  * **更新前の値を返す**形になる（テストは 1 件も落ちない）。
  *
- * **呼び出し側は先に `assertAuditConfigured()` を通すこと。** 理由は `recordPlanChangeAudit`。
+ * **呼び出し側は先に `assertAuditConfigured()` を通すこと**（理由は `recordPlanChangeAudit`）。
  */
 export async function applyPlanChange(
   repos: Repositories,

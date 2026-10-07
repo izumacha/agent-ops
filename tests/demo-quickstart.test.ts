@@ -8,15 +8,20 @@
 //
 // **手がかりを 2 つに分ける.** 「どのパスがプランで閉じているか」は**ルートの印から**
 // （`ROUTE_REQUIRED_PLAN_FEATURE_BRAND`。表を手で書くと、ゲートを足した人が README を見ない）、
-// 「quickstart が何を叩くか」は**README の本文から**読む。片方だけを基準にすると、
+// 「quickstart が何を叩くか」は**README のコードブロックから**読む。片方だけを基準にすると、
 // 導出が狭まったときに検査も一緒に狭まって「対象ゼロ＝緑」で無力化される。
+//
+// **走査するのは「実際に叩いている行」だけ。** README 全体を `includes` で見ると、
+// 「`free` では 403 になる」という**制限を説明している散文**まで「quickstart が叩く経路」として
+// 数えてしまう。すると、デモのプランで使えない機能を足したとき「403 になると書いた」だけで
+// 「seed のプランを上げろ」と要求する検査になる（実行不能な指示を出す検出網はいずれ緩められる）。
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { findRouteFiles } from './lib/route-files';
 import { ROUTE_REQUIRED_PLAN_FEATURE_BRAND } from '@/lib/api/handler';
-import { PLAN_FEATURES, type PlanFeature, planAllows } from '@/domain/plan';
+import { PLAN_FEATURES, type PlanFeature, planAllows, planLimitsFor } from '@/domain/plan';
 import { DEMO_TENANT_PLAN } from '../prisma/seed-data';
 
 // Route Handler を置いているディレクトリ
@@ -25,6 +30,25 @@ const APP_DIR = join(process.cwd(), 'src', 'app');
 const README = readFileSync(join(process.cwd(), 'README.md'), 'utf8');
 // OpenAPI の `servers.url` と同じ接頭辞（ルートのファイル位置から URL を組むのに使う）
 const API_PREFIX = '/api/v1';
+
+/**
+ * README の fenced code block（```…```）の中身だけを集める。
+ *
+ * 散文を除くための最初の絞り込み。**この中にも「叩く行」と「応答の例」が混在する**ので、
+ * 呼び出し側がさらに絞る。
+ */
+function codeBlocks(markdown: string): string[] {
+  // ``` で囲まれた部分を取り出す（言語指定は読み飛ばす）
+  return [...markdown.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((match) => match[1]);
+}
+
+/** README のコードブロックのうち、実際に API を叩いている行（`curl` を含む行の続き） */
+function requestLines(markdown: string): string[] {
+  // ブロックを行に割り、コメント行（`#` で始まる）を除く
+  return codeBlocks(markdown)
+    .flatMap((block) => block.split('\n'))
+    .filter((line) => !line.trimStart().startsWith('#'));
+}
 
 /**
  * ルートのファイルパスを URL のパスへ直す（`src/app/api/v1/x/y/route.ts` → `/api/v1/x/y`）。
@@ -44,12 +68,16 @@ function urlPathOf(full: string): string | null {
 }
 
 describe('README の quickstart とデモシードの整合', () => {
-  // **プランで閉じているパスのうち、README の quickstart に出てくるものは
+  // **プランで閉じているパスのうち、README の quickstart が実際に叩くものは
   // デモテナントのプランで通ること。**
   it('quickstart が叩くプラン限定の経路はデモのプランで使える', async () => {
     // 走査したルートの数（fail-closed の判定に使う）
     let scanned = 0;
-    // README に出てきた「プラン限定のパス」（パス → 要る機能）
+    // quickstart が叩いている行（散文と応答例を除いたもの）
+    const lines = requestLines(README);
+    // 1 行も読めていなければ README の形が変わっている（検査が空回りする）
+    expect(lines.length, 'README のコードブロックから叩いている行が読めない').toBeGreaterThan(0);
+    // README が叩いている「プラン限定のパス」（パス → 要る機能）
     const documented = new Map<string, PlanFeature>();
     // ルートを 1 つずつ読む（綴りではなく実際の export の印を見る）
     for (const full of findRouteFiles(APP_DIR)) {
@@ -69,15 +97,19 @@ describe('README の quickstart とデモシードの整合', () => {
         // 綴り違いの宣言は `planAllows` が常に false を返すので「誰も使えない」側へ倒れる
         if (typeof feature !== 'string') continue;
         expect(PLAN_FEATURES, `${path} の宣言 ${feature} が表に無い`).toContain(feature);
-        // README の本文にそのパスが出ていれば、quickstart が叩く経路として数える
-        if (README.includes(path)) documented.set(path, feature as PlanFeature);
+        // quickstart が実際に叩いていれば数える（散文での言及は数えない）
+        if (lines.some((line) => line.includes(path))) {
+          documented.set(path, feature as PlanFeature);
+        }
       }
     }
     // 走査そのものが壊れていないこと（対象ゼロ＝緑にしない）
     expect(scanned, 'URL へ直せた API ルートが 0 件').toBeGreaterThan(0);
-    // **README がプラン限定の経路を 1 つも書いていない状態では、この検査は何も見ていない**
-    expect(documented.size, 'README に出てくるプラン限定の経路が 0 件').toBeGreaterThan(0);
-    // 書いてある経路はすべてデモのプランで通ること
+    // **README がプラン限定の経路を 1 つも叩いていない状態では、この検査は何も見ていない**
+    expect(documented.size, 'README の quickstart が叩くプラン限定の経路が 0 件').toBeGreaterThan(
+      0,
+    );
+    // 叩いている経路はすべてデモのプランで通ること
     for (const [path, feature] of documented) {
       expect(
         planAllows(DEMO_TENANT_PLAN, feature),
@@ -87,16 +119,42 @@ describe('README の quickstart とデモシードの整合', () => {
     }
   });
 
-  // **README が例示する `GET /billing` の応答はデモのプランと一致すること。**
-  // プラン名だけを見る（上限の数値は `tests/docs-gate.test.ts` が `PLAN_LIMITS` と突き合わせる）
-  it('GET /billing の出力例のプランがデモのプランと一致する', () => {
-    // 例示の中の `"plan": "..."` を拾う
-    const shown = [...README.matchAll(/"plan":\s*"([a-z]+)"/g)].map((match) => match[1]);
+  // **README が例示する `GET /billing` の応答は、デモのプランの上限と一致すること。**
+  //
+  // `docs/spec.md` のプラン表は `tests/docs-gate.test.ts` が `PLAN_LIMITS` と突き合わせているが、
+  // **README の出力例には突き合わせが無かった** — この例の数値は「デモテナントのプラン」の値
+  // なので、プランの上限を変えても、デモのプランを変えても、黙ってずれる。
+  it('GET /billing の出力例がデモのプランの上限と一致する', () => {
+    // 出力例は `# => { ... }` の形のコメント行に書いてある（叩く行ではない）
+    const examples = codeBlocks(README)
+      .flatMap((block) => block.split('\n'))
+      .filter((line) => line.trimStart().startsWith('#') && line.includes('"plan"'));
     // 1 つも無ければ README から例が消えている（検査が空回りする）
-    expect(shown.length, 'README に `"plan": "..."` の例が無い').toBeGreaterThan(0);
-    // すべてデモのプランと一致すること
-    for (const plan of shown) {
-      expect(plan, 'README の出力例のプランがデモシードと違う').toBe(DEMO_TENANT_PLAN);
+    expect(examples.length, 'README に `GET /billing` の出力例が無い').toBeGreaterThan(0);
+    // 例のかたまり（複数行に折り返されているので、コメント行をまとめて 1 本の文字列として見る）
+    const shown = codeBlocks(README)
+      .filter((block) => block.includes('/api/v1/billing'))
+      .join('\n');
+    // プラン名が一致すること
+    expect(shown, 'README の出力例のプランがデモシードと違う').toContain(
+      `"plan": "${DEMO_TENANT_PLAN}"`,
+    );
+    // 上限の 3 つの数値も一致すること（値は `PLAN_LIMITS` から引く＝写しを持たない）
+    const limits = planLimitsFor(DEMO_TENANT_PLAN);
+    for (const [key, value] of [
+      ['maxAgents', limits.maxAgents],
+      ['proxyRateLimitPerMinute', limits.proxyRateLimitPerMinute],
+      ['maxEnabledGuardrailRules', limits.maxEnabledGuardrailRules],
+    ] as const) {
+      expect(shown, `README の出力例の ${key} が PLAN_LIMITS と違う`).toContain(
+        `"${key}": ${value}`,
+      );
+    }
+    // 機能の可否も一致すること（表から回す＝機能を足したら README も直すことになる）
+    for (const feature of PLAN_FEATURES) {
+      expect(shown, `README の出力例に ${feature} の可否が無い`).toContain(
+        `"${feature}": ${planAllows(DEMO_TENANT_PLAN, feature)}`,
+      );
     }
   });
 });

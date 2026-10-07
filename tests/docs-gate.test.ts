@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 // 子プロセスの実行 (git に追跡対象を聞く)
 import { execFileSync } from 'node:child_process';
 // パス結合 (Node 標準)
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { importSharedModule, sharedModuleNames } from './lib/script-files';
 
 // docs/ の場所
@@ -414,173 +414,202 @@ describe('Step0 の設計成果物', () => {
   });
 });
 
-// docs/ の入口 (`docs/index.md`) が docs/ の中身を取りこぼしていないことを固定する。
+// 文書のリンクとカタログの鮮度を固定する。
 //
-// **手がかりを一覧そのものではなく「git が追跡しているファイル」から採る。** `index.md` は
-// 手書きのカタログで、文書を 1 枚足したときに書き足すのを忘れても lint も typecheck も何も
-// 言わない (実測で `api.md` / `deploy.md` / `load-test.md` / `known-issues.md` の 4 件が
+// **手がかりを文書そのものではなく「git が追跡しているファイル」から採る。** リンク切れも
+// カタログの載せ忘れも lint も typecheck も何も言わない (実測で `docs/index.md` の 4 件が
 // Step5 以前の状態で取り残されていた)。一覧を一覧自身と突き合わせる形では、載せ忘れた 1 枚が
 // この検査からも同時に外れるので、**導出とは独立な手がかり**と突き合わせる。
 //
-// **両向きとも「追跡集合」で判定し、`existsSync` を使わない** — 作業ツリーを見ると、
-// 未追跡・gitignore 対象のファイルを指すリンクが手元では通り、**clone した全員にとって
-// 404 のまま出荷される**(実測で未追跡の `docs/scratch.md` へのリンクが全件緑で通った)。
+// **判定に `existsSync` を使わない** — 作業ツリーを見ると、未追跡・gitignore 対象のファイルを
+// 指すリンクが手元では通り、**clone した全員にとって 404 のまま出荷される** (実測)。
 // `readdirSync` を使わないのも同じ理由の裏返しで、あちらは未追跡まで「載せろ」と要求して
 // 実行不能な指示になる (`docs/.vitepress/` を作っただけで落ちた)。
 //
-// **拾う対象を形で絞らない** — 絞り込みから外れた形が検証対象から黙って消える。実測で
-// 素通りした形: `](./x.md#overview)` (アンカー付き) / `](openapi/nope.yaml)` (`./` 無し) /
-// `](/openapi/nope.yaml)` (ルート絶対) / `](./x.md "題名")` (題名付き) / コメントや
-// コードフェンスの中の行。**取りこぼしに気付けるよう、`](` の出現数と解析できた本数が
-// 一致することまで要求する**。
+// **拾う対象を形で絞らない。** 絞り込みから外れた形が検証対象から黙って消える。実測で素通り
+// した形: アンカー付き / `./` 無し / ルート絶対 / 題名付き / 空の宛先 / コメントとコード
+// フェンスの中の行 / **参照形式** (`[x][ref]` と `[ref]: ./x.md`。`](` を 1 つも含まないので
+// 出現数の一致でも気付けない)。解析できない書き方は**その場で落とす**。
+const DOC_LINK = {
+  // 外部リンクのスキーム (実在を確かめられないので対象から外す)
+  EXTERNAL_SCHEME: /^[a-z][a-z0-9+.-]*:/i,
+  // 参照形式の**定義** (`[ref]: ./x.md`)。この検査は参照形式を解析しないので使わせない。
+  // **見張るのは定義だけ**で足りる — 定義の無い `[文字][ref]` は Markdown がリンクにせず
+  // そのまま文字として出るので、読者から見て壊れていることが分かる。使用の側を綴りで
+  // 見張ろうとすると、`a[1234][5678]` のような**散文の添字**に当たって誤検知する (実測で
+  // ADR-0007 の本文が落ちた)
+  REFERENCE_DEF: /^\s{0,3}\[[^\]]+\]:\s*\S/m,
+} as const;
+
+// Windows の区切りを git の出力 (スラッシュ) に合わせる (route-wrapping.test.ts と同じ理由)
+function toPosixPath(path: string): string {
+  // バックスラッシュをスラッシュへ寄せる
+  return path.split('\\').join('/');
+}
+
+// git が追跡しているパスをリポジトリ相対で全件取る (`-z` は NUL 区切り。改行を含むパスでも壊れない)
+const TRACKED: ReadonlySet<string> = new Set(
+  execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })
+    .split('\0')
+    .filter((line) => line.length > 0),
+);
+// 追跡されているディレクトリの集合 (リンク先がディレクトリのときに O(1) で引く)
+const TRACKED_DIRS: ReadonlySet<string> = new Set(
+  [...TRACKED].flatMap((path) => {
+    // パスを区切りで割る
+    const parts = path.split('/');
+    // 先頭から順に親ディレクトリを並べる
+    return parts.slice(0, -1).map((_, at) => parts.slice(0, at + 1).join('/'));
+  }),
+);
+
+// コメントとコードフェンスを落とした行を返す (表の外の記述で要求を満たせないようにする)
+function visibleLines(body: string): string[] {
+  // 本文を行に割る
+  const lines = body.split('\n');
+  // コードフェンスの中か (``` で開閉する)
+  let inFence = false;
+  // HTML コメントの中か (<!-- から --> まで。複数行にまたがる)
+  let inComment = false;
+  // 見える行だけを集める
+  const visible: string[] = [];
+  // 1 行ずつ状態を持って追う
+  for (const line of lines) {
+    // コードフェンスの開閉を切り替える
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence;
+      continue;
+    }
+    // フェンスの中は本文として読まない
+    if (inFence) continue;
+    // 同じ行で開いて閉じるコメントを消す
+    let rest = line.replace(/<!--[\s\S]*?-->/g, '');
+    // 複数行コメントの中なら、閉じが来るまで読まない
+    if (inComment) {
+      // 閉じの位置
+      const close = rest.indexOf('-->');
+      // 閉じが無ければこの行は丸ごとコメント
+      if (close < 0) continue;
+      // 閉じた後ろだけが本文
+      inComment = false;
+      rest = rest.slice(close + '-->'.length);
+    }
+    // 閉じない開きがあれば、その手前までが本文
+    const open = rest.indexOf('<!--');
+    // 以後はコメントの中として扱う
+    if (open >= 0) {
+      inComment = true;
+      rest = rest.slice(0, open);
+    }
+    // 見える行として記録する
+    visible.push(rest);
+  }
+  // 行の配列を返す
+  return visible;
+}
+
+// Markdown のリンク先を全件取り出す (題名付き `](./x.md "題名")` も落とさない)
+function linkTargets(text: string): string[] {
+  // `](` から対応する `)` までを拾う
+  const payloads = [...text.matchAll(/\]\(([^)]*)\)/g)].map((match) => match[1]);
+  // 題名 (空白の後ろの `"…"` など) を落として宛先だけにする。空白だけなら空文字になる
+  return payloads.map((payload) => payload.trim().split(/\s+/)[0] ?? '');
+}
+
+// 文書の中のリンクが「追跡されているもの」を指していることを確かめる
+function assertLinksAreTracked(file: string): void {
+  // 文書の本文
+  const body = readFileSync(join(process.cwd(), file), 'utf8');
+  // コメントとフェンスを落とした本文
+  const visible = visibleLines(body).join('\n');
+  // **参照形式は解析しないので、定義があればその場で落とす** (黙って検証対象から抜けるのを防ぐ)
+  expect(DOC_LINK.REFERENCE_DEF.test(visible), `${file} に参照形式のリンク定義がある`).toBe(false);
+  // この文書が置かれているディレクトリ (リンクはここからの相対で解く)
+  const base = dirname(file);
+  // 宛先ごとに確かめる
+  for (const link of linkTargets(visible)) {
+    // 同じ文書内の見出しへのリンクは宛先を持たない
+    if (link.startsWith('#')) continue;
+    // 外部リンクは実在を確かめられない
+    if (DOC_LINK.EXTERNAL_SCHEME.test(link)) continue;
+    // **ルート絶対は拒否する** — GitHub ではサイトの根から解決されるので読者には 404
+    expect(link.startsWith('/'), `${file} のリンク ${link} がルート絶対になっている`).toBe(false);
+    // `#fragment` を落としてパスの部分だけにする
+    const path = link.split('#')[0];
+    // **空の宛先は落とす** (`[文書]()` はリンクに見えて何処へも行かない)
+    expect(path.length, `${file} に宛先が空のリンクがある`).toBeGreaterThan(0);
+    // リポジトリ相対へ解く (末尾のスラッシュは落とす)
+    const resolved = toPosixPath(join(base, path)).replace(/\/+$/, '');
+    // ファイルとして追跡されているか、ディレクトリとして中身が追跡されているか
+    const tracked = TRACKED.has(resolved) || TRACKED_DIRS.has(resolved);
+    // 消えた・改名された・未追跡の宛先を落とす
+    expect(tracked, `${file} のリンク先 ${link} が追跡されていない`).toBe(true);
+  }
+}
+
+describe('文書のリンクの鮮度', () => {
+  // 検査する文書 (`docs/` 配下の Markdown 全部 ＋ README。追跡集合から導く)
+  const DOC_FILES = [...TRACKED]
+    .filter((path) => path === 'README.md' || (path.startsWith('docs/') && path.endsWith('.md')))
+    .sort();
+
+  it('検査する文書を追跡集合から導けている', () => {
+    // **1 件も導けなければ落とす** (「対象ゼロ＝緑」を避ける fail-closed)
+    expect(DOC_FILES.length, '検査する文書を 1 件も導けていない').toBeGreaterThan(0);
+    // 入口と読み物と README は必ず対象に入る (導出が静かに狭まったことに気付くため)
+    expect(DOC_FILES).toContain('README.md');
+    expect(DOC_FILES).toContain('docs/index.md');
+    expect(DOC_FILES).toContain('docs/overview.md');
+  });
+
+  // 文書ごとに 1 件のテストにする (落ちたときにどの文書かが名前で分かる)
+  it.each(DOC_FILES)('%s のリンク先がすべて追跡されている', (file) => {
+    // リンクを確かめる
+    assertLinksAreTracked(file);
+  });
+});
+
 describe('docs/ の入口の鮮度', () => {
   // 入口そのもの (この表に載るべき対象から外す)
   const INDEX = 'index.md';
-  // 外部リンクのスキーム (実在を確かめられないので対象から外す)
-  const EXTERNAL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
-
-  // git が追跡しているパスをリポジトリ相対で全件取る
-  function trackedPaths(): Set<string> {
-    // `-z` は NUL 区切りで出す (改行を含むパスでも壊れない)
-    const output = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' });
-    // NUL で割って空を落とす
-    return new Set(output.split('\0').filter((line) => line.length > 0));
-  }
-
-  // 追跡集合から docs/ 直下の対象を導く (ファイルはそのまま、ディレクトリは末尾に / を付ける)
-  function docsEntries(tracked: Set<string>): string[] {
-    // docs/ 配下のパスだけを見る
-    const names = [...tracked]
-      .filter((path) => path.startsWith('docs/'))
-      .map((path) => {
-        // `docs/` を外した残り
-        const rest = path.slice('docs/'.length);
-        // 最初の区切りまでがディレクトリ名
-        const slash = rest.indexOf('/');
-        // 区切りが無ければファイル、あればディレクトリ
-        return slash < 0 ? rest : `${rest.slice(0, slash)}/`;
-      });
-    // 入口自身を除き、重複を畳んで並べる
-    return [...new Set(names)].filter((name) => name !== INDEX).sort();
-  }
-
-  // `index.md` の表の行だけを本文として読む (表の外の記述で掲載の要求を満たせないようにする)
-  function indexTableRows(): string {
-    // 入口の本文を行に割る
-    const lines = readFileSync(join(DOCS, INDEX), 'utf8').split('\n');
-    // コードフェンスの中か (``` で開閉する)
-    let inFence = false;
-    // HTML コメントの中か (<!-- から --> まで。複数行にまたがる)
-    let inComment = false;
-    // 表の行だけを集める
-    const rows: string[] = [];
-    // 1 行ずつ状態を持って追う
-    for (const line of lines) {
-      // コードフェンスの開閉を切り替える
-      if (line.trimStart().startsWith('```')) {
-        inFence = !inFence;
-        continue;
-      }
-      // フェンスの中は本文として読まない
-      if (inFence) continue;
-      // コメントの開始と終了を同じ行で見る (開いて閉じる 1 行コメントもここで消える)
-      const stripped = line.replace(/<!--[\s\S]*?-->/g, '');
-      // 複数行コメントの中なら、終わりが来るまで読まない
-      if (inComment) {
-        // 閉じがあればそこから先だけを本文として扱う
-        const close = stripped.indexOf('-->');
-        if (close < 0) continue;
-        inComment = false;
-        rows.push(stripped.slice(close + '-->'.length));
-        continue;
-      }
-      // 閉じない開きがあれば、そこまでを本文にして以後はコメントの中
-      const open = stripped.indexOf('<!--');
-      if (open >= 0) {
-        inComment = true;
-        rows.push(stripped.slice(0, open));
-        continue;
-      }
-      // 表の行だけを集める
-      if (stripped.trimStart().startsWith('|')) rows.push(stripped);
-    }
-    // 1 本の文字列に戻す
-    return rows.join('\n');
-  }
-
-  // Markdown のリンク先を全件取り出す (題名付き `](./x.md "題名")` も落とさない)
-  function linkTargets(rows: string): string[] {
-    // `](` から対応する `)` までを拾う
-    const payloads = [...rows.matchAll(/\]\(([^)]*)\)/g)].map((match) => match[1]);
-    // 題名 (空白の後ろの `"…"` / `'…'` / `(…)`) を落として宛先だけにする
-    return payloads.map((payload) => payload.trim().split(/\s+/)[0]);
-  }
-
-  // リンク先をリポジトリ相対のパスへ解く (解けないものは null)
-  function resolveTarget(link: string): string | null {
-    // 見出しへのリンクは宛先を持たない
-    if (link.startsWith('#')) return null;
-    // 外部リンクは実在を確かめられない
-    if (EXTERNAL_SCHEME.test(link)) return null;
-    // `#fragment` を落としてパスの部分だけにする
-    const path = link.split('#')[0];
-    // 空なら宛先が無い
-    if (path.length === 0) return null;
-    // docs/ からの相対として正規化し、末尾のスラッシュは落とす
-    return join('docs', path).replace(/\/+$/, '');
-  }
 
   it('index.md が docs/ の追跡対象すべて (ファイルとディレクトリ) を表から指している', () => {
-    // 追跡集合
-    const tracked = trackedPaths();
-    // 実在する対象を導く
-    const entries = docsEntries(tracked);
+    // docs/ 直下の対象を導く (ファイルはそのまま、ディレクトリは末尾に / を付ける)
+    const entries = [
+      ...new Set(
+        [...TRACKED]
+          .filter((path) => path.startsWith('docs/'))
+          .map((path) => {
+            // `docs/` を外した残り
+            const rest = path.slice('docs/'.length);
+            // 最初の区切りまでがディレクトリ名
+            const slash = rest.indexOf('/');
+            // 区切りが無ければファイル、あればディレクトリ
+            return slash < 0 ? rest : `${rest.slice(0, slash)}/`;
+          }),
+      ),
+    ]
+      .filter((name) => name !== INDEX)
+      .sort();
     // **1 件も導けなければ落とす** (「対象ゼロ＝緑」を避ける fail-closed)
     expect(entries.length, 'docs/ から対象を 1 件も導けていない').toBeGreaterThan(0);
+    // 表の行だけを本文として読む (表の外の記述で掲載の要求を満たせないようにする)
+    const rows = visibleLines(readFileSync(join(DOCS, INDEX), 'utf8'))
+      .filter((line) => line.trimStart().startsWith('|'))
+      .join('\n');
     // 表の行から宛先を解いた集合 (`](./spec.md)` と `](spec.md)` を同じものとして扱う)
     const linked = new Set(
-      linkTargets(indexTableRows())
-        .map(resolveTarget)
-        .filter((path): path is string => path !== null),
+      linkTargets(rows)
+        .filter((link) => link.length > 0 && !link.startsWith('#'))
+        .filter((link) => !DOC_LINK.EXTERNAL_SCHEME.test(link))
+        .map((link) => toPosixPath(join('docs', link.split('#')[0])).replace(/\/+$/, '')),
     );
     // 1 件ずつ、表から指されているかを見る
     for (const entry of entries) {
       // ディレクトリは末尾のスラッシュを落とした形で突き合わせる
-      const target = entry.replace(/\/$/, '');
+      const target = `docs/${entry.replace(/\/$/, '')}`;
       // 宛先として指されていること
-      expect(linked, `docs/${entry} を docs/${INDEX} の表が指していない`).toContain(
-        `docs/${target}`,
-      );
-    }
-  });
-
-  it('index.md が指しているリンク先がすべて追跡されている', () => {
-    // 表の行
-    const rows = indexTableRows();
-    // 解析できたリンク
-    const links = linkTargets(rows);
-    // **1 本も拾えなければ落とす** (表が消えたことに気付けるようにする)
-    expect(links.length, `docs/${INDEX} からリンクを 1 件も拾えていない`).toBeGreaterThan(0);
-    // **`](` の出現数と一致すること** — 解析できない書き方が黙って検証対象から抜けるのを防ぐ
-    expect(links.length, `docs/${INDEX} に解析できないリンクの書き方がある`).toBe(
-      (rows.match(/\]\(/g) ?? []).length,
-    );
-    // 追跡集合
-    const tracked = trackedPaths();
-    // 宛先ごとに追跡されているかを見る
-    for (const link of links) {
-      // **ルート絶対は拒否する** — GitHub ではサイトの根から解決されるので読者には 404
-      expect(link.startsWith('/'), `docs/${INDEX} のリンク ${link} がルート絶対になっている`).toBe(
-        false,
-      );
-      // リポジトリ相対へ解く
-      const path = resolveTarget(link);
-      // 宛先を持たないリンク (見出し・外部) は飛ばす
-      if (path === null) continue;
-      // ファイルとして追跡されているか、ディレクトリとして中身が追跡されているか
-      const exists = tracked.has(path) || [...tracked].some((t) => t.startsWith(`${path}/`));
-      // 消えた・改名された・未追跡の宛先を落とす
-      expect(exists, `docs/${INDEX} のリンク先 ${link} が追跡されていない`).toBe(true);
+      expect(linked, `docs/${entry} を docs/${INDEX} の表が指していない`).toContain(target);
     }
   });
 });

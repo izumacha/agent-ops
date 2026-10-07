@@ -120,7 +120,7 @@ Agent Ops は、社内外で稼働する AI エージェントを**登録・権�
 
 ## 3. ER 図
 
-`prisma/schema.prisma` と同期させる（列の詳細・インデックスはスキーマ側が正本）。テナントに属する資源はすべて `tenantId` を持ち、クエリは必ずテナントで絞る（ADR-0002）。例外は親経由でしか到達しない子テーブル（`EvaluationCase` は `EvaluationSet` 経由）で、親を `tenantId` で絞ってから辿る。`setId` だけで直接引かない。
+`prisma/schema.prisma` と同期させる（列の詳細・インデックスはスキーマ側が正本）。テナントに属する資源はすべて `tenantId` を持ち、クエリは必ずテナントで絞る（ADR-0002）。**例外は 2 つだけ**。(1) 親経由でしか到達しない子テーブル（`EvaluationCase` は `EvaluationSet` 経由）は列を持たないので、親を `tenantId` で絞ってから辿る（`setId` だけで直接引かない）。(2) 受信した課金イベント（`BillingEvent`）の `tenantId` は **nullable** で、顧客 ID からテナントを引けなかったときは `null` のまま残る（受け取った事実は残すため。ADR-0012）。**この表を読んで集計を書くときは `tenantId` が非 null である前提を置かない。**
 
 ```mermaid
 erDiagram

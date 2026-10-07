@@ -1,0 +1,44 @@
+// テストから子プロセスを起こす共通部分。
+//
+// **1 か所に集めてあるのは「起動できなかった」と「走って失敗した」を分ける判定が要るから。**
+// `spawnSync` はコマンドが見つからないときも時間切れのときも `status: null` を返すので、
+// 「非 0 なら合格」の書き方は**何も測れていない状態で緑**になる（§9 fail-closed）。逆に
+// `execFileSync` で例外だけを捕まえる形にすると、ENOENT（git が無い）と「git が走って
+// エラーを返した」が同じ catch へ落ち、失敗の文言が**起きていない原因**を名指しする。
+import { expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
+
+// 子プロセスの待ち時間の上限 (npx がレジストリを見に行って張り付くのを防ぐ)
+export const CHILD_TIMEOUT_MS = 180_000;
+
+// 子プロセスが実際に起動して正常に終わったことを確かめる。
+// **`status` の null を素通りさせない**（上のコメントの理由）
+export function expectRan(result: ReturnType<typeof spawnSync>, label: string): void {
+  // 起動そのものに失敗していないこと (ENOENT など)
+  expect(result.error, `${label} を起動できなかった`).toBeUndefined();
+  // シグナルで殺されていないこと (時間切れはここに出る)
+  expect(result.signal, `${label} が途中で打ち切られた`).toBeNull();
+  // 終了コードが数値であること (null のまま判定へ進ませない)
+  expect(typeof result.status, `${label} の終了コードが取れていない`).toBe('number');
+}
+
+// git が追跡しているパスを取る（`-z` は NUL 区切り。改行を含むパスでも壊れない）。
+// **前提（git の作業ツリーであること）を名指しして落とす** — `.git` が無い配布物でも
+// `git` の無い環境でも、失敗の理由を取り違えずに読めるようにする
+export function gitTrackedFiles(pathspec: string): string[] {
+  // 追跡集合を聞く
+  const result = spawnSync('git', ['ls-files', '-z', '--', pathspec], {
+    encoding: 'utf8',
+    timeout: CHILD_TIMEOUT_MS,
+  });
+  // 起動と終了の仕方をまず確かめる（ENOENT・時間切れをここで分ける）
+  expectRan(result, `git ls-files -- ${pathspec}`);
+  // **走って失敗した場合は git 自身の出力を見せる** — 所有者違い (`dubious ownership`)・
+  // 権限・index の破損がここへ来るので、原因を 1 つに決め打ちしない（§6）
+  expect(
+    result.status,
+    `git ls-files -- ${pathspec} が失敗した（この検査は git の作業ツリーを前提にしている）: ${result.stderr?.trim() ?? ''}`,
+  ).toBe(0);
+  // NUL で割って空を落とす
+  return result.stdout.split('\0').filter((line) => line.length > 0);
+}

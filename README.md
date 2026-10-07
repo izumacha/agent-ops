@@ -317,7 +317,7 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 
 | パス | 内容 |
 |---|---|
-| `docs/` | 文書一式。**どの文書が何を持っているかは [`docs/index.md`](./docs/index.md) が唯一のカタログ**（初見なら [`docs/overview.md`](./docs/overview.md)、正本は `spec.md` と `roadmap.md`）。ここに一覧を写さないのは、写した側が黙って古くなるため（カタログの鮮度は `tests/docs-gate.test.ts` が `docs/` の実体と両向きに突き合わせる） |
+| `docs/` | 文書一式。**どの文書が何を持っているかは [`docs/index.md`](./docs/index.md) が唯一のカタログ**（初見なら [`docs/overview.md`](./docs/overview.md)、正本は `spec.md` と `roadmap.md`）。ここに一覧を写さないのは、写した側が黙って古くなるため（載せ忘れは `tests/docs-gate.test.ts` が `git ls-files` と突き合わせて落とす） |
 | `vercel.json` | Vercel のビルドの結線（生成物をコミットしないのでビルド前に `gen` / `db:generate` を流す） |
 | `openapi/openapi.yaml` | REST API 定義（OpenAPI 3.1、契約の正本） |
 | `prisma/schema.prisma` | DB スキーマ（全テーブルに `tenantId`） |

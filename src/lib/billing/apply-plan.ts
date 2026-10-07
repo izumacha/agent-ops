@@ -8,7 +8,7 @@ import type { Repositories } from '@/data';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import type { Plan } from '@/domain/types';
 import { recordAudit } from '@/lib/audit/record';
-import type { UpdateTenantPlanInput } from '@/data/ports';
+import type { TenantRecord, UpdateTenantPlanInput } from '@/data/ports';
 
 /**
  * プランを変えた経路（監査ログの payload に残す）。
@@ -56,33 +56,35 @@ function linkOf(value: string | null | undefined): PlanChangeLink {
   return PLAN_CHANGE_LINK.set;
 }
 
-/** プラン変更の入力（`updatePlan` へ渡すものと、記録に要るもの） */
-export interface ApplyPlanChangeInput {
+/** プラン変更の記録に要るもの（反映そのものは呼び出し側が済ませている） */
+export interface PlanChangeAuditInput {
   // 対象のテナント
   tenantId: string;
-  // 変更前のプラン（記録に残すために呼び出し側が渡す）
+  // 変更前のプラン（呼び出し側が反映前に読んで渡す）
   from: Plan;
-  // 変更後のプランと課金事業者側の id
+  // 変更後のプラン（**反映後の行から取る**。渡した値ではなく実際に書かれた値）
+  to: Plan;
+  // 反映に使った入力（連携を「入れた / 外した / 据え置き」のどれだったかを導くため）
   update: UpdateTenantPlanInput;
   // どの経路からの変更か
   source: PlanChangeSource;
 }
 
 /**
- * プランを反映して監査ログに 1 行残す。対象が無ければ `null`（呼び出し側が 404 にする）。
+ * プラン変更を監査ログに 1 行残す（反映そのものは呼び出し側が済ませている）。
  *
- * **呼び出し側は先に `assertAuditConfigured()` を通すこと。** 反映してから記録に失敗すると
- * 記録の無い変更が残り、しかも再試行は「既にそのプランだ」で永久に記録されない
+ * **記録だけを切り出してあるのは、反映の仕方が経路で違うため。** Webhook は「受信の記録」と
+ * 同じ原子的操作の中で反映する（`billingEvents.recordOnce`）ので `updatePlan` を呼ばないが、
+ * **残す記録は 1 つの形にそろえる**必要がある（このファイル冒頭の理由）。
+ *
+ * **呼び出し側は反映より前に `assertAuditConfigured()` を通すこと。** 反映してから記録に
+ * 失敗すると記録の無い変更が残り、しかも再試行は「既にそのプランだ」で永久に記録されない
  * （`src/lib/audit/record.ts` が書いている「人が行う操作」と同じ扱い）。
  */
-export async function applyPlanChange(
+export async function recordPlanChangeAudit(
   repos: Repositories,
-  input: ApplyPlanChangeInput,
-): Promise<{ plan: Plan } | null> {
-  // プランと課金事業者側の id を同時に書く
-  const updated = await repos.tenants.updatePlan(input.tenantId, input.update);
-  // 対象が無ければ何も記録しない
-  if (updated === null) return null;
+  input: PlanChangeAuditInput,
+): Promise<void> {
   // 監査ログに残す（payload は**平坦な辞書**でキーは辞書順。入れ子は許されない）
   await recordAudit(repos, {
     tenantId: input.tenantId,
@@ -97,9 +99,45 @@ export async function applyPlanChange(
       from: input.from,
       source: input.source,
       subscriptionLink: linkOf(input.update.billingSubscriptionId),
-      to: updated.plan,
+      to: input.to,
     },
   });
-  // 反映後のプラン
-  return { plan: updated.plan };
+}
+
+/**
+ * プラン変更の入力（`updatePlan` へ渡すものと、記録に要るもの）。
+ *
+ * **記録側の入力から `to` を除いたもの**として表す — こちらは反映も行うので、変更後のプランは
+ * 呼び出し側が渡すのではなく**実際に書かれた行**から取る。2 つの interface に同じ項目を並べると、
+ * 監査の payload に項目が増えたとき片方だけが直る（§6 DRY）。
+ */
+export type ApplyPlanChangeInput = Omit<PlanChangeAuditInput, 'to'>;
+
+/**
+ * プランを反映して監査ログに 1 行残す。対象が無ければ `null`（呼び出し側が 404 にする）。
+ *
+ * **返すのは反映後の行そのもの。** プランだけを返していた頃は、呼び出し側が「読んだ行＋プラン」で
+ * 応答を組み立てていたので、`TenantDto` に可変の項目（`updatedAt` や課金連携）が増えた瞬間に
+ * **更新前の値を返す**形になる（テストは 1 件も落ちない）。
+ *
+ * **呼び出し側は先に `assertAuditConfigured()` を通すこと**（理由は `recordPlanChangeAudit`）。
+ */
+export async function applyPlanChange(
+  repos: Repositories,
+  input: ApplyPlanChangeInput,
+): Promise<TenantRecord | null> {
+  // プランと課金事業者側の id を同時に書く
+  const updated = await repos.tenants.updatePlan(input.tenantId, input.update);
+  // 対象が無ければ何も記録しない
+  if (updated === null) return null;
+  // 記録の形は Webhook と共有する
+  await recordPlanChangeAudit(repos, {
+    tenantId: input.tenantId,
+    from: input.from,
+    to: updated.plan,
+    update: input.update,
+    source: input.source,
+  });
+  // 反映後の行
+  return updated;
 }

@@ -237,12 +237,18 @@ payload の `source` が示す）。
 **事業者の顧客 ID とテナントを結び付けるのは運用者**（プラットフォーム管理者）。Webhook は顧客 ID で
 テナントを**引く**だけなので、結び付けていないイベントは受け取るだけで反映されません（`applied: false`）。
 
+**顧客を付け替えたときはサブスクリプション ID も直す。** 解約は「いまの契約の解約か」を
+`billingSubscriptionId` と突き合わせて判断する（配信順が保証されないため）ので、古い ID が残っていると
+以後の解約がすべて捨てられます（受信は記録済みなので再送も来ません）。新しい契約が既に有効で
+`customer.subscription.created` / `.updated` が届かない場合は、下の `PATCH` で入れ直してください。
+
 ```bash
 # プランと課金連携を変える (プラットフォーム管理者トークン。テナント内の admin では 403)
 curl -s -X PATCH http://localhost:3000/api/v1/tenants/$TENANT_ID \
   -H "Authorization: Bearer $PLATFORM_ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"plan":"pro","billingCustomerId":"cus_123"}'
-# billingCustomerId を省けば据え置き、null を渡せば連携を外す
+# billingCustomerId / billingSubscriptionId は省けば据え置き、null を渡せば連携を外す
+# (サブスクリプション ID は通常 Webhook が書くが、顧客を付け替えたときの修復に要る — 上記)
 ```
 
 ```bash

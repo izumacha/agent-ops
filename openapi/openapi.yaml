@@ -2596,3 +2596,13 @@ components:
             事業者側の顧客 ID (`cus_...`)。**省略すると据え置き**、`null` で連携を外す。
             事業者の画面で作った顧客を運用者が結び付けるための項目
           example: cus_123
+        billingSubscriptionId:
+          type: string
+          nullable: true
+          maxLength: 100
+          description: |-
+            事業者側のサブスクリプション ID (`sub_...`)。**省略すると据え置き**、`null` で連携を
+            外す。通常は受信 Webhook が書くので触る必要は無いが、**顧客を付け替えたときの修復に
+            要る** — 新しい契約が既に有効だと `created` / `updated` が届かず古い値が残り、以後の
+            解約が「いまの契約とは別の解約」として捨てられる (受信は記録済みなので再送も来ない)
+          example: sub_123

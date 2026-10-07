@@ -45,8 +45,8 @@ export const PATCH = route<{ tenantId: string }>(async ({ request, params, princ
   // 記録の無い変更が残り、しかも再試行は「既にそのプランだ」で永久に記録されない
   assertAuditConfigured();
   // 反映して記録する（反映と記録の形は Webhook と共有する）。
-  // **顧客 ID は項目があるときだけ渡す** — Port の `null` は「連携を外す」という明示の指示なので、
-  // 省略されたときに渡すと既存の連携が消える（`undefined` なら据え置き）
+  // **課金連携の 2 つは項目があるときだけ渡す** — Port の `null` は「連携を外す」という明示の
+  // 指示なので、省略されたときに渡すと既存の連携が消える（`undefined` なら据え置き）
   const applied = await applyPlanChange(repos, {
     tenantId: current.id,
     from: current.plan,
@@ -55,11 +55,16 @@ export const PATCH = route<{ tenantId: string }>(async ({ request, params, princ
       ...(input.billingCustomerId === undefined
         ? {}
         : { billingCustomerId: input.billingCustomerId }),
+      ...(input.billingSubscriptionId === undefined
+        ? {}
+        : { billingSubscriptionId: input.billingSubscriptionId }),
     },
     source: PLAN_CHANGE_SOURCE.platformAdmin,
   });
   // 読んだ直後に消えた場合（並行削除）は 404
   if (applied === null) throw notFoundError();
-  // 変更後の行を返す
-  return Response.json(toTenantDto({ ...current, plan: applied.plan }));
+  // **反映後の行をそのまま返す** — 読んだ行にプランだけを差し込む形にすると、`TenantDto` に
+  // 可変の項目（`updatedAt` や課金連携）が増えた瞬間に更新前の値を返すようになる（テストは
+  // 1 件も落ちない）。`applyPlanChange` が実際に書かれた行を返すのでそれを使う
+  return Response.json(toTenantDto(applied));
 });

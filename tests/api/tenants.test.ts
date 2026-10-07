@@ -204,10 +204,45 @@ describe('PATCH /tenants/{tenantId}', () => {
           method: 'PATCH',
           token: PLATFORM_TOKEN,
           params: { tenantId: seed.a.id },
-          body: { plan: Plan.pro, billingSubscriptionId: 'sub_1' },
+          body: { plan: Plan.pro, billingPriceId: 'price_1' },
         })
       ).status,
     ).toBe(422);
+  });
+
+  // **課金連携の 2 つはどちらも「省略＝据え置き / null＝外す」**（Port の約束と同じ）。
+  // `billingSubscriptionId` を API から書けないと、顧客を付け替えたときに古い契約 ID が残り、
+  // `isStaleCancellation` が以後の解約をすべて捨てる（受信は記録済みなので再送も来ない）
+  it('サブスクリプション ID を入れ直せる・外せる・省略で据え置き', async () => {
+    // まず両方を結び付ける
+    const linked = await call(updateTenantPlan, {
+      method: 'PATCH',
+      token: PLATFORM_TOKEN,
+      params: { tenantId: seed.a.id },
+      body: { plan: Plan.pro, billingCustomerId: 'cus_fix', billingSubscriptionId: 'sub_old' },
+    });
+    expect(linked.status).toBe(200);
+    // 古い契約 ID を新しいものへ付け替える（修復の経路）
+    const repaired = await call(updateTenantPlan, {
+      method: 'PATCH',
+      token: PLATFORM_TOKEN,
+      params: { tenantId: seed.a.id },
+      body: { plan: Plan.pro, billingSubscriptionId: 'sub_new' },
+    });
+    expect(repaired.status).toBe(200);
+    // 顧客 ID は省略したので据え置き、サブスクリプション ID だけが変わっている
+    const afterRepair = await seed.repos.tenants.findById(seed.a.id);
+    expect(afterRepair?.billingCustomerId).toBe('cus_fix');
+    expect(afterRepair?.billingSubscriptionId).toBe('sub_new');
+    // null を渡せば連携を外せる
+    const cleared = await call(updateTenantPlan, {
+      method: 'PATCH',
+      token: PLATFORM_TOKEN,
+      params: { tenantId: seed.a.id },
+      body: { plan: Plan.pro, billingSubscriptionId: null },
+    });
+    expect(cleared.status).toBe(200);
+    expect((await seed.repos.tenants.findById(seed.a.id))?.billingSubscriptionId).toBeNull();
   });
 
   it('存在しないテナントは 404', async () => {

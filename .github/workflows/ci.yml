@@ -1,11 +1,12 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step6`: gen / db:generate / lint / format:check / typecheck /
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step7`: gen / db:generate / lint / format:check / typecheck /
 # テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / 不正出力の除外が全理由分 pass /
 # 発火が全種別分 pass / 改ざん検知が全種類分 pass / ガードレールの E2E が pass / 突合が pass /
 # テナント越境が全パターン pass / Webhook の冪等性が pass / ロジック層のカバレッジ 4 指標 ≧ 80% /
-# npm audit (本番依存) high 0 / 本番ビルド / 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90 /
-# ベンチ 4 本) を検査し、
+# 既知バグ 0 (文書の表 ＋ ソースの印) / npm audit (本番依存) high 0 / 本番ビルド /
+# 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90 / ベンチ 6 本) を検査し、
 # あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・
-# Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
+# Docker 起動 (クリーン環境の `compose up` から 5 分以内にデモの筋が通ること = Step7 の受け入れ基準①)
+# を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
 name: CI
 
 on:
@@ -28,6 +29,10 @@ jobs:
   gate:
     name: gate (実装済みの最新 Step の受け入れ基準)
     runs-on: ubuntu-latest
+    # **ハングを「赤」にする。** 上限を置かないと GitHub の既定 (6 時間) まで走り続け、
+    # 「基準違反で落ちた」と「終わらない」が区別できない (ジョブは必須チェックなので
+    # マージも止まったまま待たされる)。値は実測の 3〜5 倍を目安にしてある
+    timeout-minutes: 45
     # Step3 のゲートはベンチ (1 万件投入の日次集計・プロキシ経由の追加遅延・採点の再現率) を含むので DB が要る。
     # **接続先は契約テストと同じ専用 DB (末尾 _contract)** — ベンチは全テーブルを TRUNCATE するので、
     # 開発 DB を指していればベンチ側が 1 件も書かずに落ちる (fail-closed)
@@ -75,8 +80,8 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run latest step gate (gate:step6)
-        run: npm run gate:step6
+      - name: Run latest step gate (gate:step7)
+        run: npm run gate:step7
 
       # **ゲートと同じ検査をここでも流す。** ゲートのステップを丸ごと削除する形（`STEP0_STEPS`
       # から 1 行消す・ゲート本体の呼び出しを消す）は検出網では捉えられない — 「流すと書いて
@@ -100,6 +105,8 @@ jobs:
   migrate-and-build:
     name: Migrate (PostgreSQL) / Build
     runs-on: ubuntu-latest
+    # ハングを「赤」にする (理由は gate ジョブの同じ指定のコメント)
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -163,16 +170,57 @@ jobs:
         run: npm run build
 
   docker-smoke:
+    # **ジョブ名 (= 必須ステータスチェック名) は変えない。** このジョブが何を確かめるかは
+    # ステップ名で示す (`gate` ジョブと同じ規約)。リポジトリの必須ステータスチェックは
+    # ジョブ名で登録されているので、改名すると「必須チェックが存在しない」状態になり
+    # **CI が全部緑でも PR がマージできなくなる** (実測: 一度 `Docker (compose up →
+    # 5 分以内にデモ動作)` へ改名したら 405 Repository rule violations で止まった)。
     name: Docker (compose up → /api/v1/health)
     runs-on: ubuntu-latest
+    # ハングを「赤」にする (理由は gate ジョブの同じ指定のコメント)。
+    # **受け入れ基準①の 5 分より大きく取る** — 基準違反は `demo-probe.mjs` が
+    # 所要時間を上限と比べて落とすので、ここで切るのは「応答が返らない」場合だけ
+    timeout-minutes: 20
+    # **これが Step7 の受け入れ基準①そのもの** (クリーン環境の `docker compose up` から数える)。
+    # ゲートが毎回回す `bench:demo-ready` は本番ビルドの起動から数える**部分集合**で、
+    # イメージのビルドとマイグレーション適用を含まない (解釈は docs/roadmap.md と ADR-0013)。
+    env:
+      # デモの筋を叩く先 (compose が公開するポート)
+      DEMO_BASE_URL: http://127.0.0.1:3000
     steps:
       - uses: actions/checkout@v7
+
+      # デモの筋を通すスクリプトを動かすために Node が要る (版は .nvmrc が正本)
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+
+      # **資格情報はこの実行ごとに作る。** 値をワークフローへ直書きすると、CI 専用の
+      # 使い捨てであってもリポジトリを読める誰でも知る値になり、§9 の
+      # 「認証情報をコード・コミットに含めない」と docker-compose.yml の
+      # 「リポジトリに書かれた資格情報で動く配備を作らない」に反する。
+      # どちらも 32 文字以上でなければアプリが fail-closed で断る
+      # (プラットフォーム管理者トークンは「存在しない」扱い、監査ログの鍵は 503)。
+      # `::add-mask::` でログへ出さないようにしてから `GITHUB_ENV` へ渡す
+      - name: Generate throwaway credentials for this run
+        run: |
+          platform_admin_token="$(openssl rand -hex 24)"
+          audit_hmac_secret="$(openssl rand -hex 24)"
+          echo "::add-mask::$platform_admin_token"
+          echo "::add-mask::$audit_hmac_secret"
+          echo "PLATFORM_ADMIN_TOKEN=$platform_admin_token" >> "$GITHUB_ENV"
+          echo "AUDIT_HMAC_SECRET=$audit_hmac_secret" >> "$GITHUB_ENV"
 
       # 設定の構文と変数展開を検査する
       - name: Validate compose file
         run: docker compose config --quiet
 
-      # クリーンな状態から build → 起動 → マイグレーション適用まで通す (Step7 の「compose up でデモ動作」の前倒し検証)
+      # **ここから時間を測る** — 基準の起点は `docker compose up` なので、イメージのビルドと
+      # マイグレーション適用も予算の中に入る。epoch ミリ秒を次のステップへ渡す
+      - name: Record start time
+        run: echo "DEMO_STARTED_AT_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+
+      # クリーンな状態から build → 起動 → マイグレーション適用まで通す
       - name: Build and start
         run: docker compose up -d --build
 
@@ -190,6 +238,17 @@ jobs:
       # ホストから実際に応答を確かめる (200 と ok:true)
       - name: Probe /api/v1/health
         run: curl -fsS http://127.0.0.1:3000/api/v1/health | grep -q '"ok":true'
+
+      # **デモの筋を 1 回通し、`compose up` からの所要時間を上限と比べる。**
+      # 手順と上限はどちらも共有モジュールが持つ (`scripts/lib/demo-flow.mjs` の DEMO_STEPS と
+      # `scripts/lib/step7-criteria.mjs` の DEMO_READY_MAX_MS) ので、ここに写しは無い
+      - name: Probe demo flow within the time limit
+        run: node scripts/demo-probe.mjs
+
+      # 失敗したときに原因が読めるようにログを残す
+      - name: Dump app logs on failure
+        if: failure()
+        run: docker compose logs app
 
       - name: Tear down
         if: always()

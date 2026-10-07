@@ -3,7 +3,7 @@
 AI エージェントの**登録・権限・コスト・品質・停止**を一元管理する運用基盤（SaaS）。複数のエージェントを複数チームで運用し、コストと品質を可視化して事故（暴走・コスト超過・品質低下）を自動で止める。
 
 - スタック: Next.js 16（App Router）/ TypeScript / Prisma 7 / PostgreSQL 16 / Docker
-- 現在の段階: **Step6（マルチテナント・課金）実装済み**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
+- 現在の段階: **Step7（リリース準備）実装済み＝ロードマップの全 8 Step 完了**。ロードマップは [`docs/roadmap.md`](./docs/roadmap.md)、仕様は [`docs/spec.md`](./docs/spec.md)
 
 ## デモ
 
@@ -293,6 +293,7 @@ npm run gate:step3   # Step3 の受け入れ基準を一括検査 (上記 + 不�
 npm run gate:step4   # Step4 の受け入れ基準を一括検査 (上記 + 発火が全種別分 pass / 改ざん検知が全種類分 pass / E2E / ベンチ 4 本)
 npm run gate:step5   # Step5 の受け入れ基準を一括検査 (上記 + 突合 / 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90)
 npm run gate:step6   # Step6 の受け入れ基準を一括検査 (上記 + テナント越境が全パターン pass / Webhook の冪等性 / ロジック層のカバレッジ 4 指標 ≧ 80%)
+npm run gate:step7   # Step7 の受け入れ基準を一括検査 (上記 + 既知バグ 0 / ベンチ 6 本。**最後の Step**)
 npm run test:coverage # ロジック層のカバレッジを測る (判定はせず数値を出すだけ。合否は gate:step6 が決める)
 npm run test:e2e     # 主要 5 画面の E2E (Playwright・chromium。先に npm run build。専用 DB が必要)
 npm run lighthouse   # 5 画面の Lighthouse を 3 回ずつ測って中央値を出す (同上)
@@ -301,13 +302,15 @@ npm run bench:usage  # 1 万件投入で日次集計 ≦ 1 秒 (専用 DB が必
 npm run bench:proxy  # プロキシ経由の追加遅延 ≦ 50ms (先に npm run build。専用 DB が必要)
 npm run bench:evaluation # 固定評価セット 100 件を 2 回採点して再現率 ≧ 90% (専用 DB が必要)
 npm run bench:guardrail  # 発火から停止まで ≦ 3 秒 (専用 DB が必要)
+npm run bench:demo-ready # 本番ビルドの起動からデモの筋が通るまで ≦ 5 分 (先に npm run build。専用 DB が必要)
+npm run bench:concurrency # 同時 100 リクエストでエラー率 < 1% (同上)
 ```
 
-`gate:step6`（と `gate:step2` 〜 `gate:step5`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチと E2E は全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩き、画面は上流を呼ばないので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
+`gate:step7`（と `gate:step2` 〜 `gate:step6`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチと E2E は全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩き、画面は上流を呼ばないので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
 
 **E2E・Lighthouse・スクショの撮影はブラウザ（chromium）を使う。** 初回は `npx playwright install chromium` で入れる。ダウンロードできない環境では、既存の Chromium の実行ファイルを `PLAYWRIGHT_CHROMIUM_PATH` で指定する（E2E・Lighthouse・撮影の 3 つが同じ環境変数を読む）。
 
-CI（`.github/workflows/ci.yml`）は `gate:step6` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・Docker 起動を検証する。
+CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サービスコンテナへのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルドを検証し、**`docker compose up` から 5 分以内にデモの筋が通ること**（Step7 の受け入れ基準①）を `docker-smoke` ジョブで確かめる。
 
 ## ディレクトリ
 
@@ -316,6 +319,11 @@ CI（`.github/workflows/ci.yml`）は `gate:step6` に加え、PostgreSQL サー
 | `docs/spec.md` | 仕様書（正本）: ユースケース 10 件・ER 図・API 一覧 |
 | `docs/roadmap.md` | 8 Step のロードマップと受け入れ基準（`gate:stepN`） |
 | `docs/adr/` | 設計判断の記録（ADR） |
+| `docs/api.md` | API リファレンス（読み物版。契約との一致は `tests/api-docs.test.ts` が見る） |
+| `docs/deploy.md` | Vercel + Supabase への配備手順と、サーバーレスでの制限 |
+| `docs/load-test.md` | 負荷試験レポート（同時 100 リクエスト・配備からデモ動作までの実測） |
+| `docs/known-issues.md` | 既知の問題（**未解決のバグの正本**）と既知の制限 |
+| `vercel.json` | Vercel のビルドの結線（生成物をコミットしないのでビルド前に `gen` / `db:generate` を流す） |
 | `openapi/openapi.yaml` | REST API 定義（OpenAPI 3.1、契約の正本） |
 | `prisma/schema.prisma` | DB スキーマ（全テーブルに `tenantId`） |
 | `src/domain/` | フレームワーク非依存の純粋ロジック（RBAC 許可表・金額） |
@@ -331,7 +339,9 @@ CI（`.github/workflows/ci.yml`）は `gate:step6` に加え、PostgreSQL サー
 
 ## 本番配備の前提（公開する前に必ず読む）
 
-このアプリ単体では塞いでいない前提が 2 つあり、どちらも設計判断として ADR に記録してある。
+**手順は [`docs/deploy.md`](./docs/deploy.md)**（Vercel + Supabase）、**既知の制限の一覧は
+[`docs/known-issues.md`](./docs/known-issues.md)**。以下はそのうち「公開する前に必ず読む」もので、
+どちらも設計判断として ADR に記録してある。
 
 - **上流の使いすぎは Step4 で絞ったが、ベンダー側の上限は別に要る**（ADR-0007「残る宿題」→
   [ADR-0010](./docs/adr/0010-guardrails-and-audit-chain.md)）。上流へ費用を発生させる経路（中継・評価の
@@ -361,10 +371,11 @@ CI（`.github/workflows/ci.yml`）は `gate:step6` に加え、PostgreSQL サー
 | 3 | 品質評価（LLM-as-judge。実装済み） | 2 週 |
 | 4 | ガードレール・自動停止・通知・監査ログ（実装済み） | 2 週 |
 | 5 | ダッシュボード（画面・CSV・Lighthouse。実装済み） | 2 週 |
-| 6 | マルチテナント・課金（プラン別の上限・機能ゲート・受信 Webhook。実装済み・本 README の状態） | 2 週 |
-| 7 | リリース準備 | 1 週 |
+| 6 | マルチテナント・課金（プラン別の上限・機能ゲート・受信 Webhook。実装済み） | 2 週 |
+| 7 | リリース準備（デプロイ設定・API docs・デモシード・負荷試験レポート。実装済み・本 README の状態） | 1 週 |
 
 各 Step の受け入れ基準は `npm run gate:stepN` で機械的に検査し、赤なら次 Step のブランチを切らない。
+**全 Step 完了後も `gate:step7` が最新のゲート**で、CI は常にこれを回す。
 
 ## ライセンス
 

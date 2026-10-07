@@ -38,6 +38,14 @@ import {
   COVERAGE_INCLUDE,
   COVERAGE_MIN_PERCENT,
 } from '../scripts/lib/step6-criteria.mjs';
+// Step7 の受け入れ基準 (デモが動くまでの上限・同時接続・エラー率・既知の問題の文書)
+import {
+  CONCURRENCY_CONNECTIONS,
+  CONCURRENCY_MAX_ERROR_PERCENT,
+  DEMO_READY_MAX_MS,
+  DEMO_STEP_COUNT,
+  KNOWN_ISSUES_DOC,
+} from '../scripts/lib/step7-criteria.mjs';
 // プラン別の上限の正本 (spec.md の表はこれの写しなので突き合わせる)
 import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 // プランの一覧 (enum の正準)
@@ -362,6 +370,37 @@ describe('Step0 の設計成果物', () => {
     // その行が名乗る Step 番号が最新と一致すること
     expect(statusLine, 'README の「現在の段階」がロードマップと食い違っている').toMatch(
       new RegExp(`Step${latest}(?![0-9])`),
+    );
+  });
+
+  // Step7 の受け入れ基準のうち数で書けるもの (デモが動くまでの上限・同時接続・エラー率) と、
+  // **解釈を決めた節**がロードマップに書かれていることを突き合わせる。
+  // この Step は基準①（`docker compose up` から 5 分）を 2 つの経路に割り、基準④（既知バグ 0）を
+  // 「文書の表 ＋ ソースの印」に具体化しているので、ゲート運用ルール 4 の裏打ちがここに要る
+  it('Step7 の受け入れ基準がロードマップと一致する', () => {
+    // ロードマップの Step7 の行
+    const stepRow = roadmapStepRow(7);
+    // デモが動くまでの上限 (散文は「5 分以内」。定数はミリ秒なので分へ直す)
+    expect(stepRow, 'デモが動くまでの上限がずれている').toMatch(
+      new RegExp(`(?<![0-9])${DEMO_READY_MAX_MS / 60_000} 分`),
+    );
+    // 同時接続の数 (散文は「同時 100 リクエスト」)
+    expect(stepRow, '同時接続の数がずれている').toMatch(
+      new RegExp(`(?<![0-9])${CONCURRENCY_CONNECTIONS} リクエスト`),
+    );
+    // エラー率の上限 (散文は「< 1%」。**等号を含まない形で書いてある**)
+    expect(stepRow, 'エラー率の上限がずれている').toContain(`< ${CONCURRENCY_MAX_ERROR_PERCENT}%`);
+    // ロードマップ全体 (解釈は行に収まらないので別節に書いてある)
+    const roadmap = readFileSync(join(DOCS, 'roadmap.md'), 'utf8');
+    // **既知の問題の文書の場所が書かれていること** — ゲートが読む正本なので、
+    // 置き場所を変えたときに運用の説明が取り残されない
+    expect(roadmap, `${KNOWN_ISSUES_DOC} がロードマップに書かれていない`).toContain(
+      KNOWN_ISSUES_DOC,
+    );
+    // **デモの段数が書かれていること** — 段を削って速くした計測を許さない基準なので、
+    // 何段通すのかが文書からも読める必要がある
+    expect(roadmap, 'デモの段数がロードマップに書かれていない').toMatch(
+      new RegExp(`(?<![0-9])${DEMO_STEP_COUNT} 段`),
     );
   });
 

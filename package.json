@@ -28,6 +28,8 @@
     "bench:usage": "tsx scripts/bench-usage-aggregate.ts",
     "bench:evaluation": "tsx scripts/bench-evaluation.ts",
     "bench:guardrail": "tsx scripts/bench-guardrail.ts",
+    "bench:demo-ready": "tsx scripts/bench-demo-ready.ts",
+    "bench:concurrency": "tsx scripts/bench-concurrency.ts",
     "gate:step0": "node scripts/gate-step0.mjs",
     "gate:step1": "node scripts/gate-step1.mjs",
     "gate:step2": "node scripts/gate-step2.mjs",
@@ -35,7 +37,8 @@
     "gate:step4": "node scripts/gate-step4.mjs",
     "gate:step5": "node scripts/gate-step5.mjs",
     "test:coverage": "vitest run --coverage",
-    "gate:step6": "node scripts/gate-step6.mjs"
+    "gate:step6": "node scripts/gate-step6.mjs",
+    "gate:step7": "node scripts/gate-step7.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",

@@ -583,6 +583,37 @@ describe('POST /billing/webhook', () => {
     expect(await planOfA()).toBe(Plan.enterprise);
   });
 
+  it('冪等性: 反映に失敗した受信は記録されないので再送でやり直せる', async () => {
+    // **これが「記録してから別の操作で反映する」との差が出る検査。** 記録だけ先に確定する形だと、
+    // 反映が失敗したイベントは再送で `duplicate` になり**永久に反映されない**
+    // （解約が落ちれば解約済みのテナントが有料の権限を保つ）。
+    //
+    // 失敗を作るのに**サブスクリプション ID の一意制約**を使う — テナント B が既に `sub_1` を
+    // 持っている状態で A 宛ての同じ ID のイベントが来ると、反映が一意制約違反で落ちる
+    await linkCustomer();
+    await seed.repos.tenants.updatePlan(seed.b.id, {
+      plan: Plan.pro,
+      billingSubscriptionId: 'sub_1',
+    });
+    const body = webhookBody({ plan: Plan.pro, eventId: 'evt_retry', subscriptionId: 'sub_1' });
+    // 1 通目は反映できない（一意制約違反は 422 に写る）
+    const failed = await postWebhook(body);
+    expect(failed.status).toBe(422);
+    // A のプランは変わっていない
+    expect(await planOfA()).toBe(Plan.free);
+    // 衝突を取り除く（運用者が B の連携を外した、という想定）
+    await seed.repos.tenants.updatePlan(seed.b.id, {
+      plan: Plan.pro,
+      billingSubscriptionId: null,
+    });
+    // **同じイベント ID の再送が「2 通目」にならず、ちゃんと反映される**
+    const retried = await postWebhook(body);
+    expect(retried.status).toBe(200);
+    expect(retried.json).toEqual({ received: true, applied: true });
+    expect(await planOfA()).toBe(Plan.pro);
+    expect((await billingLinkOfA())?.billingSubscriptionId).toBe('sub_1');
+  });
+
   it('冪等性: 署名が確認できなかった要求は記録しない（記録を使い切らせない）', async () => {
     // **弾いた要求を記録すると、攻撃者が任意のイベント ID を「処理済み」にできる** —
     // 本物の通知がその ID で届いても 2 通目として無視され、プランが永久に反映されない

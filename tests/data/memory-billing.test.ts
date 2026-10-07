@@ -9,7 +9,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createMemoryRepos, MemoryStore } from '@/data/adapters/memory';
 import { DuplicateError } from '@/data/errors';
-import type { Repositories } from '@/data/ports';
+import type { Repositories, RecordBillingEventInput } from '@/data/ports';
 import { Plan, Provider } from '@/domain/types';
 // エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
 import { createTestAgent } from '../lib/agent-limits';
@@ -28,6 +28,21 @@ async function makeTenant(repos: Repositories, label: string): Promise<string> {
     },
   });
   return created.tenant.id;
+}
+
+/**
+ * 反映を渡さずに受信だけを記録する（`outcome` だけを見たいテスト用の薄い包み）。
+ *
+ * **`recordOnce` の反映は省略可にしていない**（渡し忘れが静かに「記録だけ」へ戻るのを防ぐため）
+ * ので、テスト側で `null` を書き並べる代わりにここへ寄せる。
+ */
+async function recordWithoutApply(
+  repos: Repositories,
+  input: RecordBillingEventInput,
+): Promise<string> {
+  // 反映なしで記録し、結果の種類だけを返す
+  const result = await repos.billingEvents.recordOnce(input, null);
+  return result.outcome;
 }
 
 describe('memory アダプタ: テナントのプラン更新', () => {
@@ -161,31 +176,31 @@ describe('memory アダプタ: 受信した課金イベントの冪等な記録'
       tenantId,
     };
     // 1 通目は記録、2 通目は既に記録済み（例外にしない — 再送は正常系）
-    expect(await repos.billingEvents.recordOnce(input)).toBe('recorded');
-    expect(await repos.billingEvents.recordOnce(input)).toBe('duplicate');
+    expect(await recordWithoutApply(repos, input)).toBe('recorded');
+    expect(await recordWithoutApply(repos, input)).toBe('duplicate');
   });
 
   it('イベント ID が違えば別の記録になる', async () => {
     // 同じ事業者・同じ種別でも ID が違えば別イベント
     const tenantId = await makeTenant(repos, 'A');
     const base = { provider: 'stripe', type: 'customer.subscription.deleted', tenantId };
-    expect(await repos.billingEvents.recordOnce({ ...base, eventId: 'evt_1' })).toBe('recorded');
-    expect(await repos.billingEvents.recordOnce({ ...base, eventId: 'evt_2' })).toBe('recorded');
+    expect(await recordWithoutApply(repos, { ...base, eventId: 'evt_1' })).toBe('recorded');
+    expect(await recordWithoutApply(repos, { ...base, eventId: 'evt_2' })).toBe('recorded');
   });
 
   it('事業者が違えば同じイベント ID でも別の記録になる', async () => {
     // 一意制約の粒度は (provider, eventId)。事業者をまたいだ ID の衝突で片方を落とさない
     const tenantId = await makeTenant(repos, 'A');
     const base = { eventId: 'evt_1', type: 'customer.subscription.updated', tenantId };
-    expect(await repos.billingEvents.recordOnce({ ...base, provider: 'stripe' })).toBe('recorded');
-    expect(await repos.billingEvents.recordOnce({ ...base, provider: 'other' })).toBe('recorded');
+    expect(await recordWithoutApply(repos, { ...base, provider: 'stripe' })).toBe('recorded');
+    expect(await recordWithoutApply(repos, { ...base, provider: 'other' })).toBe('recorded');
   });
 
   it('テナントが決まらないイベントも記録できる', async () => {
     // 顧客 ID からテナントを引けなかった場合（tenantId は null）。
     // 記録しないと「知らない顧客からの再送」を何度でも処理してしまう
     expect(
-      await repos.billingEvents.recordOnce({
+      await recordWithoutApply(repos, {
         provider: 'stripe',
         eventId: 'evt_orphan',
         type: 'customer.subscription.updated',
@@ -194,13 +209,108 @@ describe('memory アダプタ: 受信した課金イベントの冪等な記録'
     ).toBe('recorded');
     // 2 通目は duplicate（テナント不明でも冪等であること）
     expect(
-      await repos.billingEvents.recordOnce({
+      await recordWithoutApply(repos, {
         provider: 'stripe',
         eventId: 'evt_orphan',
         type: 'customer.subscription.updated',
         tenantId: null,
       }),
     ).toBe('duplicate');
+  });
+
+  // --- 受信の記録とプランの反映が同じ原子的操作であること（prisma 側の契約テストと同じ期待） ---
+
+  it('反映を渡すと受信記録と同時にプランが変わる', async () => {
+    // free のテナントを 1 つ用意する
+    const tenantId = await makeTenant(repos, 'A');
+    // 受信を記録しつつ pro へ上げる
+    const result = await repos.billingEvents.recordOnce(
+      { provider: 'stripe', eventId: 'evt_apply', type: 'customer.subscription.updated', tenantId },
+      { tenantId, update: { plan: Plan.pro, billingSubscriptionId: 'sub_1' } },
+    );
+    // 初めての記録で、反映後の行が返る
+    expect(result.outcome).toBe('recorded');
+    expect(result.tenant?.plan).toBe(Plan.pro);
+    expect(result.tenant?.billingSubscriptionId).toBe('sub_1');
+    // 表の行も変わっている
+    expect((await repos.tenants.findById(tenantId))?.plan).toBe(Plan.pro);
+  });
+
+  it('2 通目は反映もしない（プランが動かない）', async () => {
+    // pro へ上げたあと、同じイベントで free へ落とす指示を送る
+    const tenantId = await makeTenant(repos, 'A');
+    const input = {
+      provider: 'stripe',
+      eventId: 'evt_twice',
+      type: 'customer.subscription.updated',
+      tenantId,
+    };
+    await repos.billingEvents.recordOnce(input, { tenantId, update: { plan: Plan.pro } });
+    // 2 通目（同じ ID）は何も書かない
+    const second = await repos.billingEvents.recordOnce(input, {
+      tenantId,
+      update: { plan: Plan.free },
+    });
+    expect(second.outcome).toBe('duplicate');
+    expect(second.tenant).toBeNull();
+    // プランは 1 通目のまま（2 通目の指示が効いていない）
+    expect((await repos.tenants.findById(tenantId))?.plan).toBe(Plan.pro);
+  });
+
+  it('反映の対象が居なければ記録だけ残る', async () => {
+    // 居ないテナントへの反映を渡す（再送しても結果は変わらないので記録は残す）
+    const result = await repos.billingEvents.recordOnce(
+      {
+        provider: 'stripe',
+        eventId: 'evt_gone',
+        type: 'customer.subscription.deleted',
+        tenantId: null,
+      },
+      { tenantId: 'tenant_missing', update: { plan: Plan.free } },
+    );
+    // 記録はされ、反映後の行は無い
+    expect(result.outcome).toBe('recorded');
+    expect(result.tenant).toBeNull();
+    // 2 通目は duplicate（記録が残っている証拠）
+    expect(
+      await recordWithoutApply(repos, {
+        provider: 'stripe',
+        eventId: 'evt_gone',
+        type: 'customer.subscription.deleted',
+        tenantId: null,
+      }),
+    ).toBe('duplicate');
+  });
+
+  it('反映が失敗したら受信記録も残らない（再送でやり直せる）', async () => {
+    // **これが「記録してから別の操作で反映する」との差が出る検査。** 記録だけ先に確定する形だと、
+    // 反映に失敗したイベントが「もう処理した」になり再送でも永久にやり直せない
+    const first = await makeTenant(repos, 'A');
+    const second = await makeTenant(repos, 'B');
+    // B に既にあるサブスクリプション ID を A へ付けようとして一意制約違反を起こす
+    await repos.tenants.updatePlan(second, { plan: Plan.pro, billingSubscriptionId: 'sub_taken' });
+    await expect(
+      repos.billingEvents.recordOnce(
+        {
+          provider: 'stripe',
+          eventId: 'evt_fail',
+          type: 'customer.subscription.updated',
+          tenantId: first,
+        },
+        { tenantId: first, update: { plan: Plan.pro, billingSubscriptionId: 'sub_taken' } },
+      ),
+    ).rejects.toBeInstanceOf(DuplicateError);
+    // 記録が残っていないので、同じ ID の再送は「初めて」として扱える
+    expect(
+      await recordWithoutApply(repos, {
+        provider: 'stripe',
+        eventId: 'evt_fail',
+        type: 'customer.subscription.updated',
+        tenantId: first,
+      }),
+    ).toBe('recorded');
+    // A のプランも巻き戻っている（反映されていない）
+    expect((await repos.tenants.findById(first))?.plan).toBe(Plan.free);
   });
 });
 

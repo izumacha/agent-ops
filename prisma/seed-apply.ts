@@ -19,10 +19,13 @@ type SeedClient = ReturnType<typeof createPrismaClient>;
  * 呼び出し側が接続と切断を持ち、この関数は投入だけを行う
  */
 export async function applySeed(prisma: SeedClient): Promise<void> {
-  // 既定テナント (無ければ作成、あれば名前だけ更新)
+  // 既定テナント (無ければ作成、あれば名前とプランを更新)。
+  // **既にある行のプランも揃える** — 作成時だけ入れていると、seed を流し直しても古いプランが
+  // 残り、README の quickstart が「人によって 403 になる」状態になる (seed は冪等であって
+  // 「1 度作ったら触らない」ではない)
   const tenant = await prisma.tenant.upsert({
     where: { id: DEFAULT_TENANT_ID },
-    update: { name: DEMO_TENANT_NAME },
+    update: { name: DEMO_TENANT_NAME, plan: DEMO_TENANT_PLAN },
     create: { id: DEFAULT_TENANT_ID, name: DEMO_TENANT_NAME, plan: DEMO_TENANT_PLAN },
   });
   // デモユーザーを 1 人ずつ投入する (既にいれば何も変えない = 冪等)

@@ -27,4 +27,11 @@ export const tenantPlanUpdateSchema = z.strictObject({
   plan: z.enum(Object.values(Plan)),
   // 事業者側の顧客 ID（`cus_...`）。省略で据え置き、null で連携を外す
   billingCustomerId: shortText.nullable().optional(),
+  // 事業者側のサブスクリプション ID（`sub_...`）。同上。
+  //
+  // **修復の経路が無いと解約が永久に落ちる。** この列は Webhook だけが書くので、顧客を
+  // 付け替えた（新しい契約が既に `active` で `created` / `updated` が届かない）ときに古い値が
+  // 残る。すると `isStaleCancellation` が「いまの契約とは別の解約」と判断して**その後の解約を
+  // すべて捨て**、受信は記録済みなので再送も来ない（＝解約済みのテナントが有料の権限を保つ）。
+  billingSubscriptionId: shortText.nullable().optional(),
 });

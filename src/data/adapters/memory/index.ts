@@ -39,6 +39,7 @@ import type {
   CreateEvaluationSetInput,
   CreateTenantInput,
   CreateTenantResult,
+  BillingPlanApplication,
   RecordBillingEventInput,
   RecordBillingEventResult,
   UpdateTenantPlanInput,
@@ -115,6 +116,46 @@ function cloneAuditLog(row: AuditLogRecord): AuditLogRecord {
 }
 
 // テナント Port の memory 実装
+/**
+ * テナントのプランと課金事業者側の id を書き換える (無ければ null)。
+ *
+ * **2 つの Port が同じ規則で書くので関数へ出してある** — `tenants.updatePlan` と、受信 Webhook が
+ * 使う `billingEvents.recordOnce`。prisma 側は 1 つのトランザクションで同じことをするので、
+ * ここで書き写すと「memory では一意性を見ていない」のような食い違いが片方にだけ残る (§6 DRY)。
+ */
+function applyTenantPlan(
+  store: MemoryStore,
+  tenantId: string,
+  input: UpdateTenantPlanInput,
+): TenantRecord | null {
+  // 対象行 (無ければ null)
+  const row = store.tenants.get(tenantId);
+  if (!row) return null;
+  // **顧客 ID の一意性を memory 側でも守る** — 本番は一意索引が 2 行目を拒否するので、
+  // ここが緩いと「2 テナントが同じ顧客を名乗る」状態を API テストだけが通してしまう
+  for (const key of ['billingCustomerId', 'billingSubscriptionId'] as const) {
+    // 指定が無い (undefined) か null へ戻すときは衝突しない
+    const value = input[key];
+    if (value === undefined || value === null) continue;
+    // 他のテナントが同じ値を持っていれば一意制約違反
+    const taken = [...store.tenants.values()].some(
+      (tenant) => tenant.id !== tenantId && tenant[key] === value,
+    );
+    if (taken) throw new DuplicateError(key);
+  }
+  // プランを入れ替える
+  row.plan = input.plan;
+  // 課金事業者側の id は**指定されたときだけ**書き換える (undefined は変更しない)
+  if (input.billingCustomerId !== undefined) row.billingCustomerId = input.billingCustomerId;
+  if (input.billingSubscriptionId !== undefined) {
+    row.billingSubscriptionId = input.billingSubscriptionId;
+  }
+  // 更新日時を進める
+  row.updatedAt = store.now();
+  // 複製を返す
+  return clone(row);
+}
+
 class MemoryTenants implements TenantsPort {
   // 共有の表を受け取る
   constructor(private readonly store: MemoryStore) {}
@@ -144,32 +185,8 @@ class MemoryTenants implements TenantsPort {
 
   // プラン (と課金事業者側の id) を変える
   async updatePlan(tenantId: string, input: UpdateTenantPlanInput): Promise<TenantRecord | null> {
-    // 対象行 (無ければ null)
-    const row = this.store.tenants.get(tenantId);
-    if (!row) return null;
-    // **顧客 ID の一意性を memory 側でも守る** — 本番は一意索引が 2 行目を拒否するので、
-    // ここが緩いと「2 テナントが同じ顧客を名乗る」状態を API テストだけが通してしまう
-    for (const key of ['billingCustomerId', 'billingSubscriptionId'] as const) {
-      // 指定が無い (undefined) か null へ戻すときは衝突しない
-      const value = input[key];
-      if (value === undefined || value === null) continue;
-      // 他のテナントが同じ値を持っていれば一意制約違反
-      const taken = [...this.store.tenants.values()].some(
-        (tenant) => tenant.id !== tenantId && tenant[key] === value,
-      );
-      if (taken) throw new DuplicateError(key);
-    }
-    // プランを入れ替える
-    row.plan = input.plan;
-    // 課金事業者側の id は**指定されたときだけ**書き換える (undefined は変更しない)
-    if (input.billingCustomerId !== undefined) row.billingCustomerId = input.billingCustomerId;
-    if (input.billingSubscriptionId !== undefined) {
-      row.billingSubscriptionId = input.billingSubscriptionId;
-    }
-    // 更新日時を進める
-    row.updatedAt = this.store.now();
-    // 複製を返す
-    return clone(row);
+    // 書き換えは共有の関数へ出してある (受信 Webhook の `recordOnce` が同じ規則で書くため)
+    return applyTenantPlan(this.store, tenantId, input);
   }
 
   // テナント + admin + トークンを作る (メモリなので原子性は自明)
@@ -1224,12 +1241,19 @@ class MemoryBillingEvents implements BillingEventsPort {
   constructor(private readonly store: MemoryStore) {}
 
   // 1 度だけ記録する (2 通目は duplicate)
-  async recordOnce(input: RecordBillingEventInput): Promise<RecordBillingEventResult> {
+  async recordOnce(
+    input: RecordBillingEventInput,
+    apply: BillingPlanApplication | null,
+  ): Promise<RecordBillingEventResult> {
     // 一意制約と同じキー (provider + eventId)。**本番の `@@unique([provider, eventId])` と
     // 同じ粒度にする** — 事業者をまたいで eventId が衝突しても別イベントとして扱えるようにする
     const key = `${input.provider}:${input.eventId}`;
     // 既に記録済みなら何もしない (再送は正常系なので例外にしない)
-    if (this.store.billingEvents.has(key)) return 'duplicate';
+    if (this.store.billingEvents.has(key)) return { outcome: 'duplicate', tenant: null };
+    // **反映を先に行う** — prisma 側は 1 つのトランザクションなので、失敗したときに記録も
+    // 残らない。memory も順序をそろえておく (`applyTenantPlan` が投げれば記録へ進まない)
+    const tenant =
+      apply === null ? null : applyTenantPlan(this.store, apply.tenantId, apply.update);
     // 記録して「初めて」を返す
     this.store.billingEvents.set(key, {
       provider: input.provider,
@@ -1238,7 +1262,7 @@ class MemoryBillingEvents implements BillingEventsPort {
       tenantId: input.tenantId,
       receivedAt: this.store.now(),
     });
-    return 'recorded';
+    return { outcome: 'recorded', tenant };
   }
 }
 

@@ -26,6 +26,8 @@ const STARTUP_TIMEOUT_MS = 60_000;
 const STARTUP_POLL_MS = 100;
 // 起動までの出力をためる上限（文字数）。原因が読める長さだけ残して、あとは捨てる
 const STARTUP_OUTPUT_MAX_CHARS = 64 * 1024;
+// 切り詰めたことを示す印（読む人が「出力がそこで終わった」と誤読しないように末尾へ付ける）
+const STARTUP_OUTPUT_TRUNCATED_NOTE = '\n…(これ以降の出力は計測側が切り詰めました)';
 // 起動確認の 1 回あたりの上限（ミリ秒）。待ち受けは始まったが応答を返さない状態で
 // ループが止まらないようにする（上の `deadline` はこの中で進まないと評価されない）
 const STARTUP_PROBE_TIMEOUT_MS = 5_000;
@@ -161,12 +163,20 @@ export async function startDemoApp({ port, platformAdminToken, auditSecret, extr
   // `bench-concurrency` はこの後 10 秒間 100 並列で叩くので、配備が 1 要求ずつ記録を出す
   // 設定だと計測プロセスのヒープに読まれない文字列が積み上がる
   let output = '';
-  // ためる上限（超えた分は捨てて、末尾に切り詰めた旨を書く）
+  // ためる上限（超えたら切り詰めて、**切り詰めた旨を末尾に残す** — 印が無いと
+  // 「アプリの出力がそこで終わった＝そこで固まった」と読めてしまう）
   const appendOutput = (chunk) => {
-    // 既に上限なら何もしない
-    if (output.length >= STARTUP_OUTPUT_MAX_CHARS) return;
-    // 上限までを足す
-    output = (output + chunk.toString()).slice(0, STARTUP_OUTPUT_MAX_CHARS);
+    // 既に切り詰め済みなら何もしない
+    if (output.endsWith(STARTUP_OUTPUT_TRUNCATED_NOTE)) return;
+    // 足したあとの長さ
+    const merged = output + chunk.toString();
+    // 上限までなら全部残す
+    if (merged.length <= STARTUP_OUTPUT_MAX_CHARS) {
+      output = merged;
+      return;
+    }
+    // 上限を超えたら切り詰めて、切り詰めたことを書き添える
+    output = merged.slice(0, STARTUP_OUTPUT_MAX_CHARS) + STARTUP_OUTPUT_TRUNCATED_NOTE;
   };
   app.stdout?.on('data', appendOutput);
   app.stderr?.on('data', appendOutput);

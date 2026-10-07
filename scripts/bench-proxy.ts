@@ -16,14 +16,14 @@
 // (正しく) 503 になる。自己署名証明書を作り、アプリには NODE_EXTRA_CA_CERTS で信頼させる
 import 'dotenv/config';
 import autocannon from 'autocannon';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer as createHttpsServer, type Server } from 'node:https';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requireContractDatabase } from './lib/contract-database.mjs';
 // 空きポートの取得（**写しを持たない** — Step7 で共有モジュールへ出した 1 本を使う）
-import { freePort } from './lib/demo-flow.mjs';
+import { freePort, startDemoApp } from './lib/demo-flow.mjs';
 import { PROXY_ADDED_LATENCY_P95_MAX_MS } from './lib/step2-criteria.mjs';
 import { intFromEnv, runBench } from './lib/bench-criteria.mjs';
 import { createPrismaClient } from '../src/lib/prisma-client';
@@ -79,12 +79,7 @@ const BENCH_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
  * （`MICRO_USD_MAX`）にする — 到達すると以降の中継が全部 403 になる
  */
 const BENCH_RULE_WINDOW_MINUTES = 60;
-// アプリの起動を待つ上限 (ミリ秒)
-const STARTUP_TIMEOUT_MS = 30_000;
-// 起動待ちの確認間隔 (ミリ秒)
-const STARTUP_POLL_MS = 200;
-// 本番ビルドの成果物 (standalone 出力)
-const STANDALONE_SERVER = join(process.cwd(), '.next', 'standalone', 'server.js');
+// 起動の上限・確認間隔・本番ビルドの場所は `startDemoApp` が持つ（写しを置かない）
 
 // スタブ上流が返す本文 (usage を持つ Anthropic 形式)
 const UPSTREAM_BODY = JSON.stringify({
@@ -215,55 +210,33 @@ function stubUpstreamEnv(upstreamPort: number): Record<string, string> {
   );
 }
 
-// アプリ (本番ビルド) を起動して、応答するようになるまで待つ
+// アプリ (本番ビルド) を起動して、応答するようになるまで待つ。
+// **起動そのものは `startDemoApp` を使う**（写しを持たない）— あちらは Step7 で
+// (a) `error` の購読（spawn の非同期な失敗が `runBench` の外で uncaughtException になるのを防ぐ）
+// (b) `exitCode` / `signalCode` による即時終了の検出（60 秒待たずに原因を出す）
+// (c) 出力バッファの上限（計測中の出力をヒープに積まない）
+// (d) health プローブのタイムアウト（ポートは掴んだが応答しない相手で止まらない）
+// の 4 つを持っており、ここに同じ処理の写しを残すとそのどれも効かない。
+// このベンチ固有の事情（スタブ上流への差し替え・レート制限の緩和・自己署名証明書）は
+// `extraEnv` で渡す（`startDemoApp` の既定より後ろに展開されるので上書きできる）。
 async function startApp(port: number, upstreamPort: number, caPath: string): Promise<ChildProcess> {
-  // 本番ビルドが無ければ測れない
-  if (!existsSync(STANDALONE_SERVER)) {
-    throw new Error(`本番ビルドがありません: 先に npm run build を実行してください`);
-  }
-  // 子プロセスとして起動する
-  const app = spawn(process.execPath, [STANDALONE_SERVER], {
-    env: {
-      ...process.env,
-      PORT: String(port),
-      HOSTNAME: '127.0.0.1',
+  // 起動して health が通るまで待つ
+  return startDemoApp({
+    port,
+    // **このベンチはテナント管理 API を使わない**ので、使い捨てを渡して開発機の .env の値を子へ渡さない
+    platformAdminToken: issueSecret('user').secret,
+    // 監査ログの鍵も同じ理由で使い捨て（発火しないルールで測るので記録は出ないが、未設定だと 503）
+    auditSecret: issueSecret('user').secret,
+    extraEnv: {
       // 上流はローカルのスタブ (https)。**全プロバイダぶんを結線表から導いて上書きする** —
       // 一覧を書き写すと、プロバイダを足した人が上書きを書き忘れ、開発機の実キーで本物を叩いて課金する
       ...stubUpstreamEnv(upstreamPort),
-      // 計測はテナント管理 API を使わないので、開発機の .env にある値を子へ渡さない (最小権限)
-      PLATFORM_ADMIN_TOKEN: '',
       // **計測中だけレート制限を外す**（理由は BENCH_RATE_LIMIT のコメント）
       [PROXY_RATE_LIMIT_ENV]: String(BENCH_RATE_LIMIT),
-      // 通知の宛先は置かない（発火しないルールなので送られないが、設定を子へ漏らさない）
-      NOTIFY_WEBHOOK_URL: '',
-      NOTIFY_MAIL_WEBHOOK_URL: '',
       // スタブの自己署名証明書を信頼させる (この 1 枚だけ)
       NODE_EXTRA_CA_CERTS: caPath,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  // 起動の失敗を拾えるよう、出力はためておく
-  let output = '';
-  app.stdout?.on('data', (chunk: Buffer) => (output += chunk.toString()));
-  app.stderr?.on('data', (chunk: Buffer) => (output += chunk.toString()));
-  // 健康確認が通るまで待つ
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  for (;;) {
-    // 期限切れなら落ちる
-    if (Date.now() > deadline) {
-      app.kill('SIGKILL');
-      throw new Error(`アプリが起動しませんでした:\n${output}`);
-    }
-    // health を叩いてみる
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/v1/health`);
-      if (response.ok) return app;
-    } catch {
-      // まだ起動していないだけなので待つ
-    }
-    // 少し待って再試行する
-    await new Promise((resolve) => setTimeout(resolve, STARTUP_POLL_MS));
-  }
 }
 
 // 1 回ぶんの負荷を掛けて、遅延の分布をそのまま返す (判定に使う値は呼び出し側が選ぶ)

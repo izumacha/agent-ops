@@ -37,6 +37,9 @@ export const SCANNED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.mjs', '.js', '.jsx',
 const LINE_COMMENT_OPENERS_BY_EXTENSION = { '.sql': ['--'] };
 // どの拡張子でも行末コメントになる綴り
 const COMMON_LINE_COMMENT_OPENERS = ['//'];
+// 印の前後に来たら「印ではない」と見る文字（英数字と下線。伏字やプレースホルダを拾わないため）。
+// **行頭・行末のときは空文字になるので一致しない**＝印として拾う
+const MARKER_WORD_CHAR = /^[0-9A-Za-z_]$/;
 
 /**
  * その拡張子で「行末までコメントになる綴り」を返す。
@@ -275,6 +278,13 @@ export function findKnownBugMarkers(root = process.cwd()) {
           from = index + 1;
           // コメントの中だけを拾う（コードの中の値は対象外）
           if (flags[index] !== true) continue;
+          // **印の前後が英数字なら印ではない（語の境界を要求する）** — 伏字やプレースホルダを
+          // 「未解決の欠陥」と報告すると、直す手段が「コメントを書き換える」か「検出網を
+          // 緩める」だけになる（実測で伏字を書いたコメントが 1 件として報告された）。
+          // **片側だけでは足りない** — 同じ印が連続する伏字では、右だけ見ると末尾の 1 つが
+          // 「直後が記号」で通り、左だけ見ると先頭の 1 つが「直前が記号」で通る
+          if (MARKER_WORD_CHAR.test(line.charAt(index + marker.length))) continue;
+          if (index > 0 && MARKER_WORD_CHAR.test(line.charAt(index - 1))) continue;
           // リポジトリ相対のパスで覚える（出力が機械に依存しないように）
           hits.push(`${name}:${offset + 1} ${marker}`);
           // 同じ行・同じ印は 1 件で足りる（件数ではなく「有るか」を見る判定なので）

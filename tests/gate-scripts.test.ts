@@ -2443,6 +2443,22 @@ describe('findKnownBugMarkers', () => {
     expect(result.hits.filter((hit) => hit.includes(marker))).toHaveLength(1);
   });
 
+  it('印の直後が英数字なら拾わない (伏字・プレースホルダで赤を出さない)', () => {
+    // **直す手段が「コメントを書き換える」か「検出網を緩める」だけになる形を作らない** —
+    // 実測で、伏字を書いたコメントが「未解決の欠陥の印」として報告された
+    const marker = KNOWN_BUG_MARKERS[0];
+    const result = withSource(`// 例: Authorization: Bearer sk-${marker}${marker} (値は伏せた)\n`);
+    expect(result.hits, '伏字を印として報告している').toEqual([]);
+  });
+
+  it('印の直後が行末・空白・記号なら拾う (境界の判定で取り落とさない)', () => {
+    // 行末・空白・コロンの 3 形（コロン付きの印は元から区切りを持つので、この境界で落ちない）
+    const marker = KNOWN_BUG_MARKERS[0];
+    for (const after of ['', ' いまここが壊れている', ': いまここが壊れている']) {
+      expect(withSource(`// ${marker}${after}\n`).hits.join(' '), after).toContain(marker);
+    }
+  });
+
   it('コードの中の値は拾わない (印の一覧そのものを報告しない)', () => {
     // 配列リテラルとして書いた形 (コメントの始まりがその手前に無い)
     const result = withSource(`export const MARKERS = ${JSON.stringify(KNOWN_BUG_MARKERS)};\n`);

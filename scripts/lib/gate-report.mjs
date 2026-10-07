@@ -880,7 +880,8 @@ export function knownBugProblems({ docProblems, openIssues, markerHits, scannedF
     failures.push(`未解決のバグが ${openIssues.length} 件あります: ${openIssues.join(' / ')}`);
   }
   // 走査したファイル数が読めない・0 件なら、印の検査が空振りしている
-  if (typeof scannedFiles !== 'number' || !Number.isInteger(scannedFiles) || scannedFiles <= 0) {
+  // （`Number.isInteger` は数値でない値に対して必ず false を返すので、型の検査は要らない）
+  if (!Number.isInteger(scannedFiles) || scannedFiles <= 0) {
     failures.push('ソースの走査が 1 ファイルも読めていません');
   }
   // ソースに印が残っていれば既知バグ 0 ではない

@@ -85,8 +85,15 @@ async function main(): Promise<Record<string, unknown>> {
     // 失敗として数えるもの（2xx 以外 ＋ 応答が返らなかった要求）。
     // **`timeouts` を足さない** — `errors` が既に含んでいる（上のコメント）
     const errorRequests = result.non2xx + result.errors;
-    // 総リクエスト数（分母。0 件のときは下の最小件数の門番が落とす）
-    const requests = result.requests.total;
+    // 総リクエスト数（分母。0 件のときは下の最小件数の門番が落とす）。
+    // **`requests.total` ではなく `requests.sent` を使う** — 前者は `totalCompletedRequests`
+    // （＝応答を受け取った件数）で、接続エラーとタイムアウトを含まない。一方で分子はそれらを
+    // 含むので、`total` を分母にすると**単位が揃わず 100% を超えうる**（2,000 件送って
+    // 1,200 件がタイムアウト・800 件が 200 なら、本当は 60% なのに 1200/800 = 150% と出る）。
+    // `sent` は `client.on('request')` の累計＝送った件数で、分子と同じ母集団を指す
+    // （`node_modules/autocannon/lib/aggregateResult.js` の `result.requests.sent =
+    // aggregated.totalRequests` と `lib/run.js:216` で確認）
+    const requests = result.requests.sent;
     // エラー率（%）。要求が 1 件も流れなかったときは 100% として扱う（最小件数の門番も落とす）
     const errorPercent =
       requests === 0
@@ -106,6 +113,8 @@ async function main(): Promise<Record<string, unknown>> {
       non2xx: result.non2xx,
       connectionErrors: result.errors,
       timeouts: result.timeouts,
+      // 応答を受け取った件数（分母の `requests` は送った件数なので、差は打ち切り時の飛行中の分）
+      completedRequests: result.requests.total,
       // 遅延の裾（同じく参考値。同時実行では待ち行列が伸びるので判定には使わない）
       latencyP97_5Ms: result.latency.p97_5,
       latencyMaxMs: result.latency.max,

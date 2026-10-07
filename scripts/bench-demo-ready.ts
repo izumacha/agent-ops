@@ -19,7 +19,13 @@ import 'dotenv/config';
 import { requireContractDatabase } from './lib/contract-database.mjs';
 import { runBench } from './lib/bench-criteria.mjs';
 import { DEMO_READY_MAX_MS } from './lib/step7-criteria.mjs';
-import { DEMO_STEPS, freePort, runDemoFlow, startDemoApp } from './lib/demo-flow.mjs';
+import {
+  DEMO_STEPS,
+  countStepsInOrder,
+  freePort,
+  runDemoFlow,
+  startDemoApp,
+} from './lib/demo-flow.mjs';
 import { createPrismaClient } from '../src/lib/prisma-client';
 import { issueSecret } from '../src/lib/tokens';
 
@@ -67,6 +73,9 @@ async function main(): Promise<Record<string, unknown>> {
       expectedSteps: DEMO_STEPS.length,
       // 実際に通った段の数
       stepsCompleted: flow.steps.length,
+      // 正本（DEMO_STEPS）と同じ名前が同じ位置にあった段の数。**件数だけでは足りない** —
+      // 要求を消してラベルだけ積む形や同じラベルを 2 回積む形は件数が変わらない
+      stepsInOrder: countStepsInOrder(flow.steps),
       // 登録したエージェントが一覧に出た件数（書いたものが読めたことの裏打ち）
       agentsListed: flow.agentsListed,
       // 停止の操作が監査ログに残った件数（**0 件なら「読めた」だけで何も示していない**）

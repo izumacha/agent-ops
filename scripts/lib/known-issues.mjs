@@ -21,8 +21,12 @@ import {
   KNOWN_ISSUES_HEADING,
 } from './step7-criteria.mjs';
 
-// 走査する拡張子（コメントを書ける形式だけ。画像・ロックファイル等は読まない）
-const SCANNED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.mjs', '.js', '.jsx', '.prisma', '.sql'];
+// 走査する拡張子（コメントを書ける形式だけ。画像・ロックファイル等は読まない）。
+// **公開しているのは、走査対象の宣言（`KNOWN_BUG_MARKER_DIRS`）が実在して中身を持つことを
+// テストが同じ条件で照合するため** — 宣言したディレクトリを改名・移動すると `filesUnder` は
+// 読み取りの失敗を `[]` に畳むので、その配下の印が黙って走査対象から外れる（他のディレクトリに
+// ファイルがあるかぎり `scannedFiles > 0` は成立し続けるので判定側の fail-closed も鳴らない）
+export const SCANNED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.mjs', '.js', '.jsx', '.prisma', '.sql'];
 // 行末までコメントになる綴り（`--` は SQL。マイグレーションは `.sql` なので要る）
 const LINE_COMMENT_OPENERS = ['//', '#', '--'];
 // 囲むコメントの開き・閉じ（**行をまたぐので状態を持って追う** — 中の行に `*` が無くても
@@ -220,14 +224,28 @@ export function findKnownBugMarkers(root = process.cwd()) {
       inBlock = endsInBlock;
       // 印を 1 つずつ当てる
       for (const marker of KNOWN_BUG_MARKERS) {
-        // その行での位置
-        const index = line.indexOf(marker);
-        // 無ければ次の印
-        if (index < 0) continue;
-        // コメントの中だけを拾う（コードの中の値は対象外）
-        if (flags[index] !== true) continue;
-        // リポジトリ相対のパスで覚える（出力が機械に依存しないように）
-        hits.push(`${name}:${offset + 1} ${marker}`);
+        // **その行の出現を全部見る。** 最初の 1 回だけを見る形にすると、同じ行でコードの側に
+        // 先に綴りが現れたときコメント中の本物の印を取り落とす（実測。印を値として書いた変数
+        // 宣言の後ろに、同じ印を使ったコメントを続けた 1 行が 0 件になった）。1 行に両方を書くのは
+        // 自然な形なので、ここは「惜しい書き方だけ拾えない」ではなく普通の取り落とし。
+        // 再現の形は `tests/gate-scripts.test.ts` が定数から組み立てて持っている
+        // （この走査はコメントの中を見るので、ここに綴りを書くと自分自身を報告してしまう）
+        let from = 0;
+        // 見つかるかぎり次の出現へ進む
+        for (;;) {
+          // その行での次の位置
+          const index = line.indexOf(marker, from);
+          // もう無ければこの印は終わり
+          if (index < 0) break;
+          // 次の走査はこの出現の 1 文字先から（同じ位置で止まらないように）
+          from = index + 1;
+          // コメントの中だけを拾う（コードの中の値は対象外）
+          if (flags[index] !== true) continue;
+          // リポジトリ相対のパスで覚える（出力が機械に依存しないように）
+          hits.push(`${name}:${offset + 1} ${marker}`);
+          // 同じ行・同じ印は 1 件で足りる（件数ではなく「有るか」を見る判定なので）
+          break;
+        }
       }
     });
   }

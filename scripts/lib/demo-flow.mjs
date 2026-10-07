@@ -1,6 +1,7 @@
 // Step7 の「デモ動作」の筋と、それを測るためのアプリ起動。**2 本のベンチが共有する** —
 // `bench-demo-ready`（基準①の部分集合）と `bench-concurrency`（基準②の仕込み）が、どちらも
-// 「本番ビルドを起こしてテナントを 1 つ作る」ところまで同じことをする。
+// 「本番ビルドを起こしてテナントを 1 つ作る」ところまで同じことをする
+// （`freePort` だけは `bench-proxy` も使うので 3 本から参照される）。
 //
 // **HTTP だけでデモの筋を通す。** DB へ直接書いて仕込むと「配備した成果物で動くか」を測らない
 // （CI の compose 経路ではコンテナの中へ入れない）。ブートストラップはプラットフォーム管理者の
@@ -23,8 +24,31 @@ const STANDALONE_SERVER = join(process.cwd(), '.next', 'standalone', 'server.js'
 const STARTUP_TIMEOUT_MS = 60_000;
 // 起動確認の間隔（ミリ秒）
 const STARTUP_POLL_MS = 100;
+// 起動確認の 1 回あたりの上限（ミリ秒）。待ち受けは始まったが応答を返さない状態で
+// ループが止まらないようにする（上の `deadline` はこの中で進まないと評価されない）
+const STARTUP_PROBE_TIMEOUT_MS = 5_000;
+// デモの筋の 1 要求あたりの上限（ミリ秒）。**Node の global fetch は既定でタイムアウトしない**ので、
+// 配備が応答を返さなくなる（DB のロック待ち・プーラの飽和など）と `runDemoFlow` が返らず、
+// **基準の判定（所要時間と上限の比較）はその後ろにあるので一度も実行されない** —
+// ジョブは「基準違反で赤」ではなく GitHub の上限まで無言でハングする。上限に当たれば
+// `TimeoutError` が投げられ、ベンチは `runBench` 経由・プローブは catch 経由で
+// 「どの段で止まったか」を添えて非 0 終了する
+const REQUEST_TIMEOUT_MS = 30_000;
 // OpenAPI の `servers.url` と同じ接頭辞
 const API_PREFIX = '/api/v1';
+
+/**
+ * タイムアウト付きで叩く。**デモの筋のすべての要求がここを通る**（1 か所に集めるのは、
+ * 新しい段を足した人が付け忘れても同じ上限が掛かるようにするため）。
+ * @param {string} url 叩く先
+ * @param {RequestInit} [init] fetch へ渡す設定（`signal` はここが決めるので渡さない）
+ * @param {number} [timeoutMs] 上限（ミリ秒）
+ * @returns {Promise<Response>} 応答
+ */
+function fetchWithTimeout(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  // 上限を過ぎたら中断する signal を付けて叩く
+  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+}
 
 /**
  * デモの筋（この順で通す）。**件数の正本はここ** — `step7-criteria.mjs` の
@@ -49,10 +73,26 @@ export const DEMO_STEPS = [
 ];
 
 /**
+ * 通った段のうち、**正本（`DEMO_STEPS`）と同じ名前が同じ位置にある**ものを数える。
+ * 正本の隣に置くのは、突き合わせの規則を正本と一緒に読めるようにするため
+ * （ベンチと CI のプローブが同じ数え方を使う。写しを 2 つ持たない）。
+ * @param {readonly string[]} steps 実際に通った段の名前（順序どおり）
+ * @returns {number} 正本と一致した位置の数
+ */
+export function countStepsInOrder(steps) {
+  // 配列でなければ 0（判定が落ちる側へ倒す = fail-closed）
+  if (!Array.isArray(steps)) return 0;
+  // 同じ位置に同じ名前があるものを数える
+  return steps.filter((step, at) => step === DEMO_STEPS[at]).length;
+}
+
+/**
  * 空いている TCP ポートを 1 つ取る（固定ポートだと CI で衝突する）。
  *
- * **`bench-proxy.ts` が同じことをしているが、あちらはベンチ本体なのでここからは触れない**
- * （共有モジュールへ寄せる差分は Step7 の範囲を超える）。2 本の新しいベンチがこれを使う。
+ * **3 本のベンチが共有する**（`bench-proxy` / `bench-demo-ready` / `bench-concurrency`）。
+ * `bench-proxy.ts` は同じ処理を自前で持っていたが、Step7 でここへ寄せて写しを 1 本消した。
+ * `e2e/lib/app.ts` の 1 本は残してある — あちらは静的アセットの配置・SIGTERM での停止・
+ * ポートの掴み方が意図的に違う（同じ関数にすると片方の事情がもう片方を壊す）。
  * @returns {Promise<number>} 割り当てられたポート番号
  */
 export async function freePort() {
@@ -139,7 +179,11 @@ export async function startDemoApp({ port, platformAdminToken, auditSecret, extr
     }
     // health を叩いてみる
     try {
-      const response = await fetch(`http://127.0.0.1:${port}${API_PREFIX}/health`);
+      const response = await fetchWithTimeout(
+        `http://127.0.0.1:${port}${API_PREFIX}/health`,
+        {},
+        STARTUP_PROBE_TIMEOUT_MS,
+      );
       if (response.ok) return app;
     } catch {
       // まだ起動していないだけなので待つ
@@ -183,13 +227,13 @@ export async function runDemoFlow({ baseUrl, platformAdminToken }) {
   // 通った段を順に積む
   const steps = [];
   // 1. 配備が生きているか（DB 到達性も含む）
-  const health = await fetch(`${baseUrl}${API_PREFIX}/health`);
+  const health = await fetchWithTimeout(`${baseUrl}${API_PREFIX}/health`);
   const healthBody = await expectJson(health, 200, 'health');
   // `ok` が true でなければ配備が壊れている
   if (healthBody.ok !== true) throw new Error(`health: ok でない (${JSON.stringify(healthBody)})`);
   steps.push('health');
   // 2. テナントを立ち上げる（プラットフォーム管理者だけができる。応答に最初の admin のトークンが入る）
-  const tenantResponse = await fetch(`${baseUrl}${API_PREFIX}/tenants`, {
+  const tenantResponse = await fetchWithTimeout(`${baseUrl}${API_PREFIX}/tenants`, {
     method: 'POST',
     headers: { authorization: `Bearer ${platformAdminToken}`, 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -205,7 +249,7 @@ export async function runDemoFlow({ baseUrl, platformAdminToken }) {
   // 以後の要求に付けるヘッダ
   const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
   // 3. エージェントを 1 つ登録する（運用の起点）
-  const agentResponse = await fetch(`${baseUrl}${API_PREFIX}/agents`, {
+  const agentResponse = await fetchWithTimeout(`${baseUrl}${API_PREFIX}/agents`, {
     method: 'POST',
     headers: auth,
     body: JSON.stringify({
@@ -220,26 +264,30 @@ export async function runDemoFlow({ baseUrl, platformAdminToken }) {
   const agentId = readString(agent, ['id'], 'create-agent');
   steps.push('create-agent');
   // 4. 一覧に出ることを確かめる（書いたものが読めるか）
-  const listResponse = await fetch(`${baseUrl}${API_PREFIX}/agents`, { headers: auth });
+  const listResponse = await fetchWithTimeout(`${baseUrl}${API_PREFIX}/agents`, { headers: auth });
   const list = await expectJson(listResponse, 200, 'list-agents');
   // 件数（`items` の長さ。形は OpenAPI の一覧応答が決める）
   const items = Array.isArray(list.items) ? list.items : [];
   steps.push('list-agents');
   // 5. 契約プランと実際に効いている上限を引く（409 / 403 を受けたときの参照先）
-  const billingResponse = await fetch(`${baseUrl}${API_PREFIX}/billing`, { headers: auth });
+  const billingResponse = await fetchWithTimeout(`${baseUrl}${API_PREFIX}/billing`, {
+    headers: auth,
+  });
   const billing = await expectJson(billingResponse, 200, 'read-billing');
   // プラン名
   const plan = readString(billing, ['plan'], 'read-billing');
   steps.push('read-billing');
   // 6. エージェントを止める（**記録を残す操作**。監査ログの段を意味のあるものにする）
-  const stopResponse = await fetch(`${baseUrl}${API_PREFIX}/agents/${agentId}/stop`, {
+  const stopResponse = await fetchWithTimeout(`${baseUrl}${API_PREFIX}/agents/${agentId}/stop`, {
     method: 'POST',
     headers: auth,
   });
   await expectJson(stopResponse, 200, 'stop-agent');
   steps.push('stop-agent');
   // 7. 監査ログに**その操作が残っている**こと（運用の記録が残る配備であること）
-  const auditResponse = await fetch(`${baseUrl}${API_PREFIX}/audit-logs`, { headers: auth });
+  const auditResponse = await fetchWithTimeout(`${baseUrl}${API_PREFIX}/audit-logs`, {
+    headers: auth,
+  });
   const audit = await expectJson(auditResponse, 200, 'read-audit-logs');
   // 残っていた行数（**0 件なら「読めた」だけで何も示していない**）
   const auditRows = Array.isArray(audit.items) ? audit.items.length : 0;

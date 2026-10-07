@@ -29,6 +29,10 @@ jobs:
   gate:
     name: gate (実装済みの最新 Step の受け入れ基準)
     runs-on: ubuntu-latest
+    # **ハングを「赤」にする。** 上限を置かないと GitHub の既定 (6 時間) まで走り続け、
+    # 「基準違反で落ちた」と「終わらない」が区別できない (ジョブは必須チェックなので
+    # マージも止まったまま待たされる)。値は実測の 3〜5 倍を目安にしてある
+    timeout-minutes: 45
     # Step3 のゲートはベンチ (1 万件投入の日次集計・プロキシ経由の追加遅延・採点の再現率) を含むので DB が要る。
     # **接続先は契約テストと同じ専用 DB (末尾 _contract)** — ベンチは全テーブルを TRUNCATE するので、
     # 開発 DB を指していればベンチ側が 1 件も書かずに落ちる (fail-closed)
@@ -101,6 +105,8 @@ jobs:
   migrate-and-build:
     name: Migrate (PostgreSQL) / Build
     runs-on: ubuntu-latest
+    # ハングを「赤」にする (理由は gate ジョブの同じ指定のコメント)
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -171,16 +177,14 @@ jobs:
     # 5 分以内にデモ動作)` へ改名したら 405 Repository rule violations で止まった)。
     name: Docker (compose up → /api/v1/health)
     runs-on: ubuntu-latest
+    # ハングを「赤」にする (理由は gate ジョブの同じ指定のコメント)。
+    # **受け入れ基準①の 5 分より大きく取る** — 基準違反は `demo-probe.mjs` が
+    # 所要時間を上限と比べて落とすので、ここで切るのは「応答が返らない」場合だけ
+    timeout-minutes: 20
     # **これが Step7 の受け入れ基準①そのもの** (クリーン環境の `docker compose up` から数える)。
     # ゲートが毎回回す `bench:demo-ready` は本番ビルドの起動から数える**部分集合**で、
     # イメージのビルドとマイグレーション適用を含まない (解釈は docs/roadmap.md と ADR-0013)。
     env:
-      # テナント作成に要るトークン (compose が `${PLATFORM_ADMIN_TOKEN:-}` で app へ渡す)。
-      # **この値は CI の使い捨て**で、32 文字以上であること以外に意味は無い
-      PLATFORM_ADMIN_TOKEN: ci-docker-smoke-platform-admin-token-0123456789
-      # 監査ログの HMAC 鍵 (デモの筋が停止を 1 回行うので要る。これも CI の使い捨て)。
-      # **未設定だと停止が 503 になる** (fail-closed) ので、渡し忘れればこのジョブが赤くなる
-      AUDIT_HMAC_SECRET: ci-docker-smoke-audit-hmac-secret-0123456789
       # デモの筋を叩く先 (compose が公開するポート)
       DEMO_BASE_URL: http://127.0.0.1:3000
     steps:
@@ -190,6 +194,22 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
+
+      # **資格情報はこの実行ごとに作る。** 値をワークフローへ直書きすると、CI 専用の
+      # 使い捨てであってもリポジトリを読める誰でも知る値になり、§9 の
+      # 「認証情報をコード・コミットに含めない」と docker-compose.yml の
+      # 「リポジトリに書かれた資格情報で動く配備を作らない」に反する。
+      # どちらも 32 文字以上でなければアプリが fail-closed で断る
+      # (プラットフォーム管理者トークンは「存在しない」扱い、監査ログの鍵は 503)。
+      # `::add-mask::` でログへ出さないようにしてから `GITHUB_ENV` へ渡す
+      - name: Generate throwaway credentials for this run
+        run: |
+          platform_admin_token="$(openssl rand -hex 24)"
+          audit_hmac_secret="$(openssl rand -hex 24)"
+          echo "::add-mask::$platform_admin_token"
+          echo "::add-mask::$audit_hmac_secret"
+          echo "PLATFORM_ADMIN_TOKEN=$platform_admin_token" >> "$GITHUB_ENV"
+          echo "AUDIT_HMAC_SECRET=$audit_hmac_secret" >> "$GITHUB_ENV"
 
       # 設定の構文と変数展開を検査する
       - name: Validate compose file

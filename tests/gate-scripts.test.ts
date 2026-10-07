@@ -69,6 +69,7 @@ import {
   demoAuditRowsProblem,
   demoReadyProblem,
   demoStepDefinitionProblem,
+  demoStepOrderProblem,
   demoStepsCompletedProblem,
   disagreementProblem,
   injectedVarianceProblem,
@@ -94,16 +95,18 @@ import {
   DEMO_READY_MAX_MS,
   DEMO_STEP_COUNT,
   KNOWN_BUG_MARKERS,
+  KNOWN_BUG_MARKER_DIRS,
   KNOWN_BUG_MARKER_EXCLUDED_DIRS,
   KNOWN_ISSUES_DOC,
   KNOWN_ISSUES_HEADING,
 } from '../scripts/lib/step7-criteria.mjs';
 import {
+  SCANNED_EXTENSIONS,
   commentPositions,
   findKnownBugMarkers,
   readKnownIssues,
 } from '../scripts/lib/known-issues.mjs';
-import { DEMO_STEPS } from '../scripts/lib/demo-flow.mjs';
+import { DEMO_STEPS, countStepsInOrder } from '../scripts/lib/demo-flow.mjs';
 import { EvaluationExclusionReason } from '@/domain/types';
 import {
   EVALUATION_BENCH_CASE_COUNT,
@@ -1984,16 +1987,20 @@ const BENCH_PAYLOADS: Readonly<
     ok: {
       expectedSteps: DEMO_STEP_COUNT,
       stepsCompleted: DEMO_STEP_COUNT,
+      stepsInOrder: DEMO_STEP_COUNT,
       agentsListed: 1,
       auditRows: 1,
       elapsedMs: DEMO_READY_MAX_MS,
     },
     // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)。
     // **段は「減る」向きで破る** — 段を削って速く通す形がいちばん通しやすいため。
-    // 2 つ目 (全部通ったか) は**実績だけ**を減らす (宣言を動かすと 1 つ目も同時に破れる)
+    // 2 つ目 (全部通ったか) は**実績だけ**を減らす (宣言を動かすと 1 つ目も同時に破れる)。
+    // 3 つ目 (並び) は**一致した位置の数だけ**を減らす — 段の数は動かさない
+    // (動かすと 1 つ目・2 つ目も同時に破れる)
     breaks: [
       { expectedSteps: DEMO_STEP_COUNT - 1 },
       { stepsCompleted: DEMO_STEP_COUNT - 1 },
+      { stepsInOrder: DEMO_STEP_COUNT - 1 },
       { agentsListed: 0 },
       { auditRows: 0 },
       { elapsedMs: DEMO_READY_MAX_MS + 1 },
@@ -2056,6 +2063,48 @@ describe('demoStepsCompletedProblem', () => {
   it('宣言より多く通っていても落とさない (宣言の正しさは別の判定が見る)', () => {
     // **役割を分けている**ので、ここは「足りないか」だけを見る
     expect(demoStepsCompletedProblem(DEMO_STEP_COUNT - 1, DEMO_STEP_COUNT)).toBeNull();
+  });
+});
+
+describe('countStepsInOrder', () => {
+  it('正本と同じ並びなら全段を数える', () => {
+    // 正本そのもの
+    expect(countStepsInOrder([...DEMO_STEPS])).toBe(DEMO_STEP_COUNT);
+  });
+
+  it('配列でなければ 0 と数える (判定が落ちる側へ倒す)', () => {
+    // 項目が無い計測 (fail-closed)
+    expect(countStepsInOrder(undefined as unknown as string[])).toBe(0);
+  });
+});
+
+describe('demoStepOrderProblem', () => {
+  it('全段が正本と同じ位置なら問題なし', () => {
+    // 正本そのもの
+    expect(countStepsInOrder([...DEMO_STEPS])).toBe(DEMO_STEP_COUNT);
+    expect(demoStepOrderProblem(DEMO_STEP_COUNT, DEMO_STEP_COUNT)).toBeNull();
+  });
+
+  it('順を入れ替えた計測を落とす (件数は同じ)', () => {
+    // 先頭 2 段を入れ替える (長さは変わらないので、件数を見る判定は落ちない)
+    const swapped = [DEMO_STEPS[1], DEMO_STEPS[0], ...DEMO_STEPS.slice(2)];
+    expect(swapped).toHaveLength(DEMO_STEP_COUNT);
+    const inOrder = countStepsInOrder(swapped);
+    expect(inOrder).toBeLessThan(DEMO_STEP_COUNT);
+    expect(demoStepOrderProblem(DEMO_STEP_COUNT, inOrder)).toContain('並び');
+  });
+
+  it('同じラベルを 2 回積んだ計測を落とす (件数だけでは通る形)', () => {
+    // 最後の段の代わりに最初の段をもう 1 回積む (`fetch` を消してラベルだけ残す形がこれ)
+    const duplicated = [...DEMO_STEPS.slice(0, -1), DEMO_STEPS[0]];
+    expect(duplicated).toHaveLength(DEMO_STEP_COUNT);
+    expect(demoStepOrderProblem(DEMO_STEP_COUNT, countStepsInOrder(duplicated))).toContain('並び');
+  });
+
+  it('配列でなければ 0 と数えて落とす (計測が成立していない)', () => {
+    // 項目が無い計測 (fail-closed)
+    expect(countStepsInOrder(undefined as unknown as string[])).toBe(0);
+    expect(demoStepOrderProblem(DEMO_STEP_COUNT, 0)).toContain('並び');
   });
 });
 
@@ -2296,6 +2345,24 @@ describe('findKnownBugMarkers', () => {
     }
   }
 
+  // そのディレクトリ以下にある「走査対象の拡張子」のファイルを数える (走査の実装とは別に書く)
+  function countScannedFiles(directory: string): number {
+    // 見つかった数
+    let total = 0;
+    // 1 段ずつ掘る
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      // 下に潜る (node_modules は対象のディレクトリの下には無い)
+      if (entry.isDirectory()) {
+        total += countScannedFiles(join(directory, entry.name));
+        continue;
+      }
+      // 拡張子が一致すれば数える
+      if (SCANNED_EXTENSIONS.some((extension) => entry.name.endsWith(extension))) total += 1;
+    }
+    // 合計
+    return total;
+  }
+
   it.each([...KNOWN_BUG_MARKERS])('コメントに残った %s を拾う', (marker) => {
     // コメント行に印を書く (**綴りは定数から組み立てる** — このテストのコメントに
     // 印を直接書くと、この検出網が自分自身を報告する)
@@ -2317,6 +2384,25 @@ describe('findKnownBugMarkers', () => {
     // 整形の慣習に頼っていたときは、`*` の無い行が素通りした (実測)
     const result = withSource(`/* 説明\n${KNOWN_BUG_MARKERS[0]} まだ直していない\n*/\n`);
     expect(result.hits.join(' ')).toContain('src/sample.ts:2');
+  });
+
+  it('同じ行でコードの側に先に綴りが現れてもコメント中の印を拾う', () => {
+    // **行内の最初の 1 回だけを見る形は取り落としになる** (実測: 直す前は 0 件だった)。
+    // 1 行に「値としての綴り」と「本物の印」を両方書くのは自然な形なので、
+    // 「惜しい書き方だけ拾えない」ではなく普通の fail-open
+    const marker = KNOWN_BUG_MARKERS[0];
+    const result = withSource(
+      `export const label = ${JSON.stringify(marker)}; // ${marker} いまここが壊れている\n`,
+    );
+    expect(result.hits.join(' '), '行内の 2 回目以降を見ていない').toContain('src/sample.ts:1');
+  });
+
+  it('同じ行・同じ印は 1 件だけ数える (件数ではなく有無を見る判定なので)', () => {
+    // コメントの中に同じ印を 2 回書く
+    const marker = KNOWN_BUG_MARKERS[0];
+    const result = withSource(`// ${marker} と ${marker} の 2 回\n`);
+    // 1 行につき 1 件 (重複して積まない)
+    expect(result.hits.filter((hit) => hit.includes(marker))).toHaveLength(1);
   });
 
   it('コードの中の値は拾わない (印の一覧そのものを報告しない)', () => {
@@ -2366,6 +2452,24 @@ describe('findKnownBugMarkers', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.each([...KNOWN_BUG_MARKER_DIRS])(
+    '走査対象として宣言した %s は実在して中身を持つ (改名で黙って外れない)',
+    (declared) => {
+      // **宣言と実体がずれても誰も鳴らない形だった** — `filesUnder` は読み取りの失敗を `[]` に
+      // 畳むので、`e2e/` を `tests/e2e/` へ移す (綴りを 1 文字変える) だけでその配下の印が
+      // 走査対象から消える。他のディレクトリにファイルがあるかぎり `scannedFiles > 0` は
+      // 成立し続けるので、判定側の「1 ファイルも読めていません」も鳴らない。
+      // 痕跡は差分にもテスト件数にも出ないので、宣言の側を fail-closed で固定する
+      const directory = join(ROOT, declared);
+      expect(existsSync(directory), `${declared} が実在しない (改名・移動していないか)`).toBe(true);
+      // 走査対象の拡張子を 1 つでも含むこと (空のディレクトリを宣言したままにしない)
+      expect(
+        countScannedFiles(directory),
+        `${declared} に走査対象の拡張子のファイルが無い`,
+      ).toBeGreaterThan(0);
+    },
+  );
 
   it('いまのリポジトリは既知バグ 0 (受け入れ基準④)', () => {
     // **実物を見る** — ゲートが読むのと同じ材料で、いま基準を満たしていることを固定する

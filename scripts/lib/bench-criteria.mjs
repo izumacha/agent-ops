@@ -34,6 +34,9 @@ import {
   DEMO_READY_MAX_MS,
   DEMO_STEP_COUNT,
 } from './step7-criteria.mjs';
+// デモの筋の正本（並びそのものを突き合わせるために要る。件数だけでは「同じラベルを 2 回積む」
+// 「fetch を消してラベルだけ残す」形が通るので、名前と順序まで見る）
+import { DEMO_STEPS } from './demo-flow.mjs';
 
 // 捨て玉 (ウォームアップ) の最大遅延に置く上限 (ミリ秒)。
 // **受け入れ基準の 50ms から導かない。** あちらは「プロキシ経由と直接の差」の予算で、こちらは
@@ -326,6 +329,30 @@ export function demoStepsCompletedProblem(expectedSteps, stepsCompleted) {
 }
 
 /**
+ * 通った段が**正本と同じ名前・同じ順序だったか**を判定する。
+ *
+ * **件数だけでは足りない** — `runDemoFlow` は段の名前を返すのに、呼び出し側も判定も
+ * 長さしか見ていなかったので、`GET /billing` の要求を消してラベルだけ積む形や、
+ * 同じラベルを 2 回積む形が「7 段通った」として素通りした。`DEMO_STEPS` の重複の無さは
+ * 定数側のテストが見ているが、実行時に積まれた配列には掛からない。
+ *
+ * **受け取るのは数値（一致した位置の数）にする。** `judgeBenchPayload` は「項目が数値で
+ * なければ例外」という fail-closed を持っていて、配列を 1 つ通すためにそれを緩めると
+ * 「項目名を打ち間違えたときに基準を黙って飛ばす」穴が全基準に戻る。突き合わせ自体は
+ * `demo-flow.mjs` の `countStepsInOrder`（正本の隣）が行い、ベンチは**その数と段の名前の
+ * 両方**を結果に載せるので、出力を読めば人も確かめられる
+ * @param {number} expectedSteps 宣言した段数
+ * @param {number} stepsInOrder 正本と同じ名前・同じ位置だった段の数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function demoStepOrderProblem(expectedSteps, stepsInOrder) {
+  // 全段が正本と同じ位置に並んでいれば問題なし
+  if (stepsInOrder >= expectedSteps) return null;
+  // 違えば、測ったデモが正本の筋と違う
+  return `デモの段が正本と同じ並びではありません (${stepsInOrder}/${expectedSteps} 段だけ一致。正本: ${DEMO_STEPS.join(' → ')})`;
+}
+
+/**
  * 登録したエージェントが**一覧に出たか**を判定する。
  * **「201 が返った」だけでは足りない** — 書き込みが別のテナントへ入っていても 201 は返る。
  * 一覧に 1 件以上出たことまで見て「配備した成果物で動いた」の証拠にする
@@ -460,6 +487,8 @@ const BENCH_CRITERIA = {
     { fields: ['expectedSteps'], judge: demoStepDefinitionProblem },
     // 宣言した段を全部通ったか
     { fields: ['expectedSteps', 'stepsCompleted'], judge: demoStepsCompletedProblem },
+    // 通った段が正本と同じ名前・同じ順序か (件数だけでは同じラベルを 2 回積む形が通る)
+    { fields: ['expectedSteps', 'stepsInOrder'], judge: demoStepOrderProblem },
     // 登録したものが一覧に出たか (201 だけでは「動いた」と言えない)
     { fields: ['agentsListed'], judge: demoAgentsListedProblem },
     // 停止の操作が監査ログに残ったか (読めただけでは記録が残る配備だと言えない)

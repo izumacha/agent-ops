@@ -207,8 +207,20 @@ function collectCallsByScope(source: ts.SourceFile): Map<string, CallSite[]> {
  * `runBench('demo-ready', main)` のように**他の関数へ渡して実行させる**スコープが
  * 「到達不能」と判定され、その中の呼び出しがどの検査からも見えなかった (実測で、
  * ベンチの `main` の中で共有モジュールの関数を呼んでいるのに
- * 「取り込んだまま呼んでいない」と報告された)。渡した関数は呼ばれる前提で辿る —
- * 辿らない側に倒すと**検出網が狭まる**方向の間違いになる。
+ * 「取り込んだまま呼んでいない」と報告された)。
+ *
+ * **ただし辿るのは「素の識別子で呼ばれた、このファイルの関数ではない呼び出し先」に渡した
+ * 引数だけ**。どんな呼び出しでも辿る形にすると、上で塞いだ「一度も呼ばれない関数の中へ
+ * 移す」変異が綴りを変えるだけで戻る — `void neverCalledReporter;` を
+ * `console.log(neverCalledReporter)` に替えれば**関数を呼ばないのに**そのスコープが
+ * 到達可能になる。**実測**: ベンチの `runDemoFlow(...)` の呼び出しを
+ * `function deadCode() { … } console.log(deadCode);` の中へ移す変異は、どんな呼び出しでも
+ * 辿る版では「ベンチは scripts/lib から取り込んだ判定を全部呼ぶ」を**素通りし**、この絞り
+ * 込みを入れた版では落ちた。`console.log` は受け手が識別子のメンバ式なので `console.log`
+ * という名前で数えられており、素の識別子かどうかで両者を分けられる。
+ * **残る境界**: 受け取った関数を呼ばない外部の関数へ渡す形 (`queueMicrotask` のような
+ * 素の識別子のグローバル、あるいは何もしない取り込み済みの関数) は区別できない。
+ * 呼び出し先の中身まで追う話になるので、ここは規約とレビューで守る。
  * @param byScope collectCallsByScope の結果
  * @returns 到達可能なスコープ名の集合
  */
@@ -222,10 +234,15 @@ function reachableScopes(byScope: Map<string, CallSite[]>): Set<string> {
     // 次に見るスコープ
     const current = queue.pop() as string;
     for (const call of byScope.get(current) ?? []) {
-      // 辿る候補 = 呼び出し先の名前 ＋ **素の識別子として渡した実引数の名前**
+      // 実引数まで辿るのは「素の識別子で呼ばれた、このファイルの関数ではない呼び出し先」だけ
+      // (`runBench(...)` は該当し、`console.log(...)` はメンバ式なので該当しない)
+      const callsOutward = !call.name.includes('.') && !byScope.has(call.name);
+      // 辿る候補 = 呼び出し先の名前 ＋ (条件を満たすときだけ) 素の識別子で渡した実引数の名前
       const names = [
         call.name,
-        ...[...call.args].filter((arg) => ts.isIdentifier(arg)).map((arg) => arg.text),
+        ...(callsOutward
+          ? [...call.args].filter((arg) => ts.isIdentifier(arg)).map((arg) => arg.text)
+          : []),
       ];
       for (const name of names) {
         // このファイルの名前付き関数で、まだ辿っていなければ広げる

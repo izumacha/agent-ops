@@ -79,6 +79,16 @@ README も「including timeouts」と書いている）ので、`timeouts` を�
 CI の `docker-smoke` ジョブ**がイメージのビルドとマイグレーション適用を含めて測る
 （解釈は `docs/roadmap.md` の「Step7 の受け入れ基準の解釈」と ADR-0013）。
 
+**基準そのものの経路の実測（GitHub の `ubuntu-latest` ランナー、レイヤキャッシュ無し）**:
+`docker compose up -d --build` の開始から `scripts/demo-probe.mjs` の完了まで **1 分 58 秒**
+（2026-10-07 / PR #24 の `docker-smoke`）。内訳は `npm ci` ×2・`npm run gen`・
+`prisma generate`・`next build` を含むイメージのビルドと、`prisma migrate deploy`、
+healthcheck 待ち、デモの筋 7 段。**5 分の予算に対して約 2.5 倍の余裕**。
+
+> **この経路はキャッシュを持たないので、予算に近づくとしたらここ。** 上の部分集合の
+> ベンチ（約 1.2 秒）は余裕を過大に見せるので、**基準に対する余裕はこちらの数字で読む**。
+> 依存を増やしたりビルドの段を足したときは、この値が伸びていないか CI のジョブ時間で見る。
+
 デモの筋（`scripts/lib/demo-flow.mjs` の `DEMO_STEPS` が正本）:
 健康確認 → テナント作成 → エージェント登録 → 一覧 → 契約プランの参照 → **停止** →
 監査ログの参照（停止が記録に残ったことを確かめる）。

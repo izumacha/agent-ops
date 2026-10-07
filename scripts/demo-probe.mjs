@@ -12,7 +12,7 @@
 // **判定もここで行う**（上限は正本から読む）。ワークフロー側で秒数を比べる形にすると、
 // 上限の写しが YAML に生まれて片方だけ古くなる。
 import { DEMO_READY_MAX_MS } from './lib/step7-criteria.mjs';
-import { DEMO_STEPS, runDemoFlow } from './lib/demo-flow.mjs';
+import { DEMO_STEPS, countStepsInOrder, runDemoFlow } from './lib/demo-flow.mjs';
 
 // 叩く先（compose が公開しているアプリ）
 const baseUrl = process.env.DEMO_BASE_URL;
@@ -41,6 +41,12 @@ if (problems.length === 0) {
     // 通った段が宣言どおりか（段を削った計測を「デモが動いた」と数えない）
     if (flow.steps.length < DEMO_STEPS.length)
       problems.push(`デモの段を ${flow.steps.length}/${DEMO_STEPS.length} しか通っていません`);
+    // 正本と同じ名前が同じ位置にあるか（件数だけでは同じラベルを 2 回積む形が通る）
+    const stepsInOrder = countStepsInOrder(flow.steps);
+    if (stepsInOrder < DEMO_STEPS.length)
+      problems.push(
+        `デモの段が正本と同じ並びではありません (${stepsInOrder}/${DEMO_STEPS.length} 段だけ一致)`,
+      );
     // 登録したものが一覧に出たか（書いたものが読めたことの裏打ち）
     if (flow.agentsListed <= 0) problems.push('登録したエージェントが一覧に出ていません');
     // 停止の操作が記録に残ったか（`runDemoFlow` も 0 件なら落ちるが、結果に載せて読めるようにする）
@@ -55,6 +61,7 @@ if (problems.length === 0) {
         elapsedMs,
         limitMs: DEMO_READY_MAX_MS,
         steps: flow.steps,
+        stepsInOrder,
         agentsListed: flow.agentsListed,
         auditRows: flow.auditRows,
         plan: flow.plan,

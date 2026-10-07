@@ -84,8 +84,15 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 | `NOTIFY_WEBHOOK_URL` / `NOTIFY_MAIL_WEBHOOK_URL` / `NOTIFY_SIGNING_SECRET` | 任意 | 通知。鍵が無ければ**送らない** |
 
 **どれも未設定なら安全側に倒れる（fail-closed）** ので、「設定を忘れたまま動いてしまう」形は無い。
-代わりに**その機能が 503 になる**ので、公開前に `GET /api/v1/health` と
-`GET /api/v1/audit-logs/verify` を 1 回ずつ叩いて確かめる。
+代わりに**その機能が 503 になる**ので、公開前に確かめる。
+
+- `GET /api/v1/health` — `{"ok":true}`（DB 到達性込み）。
+- **`AUDIT_HMAC_SECRET` の確認は「人の操作を 1 回行う」**。`POST /api/v1/agents/{id}/stop`
+  が 204 を返せば鍵が入っている（未設定なら 503）。
+  **`GET /api/v1/audit-logs/verify` では確かめられない** — このエンドポイントは
+  pro / enterprise 限定の機能ゲートの後ろにあり、新しく作ったテナントは既定で `free` なので、
+  鍵が入っていても **403** が返る（鍵の有無と区別が付かない）。連鎖の検証まで確かめたいなら、
+  先にプラットフォーム管理者の `PATCH /api/v1/tenants/{tenantId}` でプランを上げる。
 
 > **上流 LLM を繋ぐなら、ベンダー側の月次利用上限（spend limit）を必ず設定する。**
 > アプリ側の歯止めは「テナント単位のレート制限」と「エージェントの予算」だが、

@@ -14,8 +14,12 @@
 // 正しい挙動なので「エラー率 < 1%」を測れない（枠を環境変数で広げると、今度は本番と違う設定を
 // 測ることになる）。上流 LLM を呼ぶ経路も選ばない（実キーと課金が要る）。
 //
-// **2xx 以外だけを数えない.** autocannon は接続エラーとタイムアウトを `errors` / `timeouts` に
-// 別で数えるので、`non2xx` だけを見ると「接続を切られた分」が無かったことになる。
+// **2xx 以外だけを数えない.** 応答が返らなかった要求は `non2xx` に現れないので、それだけを見ると
+// 「接続を切られた分」が無かったことになる。**ただし `errors` と `timeouts` を足し合わせない** —
+// autocannon の `errors` は**タイムアウトを含む**（`lib/run.js` の `onTimeout()` が
+// `errors++; timeouts++` の両方を数え、README も「including timeouts」と書いている）。
+// 足すとタイムアウトを二重に数え、**基準を満たしている計測を赤にする**（2 万件中 100 件の
+// タイムアウトは本当は 0.5% だが 1.0% として出る）。`timeouts` は内訳として別に出すだけにする。
 import 'dotenv/config';
 import autocannon from 'autocannon';
 import { requireContractDatabase } from './lib/contract-database.mjs';
@@ -59,13 +63,15 @@ async function main(): Promise<Record<string, unknown>> {
   await resetDatabase();
   // プラットフォーム管理者トークン（仕込みの入口。使い捨てをここで作る）
   const platformAdminToken = issueSecret('user').secret;
+  // 監査ログの HMAC 鍵（仕込みのデモの筋が停止を 1 回行うので要る。同じく使い捨て）
+  const auditSecret = issueSecret('user').secret;
   // アプリが待ち受けるポート
   const port = await freePort();
   // 起動した子プロセス（後始末で止める）
   let app: Awaited<ReturnType<typeof startDemoApp>> | undefined;
   try {
     // 本番ビルドを起こす
-    app = await startDemoApp({ port, platformAdminToken });
+    app = await startDemoApp({ port, platformAdminToken, auditSecret });
     // デモの筋を 1 回通して、叩く相手（テナント・エージェント）とトークンを用意する
     const flow = await runDemoFlow({ baseUrl: `http://127.0.0.1:${port}`, platformAdminToken });
     // 同時 100 接続で一覧を叩く
@@ -76,8 +82,9 @@ async function main(): Promise<Record<string, unknown>> {
       method: 'GET',
       headers: { authorization: `Bearer ${flow.token}` },
     });
-    // 失敗として数えるもの（2xx 以外 ＋ 接続エラー ＋ タイムアウト）
-    const errorRequests = result.non2xx + result.errors + result.timeouts;
+    // 失敗として数えるもの（2xx 以外 ＋ 応答が返らなかった要求）。
+    // **`timeouts` を足さない** — `errors` が既に含んでいる（上のコメント）
+    const errorRequests = result.non2xx + result.errors;
     // 総リクエスト数（分母。0 件のときは下の最小件数の門番が落とす）
     const requests = result.requests.total;
     // エラー率（%）。要求が 1 件も流れなかったときは 100% として扱う（最小件数の門番も落とす）
@@ -94,7 +101,8 @@ async function main(): Promise<Record<string, unknown>> {
       errorRequests,
       errorPercent,
       limitErrorPercent: CONCURRENCY_MAX_ERROR_PERCENT,
-      // 内訳（判定には使わないが、何が起きたか読めるように残す）
+      // 内訳（判定には使わないが、何が起きたか読めるように残す）。
+      // `timeouts` は `connectionErrors` の**内数**（autocannon の数え方。上のコメント）
       non2xx: result.non2xx,
       connectionErrors: result.errors,
       timeouts: result.timeouts,

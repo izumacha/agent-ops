@@ -16,14 +16,19 @@ import { join } from 'node:path';
 import {
   KNOWN_BUG_MARKERS,
   KNOWN_BUG_MARKER_DIRS,
+  KNOWN_BUG_MARKER_EXCLUDED_DIRS,
   KNOWN_ISSUES_DOC,
   KNOWN_ISSUES_HEADING,
 } from './step7-criteria.mjs';
 
 // 走査する拡張子（コメントを書ける形式だけ。画像・ロックファイル等は読まない）
 const SCANNED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.mjs', '.js', '.jsx', '.prisma', '.sql'];
-// コメントの始まりとして認める綴り（この手前に印があれば「コードの中の値」なので拾わない）
-const COMMENT_OPENERS = ['//', '/*', '*', '#'];
+// 行末までコメントになる綴り（`--` は SQL。マイグレーションは `.sql` なので要る）
+const LINE_COMMENT_OPENERS = ['//', '#', '--'];
+// 囲むコメントの開き・閉じ（**行をまたぐので状態を持って追う** — 中の行に `*` が無くても
+// コメントであることは変わらない。印を書く人が整形の慣習に従う前提を置かない）
+const BLOCK_COMMENT_OPEN = '/*';
+const BLOCK_COMMENT_CLOSE = '*/';
 // Markdown の表の行の始まり
 const TABLE_ROW_PREFIX = '|';
 // Markdown の見出しの始まり（節の終わりを見つけるのに使う）
@@ -80,25 +85,79 @@ export function readKnownIssues(root = process.cwd()) {
 }
 
 /**
- * その行の、印より手前にコメントの始まりがあるか。
+ * その行のどの位置がコメントの中かを求める（行をまたぐ囲みコメントの状態も返す）。
  *
  * **コードの中の値（印の一覧そのもの）を拾わないため**の絞り込み。実際の「未解決の欠陥」の印は
  * 必ずコメントに書かれるので、これで取り落としは起きない。
+ *
+ * **「印より手前にコメントの開きがあるか」だけを見る形では足りなかった**（実測）:
+ * SQL の `--` を見ていなかったのでマイグレーションのコメントが素通りし、囲みコメントの
+ * 2 行目以降は行頭に `*` を書く整形の慣習に頼っていたので、`*` の無い行が素通りした。
+ * 状態を持って 1 文字ずつ見れば、どちらも同じ 1 つの規則で閉じる。
+ *
+ * **文字列リテラルの中は区別しない**（`'…//…'` の後ろはコメント扱いになる）。
+ * 見逃すより余計に拾うほうが安全側で、印の綴りをたまたま含む文字列は実在しない。
  * @param {string} line 1 行
- * @param {number} index 印が見つかった位置
- * @returns {boolean} コメントの中なら true
+ * @param {boolean} startedInBlock その行が囲みコメントの途中から始まるか
+ * @returns {{ flags: boolean[]; endsInBlock: boolean }} 位置ごとの可否と、行末の状態
  */
-function insideComment(line, index) {
-  // 印より手前の部分
-  const before = line.slice(0, index);
-  // コメントの始まりがどれか含まれていれば中にいる
-  return COMMENT_OPENERS.some((opener) => before.includes(opener));
+export function commentPositions(line, startedInBlock) {
+  // 位置ごとに「コメントの中か」を持つ
+  const flags = new Array(line.length).fill(false);
+  // 囲みコメントの中にいるか
+  let block = startedInBlock;
+  // 行末までのコメントに入ったか
+  let lineComment = false;
+  // 1 文字ずつ見る
+  for (let index = 0; index < line.length; index += 1) {
+    // 囲みコメントの中なら、閉じを見つけるまで全部コメント
+    if (block) {
+      flags[index] = true;
+      // 閉じなら 2 文字ぶん消費して外へ出る
+      if (line.startsWith(BLOCK_COMMENT_CLOSE, index)) {
+        flags[index + 1] = true;
+        block = false;
+        index += 1;
+      }
+      continue;
+    }
+    // 行末までのコメントに入っていれば、残りは全部コメント
+    if (lineComment) {
+      flags[index] = true;
+      continue;
+    }
+    // 囲みコメントの開き
+    if (line.startsWith(BLOCK_COMMENT_OPEN, index)) {
+      block = true;
+      flags[index] = true;
+      flags[index + 1] = true;
+      index += 1;
+      continue;
+    }
+    // 行末までのコメントの開き
+    if (LINE_COMMENT_OPENERS.some((opener) => line.startsWith(opener, index))) {
+      lineComment = true;
+      flags[index] = true;
+      continue;
+    }
+  }
+  // 位置ごとの可否と、次の行へ持ち越す状態
+  return { flags, endsInBlock: block };
 }
 
-// そのディレクトリ以下のファイルを再帰で集める（走査対象の拡張子だけ）
-function filesUnder(directory) {
+/**
+ * そのディレクトリ以下のファイルを再帰で集める（走査対象の拡張子だけ）。
+ *
+ * **生成物のディレクトリは掘らない**（`KNOWN_BUG_MARKER_EXCLUDED_DIRS`）。理由はそちらに書いた。
+ * @param {string} directory 掘る場所（絶対パス）
+ * @param {Set<string>} excluded 掘らない場所（絶対パス）
+ * @returns {string[]} 見つかったファイル（絶対パス）
+ */
+function filesUnder(directory, excluded) {
   // 集めたパス
   const found = [];
+  // 除外されていれば掘らない
+  if (excluded.has(directory)) return found;
   // 読めなければ空（呼び出し側が「1 件も読めない」として落とす）
   let entries;
   try {
@@ -112,7 +171,7 @@ function filesUnder(directory) {
     const path = join(directory, entry.name);
     // ディレクトリなら掘る
     if (entry.isDirectory()) {
-      found.push(...filesUnder(path));
+      found.push(...filesUnder(path, excluded));
       continue;
     }
     // 走査対象の拡張子だけ
@@ -133,33 +192,44 @@ export function findKnownBugMarkers(root = process.cwd()) {
   const hits = [];
   // 走査したファイル数（0 件なら判定側が fail-closed で落とす）
   let scannedFiles = 0;
-  // 対象のディレクトリを順に見る
-  for (const directory of KNOWN_BUG_MARKER_DIRS) {
-    // そのディレクトリ以下のファイル
-    for (const path of filesUnder(join(root, directory))) {
-      // 読めなければ飛ばす（走査数にも数えない）
-      let lines;
-      try {
-        lines = readFileSync(path, 'utf8').split('\n');
-      } catch {
-        continue;
-      }
-      scannedFiles += 1;
-      // 行ごとに印を探す
-      lines.forEach((line, offset) => {
-        // 印を 1 つずつ当てる
-        for (const marker of KNOWN_BUG_MARKERS) {
-          // その行での位置
-          const index = line.indexOf(marker);
-          // 無ければ次の印
-          if (index < 0) continue;
-          // コメントの中だけを拾う（コードの中の値は対象外）
-          if (!insideComment(line, index)) continue;
-          // リポジトリ相対のパスで覚える（出力が機械に依存しないように）
-          hits.push(`${path.slice(root.length + 1)}:${offset + 1} ${marker}`);
-        }
-      });
+  // 掘らない場所（絶対パスにしてから渡す）
+  const excluded = new Set(
+    Object.keys(KNOWN_BUG_MARKER_EXCLUDED_DIRS).map((relative) => join(root, relative)),
+  );
+  // 対象のディレクトリ以下のファイルを順に見る
+  for (const path of KNOWN_BUG_MARKER_DIRS.flatMap((directory) =>
+    filesUnder(join(root, directory), excluded),
+  )) {
+    // リポジトリ相対のパス（出力が機械に依存しないように）
+    const name = path.slice(root.length + 1);
+    // 読めなければ飛ばす（走査数にも数えない）
+    let lines;
+    try {
+      lines = readFileSync(path, 'utf8').split('\n');
+    } catch {
+      continue;
     }
+    scannedFiles += 1;
+    // 囲みコメントは行をまたぐので状態を持ち越す
+    let inBlock = false;
+    // 行ごとに印を探す
+    lines.forEach((line, offset) => {
+      // この行のどこがコメントかを求める
+      const { flags, endsInBlock } = commentPositions(line, inBlock);
+      // 次の行へ状態を持ち越す
+      inBlock = endsInBlock;
+      // 印を 1 つずつ当てる
+      for (const marker of KNOWN_BUG_MARKERS) {
+        // その行での位置
+        const index = line.indexOf(marker);
+        // 無ければ次の印
+        if (index < 0) continue;
+        // コメントの中だけを拾う（コードの中の値は対象外）
+        if (flags[index] !== true) continue;
+        // リポジトリ相対のパスで覚える（出力が機械に依存しないように）
+        hits.push(`${name}:${offset + 1} ${marker}`);
+      }
+    });
   }
   // 見つかった印と走査数
   return { hits, scannedFiles };

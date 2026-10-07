@@ -66,6 +66,7 @@ import {
   concurrencyErrorRateProblem,
   concurrencyRequestsProblem,
   demoAgentsListedProblem,
+  demoAuditRowsProblem,
   demoReadyProblem,
   demoStepDefinitionProblem,
   demoStepsCompletedProblem,
@@ -93,10 +94,15 @@ import {
   DEMO_READY_MAX_MS,
   DEMO_STEP_COUNT,
   KNOWN_BUG_MARKERS,
+  KNOWN_BUG_MARKER_EXCLUDED_DIRS,
   KNOWN_ISSUES_DOC,
   KNOWN_ISSUES_HEADING,
 } from '../scripts/lib/step7-criteria.mjs';
-import { findKnownBugMarkers, readKnownIssues } from '../scripts/lib/known-issues.mjs';
+import {
+  commentPositions,
+  findKnownBugMarkers,
+  readKnownIssues,
+} from '../scripts/lib/known-issues.mjs';
 import { DEMO_STEPS } from '../scripts/lib/demo-flow.mjs';
 import { EvaluationExclusionReason } from '@/domain/types';
 import {
@@ -1979,6 +1985,7 @@ const BENCH_PAYLOADS: Readonly<
       expectedSteps: DEMO_STEP_COUNT,
       stepsCompleted: DEMO_STEP_COUNT,
       agentsListed: 1,
+      auditRows: 1,
       elapsedMs: DEMO_READY_MAX_MS,
     },
     // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)。
@@ -1988,6 +1995,7 @@ const BENCH_PAYLOADS: Readonly<
       { expectedSteps: DEMO_STEP_COUNT - 1 },
       { stepsCompleted: DEMO_STEP_COUNT - 1 },
       { agentsListed: 0 },
+      { auditRows: 0 },
       { elapsedMs: DEMO_READY_MAX_MS + 1 },
     ],
   },
@@ -2060,6 +2068,18 @@ describe('demoAgentsListedProblem', () => {
   it('0 件なら落とす (書いたものが読めていない)', () => {
     // 201 は返ったが一覧に出なかった形
     expect(demoAgentsListedProblem(0)).toContain('一覧');
+  });
+});
+
+describe('demoAuditRowsProblem', () => {
+  it('1 件以上あれば問題なし', () => {
+    // 停止の操作が記録に残った
+    expect(demoAuditRowsProblem(1)).toBeNull();
+  });
+
+  it('0 件なら落とす (読めただけでは記録が残る配備だと言えない)', () => {
+    // 鍵を渡し忘れた配備・記録の書き込みが壊れた配備
+    expect(demoAuditRowsProblem(0)).toContain('監査ログ');
   });
 });
 
@@ -2218,15 +2238,56 @@ describe('readKnownIssues', () => {
   });
 });
 
+describe('commentPositions', () => {
+  // 印の綴りは定数から組み立てる (このファイルのコメントに書くと検出網が自分自身を報告する)
+  const marker = KNOWN_BUG_MARKERS[0];
+
+  it.each(['//', '#', '--'])('%s から行末までをコメントとして扱う', (opener) => {
+    // その綴りで始まる行
+    const line = `${opener} ${marker}`;
+    const { flags } = commentPositions(line, false);
+    // 印の位置がコメントの中であること
+    expect(flags[line.indexOf(marker)]).toBe(true);
+  });
+
+  it('コードの中の値はコメントではない', () => {
+    // 配列リテラル (コメントの開きがその手前に無い)
+    const line = `const M = ['${marker}'];`;
+    const { flags } = commentPositions(line, false);
+    expect(flags[line.indexOf(marker)]).toBe(false);
+  });
+
+  it('囲みコメントは行をまたいで続く (途中の行に * が無くても)', () => {
+    // 開きの行は閉じていない
+    const opened = commentPositions('/* 説明', false);
+    expect(opened.endsInBlock).toBe(true);
+    // 次の行は行頭から全部コメント
+    const line = `${marker} まだ直していない`;
+    const { flags, endsInBlock } = commentPositions(line, opened.endsInBlock);
+    expect(flags[line.indexOf(marker)]).toBe(true);
+    expect(endsInBlock).toBe(true);
+    // 閉じの行で状態が戻る
+    expect(commentPositions(' */', true).endsInBlock).toBe(false);
+  });
+
+  it('閉じた後のコードはコメントではない', () => {
+    // 同じ行で閉じて、その後ろに値を書く
+    const line = `/* 説明 */ const M = '${marker}';`;
+    const { flags, endsInBlock } = commentPositions(line, false);
+    expect(flags[line.indexOf(marker)]).toBe(false);
+    expect(endsInBlock).toBe(false);
+  });
+});
+
 describe('findKnownBugMarkers', () => {
   // ソースを 1 本だけ置いた一時的なリポジトリを走査する
-  function withSource(body: string): { hits: string[]; scannedFiles: number } {
+  function withSource(body: string, name = 'sample.ts'): { hits: string[]; scannedFiles: number } {
     // 一時ディレクトリ
     const root = mkdtempSync(join(tmpdir(), 'agent-ops-markers-'));
     try {
-      // src/ に 1 本置く
-      mkdirSync(join(root, 'src'), { recursive: true });
-      writeFileSync(join(root, 'src', 'sample.ts'), body);
+      // src/ に 1 本置く (入れ子でも置けるように掘る)
+      mkdirSync(dirname(join(root, 'src', name)), { recursive: true });
+      writeFileSync(join(root, 'src', name), body);
       // 走査する
       return findKnownBugMarkers(root);
     } finally {
@@ -2243,6 +2304,21 @@ describe('findKnownBugMarkers', () => {
     expect(result.hits.join(' ')).toContain('src/sample.ts:1');
   });
 
+  it('SQL の -- コメントも拾う (マイグレーションは .sql)', () => {
+    // `--` を見ていなかったときは、マイグレーションのコメントに書いた印が素通りした (実測)
+    const result = withSource(
+      `-- ${KNOWN_BUG_MARKERS[0]} この制約は壊れている\nSELECT 1;\n`,
+      'migration.sql',
+    );
+    expect(result.hits.join(' ')).toContain('src/migration.sql:1');
+  });
+
+  it('囲みコメントの 2 行目以降も拾う (行頭の * に頼らない)', () => {
+    // 整形の慣習に頼っていたときは、`*` の無い行が素通りした (実測)
+    const result = withSource(`/* 説明\n${KNOWN_BUG_MARKERS[0]} まだ直していない\n*/\n`);
+    expect(result.hits.join(' ')).toContain('src/sample.ts:2');
+  });
+
   it('コードの中の値は拾わない (印の一覧そのものを報告しない)', () => {
     // 配列リテラルとして書いた形 (コメントの始まりがその手前に無い)
     const result = withSource(`export const MARKERS = ${JSON.stringify(KNOWN_BUG_MARKERS)};\n`);
@@ -2252,6 +2328,33 @@ describe('findKnownBugMarkers', () => {
   it('走査したファイル数を返す (0 件なら判定側が落とす)', () => {
     // 1 本だけ置いたので 1
     expect(withSource('export const x = 1;\n').scannedFiles).toBe(1);
+  });
+
+  it.each(Object.keys(KNOWN_BUG_MARKER_EXCLUDED_DIRS))(
+    '%s は走査しない (人が直せない生成物で赤を出さない)',
+    (excluded) => {
+      // 除外されたディレクトリの下に印を置く (除外は 'src/...' の形で宣言されている)
+      const result = withSource(
+        `// ${KNOWN_BUG_MARKERS[0]} 生成物のコメント\n`,
+        `${excluded.replace(/^src\//, '')}/generated.ts`,
+      );
+      // 1 件も拾わず、走査もしていないこと
+      expect(result).toEqual({ hits: [], scannedFiles: 0 });
+    },
+  );
+
+  it('除外したディレクトリは gitignore 対象であること (古い登録を残さない)', () => {
+    // **理由の妥当性はレビューで見るが、「生成物である」ことだけは機械で照合する** —
+    // gitignore に無いディレクトリを除外していれば、それは人が直せる場所
+    const gitignore = readFileSync(join(ROOT, '.gitignore'), 'utf8');
+    // 1 件も無ければ照合が空振りしている (fail-closed)
+    const excludedDirs = Object.entries(KNOWN_BUG_MARKER_EXCLUDED_DIRS);
+    expect(excludedDirs.length, '除外の表が空').toBeGreaterThan(0);
+    for (const [excluded, why] of excludedDirs) {
+      expect(gitignore, `${excluded} が .gitignore に無い (生成物ではない)`).toContain(excluded);
+      // 理由が空でないこと (「とりあえず黙らせる」使い方を塞ぐ)
+      expect(why.trim().length, `${excluded} の除外に理由が無い`).toBeGreaterThan(0);
+    }
   });
 
   it('対象のディレクトリが無ければ 0 件 (判定側が fail-closed で落とす)', () => {

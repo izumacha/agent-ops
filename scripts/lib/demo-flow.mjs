@@ -31,8 +31,12 @@ const API_PREFIX = '/api/v1';
  * `DEMO_STEP_COUNT` と一致することはテストが固定する（写しを 2 つ持たない）。
  *
  * 選んだ理由: 「配備した直後の運用者が、何もない状態から**自分のテナントを立ち上げて
- * エージェントを登録し、上限と監査の記録を確認できる**」までが最小のデモ。
- * **上流 LLM は呼ばない**（中継は実キーと課金が要るので、デモの筋には入れない）。
+ * エージェントを登録し、上限を確認し、止めて、その操作が記録に残ったことを読める**」までが
+ * 最小のデモ。**上流 LLM は呼ばない**（中継は実キーと課金が要るので、デモの筋には入れない）。
+ *
+ * **停止を入れているのは監査ログの段を意味のあるものにするため。** 記録を残す操作を 1 つも
+ * しないまま `GET /audit-logs` を叩くと、空の一覧に 200 が返るだけで「運用の記録が残る配備
+ * であること」を何も示さない（監査ログの書き込みが完全に壊れていても通る）。
  */
 export const DEMO_STEPS = [
   'health',
@@ -40,6 +44,7 @@ export const DEMO_STEPS = [
   'create-agent',
   'list-agents',
   'read-billing',
+  'stop-agent',
   'read-audit-logs',
 ];
 
@@ -78,10 +83,12 @@ export async function freePort() {
  * @param {object} options 起動の設定
  * @param {number} options.port 待ち受けるポート
  * @param {string} options.platformAdminToken プラットフォーム管理者トークン（テナント作成に要る）
+ * @param {string} options.auditSecret 監査ログの HMAC 鍵（**省略可にしない** — 既定で空にすると
+ *   停止の段が 503 になり、呼び出し側が渡し忘れたことに気付けない）
  * @param {Record<string, string>} [options.extraEnv] 追加で渡す環境変数
  * @returns {Promise<import('node:child_process').ChildProcess>} 起動した子プロセス
  */
-export async function startDemoApp({ port, platformAdminToken, extraEnv = {} }) {
+export async function startDemoApp({ port, platformAdminToken, auditSecret, extraEnv = {} }) {
   // 本番ビルドが無ければ測れない（原因の分かる失敗にする）
   if (!existsSync(STANDALONE_SERVER)) {
     throw new Error('本番ビルドがありません: 先に npm run build を実行してください');
@@ -94,6 +101,9 @@ export async function startDemoApp({ port, platformAdminToken, extraEnv = {} }) 
       HOSTNAME: '127.0.0.1',
       // テナント作成に要る（デモの入口）。**使い捨てを呼び出し側が作って渡す**
       PLATFORM_ADMIN_TOKEN: platformAdminToken,
+      // 監査ログの HMAC 鍵（停止の段に要る。これも使い捨てを呼び出し側が作って渡す —
+      // 開発機の .env の値を使うと、計測が本番相当の鍵に依存する）
+      AUDIT_HMAC_SECRET: auditSecret,
       // 上流 LLM は呼ばないので資格情報を子へ渡さない（最小権限。開発機の実キーで課金しない）
       ANTHROPIC_API_KEY: '',
       OPENAI_API_KEY: '',
@@ -108,9 +118,20 @@ export async function startDemoApp({ port, platformAdminToken, extraEnv = {} }) 
   let output = '';
   app.stdout?.on('data', (chunk) => (output += chunk.toString()));
   app.stderr?.on('data', (chunk) => (output += chunk.toString()));
+  // **`error` を購読する。** 購読しないと spawn の非同期な失敗が uncaughtException になり、
+  // `runBench` の try/catch の外でプロセスが死ぬ（結果の JSON を 1 行も出さないので、
+  // ゲートには「結果を出していません」という原因の分からない赤だけが残る）
+  let spawnError = null;
+  app.on('error', (error) => (spawnError = error));
   // 健康確認が通るまで待つ
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   for (;;) {
+    // spawn そのものが失敗していたら、待たずに原因を出す
+    if (spawnError !== null) throw new Error(`アプリを起動できません: ${spawnError.message}`);
+    // **子が先に終了していたら待たずに落ちる** — 接続文字列が不正・ポートが取られた等では
+    // すぐ終わるので、60 秒待ってから「起動しませんでした」と言うのは原因を隠すだけ
+    if (app.exitCode !== null)
+      throw new Error(`アプリが起動直後に終了しました (終了コード ${app.exitCode}):\n${output}`);
     // 期限切れなら原因を添えて落ちる
     if (Date.now() > deadline) {
       app.kill('SIGKILL');
@@ -156,7 +177,7 @@ async function expectJson(response, expected, step) {
  * @param {object} options 叩く先
  * @param {string} options.baseUrl アプリの基底 URL（例: `http://127.0.0.1:3000`）
  * @param {string} options.platformAdminToken プラットフォーム管理者トークン
- * @returns {Promise<{ steps: string[]; agentsListed: number; plan: string; token: string }>} 通った段・確認した値・以後の操作に使うトークン
+ * @returns {Promise<{ steps: string[]; agentsListed: number; auditRows: number; plan: string; token: string }>} 通った段・確認した値・以後の操作に使うトークン
  */
 export async function runDemoFlow({ baseUrl, platformAdminToken }) {
   // 通った段を順に積む
@@ -194,7 +215,9 @@ export async function runDemoFlow({ baseUrl, platformAdminToken }) {
       model: 'claude-sonnet-4-6',
     }),
   });
-  await expectJson(agentResponse, 201, 'create-agent');
+  const agent = await expectJson(agentResponse, 201, 'create-agent');
+  // 以後の操作に使う id（停止の段で要る）
+  const agentId = readString(agent, ['id'], 'create-agent');
   steps.push('create-agent');
   // 4. 一覧に出ることを確かめる（書いたものが読めるか）
   const listResponse = await fetch(`${baseUrl}${API_PREFIX}/agents`, { headers: auth });
@@ -208,13 +231,23 @@ export async function runDemoFlow({ baseUrl, platformAdminToken }) {
   // プラン名
   const plan = readString(billing, ['plan'], 'read-billing');
   steps.push('read-billing');
-  // 6. 監査ログが読めること（運用の記録が残る配備であること）
+  // 6. エージェントを止める（**記録を残す操作**。監査ログの段を意味のあるものにする）
+  const stopResponse = await fetch(`${baseUrl}${API_PREFIX}/agents/${agentId}/stop`, {
+    method: 'POST',
+    headers: auth,
+  });
+  await expectJson(stopResponse, 200, 'stop-agent');
+  steps.push('stop-agent');
+  // 7. 監査ログに**その操作が残っている**こと（運用の記録が残る配備であること）
   const auditResponse = await fetch(`${baseUrl}${API_PREFIX}/audit-logs`, { headers: auth });
-  await expectJson(auditResponse, 200, 'read-audit-logs');
+  const audit = await expectJson(auditResponse, 200, 'read-audit-logs');
+  // 残っていた行数（**0 件なら「読めた」だけで何も示していない**）
+  const auditRows = Array.isArray(audit.items) ? audit.items.length : 0;
+  if (auditRows === 0) throw new Error('read-audit-logs: 停止したのに監査ログが 0 件です');
   steps.push('read-audit-logs');
   // 通った段・確認に使った値・以後の操作に使うトークン（同時実行のベンチが使い回す。
   // **使い捨てのテナントのトークンなので持ち出しても害は無いが、ログには出さない**）
-  return { steps, agentsListed: items.length, plan, token };
+  return { steps, agentsListed: items.length, auditRows, plan, token };
 }
 
 /**

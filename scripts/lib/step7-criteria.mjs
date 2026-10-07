@@ -28,7 +28,7 @@ export const DEMO_READY_MAX_MS = 5 * 60 * 1_000;
  * 中身（どの API をどの順で叩くか）は `scripts/lib/demo-flow.mjs` の `DEMO_STEPS` が持ち、
  * ここは「その件数ぶん成功したか」だけを見る（写しを 2 つ持たないため、件数もそちらから導く）。
  */
-export const DEMO_STEP_COUNT = 6;
+export const DEMO_STEP_COUNT = 7;
 
 // ─────────────────────────────────────────────
 // 基準② 同時 100 リクエストでエラー率 < 1%
@@ -93,3 +93,19 @@ export const KNOWN_BUG_MARKERS = ['FIXME', 'XXX', 'BUG:', 'HACK:'];
 
 /** マーカーを探すディレクトリ (リポジトリ相対。実行されるコードと検出網のすべて) */
 export const KNOWN_BUG_MARKER_DIRS = ['src', 'tests', 'scripts', 'e2e', 'prisma'];
+
+/**
+ * 走査から外すディレクトリ (リポジトリ相対) と、その理由。
+ *
+ * **ここに増える差分は理由の妥当性をレビューで必ず確認する**（除外表はこのリポジトリが
+ * 繰り返し「静かに緩む口」として見てきた形）。エントリが gitignore 対象であることは
+ * `tests/gate-scripts.test.ts` が `.gitignore` と突き合わせる。
+ */
+export const KNOWN_BUG_MARKER_EXCLUDED_DIRS = {
+  // Prisma クライアントと OpenAPI の型。**gitignore 対象の生成物**で、人が直せる場所ではない。
+  // 依存を上げたときに生成物のコメントへ印が入ると「直す手段が無い指摘」でゲートが赤くなり、
+  // 残る道は検出網を緩めることだけになる（実行不能な指示を出す検出網はいずれ緩められる）。
+  // あわせて、走査件数が「生成前か生成後か」で変わらなくなる（ゲートが出す数が再現する）。
+  'src/generated':
+    'gitignore 対象の生成物（Prisma クライアント・OpenAPI の型）。人が直せないので指摘しても緩めるしかない',
+};

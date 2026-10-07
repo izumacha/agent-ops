@@ -173,6 +173,9 @@ jobs:
       # テナント作成に要るトークン (compose が `${PLATFORM_ADMIN_TOKEN:-}` で app へ渡す)。
       # **この値は CI の使い捨て**で、32 文字以上であること以外に意味は無い
       PLATFORM_ADMIN_TOKEN: ci-docker-smoke-platform-admin-token-0123456789
+      # 監査ログの HMAC 鍵 (デモの筋が停止を 1 回行うので要る。これも CI の使い捨て)。
+      # **未設定だと停止が 503 になる** (fail-closed) ので、渡し忘れればこのジョブが赤くなる
+      AUDIT_HMAC_SECRET: ci-docker-smoke-audit-hmac-secret-0123456789
       # デモの筋を叩く先 (compose が公開するポート)
       DEMO_BASE_URL: http://127.0.0.1:3000
     steps:

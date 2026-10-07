@@ -163,7 +163,7 @@ banner('Unit + API tests (JSON レポート + カバレッジ)');
 // レポートとカバレッジの置き場 (一時ディレクトリ。終わったら消す)。
 // **リポジトリ直下の `coverage/` へ出させない** — 出力先をゲートが指定すれば、
 // 判定が読むのは「いま流した 1 回の結果」だけになる (前回の実行結果が残っていても拾わない)
-const outputDir = mkdtempSync(join(tmpdir(), 'agent-ops-gate-step6-'));
+const outputDir = mkdtempSync(join(tmpdir(), 'agent-ops-gate-step7-'));
 const reportPath = join(outputDir, 'vitest.json');
 const coverageDir = join(outputDir, 'coverage');
 // vitest run --coverage --coverage.reportsDirectory=<dir> --reporter=default --reporter=json --outputFile=<path>

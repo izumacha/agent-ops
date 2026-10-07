@@ -10,7 +10,7 @@
 | 項目 | 値 |
 | ---- | -- |
 | 基底パス | `/api/v1`（`openapi.yaml` の `servers.url`） |
-| 認証 | `Authorization: Bearer <トークン>`（2 系統 ＋ 署名付き Webhook。下記） |
+| 認証 | `Authorization: Bearer <トークン>`（3 系統 ＋ 署名付き Webhook。下記） |
 | 形式 | リクエスト・レスポンスともに `application/json` |
 | 金額 | マイクロ USD の整数を**文字列**で運ぶ（1 USD = 1,000,000。浮動小数誤差を避ける） |
 | 一覧 | `limit` と `cursor` のキーセットページング（`createdAt → id` 順） |

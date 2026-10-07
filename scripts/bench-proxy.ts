@@ -18,11 +18,12 @@ import 'dotenv/config';
 import autocannon from 'autocannon';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer as createHttpsServer, type Server } from 'node:https';
-import { createServer as createTcpServer } from 'node:net';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requireContractDatabase } from './lib/contract-database.mjs';
+// 空きポートの取得（**写しを持たない** — Step7 で共有モジュールへ出した 1 本を使う）
+import { freePort } from './lib/demo-flow.mjs';
 import { PROXY_ADDED_LATENCY_P95_MAX_MS } from './lib/step2-criteria.mjs';
 import { intFromEnv, runBench } from './lib/bench-criteria.mjs';
 import { createPrismaClient } from '../src/lib/prisma-client';
@@ -96,27 +97,6 @@ const REQUEST_BODY = JSON.stringify({
   model: MODEL,
   messages: [{ role: 'user', content: 'ping' }],
 });
-
-// 空いている TCP ポートを 1 つ取る (固定ポートだと CI で衝突する)
-async function freePort(): Promise<number> {
-  // 一時的に 0 番で待ち受けて、割り当てられたポートを読む
-  return new Promise((resolve, reject) => {
-    const server = createTcpServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      // 割り当てられたポート
-      const address = server.address();
-      // アドレスが読めなければ失敗
-      if (address === null || typeof address === 'string') {
-        reject(new Error('ポートを取得できません'));
-        return;
-      }
-      // 閉じてから返す
-      const port = address.port;
-      server.close(() => resolve(port));
-    });
-  });
-}
 
 // 自己署名証明書を作る (ローカルのスタブ上流を https にするため)
 function createSelfSignedCert(dir: string): { key: string; cert: string } {
@@ -316,13 +296,16 @@ async function runLoad(
     // スタブは自己署名証明書なので、計測側は検証しない (信頼の判断はアプリ側で行っている)
     tlsOptions: { rejectUnauthorized: false },
   });
-  // 分布と、2xx 以外の件数・総リクエスト数
+  // 分布と、2xx 以外の件数・総リクエスト数。
+  // **`timeouts` は足さない** — autocannon の `errors` はタイムアウトを含む
+  // (`lib/run.js` の `onTimeout()` が両方を数える)。ここの門番は「0 件か」なので
+  // 二重に数えても判定は変わらないが、同じ数え方を 2 本のベンチで揃えておく
   return {
     p97_5Ms: result.latency.p97_5,
     p50Ms: result.latency.p50,
     p99Ms: result.latency.p99,
     maxMs: result.latency.max,
-    non2xx: result.non2xx + result.errors + result.timeouts,
+    non2xx: result.non2xx + result.errors,
     requests: result.requests.total,
   };
 }

@@ -340,6 +340,22 @@ export function demoAgentsListedProblem(agentsListed) {
 }
 
 /**
+ * 停止の操作が**監査ログに残ったか**を判定する。
+ *
+ * **これが無いと監査ログの段が「読めた」だけになる** — 記録を残す操作をしないまま
+ * `GET /audit-logs` を叩くと空の一覧に 200 が返り、監査ログの書き込みが完全に壊れていても通る
+ * （`agentsListed` を足したのと同じ理由。鍵を渡し忘れた配備もここで落ちる）。
+ * @param {number} auditRows 監査ログに残った件数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function demoAuditRowsProblem(auditRows) {
+  // 1 件以上なら問題なし
+  if (auditRows > 0) return null;
+  // 0 件なら記録が残る配備であることを示していない
+  return '停止したのに監査ログが 0 件です (AUDIT_HMAC_SECRET の設定を確認してください)';
+}
+
+/**
  * 受け入れ基準「配備からデモ動作まで ≦ 上限」を判定する。
  * 上限を引数で受け取らないのは他の判定と同じ理由 (実測値と上限を入れ替えられる)
  * @param {number} elapsedMs 起動からデモの筋が通るまでの実測
@@ -446,6 +462,8 @@ const BENCH_CRITERIA = {
     { fields: ['expectedSteps', 'stepsCompleted'], judge: demoStepsCompletedProblem },
     // 登録したものが一覧に出たか (201 だけでは「動いた」と言えない)
     { fields: ['agentsListed'], judge: demoAgentsListedProblem },
+    // 停止の操作が監査ログに残ったか (読めただけでは記録が残る配備だと言えない)
+    { fields: ['auditRows'], judge: demoAuditRowsProblem },
     // 受け入れ基準そのもの (配備からデモ動作まで ≦ 上限)
     { fields: ['elapsedMs'], judge: demoReadyProblem },
   ],

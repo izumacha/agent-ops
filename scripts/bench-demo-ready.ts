@@ -44,6 +44,8 @@ async function main(): Promise<Record<string, unknown>> {
   // プラットフォーム管理者トークン（デモの入口。**使い捨てをここで作る** —
   // 開発機の .env の値を使うと、計測が本番相当の資格情報に依存する）
   const platformAdminToken = issueSecret('user').secret;
+  // 監査ログの HMAC 鍵（停止の段に要る。同じ理由で使い捨て）
+  const auditSecret = issueSecret('user').secret;
   // アプリが待ち受けるポート
   const port = await freePort();
   // 起動した子プロセス（後始末で止める）
@@ -52,7 +54,7 @@ async function main(): Promise<Record<string, unknown>> {
     // **ここから時間を測る** — 「配備してからデモが動くまで」なので、起動待ちを含める
     const startedAt = Date.now();
     // 本番ビルドを起こして health が通るまで待つ
-    app = await startDemoApp({ port, platformAdminToken });
+    app = await startDemoApp({ port, platformAdminToken, auditSecret });
     // デモの筋を 1 回通す（HTTP だけで行う。DB へ直接書いて仕込まない）
     const flow = await runDemoFlow({ baseUrl: `http://127.0.0.1:${port}`, platformAdminToken });
     // 所要時間
@@ -67,6 +69,8 @@ async function main(): Promise<Record<string, unknown>> {
       stepsCompleted: flow.steps.length,
       // 登録したエージェントが一覧に出た件数（書いたものが読めたことの裏打ち）
       agentsListed: flow.agentsListed,
+      // 停止の操作が監査ログに残った件数（**0 件なら「読めた」だけで何も示していない**）
+      auditRows: flow.auditRows,
       // 判定には使わないが、何を通したか読めるように残す
       steps: flow.steps,
       plan: flow.plan,

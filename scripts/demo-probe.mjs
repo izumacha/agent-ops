@@ -43,6 +43,8 @@ if (problems.length === 0) {
       problems.push(`デモの段を ${flow.steps.length}/${DEMO_STEPS.length} しか通っていません`);
     // 登録したものが一覧に出たか（書いたものが読めたことの裏打ち）
     if (flow.agentsListed <= 0) problems.push('登録したエージェントが一覧に出ていません');
+    // 停止の操作が記録に残ったか（`runDemoFlow` も 0 件なら落ちるが、結果に載せて読めるようにする）
+    if (flow.auditRows <= 0) problems.push('停止したのに監査ログが 0 件です');
     // 受け入れ基準そのもの
     if (elapsedMs > DEMO_READY_MAX_MS)
       problems.push(`デモが動くまでが遅すぎます: ${elapsedMs}ms (上限 ${DEMO_READY_MAX_MS}ms)`);
@@ -54,6 +56,7 @@ if (problems.length === 0) {
         limitMs: DEMO_READY_MAX_MS,
         steps: flow.steps,
         agentsListed: flow.agentsListed,
+        auditRows: flow.auditRows,
         plan: flow.plan,
         passed: problems.length === 0,
       }),

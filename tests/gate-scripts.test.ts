@@ -25,7 +25,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 // 子プロセスの起動と終了の判定 (判定の正本は tests/lib/child-process.ts)
-import { CHILD_TIMEOUT_MS, expectRan } from './lib/child-process';
+import { CHILD_TIMEOUT_MS, expectRan, testBudgetFor } from './lib/child-process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
@@ -1689,7 +1689,7 @@ describe('runSteps', () => {
       // 後続へ進んでいないこと
       expect(result.stdout).not.toContain('REACHED_END');
     },
-    CHILD_TIMEOUT_MS,
+    testBudgetFor(1),
   );
 });
 
@@ -1704,7 +1704,7 @@ describe('exitIfFailures', () => {
       expect(result.status, 'ゲートが判定結果を捨てている').not.toBe(0);
       expect(result.stdout).not.toContain('REACHED_END');
     },
-    CHILD_TIMEOUT_MS,
+    testBudgetFor(1),
   );
 
   it(
@@ -1716,7 +1716,7 @@ describe('exitIfFailures', () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('REACHED_END');
     },
-    CHILD_TIMEOUT_MS,
+    testBudgetFor(1),
   );
 });
 

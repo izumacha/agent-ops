@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 // 子プロセスの起動と終了の判定 (共有。**写しを持たない** — 片方だけ直ると検出網が静かに緩む)
-import { CHILD_TIMEOUT_MS, expectRan } from './lib/child-process';
+import { CHILD_TIMEOUT_MS, expectRan, testBudgetFor } from './lib/child-process';
 
 // warning を 1 つだけ起こす一時ファイルの名前 (pid を入れて並行実行でも衝突させない)
 const PROBE_PREFIX = 'lint-warning-probe.';
@@ -84,8 +84,8 @@ describe('lint の指定そのもの', () => {
         // 一時ファイルを消す
         rmSync(probePath, { force: true });
       }
-      // 子プロセスを 2 本起こすので既定の 5 秒では足りない (子プロセス側の上限は CHILD_TIMEOUT_MS)
+      // 子プロセスを 2 本起こすので既定の 5 秒では足りない（上限の決め方は testBudgetFor）
     },
-    CHILD_TIMEOUT_MS,
+    testBudgetFor(2),
   );
 });

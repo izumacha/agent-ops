@@ -16,24 +16,28 @@
 import { expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncReturns } from 'node:child_process';
-// このファイルの場所からリポジトリのルートを導く (ambient な cwd に依存しないため)
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-// リポジトリのルート (`tests/lib/` から 2 つ上)。**子プロセスの cwd をここへ固定する** —
-// git はカレントからの相対でパスを出すので、固定しないと呼び出し側が突き合わせている
-// リテラル (`docs/…` / `prisma/schema.prisma`) と**静かに**食い違い、「スキーマを分割した」
-// のような**起きていない原因**を名指しする失敗になる。
-//
-// **これで「どこから起こしても動く」ようになるわけではない**（実測）。呼び出し側の読み取りは
-// `process.cwd()` 起点のままなので、別のディレクトリから vitest を起こすと検査は落ちる —
-// ただし落ち方は fail-closed で、文言が前提（agent-ops の作業ツリーで走らせること）を
-// 名指しする。リポジトリの他のテストも `process.cwd()` 起点なので、ここだけ直しても
-// 意味が無い（`npm test` はルートから走らせる、が前提）
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 // 子プロセスの待ち時間の上限 (npx がレジストリを見に行って張り付くのを防ぐ)
 export const CHILD_TIMEOUT_MS = 180_000;
+
+// vitest 側の上限に足す余裕 (起動・後片付けの分)
+const TEST_TIMEOUT_MARGIN_MS = 30_000;
+
+// 子プロセスを `children` 本起こすテストに渡す上限（子の本数ぶん＋余裕）。
+//
+// **実測しておく（誤解しやすいので）**: `it()` の上限と子の上限を**同値**にしても、
+// vitest の「Test timed out in …」が勝つことは無かった — `spawnSync` は同期で
+// イベントループを塞ぐので、子側の上限が先に効いて関数が戻り、`expectRan` の
+// 「完走しなかった (シグナルで終了: ETIMEDOUT)」が出た。**同値が壊れているわけではない。**
+//
+// それでも余裕を足すのは、子の時間切れの**あと**に走る後片付け・assertion・
+// 複数の子の合計がテストの締め切りを押し出すのを避けるため（2 本起こす
+// `lint-config` が実際にこの形）。**既定の 5 秒のまま放置しない**ことが要点で、
+// そのときだけは原因を言わない「Test timed out in 5000ms」になる
+export function testBudgetFor(children: number): number {
+  // 子の本数ぶんの上限＋余裕
+  return children * CHILD_TIMEOUT_MS + TEST_TIMEOUT_MARGIN_MS;
+}
 
 // 子プロセスが実際に起動して正常に終わったことを確かめる。
 // **`status` の null を素通りさせない**（上のコメントの理由）
@@ -65,9 +69,17 @@ export function expectRan(result: ReturnType<typeof spawnSync>, label: string): 
 // **前提（git の作業ツリーであること）を名指しして落とす** — `.git` が無い配布物でも
 // `git` の無い環境でも、失敗の理由を取り違えずに読めるようにする
 export function gitTrackedFiles(pathspec: string): string[] {
-  // 追跡集合を聞く（**cwd はリポジトリのルートに固定する**。上の REPO_ROOT の理由）
-  const result = spawnSync('git', ['ls-files', '-z', '--', pathspec], {
-    cwd: REPO_ROOT,
+  // **根からの相対で出させる。** git は既定でカレントからの相対で出すので、カレントが
+  // リポジトリの下位ディレクトリだと呼び出し側が突き合わせているリテラル（`docs/…` /
+  // `prisma/schema.prisma`）と**静かに**食い違う。`--full-name` と `:/` 付きの pathspec を
+  // 使えばカレントに依存しない（実測。`tests/lib` から呼んでも `docs/…` が返る）。
+  // **`import.meta.url` から `..` を数えて根を決める形にはしない** — このファイルを移すと
+  // 根が静かにずれ、しかも git は下位ディレクトリでも exit 0 で（別の相対で）出すので
+  // どの検査も鳴らない（実測）。カレントがリポジトリ外のときは git が非 0 で落ち、
+  // 下の検査が前提を名指しする
+  const magic = pathspec === '.' ? ':/' : `:/${pathspec}`;
+  // 追跡集合を聞く
+  const result = spawnSync('git', ['ls-files', '--full-name', '-z', '--', magic], {
     encoding: 'utf8',
     timeout: CHILD_TIMEOUT_MS,
   });

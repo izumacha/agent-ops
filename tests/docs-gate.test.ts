@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 // ファイル操作 (Node 標準)
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 // git に追跡対象を聞く共通部分 (起動失敗と「走って失敗」を分ける判定はここが正本)
-import { CHILD_TIMEOUT_MS, gitTrackedFiles } from './lib/child-process';
+import { gitTrackedFiles, testBudgetFor } from './lib/child-process';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 import { importSharedModule, sharedModuleNames } from './lib/script-files';
@@ -516,7 +516,7 @@ describe('docs/ の入口の鮮度', () => {
         ).toContain(`](./${entry})`);
       }
     },
-    CHILD_TIMEOUT_MS,
+    testBudgetFor(1),
   );
 });
 
@@ -750,6 +750,6 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
         ).toBe(true);
       }
     },
-    CHILD_TIMEOUT_MS,
+    testBudgetFor(1),
   );
 });

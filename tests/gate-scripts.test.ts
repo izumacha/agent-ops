@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -34,6 +35,8 @@ import {
   evaluateStep4Report,
   evaluateStep5Report,
   evaluateStep6Report,
+  evaluateStep7Report,
+  knownBugProblems,
   prefixedGroupProblems,
   lighthouseOutputProblems,
   missingExclusionCases,
@@ -59,6 +62,13 @@ import {
   benchCriteriaJudges,
   benchCaseCountProblem,
   benchLabels,
+  concurrencyConnectionsProblem,
+  concurrencyErrorRateProblem,
+  concurrencyRequestsProblem,
+  demoAgentsListedProblem,
+  demoReadyProblem,
+  demoStepDefinitionProblem,
+  demoStepsCompletedProblem,
   disagreementProblem,
   injectedVarianceProblem,
   intFromEnv,
@@ -75,6 +85,19 @@ import {
   PROXY_ADDED_LATENCY_P95_MAX_MS,
   USAGE_AGGREGATE_MAX_MS,
 } from '../scripts/lib/step2-criteria.mjs';
+// Step7 の受け入れ基準の値と、既知バグ 0 の材料を集める共有モジュール
+import {
+  CONCURRENCY_CONNECTIONS,
+  CONCURRENCY_MAX_ERROR_PERCENT,
+  CONCURRENCY_MIN_REQUESTS,
+  DEMO_READY_MAX_MS,
+  DEMO_STEP_COUNT,
+  KNOWN_BUG_MARKERS,
+  KNOWN_ISSUES_DOC,
+  KNOWN_ISSUES_HEADING,
+} from '../scripts/lib/step7-criteria.mjs';
+import { findKnownBugMarkers, readKnownIssues } from '../scripts/lib/known-issues.mjs';
+import { DEMO_STEPS } from '../scripts/lib/demo-flow.mjs';
 import { EvaluationExclusionReason } from '@/domain/types';
 import {
   EVALUATION_BENCH_CASE_COUNT,
@@ -1950,7 +1973,359 @@ const BENCH_PAYLOADS: Readonly<
       { elapsedMs: GUARDRAIL_STOP_MAX_MS + 1 },
     ],
   },
+  'demo-ready': {
+    // すべての基準を満たす計測結果
+    ok: {
+      expectedSteps: DEMO_STEP_COUNT,
+      stepsCompleted: DEMO_STEP_COUNT,
+      agentsListed: 1,
+      elapsedMs: DEMO_READY_MAX_MS,
+    },
+    // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)。
+    // **段は「減る」向きで破る** — 段を削って速く通す形がいちばん通しやすいため。
+    // 2 つ目 (全部通ったか) は**実績だけ**を減らす (宣言を動かすと 1 つ目も同時に破れる)
+    breaks: [
+      { expectedSteps: DEMO_STEP_COUNT - 1 },
+      { stepsCompleted: DEMO_STEP_COUNT - 1 },
+      { agentsListed: 0 },
+      { elapsedMs: DEMO_READY_MAX_MS + 1 },
+    ],
+  },
+  'concurrency-error-rate': {
+    // すべての基準を満たす計測結果。**エラー率は上限ちょうどにしない** —
+    // 基準は「< 1%」で等号を含まないので、ちょうどの値は満たさない側
+    ok: {
+      connections: CONCURRENCY_CONNECTIONS,
+      requests: CONCURRENCY_MIN_REQUESTS,
+      errorPercent: 0,
+    },
+    // 基準ごとに 1 つだけ破る差分 (順番は BENCH_CRITERIA と同じ)。
+    // **同時接続は「減る」向き・エラー率は「境界ちょうど」で破る**
+    breaks: [
+      { connections: 1 },
+      { requests: CONCURRENCY_MIN_REQUESTS - 1 },
+      { errorPercent: CONCURRENCY_MAX_ERROR_PERCENT },
+    ],
+  },
 };
+
+describe('demoStepDefinitionProblem', () => {
+  it('受け入れ基準どおりの段数なら問題なし', () => {
+    // 正本の件数そのもの
+    expect(demoStepDefinitionProblem(DEMO_STEP_COUNT)).toBeNull();
+  });
+
+  it('段を削った宣言を落とす', () => {
+    // 1 段少ない (速く通すために段を削った形)
+    expect(demoStepDefinitionProblem(DEMO_STEP_COUNT - 1)).toContain('段');
+  });
+
+  it('段を増やした宣言も落とす (基準と違うものを測っている)', () => {
+    // 1 段多い
+    expect(demoStepDefinitionProblem(DEMO_STEP_COUNT + 1)).not.toBeNull();
+  });
+
+  it('デモの筋の正本と受け入れ基準の件数が一致している', () => {
+    // **これが無いと 2 つの正本が静かにずれる** — 段の中身は demo-flow.mjs、
+    // 件数は step7-criteria.mjs が持つので、片方だけを動かす差分をここで落とす
+    expect(DEMO_STEPS.length, 'DEMO_STEPS と DEMO_STEP_COUNT が食い違う').toBe(DEMO_STEP_COUNT);
+    // 段の名前が重複していないこと (同じ段を 2 回数えて件数を満たす形を落とす)
+    expect(new Set(DEMO_STEPS).size, 'デモの段の名前が重複している').toBe(DEMO_STEPS.length);
+  });
+});
+
+describe('demoStepsCompletedProblem', () => {
+  it('宣言した段を全部通っていれば問題なし', () => {
+    // 宣言と実績が一致
+    expect(demoStepsCompletedProblem(DEMO_STEP_COUNT, DEMO_STEP_COUNT)).toBeNull();
+  });
+
+  it('途中で終わった計測を落とす', () => {
+    // 1 段足りない
+    expect(demoStepsCompletedProblem(DEMO_STEP_COUNT, DEMO_STEP_COUNT - 1)).toContain('通って');
+  });
+
+  it('宣言より多く通っていても落とさない (宣言の正しさは別の判定が見る)', () => {
+    // **役割を分けている**ので、ここは「足りないか」だけを見る
+    expect(demoStepsCompletedProblem(DEMO_STEP_COUNT - 1, DEMO_STEP_COUNT)).toBeNull();
+  });
+});
+
+describe('demoAgentsListedProblem', () => {
+  it('1 件以上あれば問題なし', () => {
+    // 登録したものが一覧に出た
+    expect(demoAgentsListedProblem(1)).toBeNull();
+  });
+
+  it('0 件なら落とす (書いたものが読めていない)', () => {
+    // 201 は返ったが一覧に出なかった形
+    expect(demoAgentsListedProblem(0)).toContain('一覧');
+  });
+});
+
+describe('demoReadyProblem', () => {
+  it('上限以内なら問題なし', () => {
+    // ちょうど上限 (等号は含む)
+    expect(demoReadyProblem(DEMO_READY_MAX_MS)).toBeNull();
+  });
+
+  it('上限を超えたら落とす', () => {
+    // 1 ミリ秒だけ超える
+    expect(demoReadyProblem(DEMO_READY_MAX_MS + 1)).toContain(String(DEMO_READY_MAX_MS));
+  });
+});
+
+describe('concurrencyConnectionsProblem', () => {
+  it('受け入れ基準どおりの同時接続なら問題なし', () => {
+    // 基準の値そのもの
+    expect(concurrencyConnectionsProblem(CONCURRENCY_CONNECTIONS)).toBeNull();
+  });
+
+  it('同時接続を下げた計測を落とす', () => {
+    // 1 接続 (同時実行の圧力が無いのでエラー率は 0% になる)
+    expect(concurrencyConnectionsProblem(1)).toContain('同時接続');
+  });
+});
+
+describe('concurrencyRequestsProblem', () => {
+  it('最小件数以上なら問題なし', () => {
+    // ちょうど下限
+    expect(concurrencyRequestsProblem(CONCURRENCY_MIN_REQUESTS)).toBeNull();
+  });
+
+  it('件数が足りなければ落とす (分母が小さいと割合が緩くなる)', () => {
+    // 1 件足りない
+    expect(concurrencyRequestsProblem(CONCURRENCY_MIN_REQUESTS - 1)).toContain('しか流せて');
+  });
+});
+
+describe('concurrencyErrorRateProblem', () => {
+  it('上限未満なら問題なし', () => {
+    // 0% は当然通る
+    expect(concurrencyErrorRateProblem(0)).toBeNull();
+  });
+
+  it('**ちょうど上限は落とす** (基準の文は「< 1%」で等号を含まない)', () => {
+    // 境界そのもの。**ゲート側の独立な比較は「≦ 上限」なので、ここが唯一の守り**
+    expect(concurrencyErrorRateProblem(CONCURRENCY_MAX_ERROR_PERCENT)).toContain('エラー率');
+  });
+
+  it('上限を超えたら落とす', () => {
+    // 倍のエラー率
+    expect(concurrencyErrorRateProblem(CONCURRENCY_MAX_ERROR_PERCENT * 2)).not.toBeNull();
+  });
+});
+
+describe('knownBugProblems', () => {
+  // 問題なしの材料 (ここから 1 項目ずつ壊す)
+  const clean = { docProblems: [], openIssues: [], markerHits: [], scannedFiles: 10 };
+
+  it('文書の表が空でソースに印も無ければ問題なし', () => {
+    // 2 つの手がかりがどちらも綺麗
+    expect(knownBugProblems(clean)).toEqual([]);
+  });
+
+  it('文書に未解決の行があれば落とす', () => {
+    // 表にデータ行が 1 本ある
+    const failures = knownBugProblems({ ...clean, openIssues: ['| B-1 | 落ちる | 高 | 無し |'] });
+    expect(failures.join(' ')).toContain('未解決のバグが 1 件');
+  });
+
+  it('ソースに印があれば落とす', () => {
+    // 印が 1 件残っている
+    const failures = knownBugProblems({ ...clean, markerHits: ['src/x.ts:3 印'] });
+    expect(failures.join(' ')).toContain('src/x.ts:3');
+  });
+
+  it('文書の構造の問題はそのまま理由にする', () => {
+    // 見出しが無い等
+    expect(knownBugProblems({ ...clean, docProblems: ['見出しがありません'] })).toContain(
+      '見出しがありません',
+    );
+  });
+
+  it('走査が 1 ファイルも読めていなければ落とす (「印ゼロ＝緑」にしない)', () => {
+    // 走査対象を縮める変更を落とす
+    expect(knownBugProblems({ ...clean, scannedFiles: 0 }).join(' ')).toContain('1 ファイルも');
+  });
+
+  it('材料そのものが欠けていれば落とす (黙って飛ばさない)', () => {
+    // 引数が無い = 呼び出し側が渡し忘れた
+    expect(knownBugProblems().length).toBeGreaterThan(0);
+  });
+});
+
+describe('readKnownIssues', () => {
+  // 文書だけを置いた一時的なリポジトリを作る
+  function withDoc(body: string): { openIssues: string[]; docProblems: string[] } {
+    // 一時ディレクトリ
+    const root = mkdtempSync(join(tmpdir(), 'agent-ops-known-issues-'));
+    try {
+      // 文書の置き場所を掘る
+      const path = join(root, KNOWN_ISSUES_DOC);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, body);
+      // 読む
+      return readKnownIssues(root);
+    } finally {
+      // 後始末
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it('表が枠だけなら未解決 0 件', () => {
+    // 見出し行と区切り行だけ
+    const result = withDoc(`${KNOWN_ISSUES_HEADING}\n\n| ID | 内容 |\n| --- | --- |\n`);
+    expect(result).toEqual({ openIssues: [], docProblems: [] });
+  });
+
+  it('枠より後ろの行を未解決として数える', () => {
+    // データ行 1 本
+    const result = withDoc(
+      `${KNOWN_ISSUES_HEADING}\n\n| ID | 内容 |\n| --- | --- |\n| B-1 | 落ちる |\n`,
+    );
+    expect(result.openIssues).toEqual(['| B-1 | 落ちる |']);
+  });
+
+  it('次の見出しより後ろの表は数えない (節の外)', () => {
+    // 別の節にある表（既知の制限の一覧）を未解決として数えてしまわないこと
+    const result = withDoc(
+      `${KNOWN_ISSUES_HEADING}\n\n| ID | 内容 |\n| --- | --- |\n\n## 既知の制限\n\n| 項目 | 内容 |\n| --- | --- |\n| 宿題 | 後で |\n`,
+    );
+    expect(result).toEqual({ openIssues: [], docProblems: [] });
+  });
+
+  it('見出しが無ければ落とす', () => {
+    // 見出しを書き換えた形
+    expect(withDoc('# 既知の問題\n').docProblems.join(' ')).toContain(KNOWN_ISSUES_HEADING);
+  });
+
+  it('表の枠が無ければ落とす (節を空にして黙らせる形を通さない)', () => {
+    // 節はあるが表が無い
+    expect(
+      withDoc(`${KNOWN_ISSUES_HEADING}\n\n現在ありません。\n`).docProblems.join(' '),
+    ).toContain('表の枠');
+  });
+
+  it('文書が無ければ落とす', () => {
+    // 一時ディレクトリに何も置かない
+    const root = mkdtempSync(join(tmpdir(), 'agent-ops-known-issues-'));
+    try {
+      expect(readKnownIssues(root).docProblems.join(' ')).toContain(KNOWN_ISSUES_DOC);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('findKnownBugMarkers', () => {
+  // ソースを 1 本だけ置いた一時的なリポジトリを走査する
+  function withSource(body: string): { hits: string[]; scannedFiles: number } {
+    // 一時ディレクトリ
+    const root = mkdtempSync(join(tmpdir(), 'agent-ops-markers-'));
+    try {
+      // src/ に 1 本置く
+      mkdirSync(join(root, 'src'), { recursive: true });
+      writeFileSync(join(root, 'src', 'sample.ts'), body);
+      // 走査する
+      return findKnownBugMarkers(root);
+    } finally {
+      // 後始末
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it.each([...KNOWN_BUG_MARKERS])('コメントに残った %s を拾う', (marker) => {
+    // コメント行に印を書く (**綴りは定数から組み立てる** — このテストのコメントに
+    // 印を直接書くと、この検出網が自分自身を報告する)
+    const result = withSource(`// ${marker} いまここが壊れている\nexport const x = 1;\n`);
+    expect(result.hits.join(' ')).toContain(marker);
+    expect(result.hits.join(' ')).toContain('src/sample.ts:1');
+  });
+
+  it('コードの中の値は拾わない (印の一覧そのものを報告しない)', () => {
+    // 配列リテラルとして書いた形 (コメントの始まりがその手前に無い)
+    const result = withSource(`export const MARKERS = ${JSON.stringify(KNOWN_BUG_MARKERS)};\n`);
+    expect(result.hits).toEqual([]);
+  });
+
+  it('走査したファイル数を返す (0 件なら判定側が落とす)', () => {
+    // 1 本だけ置いたので 1
+    expect(withSource('export const x = 1;\n').scannedFiles).toBe(1);
+  });
+
+  it('対象のディレクトリが無ければ 0 件 (判定側が fail-closed で落とす)', () => {
+    // 何も置かない
+    const root = mkdtempSync(join(tmpdir(), 'agent-ops-markers-'));
+    try {
+      expect(findKnownBugMarkers(root)).toEqual({ hits: [], scannedFiles: 0 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('いまのリポジトリは既知バグ 0 (受け入れ基準④)', () => {
+    // **実物を見る** — ゲートが読むのと同じ材料で、いま基準を満たしていることを固定する
+    const issues = readKnownIssues();
+    const markers = findKnownBugMarkers();
+    expect(knownBugProblems({ ...issues, ...markers, markerHits: markers.hits })).toEqual([]);
+  });
+});
+
+describe('evaluateStep7Report', () => {
+  // Step6 までの材料 (1 件も pass していない空のレポート。前 Step の基準は必ず落ちる)。
+  // **狙いは「引き継いでいるか」と「既知バグの判定が足されたか」の 2 点だけ**なので、
+  // 前 Step の判定の中身は `evaluateStep6Report` の describe が固定している
+  const step6 = {
+    testStatus: 0,
+    requiredPassedTests: 60,
+    ...MATRIX,
+    models: PRICED_MODELS,
+    pricePrefix: PRICE_TEST_PREFIX,
+    reasons: [],
+    exclusionPrefix: EXCLUSION_TEST_PREFIX,
+    kinds: [],
+    firingPrefix: FIRING_TEST_PREFIX,
+    breaks: [],
+    tamperPrefix: TAMPER_TEST_PREFIX,
+    e2eTestName: GUARDRAIL_E2E_TEST_NAME,
+    reconcileTestName: RECONCILE_TEST_NAME,
+    crossTenantDerivationTestName: '導出と表が一致する',
+    crossTenantPrefix: '越境: ',
+    crossTenantMinCount: 2,
+    idempotencyPrefix: '冪等性: ',
+    idempotencyMinCount: 2,
+    coverageSummary: {
+      total: {
+        statements: { pct: 90 },
+        branches: { pct: 90 },
+        functions: { pct: 90 },
+        lines: { pct: 90 },
+      },
+    },
+    coverageMinPercent: 80,
+    report: { numPassedTests: 0, numFailedTests: 0, numPendingTests: 0, testResults: [] },
+  };
+  // 既知バグ 0 を満たす材料
+  const cleanBugs = { docProblems: [], openIssues: [], markerHits: [], scannedFiles: 1 };
+
+  it('Step6 までの基準を引き継ぐ (レポートが空なら落ちる)', () => {
+    // 空のレポートなので Step1〜6 の判定がそのまま理由を積む
+    const failures = evaluateStep7Report({ ...step6, knownBugs: cleanBugs });
+    expect(failures.length, 'Step6 までの基準を引き継いでいない').toBeGreaterThan(0);
+    // **既知バグの理由は混ざっていないこと** (材料は綺麗なので)
+    expect(failures.join(' ')).not.toContain('未解決のバグ');
+  });
+
+  it('既知バグの材料が汚れていれば、その理由も積まれる', () => {
+    // 文書に未解決の行がある材料
+    const failures = evaluateStep7Report({
+      ...step6,
+      knownBugs: { ...cleanBugs, openIssues: ['| B-1 | 落ちる |'] },
+    });
+    expect(failures.join(' '), '既知バグ 0 の判定が掛かっていない').toContain('未解決のバグ');
+  });
+});
 
 describe('benchOutputProblems', () => {
   // ベンチが実際に出す形 (npm 自身の行が前後に混ざる)
@@ -2069,6 +2444,8 @@ describe('benchLabels', () => {
   it('基準を持つベンチのラベルをすべて返す', () => {
     // 表のキーをそのまま列挙する (検査はこれと突き合わせて網羅を確かめる)
     expect(benchLabels().sort()).toEqual([
+      'concurrency-error-rate',
+      'demo-ready',
       'evaluation-agreement',
       'guardrail-stop',
       'proxy-latency',
@@ -2520,6 +2897,14 @@ describe('判定の結線', () => {
       valueField: 'elapsedMs',
       limitField: 'limitMs',
     },
+    'bench-demo-ready.ts': { label: 'demo-ready', valueField: 'elapsedMs', limitField: 'limitMs' },
+    'bench-concurrency.ts': {
+      label: 'concurrency-error-rate',
+      // **ゲート側の独立な比較は「≦ 上限」** (共通判定がその形しか扱わない)。基準の文の
+      // 「< 1%」の境界は `concurrencyErrorRateProblem` が落とす
+      valueField: 'errorPercent',
+      limitField: 'limitErrorPercent',
+    },
   };
 
   // ベンチが `process` に触れてよい形。**すべて純粋な読み取りだけ**で、
@@ -2909,10 +3294,22 @@ describe('判定の結線', () => {
     'process.exitCode',
     'process.platform',
     'process.stdout',
+    // **純粋な読み取り**（いま動いている Node の実行ファイルのパス）。Step7 の共有モジュール
+    // `demo-flow.mjs` が本番ビルドを子プロセスとして起こすのに使う（ベンチ側の許可リストには
+    // 元からあり、同じ形がゲート側の走査対象にも現れたので足した）
+    'process.execPath',
   ]);
 
   // ゲートと共有モジュールが取り込んでよい相対でない指定子
-  const ALLOWED_GATE_PACKAGES = new Set(['node:child_process', 'node:fs', 'node:os', 'node:path']);
+  // **`node:net` は Step7 で足した** — `demo-flow.mjs` が空きポートを 1 つ取るために使う
+  // （import の副作用も終了経路も持たない標準モジュール。ベンチ側の許可リストには元からある）
+  const ALLOWED_GATE_PACKAGES = new Set([
+    'node:child_process',
+    'node:fs',
+    'node:net',
+    'node:os',
+    'node:path',
+  ]);
 
   it('scripts 配下の ESM の process の使い方は許可リストの形だけ', () => {
     // **対象は `scripts/` 配下の ESM すべて** — 綴り (`gate-step<数字>.mjs`) で絞っていたときは、
@@ -2981,6 +3378,8 @@ describe('判定の結線', () => {
     'proxy-latency': PROXY_ADDED_LATENCY_P95_MAX_MS,
     'evaluation-agreement': maxDisagreedCases(EVALUATION_BENCH_CASE_COUNT),
     'guardrail-stop': GUARDRAIL_STOP_MAX_MS,
+    'demo-ready': DEMO_READY_MAX_MS,
+    'concurrency-error-rate': CONCURRENCY_MAX_ERROR_PERCENT,
   };
 
   // 受け入れ基準を**すべて満たす**テストレポートを組み立てる (シムに書かせる中身)。
@@ -3067,7 +3466,7 @@ describe('判定の結線', () => {
     };
     // **組み立てた結果が意図どおりであることを、判定そのものに確かめさせる**。
     // 最新 Step の判定に通すので、前の Step の基準もそこから引き継がれて確かめられる
-    const failures = evaluateStep6Report({
+    const failures = evaluateStep7Report({
       testStatus: 0,
       report,
       requiredPassedTests: REQUIRED_PASSED_TESTS,
@@ -3092,6 +3491,9 @@ describe('判定の結線', () => {
       // カバレッジは満点の材料で確かめる (欠けさせる形は別の probe が見る)
       coverageSummary: JSON.parse(coverageMaterial()),
       coverageMinPercent: COVERAGE_MIN_PERCENT,
+      // 既知バグ 0 は「問題なし」の材料で確かめる (**実物のリポジトリは別の it が見る**。
+      // ここで実物を読むと、組み立ての形の検査が既知バグの有無で揺れる)
+      knownBugs: { docProblems: [], openIssues: [], markerHits: [], scannedFiles: 1 },
     });
     // 落としたなら基準を満たさないこと、満点なら満たすこと
     if (dropPricedIndex >= 0 || drop.crossTenantAt !== undefined || drop.derivation === true)

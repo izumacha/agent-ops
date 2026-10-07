@@ -1,11 +1,12 @@
-# CI: 実装済みの最新 Step のゲート (`npm run gate:step6`: gen / db:generate / lint / format:check / typecheck /
+# CI: 実装済みの最新 Step のゲート (`npm run gate:step7`: gen / db:generate / lint / format:check / typecheck /
 # テスト 60 件以上 / RBAC 3×3 / 料金計算が全モデル分 pass / 不正出力の除外が全理由分 pass /
 # 発火が全種別分 pass / 改ざん検知が全種類分 pass / ガードレールの E2E が pass / 突合が pass /
 # テナント越境が全パターン pass / Webhook の冪等性が pass / ロジック層のカバレッジ 4 指標 ≧ 80% /
-# npm audit (本番依存) high 0 / 本番ビルド / 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90 /
-# ベンチ 4 本) を検査し、
+# 既知バグ 0 (文書の表 ＋ ソースの印) / npm audit (本番依存) high 0 / 本番ビルド /
+# 主要 5 画面の E2E / Lighthouse 2 カテゴリ ≧ 90 / ベンチ 6 本) を検査し、
 # あわせて PostgreSQL でのマイグレーション適用・seed の冪等性・prisma アダプタの契約テスト・本番ビルド・
-# Docker 起動を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
+# Docker 起動 (クリーン環境の `compose up` から 5 分以内にデモの筋が通ること = Step7 の受け入れ基準①)
+# を確かめる (CLAUDE.md §14、docs/roadmap.md のゲート運用ルール 2)。
 name: CI
 
 on:
@@ -75,8 +76,8 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       # 実装済みの最新 Step の受け入れ基準を 1 コマンドで検査する (赤なら次 Step のブランチを切らない)
-      - name: Run latest step gate (gate:step6)
-        run: npm run gate:step6
+      - name: Run latest step gate (gate:step7)
+        run: npm run gate:step7
 
       # **ゲートと同じ検査をここでも流す。** ゲートのステップを丸ごと削除する形（`STEP0_STEPS`
       # から 1 行消す・ゲート本体の呼び出しを消す）は検出網では捉えられない — 「流すと書いて
@@ -163,16 +164,35 @@ jobs:
         run: npm run build
 
   docker-smoke:
-    name: Docker (compose up → /api/v1/health)
+    name: Docker (compose up → 5 分以内にデモ動作)
     runs-on: ubuntu-latest
+    # **これが Step7 の受け入れ基準①そのもの** (クリーン環境の `docker compose up` から数える)。
+    # ゲートが毎回回す `bench:demo-ready` は本番ビルドの起動から数える**部分集合**で、
+    # イメージのビルドとマイグレーション適用を含まない (解釈は docs/roadmap.md と ADR-0013)。
+    env:
+      # テナント作成に要るトークン (compose が `${PLATFORM_ADMIN_TOKEN:-}` で app へ渡す)。
+      # **この値は CI の使い捨て**で、32 文字以上であること以外に意味は無い
+      PLATFORM_ADMIN_TOKEN: ci-docker-smoke-platform-admin-token-0123456789
+      # デモの筋を叩く先 (compose が公開するポート)
+      DEMO_BASE_URL: http://127.0.0.1:3000
     steps:
       - uses: actions/checkout@v7
+
+      # デモの筋を通すスクリプトを動かすために Node が要る (版は .nvmrc が正本)
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
 
       # 設定の構文と変数展開を検査する
       - name: Validate compose file
         run: docker compose config --quiet
 
-      # クリーンな状態から build → 起動 → マイグレーション適用まで通す (Step7 の「compose up でデモ動作」の前倒し検証)
+      # **ここから時間を測る** — 基準の起点は `docker compose up` なので、イメージのビルドと
+      # マイグレーション適用も予算の中に入る。epoch ミリ秒を次のステップへ渡す
+      - name: Record start time
+        run: echo "DEMO_STARTED_AT_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+
+      # クリーンな状態から build → 起動 → マイグレーション適用まで通す
       - name: Build and start
         run: docker compose up -d --build
 
@@ -190,6 +210,17 @@ jobs:
       # ホストから実際に応答を確かめる (200 と ok:true)
       - name: Probe /api/v1/health
         run: curl -fsS http://127.0.0.1:3000/api/v1/health | grep -q '"ok":true'
+
+      # **デモの筋を 1 回通し、`compose up` からの所要時間を上限と比べる。**
+      # 手順と上限はどちらも共有モジュールが持つ (`scripts/lib/demo-flow.mjs` の DEMO_STEPS と
+      # `scripts/lib/step7-criteria.mjs` の DEMO_READY_MAX_MS) ので、ここに写しは無い
+      - name: Probe demo flow within the time limit
+        run: node scripts/demo-probe.mjs
+
+      # 失敗したときに原因が読めるようにログを残す
+      - name: Dump app logs on failure
+        if: failure()
+        run: docker compose logs app
 
       - name: Tear down
         if: always()

@@ -27,6 +27,13 @@ import {
   maxDisagreedCases,
 } from './step3-criteria.mjs';
 import { GUARDRAIL_STOP_MAX_MS } from './step4-criteria.mjs';
+import {
+  CONCURRENCY_CONNECTIONS,
+  CONCURRENCY_MAX_ERROR_PERCENT,
+  CONCURRENCY_MIN_REQUESTS,
+  DEMO_READY_MAX_MS,
+  DEMO_STEP_COUNT,
+} from './step7-criteria.mjs';
 
 // 捨て玉 (ウォームアップ) の最大遅延に置く上限 (ミリ秒)。
 // **受け入れ基準の 50ms から導かない。** あちらは「プロキシ経由と直接の差」の予算で、こちらは
@@ -283,6 +290,110 @@ export function guardrailStopProblem(elapsedMs) {
   return `発火から停止までが遅すぎます: ${elapsedMs}ms (上限 ${GUARDRAIL_STOP_MAX_MS}ms)`;
 }
 
+/**
+ * デモの筋が**受け入れ基準どおりの段数**で定義されているかを判定する。
+ *
+ * **これが無いと段を削って速く通せる** — 件数の正本は `demo-flow.mjs` の `DEMO_STEPS` だが、
+ * そこから 2 段消すと「宣言どおりに全段通った」だけでは何も言えなくなる（宣言と実行が同じ
+ * 配列から出るので常に一致する）。受け入れ基準の側の件数と突き合わせてはじめて落ちる。
+ * @param {number} expectedSteps ベンチが宣言した段数 (DEMO_STEPS.length)
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function demoStepDefinitionProblem(expectedSteps) {
+  // 基準どおりの段数なら問題なし
+  if (expectedSteps === DEMO_STEP_COUNT) return null;
+  // 違えば測っているデモが基準と違う
+  return `デモの段が ${expectedSteps} 段です (受け入れ基準は ${DEMO_STEP_COUNT} 段)`;
+}
+
+/**
+ * 宣言した段を**全部通したか**を判定する。
+ * 途中で失敗した計測は `runDemoFlow` が例外にするので通常ここへは来ないが、
+ * 「段の一部を飛ばして速くした」形を落とすための門番として明示的に見る。
+ *
+ * **「足りないか」だけを見る**（一致ではなく下限）。宣言そのものが基準どおりかは
+ * `demoStepDefinitionProblem` の仕事で、**2 つの判定が同じ事実で同時に落ちないように
+ * 役割を分けてある**（分けないと「基準を 1 つだけ破る」形が書けず、表の検査が成立しない）
+ * @param {number} expectedSteps 宣言した段数
+ * @param {number} stepsCompleted 実際に通った段数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function demoStepsCompletedProblem(expectedSteps, stepsCompleted) {
+  // 宣言した段を満たしていれば問題なし
+  if (stepsCompleted >= expectedSteps) return null;
+  // 足りなければデモが途中で終わっている
+  return `デモの段を ${stepsCompleted}/${expectedSteps} しか通っていません`;
+}
+
+/**
+ * 登録したエージェントが**一覧に出たか**を判定する。
+ * **「201 が返った」だけでは足りない** — 書き込みが別のテナントへ入っていても 201 は返る。
+ * 一覧に 1 件以上出たことまで見て「配備した成果物で動いた」の証拠にする
+ * @param {number} agentsListed 一覧に出た件数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function demoAgentsListedProblem(agentsListed) {
+  // 1 件以上なら問題なし
+  if (agentsListed > 0) return null;
+  // 0 件なら登録したものが読めていない
+  return '登録したエージェントが一覧に出ていません (書いたものが読めていません)';
+}
+
+/**
+ * 受け入れ基準「配備からデモ動作まで ≦ 上限」を判定する。
+ * 上限を引数で受け取らないのは他の判定と同じ理由 (実測値と上限を入れ替えられる)
+ * @param {number} elapsedMs 起動からデモの筋が通るまでの実測
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function demoReadyProblem(elapsedMs) {
+  // 上限以内なら問題なし
+  if (elapsedMs <= DEMO_READY_MAX_MS) return null;
+  // 超えていれば受け入れ基準を満たしていない
+  return `デモが動くまでが遅すぎます: ${elapsedMs}ms (上限 ${DEMO_READY_MAX_MS}ms)`;
+}
+
+/**
+ * 同時実行のベンチが**受け入れ基準どおりの同時接続数**で測ったかを判定する。
+ * **これが無いと接続数を 1 に下げて通せる** — エラー率は同時実行の圧力が無ければ 0% になる
+ * @param {number} connections 実際に張った接続数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function concurrencyConnectionsProblem(connections) {
+  // 基準どおりなら問題なし
+  if (connections === CONCURRENCY_CONNECTIONS) return null;
+  // 違えば測っている同時性が基準と違う
+  return `同時接続が ${connections} です (受け入れ基準は ${CONCURRENCY_CONNECTIONS})`;
+}
+
+/**
+ * 計測が成立する件数を流せたかを判定する。
+ * **エラー率は割合なので分母が小さいほど緩くなる** — 3 件流して 0 件失敗なら 0% になる
+ * @param {number} requests 流せた件数
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function concurrencyRequestsProblem(requests) {
+  // 最小件数以上なら問題なし
+  if (requests >= CONCURRENCY_MIN_REQUESTS) return null;
+  // 下回れば計測として成立していない
+  return `同時実行の計測が ${requests} 件しか流せていません (最低 ${CONCURRENCY_MIN_REQUESTS} 件)`;
+}
+
+/**
+ * 受け入れ基準「エラー率 < 1%」を判定する。
+ *
+ * **等号を含めない** — 基準の文は「< 1%」。ゲート側の独立な比較（`benchOutputProblems`）は
+ * 「実測値 ≦ 上限」の形しか扱えないので、**ちょうど 1% の境界を落とすのはこの判定の仕事**
+ * （その実効性は `tests/gate-scripts.test.ts` の negative control が固定する）
+ * @param {number} errorPercent 実測したエラー率 (%)
+ * @returns {string | null} 問題があれば文言、無ければ null
+ */
+export function concurrencyErrorRateProblem(errorPercent) {
+  // 上限未満なら問題なし (等号は含めない)
+  if (errorPercent < CONCURRENCY_MAX_ERROR_PERCENT) return null;
+  // 上限に達していれば受け入れ基準を満たしていない
+  return `エラー率が高すぎます: ${errorPercent}% (上限 ${CONCURRENCY_MAX_ERROR_PERCENT}% 未満)`;
+}
+
 // ベンチごとの受け入れ基準の表。**「どの値を、どの判定に掛けるか」の唯一の定義。**
 //
 // **要点は「判定へ渡す値を、出力 JSON に載せる値そのものから読む」こと。** 以前はベンチ本体が
@@ -326,6 +437,26 @@ const BENCH_CRITERIA = {
     { fields: ['upstreamRequests'], judge: upstreamRequestsProblem },
     // 受け入れ基準そのもの (食い違い ≦ 上限 = 再現率 ≧ 90%)
     { fields: ['disagreedCases', 'cases'], judge: disagreementProblem },
+  ],
+  // デモが動くまでのベンチ (scripts/bench-demo-ready.ts)
+  'demo-ready': [
+    // デモの筋が基準どおりの段数で定義されているか (段を削って速くした計測を落とす)
+    { fields: ['expectedSteps'], judge: demoStepDefinitionProblem },
+    // 宣言した段を全部通ったか
+    { fields: ['expectedSteps', 'stepsCompleted'], judge: demoStepsCompletedProblem },
+    // 登録したものが一覧に出たか (201 だけでは「動いた」と言えない)
+    { fields: ['agentsListed'], judge: demoAgentsListedProblem },
+    // 受け入れ基準そのもの (配備からデモ動作まで ≦ 上限)
+    { fields: ['elapsedMs'], judge: demoReadyProblem },
+  ],
+  // 同時 100 リクエストのベンチ (scripts/bench-concurrency.ts)
+  'concurrency-error-rate': [
+    // 基準どおりの同時接続で測ったか (1 接続に下げるとエラー率は 0% になる)
+    { fields: ['connections'], judge: concurrencyConnectionsProblem },
+    // 計測が成立する件数を流せたか (分母が小さいとエラー率が緩くなる)
+    { fields: ['requests'], judge: concurrencyRequestsProblem },
+    // 受け入れ基準そのもの (エラー率 < 上限。**等号は含めない**)
+    { fields: ['errorPercent'], judge: concurrencyErrorRateProblem },
   ],
   // 発火から停止までのベンチ (scripts/bench-guardrail.ts)
   'guardrail-stop': [

@@ -203,6 +203,12 @@ function collectCallsByScope(source: ts.SourceFile): Map<string, CallSite[]> {
  * 移すだけ**で満たせてしまう。実測で、ゲートの `exitIfFailures(...)` を
  * `function neverCalledReporter() { … }` の中へ移し `void neverCalledReporter;` を添える変異は
  * 45 件すべて緑・`npm run lint` も exit 0 で通った (未使用にならないため eslint にも映らない)。
+ * **関数を実引数として渡す形も辿る。** 直接の呼び出しだけを辿っていたときは、
+ * `runBench('demo-ready', main)` のように**他の関数へ渡して実行させる**スコープが
+ * 「到達不能」と判定され、その中の呼び出しがどの検査からも見えなかった (実測で、
+ * ベンチの `main` の中で共有モジュールの関数を呼んでいるのに
+ * 「取り込んだまま呼んでいない」と報告された)。渡した関数は呼ばれる前提で辿る —
+ * 辿らない側に倒すと**検出網が狭まる**方向の間違いになる。
  * @param byScope collectCallsByScope の結果
  * @returns 到達可能なスコープ名の集合
  */
@@ -216,10 +222,17 @@ function reachableScopes(byScope: Map<string, CallSite[]>): Set<string> {
     // 次に見るスコープ
     const current = queue.pop() as string;
     for (const call of byScope.get(current) ?? []) {
-      // 呼び出し先がこのファイルの名前付き関数で、まだ辿っていなければ広げる
-      if (byScope.has(call.name) && !reachable.has(call.name)) {
-        reachable.add(call.name);
-        queue.push(call.name);
+      // 辿る候補 = 呼び出し先の名前 ＋ **素の識別子として渡した実引数の名前**
+      const names = [
+        call.name,
+        ...[...call.args].filter((arg) => ts.isIdentifier(arg)).map((arg) => arg.text),
+      ];
+      for (const name of names) {
+        // このファイルの名前付き関数で、まだ辿っていなければ広げる
+        if (byScope.has(name) && !reachable.has(name)) {
+          reachable.add(name);
+          queue.push(name);
+        }
       }
     }
   }

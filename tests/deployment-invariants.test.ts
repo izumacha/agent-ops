@@ -394,6 +394,14 @@ const NOT_DUPLICATED_IN_CI: Record<string, { kind: 'byOtherInvocation' | 'byCost
     'npm run bench:proxy': { kind: 'byCost', why: '同上 (プロキシの追加遅延の計測)' },
     'npm run bench:evaluation': { kind: 'byCost', why: '同上 (採点の再現率の計測)' },
     'npm run bench:guardrail': { kind: 'byCost', why: '同上 (発火から停止までの計測)' },
+    'npm run bench:demo-ready': {
+      kind: 'byCost',
+      why: '同上 (配備からデモ動作までの計測)。**基準そのものは docker-smoke ジョブが別経路で測る** — あちらは `compose up` から数えるので、ここで二重に回しても同じものは見えない',
+    },
+    'npm run bench:concurrency': {
+      kind: 'byCost',
+      why: '同上 (同時 100 リクエストのエラー率の計測)。本番ビルドを起こして 10 秒間負荷を掛けるので二重に回すと所要時間が増える',
+    },
     'npm run test:e2e -- --reporter=json': {
       kind: 'byCost',
       why: '受け入れ基準の計測そのもの (主要 5 画面の E2E)。ブラウザを起動するので二重に回すと所要時間が増える',

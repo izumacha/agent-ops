@@ -850,3 +850,65 @@ export function evaluateStep5Report({ reconcileTestName, ...step4 }) {
   // 判定結果
   return failures;
 }
+
+/**
+ * Step7 の受け入れ基準④「既知バグ 0（Issue 管理）」を判定する。
+ *
+ * **手がかりを 2 つ要求する** — 文書（`docs/known-issues.md` の表が空）とソースの印（残っていない）。
+ * 片方だけでは fail-open になる: 文書だけなら編集 1 行で黙らせられ、印だけなら文書に書いた
+ * 未解決のバグが素通りする。材料を集めるのは `scripts/lib/known-issues.mjs`（分担はベンチと同じ）。
+ *
+ * **走査が空振りしていたら落とす（fail-closed）** — 1 ファイルも読めていないのに「印ゼロ＝緑」に
+ * なる形は、走査の対象を縮める変更を黙って通す。
+ *
+ * @param {{ docProblems?: string[], openIssues?: string[], markerHits?: string[], scannedFiles?: number }} input 材料
+ * @returns {string[]} 満たしていない基準の一覧（満たしていれば空）
+ */
+export function knownBugProblems({ docProblems, openIssues, markerHits, scannedFiles } = {}) {
+  // 満たしていない基準
+  const failures = [];
+  // 文書の構造の問題はそのまま理由にする（読めない・見出しが無い・表の枠が無い）
+  if (!Array.isArray(docProblems)) {
+    failures.push('既知の問題の文書の検査結果がありません');
+  } else {
+    failures.push(...docProblems);
+  }
+  // 未解決として書かれている行があれば既知バグ 0 ではない
+  if (!Array.isArray(openIssues)) {
+    failures.push('既知の問題の一覧がありません');
+  } else if (openIssues.length > 0) {
+    failures.push(`未解決のバグが ${openIssues.length} 件あります: ${openIssues.join(' / ')}`);
+  }
+  // 走査したファイル数が読めない・0 件なら、印の検査が空振りしている
+  if (typeof scannedFiles !== 'number' || !Number.isInteger(scannedFiles) || scannedFiles <= 0) {
+    failures.push('ソースの走査が 1 ファイルも読めていません');
+  }
+  // ソースに印が残っていれば既知バグ 0 ではない
+  if (!Array.isArray(markerHits)) {
+    failures.push('ソースの印の検査結果がありません');
+  } else if (markerHits.length > 0) {
+    failures.push(
+      `ソースに未解決の欠陥の印が ${markerHits.length} 件あります: ${markerHits.join(' / ')}`,
+    );
+  }
+  // 判定結果
+  return failures;
+}
+
+/**
+ * Step7 の受け入れ基準の判定（Step6 までを引き継ぎ、既知バグ 0 を足す）。
+ *
+ * **ほかの 3 つの基準はここでは見ない** — ① デモ動作と ② 同時 100 リクエストはベンチが測り
+ * （`benchOutputProblems`）、③ `npm run build` 成功はゲートのステップそのものが見る。
+ *
+ * @param {object} input 判定に要る材料（Step6 までの材料 ＋ `knownBugs`）
+ * @returns {string[]} 満たしていない基準の一覧（満たしていれば空）
+ */
+export function evaluateStep7Report({ knownBugs, ...step6 }) {
+  // Step6 までの基準をそのまま引き継ぐ
+  const failures = evaluateStep6Report(step6);
+  // 既知バグ 0（受け入れ基準④）
+  failures.push(...knownBugProblems(knownBugs));
+  // 判定結果
+  return failures;
+}

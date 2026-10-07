@@ -14,10 +14,16 @@ export const CHILD_TIMEOUT_MS = 180_000;
 // 子プロセスが実際に起動して正常に終わったことを確かめる。
 // **`status` の null を素通りさせない**（上のコメントの理由）
 export function expectRan(result: ReturnType<typeof spawnSync>, label: string): void {
-  // 起動そのものに失敗していないこと (ENOENT など)
-  expect(result.error, `${label} を起動できなかった`).toBeUndefined();
-  // シグナルで殺されていないこと (時間切れはここに出る)
-  expect(result.signal, `${label} が途中で打ち切られた`).toBeNull();
+  // **シグナルを先に見る。** 時間切れは `error` (ETIMEDOUT) と `signal` (SIGTERM) の
+  // **両方**が立つので (実測)、`error` を先に見ると時間切れが常に「起動できなかった」で
+  // 落ち、このモジュールが避けるために在る「起きていない原因の名指し」をしてしまう
+  expect(result.signal, `${label} が途中で打ち切られた (時間切れ・シグナル)`).toBeNull();
+  // 起動そのものに失敗していないこと (ENOENT など)。**理由のコードも出す** —
+  // ENOENT (実行ファイルが無い) と EACCES (権限) を取り違えないため
+  expect(
+    result.error,
+    `${label} を起動できなかった${result.error ? ` (${(result.error as NodeJS.ErrnoException).code ?? result.error.message})` : ''}`,
+  ).toBeUndefined();
   // 終了コードが数値であること (null のまま判定へ進ませない)
   expect(typeof result.status, `${label} の終了コードが取れていない`).toBe('number');
 }

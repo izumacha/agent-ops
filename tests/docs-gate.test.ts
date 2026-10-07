@@ -492,8 +492,8 @@ describe('docs/ の入口の鮮度', () => {
       for (const entry of entries) {
         // 空白と括弧を含まないこと
         expect(
-          /[\s()#<>]/.test(entry),
-          `docs/${entry} の名前に空白・括弧・# < > がある（カタログの照合が素朴な一致なので、名前はこれらなしで付ける）`,
+          /[\s()#<>|]/.test(entry),
+          `docs/${entry} の名前に空白・括弧・# < > | がある（カタログの照合が素朴な一致なので、名前はこれらなしで付ける。| はカタログが GFM の表なので行が割れる）`,
         ).toBe(false);
       }
       // カタログそのものの在処
@@ -565,6 +565,14 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
   it(
     '例外のモデル名と件数が prisma/schema.prisma から導いたものと一致する',
     () => {
+      // **読む前に「スキーマが 1 枚であること」を確かめる**（Prisma 7 はフォルダへ分割できる。
+      // 分割すると `prisma/schema.prisma` が無くなり、読み取りが素の ENOENT で落ちて、
+      // そのために書いた下の文言に辿り着けない — 読む側は「スキーマが移った」のか
+      // 「検査が壊れた」のかを区別できない。カタログの在処を先に見るのと同じ手当て）
+      expect(
+        trackedOnce().filter((path) => path.endsWith('.prisma')),
+        'prisma の定義ファイルが 1 枚ではない（分割したら、この検査の読む範囲も広げる）',
+      ).toEqual(['prisma/schema.prisma']);
       // スキーマ本文
       const schema = readFileSync(join(process.cwd(), 'prisma', 'schema.prisma'), 'utf8');
       // `model X { ... }` を全部取る。**本体の終わりは行頭の `}` で決める** — `[^}]*` にすると
@@ -592,12 +600,6 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
         models.length,
         'model の宣言の数と、本体まで取れた数が合わない（閉じ括弧が行頭に無い model がある。`prisma format` で整えるか、宣言の書き方をそろえる）',
       ).toBe((schema.match(/^model\s+\w+/gm) ?? []).length);
-      // **スキーマが 1 ファイルであることも前提**（Prisma 7 はフォルダへ分割できる。
-      // 分割すると、この検査は読んだ 1 枚の中のモデルしか見ないまま緑になる）
-      expect(
-        trackedOnce().filter((path) => path.endsWith('.prisma')),
-        'prisma の定義ファイルが 1 枚ではない（分割したら、この検査の読む範囲も広げる）',
-      ).toEqual(['prisma/schema.prisma']);
       // **境界のモデルが居ることも前提**（名前を変えたら除外が黙って効かなくなる）
       expect(
         models.some((model) => model.name === BOUNDARY_MODEL),

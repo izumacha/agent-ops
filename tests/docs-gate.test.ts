@@ -2,6 +2,8 @@
 import { describe, expect, it } from 'vitest';
 // ファイル操作 (Node 標準)
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+// 子プロセスの実行 (git に追跡対象を聞く)
+import { execFileSync } from 'node:child_process';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 import { importSharedModule, sharedModuleNames } from './lib/script-files';
@@ -414,55 +416,89 @@ describe('Step0 の設計成果物', () => {
 
 // docs/ の入口 (`docs/index.md`) が docs/ の中身を取りこぼしていないことを固定する。
 //
-// **手がかりを一覧そのものではなくファイルシステムから採る。** `index.md` は手書きの
-// カタログで、文書を 1 枚足したときに書き足すのを忘れても lint も typecheck も何も言わない
-// (実測で `api.md` / `deploy.md` / `load-test.md` / `known-issues.md` の 4 件が Step5 以前の
-// 状態で取り残されていた)。一覧を一覧自身と突き合わせる形では、載せ忘れた 1 枚がこの検査から
-// も同時に外れるので、**導出とは独立な手がかり = 実在するファイル**と突き合わせる
-// (`e2e/csp.spec.ts` が `git ls-files` を使っているのと同じ考え方)。
+// **手がかりを一覧そのものではなく「git が追跡しているファイル」から採る。** `index.md` は
+// 手書きのカタログで、文書を 1 枚足したときに書き足すのを忘れても lint も typecheck も何も
+// 言わない (実測で `api.md` / `deploy.md` / `load-test.md` / `known-issues.md` の 4 件が
+// Step5 以前の状態で取り残されていた)。一覧を一覧自身と突き合わせる形では、載せ忘れた 1 枚が
+// この検査からも同時に外れるので、**導出とは独立な手がかり**と突き合わせる。
+//
+// **`readdirSync` ではなく `git ls-files` を使う** — 前者は未追跡・gitignore 対象・隠し
+// ディレクトリまで返すので、`docs/.vitepress/` を 1 つ作っただけで落ち、しかも対処が
+// 「生成物をカタログに載せる」という実行不能な指示になる (実測で 1 件落ちた)。実行不能な
+// 指示を出す検出網はいずれ緩められるので、追跡されているものだけを見る。
 describe('docs/ の入口の鮮度', () => {
   // 入口そのもの (この表に載るべき対象から外す)
   const INDEX = 'index.md';
+  // 外部リンクのスキーム (実在を確かめられないので対象から外す)
+  const EXTERNAL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 
-  // docs/ の中身を実在するファイル・ディレクトリから導く
+  // git が追跡している docs/ 直下の対象を導く (ファイルはそのまま、ディレクトリは末尾に / を付ける)
   function docsEntries(): string[] {
-    // docs/ 直下を型つきで読む (ファイルとディレクトリを区別するため)
-    const entries = readdirSync(DOCS, { withFileTypes: true });
-    // ディレクトリは末尾にスラッシュを付けた形で、`.md` はそのままの名前で集める
-    return entries
-      .filter((entry) => entry.isDirectory() || entry.name.endsWith('.md'))
-      .filter((entry) => entry.name !== INDEX)
-      .map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
-      .sort();
+    // 追跡されているパスを docs/ 配下だけ取る (改行区切り)
+    const tracked = execFileSync('git', ['ls-files', '-z', '--', 'docs'], { encoding: 'utf8' })
+      .split('\0')
+      .filter((line) => line.length > 0);
+    // docs/ 直下の名前へ畳む (`docs/adr/0001-x.md` → `adr/`、`docs/spec.md` → `spec.md`)
+    const names = tracked.map((path) => {
+      // `docs/` を外した残り
+      const rest = path.slice('docs/'.length);
+      // 最初の区切りまでがディレクトリ名
+      const slash = rest.indexOf('/');
+      // 区切りが無ければファイル、あればディレクトリ
+      return slash < 0 ? rest : `${rest.slice(0, slash)}/`;
+    });
+    // 入口自身を除き、重複を畳んで並べる
+    return [...new Set(names)].filter((name) => name !== INDEX).sort();
   }
 
-  it('index.md が docs/ の全ファイル・全ディレクトリを載せている', () => {
+  // `index.md` の表の行だけを本文として読む (コメントやコードフェンスの中の記述で
+  // 掲載の要求を満たせないようにする。実測で `<!-- [sec](./security.md) -->` だけで通った)
+  function indexTableRows(): string {
+    // 入口の本文を行に割る
+    return readFileSync(join(DOCS, INDEX), 'utf8')
+      .split('\n')
+      .filter((line) => line.trimStart().startsWith('|'))
+      .join('\n');
+  }
+
+  it('index.md が docs/ の追跡対象すべて (ファイルとディレクトリ) を表に載せている', () => {
     // 実在する対象を導く
     const entries = docsEntries();
     // **1 件も導けなければ落とす** (「対象ゼロ＝緑」を避ける fail-closed)
     expect(entries.length, 'docs/ から対象を 1 件も導けていない').toBeGreaterThan(0);
-    // 入口の本文
-    const index = readFileSync(join(DOCS, INDEX), 'utf8');
+    // 表の行だけを見る
+    const rows = indexTableRows();
     // 1 件ずつ、相対リンクとして載っているかを見る
     for (const entry of entries) {
       // Markdown のリンク先の形 (`](./spec.md)` / `](./adr/)`)
-      expect(index, `docs/${entry} が docs/${INDEX} に載っていない`).toContain(`](./${entry})`);
+      expect(rows, `docs/${entry} が docs/${INDEX} の表に載っていない`).toContain(`](./${entry})`);
     }
   });
 
   it('index.md が載せているリンク先がすべて実在する', () => {
-    // 入口の本文
-    const index = readFileSync(join(DOCS, INDEX), 'utf8');
-    // 相対リンクの宛先を抜き出す (`./` と `../` の両方。見出しへのアンカーは対象外)
-    const targets = [...index.matchAll(/\]\((\.\.?\/[^)#]+)\)/g)].map((match) => match[1]);
-    // **1 件も拾えなければ落とす** (表が消えたことに気付けるようにする)
-    expect(targets.length, `docs/${INDEX} からリンクを 1 件も拾えていない`).toBeGreaterThan(0);
-    // 宛先ごとに実在を確かめる (docs/ からの相対として解決する)
-    for (const target of targets) {
-      // 解決した絶対パス
-      const resolved = join(DOCS, target);
+    // 表の行だけを見る
+    const rows = indexTableRows();
+    // **リンクは形で絞らずに全件拾い、確かめられないものだけを明示的に外す** —
+    // 正規表現で拾う対象を絞ると、絞り込みから外れた形 (`#anchor` 付き・`./` 無し・
+    // ルート絶対) が検証対象から黙って消える。実測で `](./x.md#overview)` /
+    // `](openapi/nope.yaml)` / `](/openapi/nope.yaml)` の 3 形が全件緑で通った
+    const links = [...rows.matchAll(/\]\(([^)\s]+)\)/g)].map((match) => match[1]);
+    // **1 本も拾えなければ落とす** (表が消えたことに気付けるようにする)
+    expect(links.length, `docs/${INDEX} からリンクを 1 件も拾えていない`).toBeGreaterThan(0);
+    // 宛先ごとに実在を確かめる
+    for (const link of links) {
+      // 外部リンク (http(s): / mailto: など) は実在を確かめられないので飛ばす
+      if (EXTERNAL_SCHEME.test(link)) continue;
+      // 同じ文書内の見出しへのリンクも対象外
+      if (link.startsWith('#')) continue;
+      // 見出しへの `#fragment` を落として、パスの部分だけを見る
+      const path = link.split('#')[0];
+      // 空になったら (`](#)` のような形) 飛ばす
+      if (path.length === 0) continue;
+      // ルート絶対はリポジトリの根から、それ以外は docs/ からの相対として解く
+      const resolved = path.startsWith('/') ? join(process.cwd(), path.slice(1)) : join(DOCS, path);
       // 消えた・改名された宛先を落とす
-      expect(existsSync(resolved), `docs/${INDEX} のリンク先 ${target} が実在しない`).toBe(true);
+      expect(existsSync(resolved), `docs/${INDEX} のリンク先 ${link} が実在しない`).toBe(true);
     }
   });
 });

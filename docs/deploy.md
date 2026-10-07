@@ -88,7 +88,7 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 
 - `GET /api/v1/health` — `{"ok":true}`（DB 到達性込み）。
 - **`AUDIT_HMAC_SECRET` の確認は「人の操作を 1 回行う」**。`POST /api/v1/agents/{id}/stop`
-  が 204 を返せば鍵が入っている（未設定なら 503）。
+  が **200**（停止後のエージェント JSON）を返せば鍵が入っている（未設定なら 503）。
   **`GET /api/v1/audit-logs/verify` では確かめられない** — このエンドポイントは
   pro / enterprise 限定の機能ゲートの後ろにあり、新しく作ったテナントは既定で `free` なので、
   鍵が入っていても **403** が返る（鍵の有無と区別が付かない）。連鎖の検証まで確かめたいなら、

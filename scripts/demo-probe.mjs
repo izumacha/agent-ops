@@ -9,10 +9,19 @@
 // （イメージのビルドとマイグレーション適用を含む＝基準そのもの）。ベンチは本番ビルドの起動から
 // 数える部分集合で、ゲートが毎回確かめるのはそちら（解釈は `docs/roadmap.md` と ADR-0013）。
 //
-// **判定もここで行う**（上限は正本から読む）。ワークフロー側で秒数を比べる形にすると、
-// 上限の写しが YAML に生まれて片方だけ古くなる。
+// **判定もここで行うが、比較そのものはベンチと同じ関数を呼ぶ**（`bench-criteria.mjs` の
+// `demo*Problem`）。ワークフロー側で秒数を比べる形にすると上限の写しが YAML に生まれ、
+// ここで比較を書き写すと「ゲートが測るデモ」と「CI が測るデモ」で判定だけがずれる。
 import { DEMO_READY_MAX_MS } from './lib/step7-criteria.mjs';
 import { DEMO_STEPS, countStepsInOrder, runDemoFlow } from './lib/demo-flow.mjs';
+import {
+  demoAgentsListedProblem,
+  demoAuditRowsProblem,
+  demoReadyProblem,
+  demoStepDefinitionProblem,
+  demoStepOrderProblem,
+  demoStepsCompletedProblem,
+} from './lib/bench-criteria.mjs';
 
 // 叩く先（compose が公開しているアプリ）
 const baseUrl = process.env.DEMO_BASE_URL;
@@ -38,22 +47,24 @@ if (problems.length === 0) {
     const flow = await runDemoFlow({ baseUrl, platformAdminToken });
     // `docker compose up` からの所要時間
     const elapsedMs = Date.now() - startedAtMs;
-    // 通った段が宣言どおりか（段を削った計測を「デモが動いた」と数えない）
-    if (flow.steps.length < DEMO_STEPS.length)
-      problems.push(`デモの段を ${flow.steps.length}/${DEMO_STEPS.length} しか通っていません`);
-    // 正本と同じ名前が同じ位置にあるか（件数だけでは同じラベルを 2 回積む形が通る）
+    // 正本と同じ名前が同じ位置にあった段の数（件数だけでは同じラベルを 2 回積む形が通る）
     const stepsInOrder = countStepsInOrder(flow.steps);
-    if (stepsInOrder < DEMO_STEPS.length)
-      problems.push(
-        `デモの段が正本と同じ並びではありません (${stepsInOrder}/${DEMO_STEPS.length} 段だけ一致)`,
-      );
-    // 登録したものが一覧に出たか（書いたものが読めたことの裏打ち）
-    if (flow.agentsListed <= 0) problems.push('登録したエージェントが一覧に出ていません');
-    // 停止の操作が記録に残ったか（`runDemoFlow` も 0 件なら落ちるが、結果に載せて読めるようにする）
-    if (flow.auditRows <= 0) problems.push('停止したのに監査ログが 0 件です');
-    // 受け入れ基準そのもの
-    if (elapsedMs > DEMO_READY_MAX_MS)
-      problems.push(`デモが動くまでが遅すぎます: ${elapsedMs}ms (上限 ${DEMO_READY_MAX_MS}ms)`);
+    // **判定はベンチと同じ関数を呼ぶ。** ここで同じ比較を書き写すと、
+    // 「ゲートが測るデモ」と「CI が測るデモ」で判定だけがずれる（文言も別になる）。
+    // 初版は 5 本すべてを書き写していて、しかも `demoStepDefinitionProblem`
+    // （正本の件数が受け入れ基準と一致するか）が抜けていたので、`DEMO_STEPS` から 2 段
+    // 消すと CI 側は「5/5 段・並び一致」で緑のままだった
+    for (const problem of [
+      demoStepDefinitionProblem(DEMO_STEPS.length),
+      demoStepsCompletedProblem(DEMO_STEPS.length, flow.steps.length),
+      demoStepOrderProblem(DEMO_STEPS.length, stepsInOrder),
+      demoAgentsListedProblem(flow.agentsListed),
+      demoAuditRowsProblem(flow.auditRows),
+      demoReadyProblem(elapsedMs),
+    ]) {
+      // null でなければ理由を覚える
+      if (problem !== null) problems.push(problem);
+    }
     // 結果を 1 行の JSON で出す（人が読む・ログに残す）
     console.log(
       JSON.stringify({

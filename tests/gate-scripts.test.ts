@@ -103,6 +103,7 @@ import {
 import {
   SCANNED_EXTENSIONS,
   commentPositions,
+  lineCommentOpenersFor,
   findKnownBugMarkers,
   readKnownIssues,
 } from '../scripts/lib/known-issues.mjs';
@@ -2291,10 +2292,14 @@ describe('commentPositions', () => {
   // 印の綴りは定数から組み立てる (このファイルのコメントに書くと検出網が自分自身を報告する)
   const marker = KNOWN_BUG_MARKERS[0];
 
-  it.each(['//', '#', '--'])('%s から行末までをコメントとして扱う', (opener) => {
+  // 行末コメントの綴りと、それが有効な拡張子の例 (`#` は走査対象のどれでもコメントではない)
+  it.each([
+    ['//', 'src/x.ts'],
+    ['--', 'prisma/x.sql'],
+  ])('%s から行末までをコメントとして扱う (%s)', (opener, path) => {
     // その綴りで始まる行
     const line = `${opener} ${marker}`;
-    const { flags } = commentPositions(line, false);
+    const { flags } = commentPositions(line, false, lineCommentOpenersFor(path));
     // 印の位置がコメントの中であること
     expect(flags[line.indexOf(marker)]).toBe(true);
   });
@@ -2325,6 +2330,39 @@ describe('commentPositions', () => {
     const { flags, endsInBlock } = commentPositions(line, false);
     expect(flags[line.indexOf(marker)]).toBe(false);
     expect(endsInBlock).toBe(false);
+  });
+});
+
+describe('lineCommentOpenersFor / 拡張子ごとの行末コメント', () => {
+  it('.sql だけ -- が行末コメントになる', () => {
+    // SQL は `--`、それ以外は `//` だけ
+    expect(lineCommentOpenersFor('prisma/migrations/x/migration.sql')).toContain('--');
+    expect(lineCommentOpenersFor('src/x.ts')).not.toContain('--');
+  });
+
+  it('TS の i-- で囲みコメントの追跡が切れない (一律に -- を当てた版の fail-open)', () => {
+    // **実測で見つかった取り落ち** — `--` を全拡張子へ当てていた版は、この行で
+    // 「ここから行末コメント」と誤読して続く `/*` を見落とし、囲みコメントの中の印が
+    // まるごと素通りした
+    const line = 'for (let i = n; i > 0; i--) total += i; /* note';
+    const openers = lineCommentOpenersFor('src/x.ts');
+    expect(commentPositions(line, false, openers).endsInBlock, '囲みコメントを開けていない').toBe(
+      true,
+    );
+  });
+
+  it('SQL では -- の後ろがコメントになる', () => {
+    // マイグレーションのコメント
+    const openers = lineCommentOpenersFor('prisma/x.sql');
+    const { flags } = commentPositions('SELECT 1; -- 説明', false, openers);
+    expect(flags[flags.length - 1]).toBe(true);
+  });
+
+  it('# はどの拡張子でもコメントにしない (走査対象にその文法が無い)', () => {
+    // `.prisma` も `//` なので、`#` を持つとハッシュを含む文字列を誤ってコメント扱いにする
+    for (const extension of SCANNED_EXTENSIONS) {
+      expect(lineCommentOpenersFor(`x${extension}`)).not.toContain('#');
+    }
   });
 });
 

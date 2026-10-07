@@ -24,6 +24,8 @@ const STANDALONE_SERVER = join(process.cwd(), '.next', 'standalone', 'server.js'
 const STARTUP_TIMEOUT_MS = 60_000;
 // 起動確認の間隔（ミリ秒）
 const STARTUP_POLL_MS = 100;
+// 起動までの出力をためる上限（文字数）。原因が読める長さだけ残して、あとは捨てる
+const STARTUP_OUTPUT_MAX_CHARS = 64 * 1024;
 // 起動確認の 1 回あたりの上限（ミリ秒）。待ち受けは始まったが応答を返さない状態で
 // ループが止まらないようにする（上の `deadline` はこの中で進まないと評価されない）
 const STARTUP_PROBE_TIMEOUT_MS = 5_000;
@@ -154,10 +156,25 @@ export async function startDemoApp({ port, platformAdminToken, auditSecret, extr
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  // 起動の失敗を拾えるよう、出力はためておく
+  // 起動の失敗を拾えるよう、出力はためておく。**上限を置き、起動できたら購読をやめる** —
+  // `output` を読むのは下の 3 つの失敗経路だけなので、起動後の出力は使われないまま溜まる。
+  // `bench-concurrency` はこの後 10 秒間 100 並列で叩くので、配備が 1 要求ずつ記録を出す
+  // 設定だと計測プロセスのヒープに読まれない文字列が積み上がる
   let output = '';
-  app.stdout?.on('data', (chunk) => (output += chunk.toString()));
-  app.stderr?.on('data', (chunk) => (output += chunk.toString()));
+  // ためる上限（超えた分は捨てて、末尾に切り詰めた旨を書く）
+  const appendOutput = (chunk) => {
+    // 既に上限なら何もしない
+    if (output.length >= STARTUP_OUTPUT_MAX_CHARS) return;
+    // 上限までを足す
+    output = (output + chunk.toString()).slice(0, STARTUP_OUTPUT_MAX_CHARS);
+  };
+  app.stdout?.on('data', appendOutput);
+  app.stderr?.on('data', appendOutput);
+  // 起動できたら購読をやめる（診断に要るのは起動までの出力だけ）
+  const stopCapturingOutput = () => {
+    app.stdout?.off('data', appendOutput);
+    app.stderr?.off('data', appendOutput);
+  };
   // **`error` を購読する。** 購読しないと spawn の非同期な失敗が uncaughtException になり、
   // `runBench` の try/catch の外でプロセスが死ぬ（結果の JSON を 1 行も出さないので、
   // ゲートには「結果を出していません」という原因の分からない赤だけが残る）
@@ -169,9 +186,16 @@ export async function startDemoApp({ port, platformAdminToken, auditSecret, extr
     // spawn そのものが失敗していたら、待たずに原因を出す
     if (spawnError !== null) throw new Error(`アプリを起動できません: ${spawnError.message}`);
     // **子が先に終了していたら待たずに落ちる** — 接続文字列が不正・ポートが取られた等では
-    // すぐ終わるので、60 秒待ってから「起動しませんでした」と言うのは原因を隠すだけ
-    if (app.exitCode !== null)
-      throw new Error(`アプリが起動直後に終了しました (終了コード ${app.exitCode}):\n${output}`);
+    // すぐ終わるので、60 秒待ってから「起動しませんでした」と言うのは原因を隠すだけ。
+    // **シグナルで死んだ場合も見る** — Node は `exitCode` を `null` のままにして
+    // `signalCode` を立てるので、`exitCode` だけだと OOM killer の `SIGKILL` や
+    // `SIGSEGV` を取り落として 60 秒待ってから原因の分からない失敗になる
+    if (app.exitCode !== null || app.signalCode !== null)
+      throw new Error(
+        `アプリが起動直後に終了しました (${
+          app.signalCode !== null ? `シグナル ${app.signalCode}` : `終了コード ${app.exitCode}`
+        }):\n${output}`,
+      );
     // 期限切れなら原因を添えて落ちる
     if (Date.now() > deadline) {
       app.kill('SIGKILL');
@@ -184,7 +208,11 @@ export async function startDemoApp({ port, platformAdminToken, auditSecret, extr
         {},
         STARTUP_PROBE_TIMEOUT_MS,
       );
-      if (response.ok) return app;
+      if (response.ok) {
+        // 起動できたので出力の購読をやめる（以後の出力は誰も読まない）
+        stopCapturingOutput();
+        return app;
+      }
     } catch {
       // まだ起動していないだけなので待つ
     }

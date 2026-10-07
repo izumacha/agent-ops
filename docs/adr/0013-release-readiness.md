@@ -118,6 +118,9 @@ GitHub の Issue はゲートから読めないので、**未解決のバグの�
 
 ## 宿題（この Step で閉じないこと）
 
+- **ベンチの `resetDatabase()` が 6 本に写っている**（`bench-usage-aggregate` / `bench-evaluation` / `bench-proxy` / `bench-guardrail` / `bench-demo-ready` / `bench-concurrency`）。本文は `createPrismaClient()` → `TRUNCATE TABLE "Tenant" CASCADE` → `$disconnect()` で同一。§6 の「2〜3 箇所目で共通化」に照らせば出すべきだが、共有先の形がまだ決まらない: `scripts/lib/` の共有モジュールは `.mjs` で、`createPrismaClient` は `src/` の TypeScript なので `.mjs` からは読めない（`.ts` の共有モジュールにすると、`scripts/` の静的検査が `.mjs` しか走査しないため**検出網の外に出る**）。この Step では `freePort` だけを出し、こちらは据え置いた。**リセットの内容を変えるとき**（`Tenant` のカスケードで届かない根のテーブルを足す、`RESTART IDENTITY` へ変える等）は 6 本すべてに入れること。1 本漏らすと、そのベンチだけが「何も無い配備」ではなく残った行の上で測る。
+- **`gate-stepN.mjs` が 8 本の写しになっている。** 段番号を正規化して比べると差は 96 行で、残り（imports・`readPricedModels`・`readCoverageSummary`・vitest の JSON ＋ カバレッジの一時ディレクトリ回り・`npm audit`・build・E2E / Lighthouse / ベンチの `exitIfFailures`）は同一。CI は `gate:step7` だけを回すので、**`gate:step6` 以前の同一部分はもう一度も実行されないまま README と CLAUDE.md §2 に載り続ける**。Step7 が最後のゲートなので共有部分を `scripts/lib/` へ出す好機だが、ゲート本体は negative control の行列（「流すと書いてある検証」をソースから導く）と結びついているため、構造を変える差分はその行列も同時に作り直すことになる。**最後の Step のリリース直前にそれを行うのは引き合わない**と判断して据え置いた。次にゲートを足す（または共有部分を直す）人がここから始める。
+
 - **レート制限の共有ストア**（ADR-0010 から継続）。サーバーレスで配備すると枠がインスタンスごとになる。`docs/deploy.md` と `docs/known-issues.md` に制限として明記した。
 - **書き込みの同時実行の負荷**は測っていない（基準の文は「同時 100 リクエスト」で、読み取りの経路を選んだ理由は上記 2）。行ロックの存在は契約テストが固定しているので、正しさの側では担保されている。
 - **長時間の安定性**（メモリの増え方・接続の滞留）は 10 秒の窓では見えない。

@@ -27,8 +27,31 @@ import {
 // 読み取りの失敗を `[]` に畳むので、その配下の印が黙って走査対象から外れる（他のディレクトリに
 // ファイルがあるかぎり `scannedFiles > 0` は成立し続けるので判定側の fail-closed も鳴らない）
 export const SCANNED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.mjs', '.js', '.jsx', '.prisma', '.sql'];
-// 行末までコメントになる綴り（`--` は SQL。マイグレーションは `.sql` なので要る）
-const LINE_COMMENT_OPENERS = ['//', '#', '--'];
+// 行末までコメントになる綴り（**拡張子ごとに分ける**）。
+// **全拡張子へ一律に当ててはいけない** — `--` が行末コメントなのは `.sql` だけで、
+// TS / JS では `i--` のような減算が「ここからコメント」と誤読される。実測で、
+// `for (let i = n; i > 0; i--) total += i; /* note` の行は `--` で行末コメントに入った
+// ことになり、その先の `/*` が見えないまま `endsInBlock === false` を返した
+// （＝続く囲みコメントの中の印が**まるごと素通りした**。基準④の fail-open）。
+// `#` はここで走査するどの拡張子でもコメントではない（`.prisma` も `//`）ので持たない
+const LINE_COMMENT_OPENERS_BY_EXTENSION = { '.sql': ['--'] };
+// どの拡張子でも行末コメントになる綴り
+const COMMON_LINE_COMMENT_OPENERS = ['//'];
+
+/**
+ * その拡張子で「行末までコメントになる綴り」を返す。
+ * @param {string} path ファイルのパス（末尾の拡張子だけを見る）
+ * @returns {string[]} 行末コメントの開きの一覧
+ */
+export function lineCommentOpenersFor(path) {
+  // 拡張子ごとの追加分（無ければ空）
+  const extra =
+    Object.entries(LINE_COMMENT_OPENERS_BY_EXTENSION).find(([extension]) =>
+      path.endsWith(extension),
+    )?.[1] ?? [];
+  // 共通分と合わせて返す
+  return [...COMMON_LINE_COMMENT_OPENERS, ...extra];
+}
 // 囲むコメントの開き・閉じ（**行をまたぐので状態を持って追う** — 中の行に `*` が無くても
 // コメントであることは変わらない。印を書く人が整形の慣習に従う前提を置かない）
 const BLOCK_COMMENT_OPEN = '/*';
@@ -99,13 +122,22 @@ export function readKnownIssues(root = process.cwd()) {
  * 2 行目以降は行頭に `*` を書く整形の慣習に頼っていたので、`*` の無い行が素通りした。
  * 状態を持って 1 文字ずつ見れば、どちらも同じ 1 つの規則で閉じる。
  *
+ * **行末コメントの綴りは拡張子ごとに渡す**（`lineCommentOpenersFor`）。一律に `--` を
+ * 当てていた版は、TS の `i--` で「ここからコメント」と誤読して続く `/*` を見落とし、
+ * その囲みコメントの中の印がまるごと素通りした（実測。**取り落ち＝fail-open**）。
+ *
  * **文字列リテラルの中は区別しない**（`'…//…'` の後ろはコメント扱いになる）。
- * 見逃すより余計に拾うほうが安全側で、印の綴りをたまたま含む文字列は実在しない。
+ * こちらは**余計に拾う**方向なので、見逃しではなく誤った赤になるだけ（すぐ気付く）。
  * @param {string} line 1 行
  * @param {boolean} startedInBlock その行が囲みコメントの途中から始まるか
+ * @param {readonly string[]} [lineCommentOpeners] 行末コメントの開き（既定は拡張子を問わない分だけ）
  * @returns {{ flags: boolean[]; endsInBlock: boolean }} 位置ごとの可否と、行末の状態
  */
-export function commentPositions(line, startedInBlock) {
+export function commentPositions(
+  line,
+  startedInBlock,
+  lineCommentOpeners = COMMON_LINE_COMMENT_OPENERS,
+) {
   // 位置ごとに「コメントの中か」を持つ
   const flags = new Array(line.length).fill(false);
   // 囲みコメントの中にいるか
@@ -139,7 +171,7 @@ export function commentPositions(line, startedInBlock) {
       continue;
     }
     // 行末までのコメントの開き
-    if (LINE_COMMENT_OPENERS.some((opener) => line.startsWith(opener, index))) {
+    if (lineCommentOpeners.some((opener) => line.startsWith(opener, index))) {
       lineComment = true;
       flags[index] = true;
       continue;
@@ -216,10 +248,12 @@ export function findKnownBugMarkers(root = process.cwd()) {
     scannedFiles += 1;
     // 囲みコメントは行をまたぐので状態を持ち越す
     let inBlock = false;
+    // この拡張子で行末コメントになる綴り（`.sql` だけ `--` が加わる）
+    const openers = lineCommentOpenersFor(path);
     // 行ごとに印を探す
     lines.forEach((line, offset) => {
       // この行のどこがコメントかを求める
-      const { flags, endsInBlock } = commentPositions(line, inBlock);
+      const { flags, endsInBlock } = commentPositions(line, inBlock, openers);
       // 次の行へ状態を持ち越す
       inBlock = endsInBlock;
       // 印を 1 つずつ当てる

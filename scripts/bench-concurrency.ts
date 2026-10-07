@@ -85,20 +85,31 @@ async function main(): Promise<Record<string, unknown>> {
     // 失敗として数えるもの（2xx 以外 ＋ 応答が返らなかった要求）。
     // **`timeouts` を足さない** — `errors` が既に含んでいる（上のコメント）
     const errorRequests = result.non2xx + result.errors;
-    // 総リクエスト数（分母。0 件のときは下の最小件数の門番が落とす）。
-    // **`requests.total` ではなく `requests.sent` を使う** — 前者は `totalCompletedRequests`
-    // （＝応答を受け取った件数）で、接続エラーとタイムアウトを含まない。一方で分子はそれらを
-    // 含むので、`total` を分母にすると**単位が揃わず 100% を超えうる**（2,000 件送って
-    // 1,200 件がタイムアウト・800 件が 200 なら、本当は 60% なのに 1200/800 = 150% と出る）。
-    // `sent` は `client.on('request')` の累計＝送った件数で、分子と同じ母集団を指す
-    // （`node_modules/autocannon/lib/aggregateResult.js` の `result.requests.sent =
-    // aggregated.totalRequests` と `lib/run.js:216` で確認）
-    const requests = result.requests.sent;
-    // エラー率（%）。要求が 1 件も流れなかったときは 100% として扱う（最小件数の門番も落とす）
+    // 分母 = **決着した要求の件数**（応答を受け取った分 ＋ 応答が返らなかった分）。
+    // 0 件のときは下の最小件数の門番が落とす。
+    //
+    // **分子と同じ母集団にそろえるのが要点。** autocannon の 3 つの数は意味が違う
+    // （`lib/run.js` と `lib/aggregateResult.js` で確認）:
+    //   - `requests.total` = `totalCompletedRequests`（応答を受け取った件数。接続エラーと
+    //     タイムアウトを含まない）
+    //   - `requests.sent` = `totalRequests`（`client.on('request')` の累計＝送った件数。
+    //     打ち切り時に飛行中だった分も含む）
+    //   - `errors` = 応答が返らなかった件数（タイムアウトを内数で含む）
+    // `total` を分母にすると分子だけが決着しなかった分を含むので**単位が揃わず 100% を
+    // 超えうる**（2,000 件送って 1,200 件タイムアウト・800 件 200 なら本当は 60% なのに 150%）。
+    // `sent` を分母にすると逆に**飛行中だった分で薄まる**（同時 100 なら最大 100 件が
+    // 分母にだけ入り、基準ちょうどの配備が合格側へ寄る）。`total + errors` は分子
+    // （`non2xx + errors`。`non2xx` は `total` の内数）とちょうど同じ母集団を指す
+    const requests = result.requests.total + result.errors;
+    // エラー率（%）。要求が 1 件も流れなかったときは 100% として扱う（最小件数の門番も落とす）。
+    // **丸めは切り捨て**（`Math.floor`）にする — `Math.round` だと [0.99995%, 1%) の計測が
+    // ちょうど `1` になり、基準「< 1%」を満たしているのに**誤って赤になる**
+    // （例: 失敗 200 / 決着 20,001 = 0.99995% → round なら 1）。切り捨てなら 1% 以上の値が
+    // 1 未満へ落ちることは無いので、緩む側へは倒れない
     const errorPercent =
       requests === 0
         ? PERCENT_SCALE
-        : Math.round((errorRequests / requests) * PERCENT_SCALE * PERCENT_ROUNDING) /
+        : Math.floor((errorRequests / requests) * PERCENT_SCALE * PERCENT_ROUNDING) /
           PERCENT_ROUNDING;
     // 計測結果（受け入れ基準も門番も runBench がこの項目を読んで掛ける）
     return {
@@ -113,8 +124,10 @@ async function main(): Promise<Record<string, unknown>> {
       non2xx: result.non2xx,
       connectionErrors: result.errors,
       timeouts: result.timeouts,
-      // 応答を受け取った件数（分母の `requests` は送った件数なので、差は打ち切り時の飛行中の分）
+      // 応答を受け取った件数と、送った件数（分母は前者 ＋ `connectionErrors`。
+      // `sentRequests` との差は打ち切り時に飛行中だった分で、決着していないので数えない）
       completedRequests: result.requests.total,
+      sentRequests: result.requests.sent,
       // 遅延の裾（同じく参考値。同時実行では待ち行列が伸びるので判定には使わない）
       latencyP97_5Ms: result.latency.p97_5,
       latencyMaxMs: result.latency.max,

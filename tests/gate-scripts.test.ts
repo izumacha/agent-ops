@@ -24,6 +24,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+// 子プロセスの起動と終了の判定 (判定の正本は tests/lib/child-process.ts)
+import { CHILD_TIMEOUT_MS, expectRan, testBudgetFor } from './lib/child-process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
@@ -198,8 +200,11 @@ function runBenchInCleanChild(label: string, payload: Record<string, number>): s
     cwd: ROOT,
     encoding: 'utf8',
     env: cleanChildEnv(),
-    timeout: 60_000,
+    timeout: CHILD_TIMEOUT_MS,
   });
+  // **起動と完走をここで確かめる** — 時間切れだと stdout が空になり、呼び出し側は
+  // 「passed: false にならない」のような**起きていない原因**を名指しする
+  expectRan(result, 'runBenchInCleanChild');
   // 標準出力 (結果の JSON と終了コードの印が入る)
   return result.stdout;
 }
@@ -219,8 +224,11 @@ function importsWithoutExiting(modulePath: string): string {
     cwd: ROOT,
     encoding: 'utf8',
     env: cleanChildEnv(),
-    timeout: 60_000,
+    timeout: CHILD_TIMEOUT_MS,
   });
+  // **起動と完走をここで確かめる** — 時間切れだと到達印が出ないので、呼び出し側は
+  // 「import の時点でプロセスを終わらせる」と誤って名指しする
+  expectRan(result, 'importsWithoutExiting');
   // 標準出力 (到達印が出ていれば import の先へ進めている)
   return result.stdout;
 }
@@ -241,8 +249,13 @@ function runInChild(statements: string[]): { status: number | null; stdout: stri
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
     cwd: ROOT,
     encoding: 'utf8',
-    timeout: 120_000,
+    timeout: CHILD_TIMEOUT_MS,
   });
+  // **起動と完走をここで確かめる。** 呼び出し側は「非 0 終了であること」を
+  // `not.toBe(0)` で見るが、起動に失敗したり時間切れになると `status` は `null` で
+  // `null !== 0` なので**何も測れていない状態で緑**になり、`stdout` も空なので
+  // 「到達印が無いこと」まで通ってしまう（ゲートの最も大事な 2 本がこの形だった）
+  expectRan(result, 'runInChild');
   // 終了コードと標準出力
   return { status: result.status, stdout: result.stdout };
 }
@@ -369,8 +382,11 @@ process.exit(broken ? 1 : 0);
       cwd: ROOT,
       encoding: 'utf8',
       env,
-      timeout: 120_000,
+      timeout: CHILD_TIMEOUT_MS,
     });
+    // **起動と完走をここで確かめる** — 時間切れだと status が null になり、呼び出し側は
+    // 「失敗を無視して成功終了した (終了コード null)」と誤って名指しする
+    expectRan(result, 'runGateUnderShim');
     // 呼ばれたサブコマンド (1 度も呼ばれていなければ空)
     const invoked = existsSync(logPath)
       ? readFileSync(logPath, 'utf8').split('\n').filter(Boolean)
@@ -1670,35 +1686,47 @@ describe('guardrailStopProblem', () => {
 });
 
 describe('runSteps', () => {
-  it('ステップが失敗したらその場で非 0 終了する (後続を実行しない)', () => {
-    // 存在しない npm script を 1 つ実行させ、そのあとに到達しないことを見る
-    const result = runInChild([
-      `runSteps('テスト', [{ name: '失敗するステップ', args: ['run', '__agent_ops_missing_script__'] }]);`,
-    ]);
-    // 非 0 終了であること (process.exit を消すと 0 で終わり、続きまで到達する)
-    expect(result.status, 'ゲートが失敗を素通りしている').not.toBe(0);
-    // 後続へ進んでいないこと
-    expect(result.stdout).not.toContain('REACHED_END');
-  });
+  it(
+    'ステップが失敗したらその場で非 0 終了する (後続を実行しない)',
+    () => {
+      // 存在しない npm script を 1 つ実行させ、そのあとに到達しないことを見る
+      const result = runInChild([
+        `runSteps('テスト', [{ name: '失敗するステップ', args: ['run', '__agent_ops_missing_script__'] }]);`,
+      ]);
+      // 非 0 終了であること (process.exit を消すと 0 で終わり、続きまで到達する)
+      expect(result.status, 'ゲートが失敗を素通りしている').not.toBe(0);
+      // 後続へ進んでいないこと
+      expect(result.stdout).not.toContain('REACHED_END');
+    },
+    testBudgetFor(1),
+  );
 });
 
 describe('exitIfFailures', () => {
-  it('満たしていない基準があれば非 0 終了する (判定結果を捨てない)', () => {
-    // 理由を 1 つ渡す
-    const result = runInChild([`exitIfFailures('テスト', ['件数が足りません']);`]);
-    // 非 0 終了で、続きへ進んでいないこと。**ここが実測で一番危なかった** —
-    // この 1 行を消すと、失敗の理由を表示したうえで「ゲート緑」と出て exit 0 になった
-    expect(result.status, 'ゲートが判定結果を捨てている').not.toBe(0);
-    expect(result.stdout).not.toContain('REACHED_END');
-  });
+  it(
+    '満たしていない基準があれば非 0 終了する (判定結果を捨てない)',
+    () => {
+      // 理由を 1 つ渡す
+      const result = runInChild([`exitIfFailures('テスト', ['件数が足りません']);`]);
+      // 非 0 終了で、続きへ進んでいないこと。**ここが実測で一番危なかった** —
+      // この 1 行を消すと、失敗の理由を表示したうえで「ゲート緑」と出て exit 0 になった
+      expect(result.status, 'ゲートが判定結果を捨てている').not.toBe(0);
+      expect(result.stdout).not.toContain('REACHED_END');
+    },
+    testBudgetFor(1),
+  );
 
-  it('基準を満たしていれば何もしない (正常時に落とさない)', () => {
-    // 失敗が無いときは処理を続ける
-    const result = runInChild([`exitIfFailures('テスト', []);`]);
-    // 正常終了し、続きまで到達すること
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('REACHED_END');
-  });
+  it(
+    '基準を満たしていれば何もしない (正常時に落とさない)',
+    () => {
+      // 失敗が無いときは処理を続ける
+      const result = runInChild([`exitIfFailures('テスト', []);`]);
+      // 正常終了し、続きまで到達すること
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('REACHED_END');
+    },
+    testBudgetFor(1),
+  );
 });
 
 describe('intFromEnv', () => {
@@ -3874,57 +3902,69 @@ describe('判定の結線', () => {
     120_000,
   );
 
-  it('最新のゲートはカバレッジが測れていないことを見逃さない (受け入れ基準 4)', () => {
-    // **カバレッジを 1 行も書かせない。** 「読めないから緑」に倒れていれば、
-    // `--coverage` を外す変異（＝1 行も測らない）がそのまま基準を満たしてしまう
-    const missing = runGateUnderShim(
-      latestGateScriptName(),
-      '',
-      fullMarksReport(),
-      benchMaterials(),
-      printedMaterials(),
-      '',
-    );
-    expect(
-      typeof missing.status === 'number' && missing.status !== 0,
-      `カバレッジが無いのに見逃した (終了コード ${String(missing.status)})`,
-    ).toBe(true);
-  });
+  it(
+    '最新のゲートはカバレッジが測れていないことを見逃さない (受け入れ基準 4)',
+    () => {
+      // **カバレッジを 1 行も書かせない。** 「読めないから緑」に倒れていれば、
+      // `--coverage` を外す変異（＝1 行も測らない）がそのまま基準を満たしてしまう
+      const missing = runGateUnderShim(
+        latestGateScriptName(),
+        '',
+        fullMarksReport(),
+        benchMaterials(),
+        printedMaterials(),
+        '',
+      );
+      expect(
+        typeof missing.status === 'number' && missing.status !== 0,
+        `カバレッジが無いのに見逃した (終了コード ${String(missing.status)})`,
+      ).toBe(true);
+    },
+    testBudgetFor(1),
+  );
 
-  it('最新のゲートは越境テストの導出の照合が無いことを見逃さない (受け入れ基準 1)', () => {
-    // **群（`越境: `）は満点のまま、導出と表を突き合わせるテストだけを外す。**
-    // 群だけを見る形だと、表から 1 件消す変異は「要求も一緒に縮む」ので素通りする
-    // （流れたものから期待を導く形）。導出のテストを別に要求していることをここで固定する
-    const noDerivation = runGateUnderShim(
-      latestGateScriptName(),
-      '',
-      fullMarksReport(-1, { derivation: true }),
-      benchMaterials(),
-      printedMaterials(),
-      coverageMaterial(),
-    );
-    expect(
-      typeof noDerivation.status === 'number' && noDerivation.status !== 0,
-      `越境の導出の照合が無いのに見逃した (終了コード ${String(noDerivation.status)})`,
-    ).toBe(true);
-  });
+  it(
+    '最新のゲートは越境テストの導出の照合が無いことを見逃さない (受け入れ基準 1)',
+    () => {
+      // **群（`越境: `）は満点のまま、導出と表を突き合わせるテストだけを外す。**
+      // 群だけを見る形だと、表から 1 件消す変異は「要求も一緒に縮む」ので素通りする
+      // （流れたものから期待を導く形）。導出のテストを別に要求していることをここで固定する
+      const noDerivation = runGateUnderShim(
+        latestGateScriptName(),
+        '',
+        fullMarksReport(-1, { derivation: true }),
+        benchMaterials(),
+        printedMaterials(),
+        coverageMaterial(),
+      );
+      expect(
+        typeof noDerivation.status === 'number' && noDerivation.status !== 0,
+        `越境の導出の照合が無いのに見逃した (終了コード ${String(noDerivation.status)})`,
+      ).toBe(true);
+    },
+    testBudgetFor(1),
+  );
 
-  it('最新のゲートは越境テストが 1 件欠けることを見逃さない (受け入れ基準 1)', () => {
-    // **群から 1 件だけ外す。** 件数の下限（床）に掛かるので、群をまるごと消す形も
-    // 一部だけ残す形も同じここで落ちる（どの添字を外しても下限を割るので 1 本で足りる）
-    const short = runGateUnderShim(
-      latestGateScriptName(),
-      '',
-      fullMarksReport(-1, { crossTenantAt: 0 }),
-      benchMaterials(),
-      printedMaterials(),
-      coverageMaterial(),
-    );
-    expect(
-      typeof short.status === 'number' && short.status !== 0,
-      `越境テストが 1 件欠けたのに見逃した (終了コード ${String(short.status)})`,
-    ).toBe(true);
-  });
+  it(
+    '最新のゲートは越境テストが 1 件欠けることを見逃さない (受け入れ基準 1)',
+    () => {
+      // **群から 1 件だけ外す。** 件数の下限（床）に掛かるので、群をまるごと消す形も
+      // 一部だけ残す形も同じここで落ちる（どの添字を外しても下限を割るので 1 本で足りる）
+      const short = runGateUnderShim(
+        latestGateScriptName(),
+        '',
+        fullMarksReport(-1, { crossTenantAt: 0 }),
+        benchMaterials(),
+        printedMaterials(),
+        coverageMaterial(),
+      );
+      expect(
+        typeof short.status === 'number' && short.status !== 0,
+        `越境テストが 1 件欠けたのに見逃した (終了コード ${String(short.status)})`,
+      ).toBe(true);
+    },
+    testBudgetFor(1),
+  );
 
   /**
    * カバレッジの合計（`coverage-summary.json`）として書かせる中身を組み立てる。
@@ -3944,20 +3984,24 @@ describe('判定の結線', () => {
     return JSON.stringify({ total });
   }
 
-  it('共有モジュールは import しただけでプロセスを終わらせない', () => {
-    // 共有モジュールの一覧 (0 本なら導出が壊れている)
-    const modules = sharedModuleNames();
-    expect(modules.length, '共有モジュールが 1 つも無い').toBeGreaterThan(0);
-    for (const name of modules) {
-      // **子プロセスで import する。** ベンチ側の許可リストはベンチ 1 ファイルしか見ないので、
-      // 共有モジュールの先頭に `if (process.env.VITEST === undefined) process.exit(0);` を
-      // 1 行足すだけで、ベンチが何も出さずに exit 0 になった (実測で 773 件すべて緑)。
-      // vitest の中では `VITEST` が立っているので、同じプロセスでは気付けない
-      const stdout = importsWithoutExiting(join(SCRIPTS_DIR, 'lib', name));
-      // import の先へ進めていること (途中で exit していれば印が出ない)
-      expect(stdout, `${name} が import の時点でプロセスを終わらせる`).toContain('REACHED_END');
-    }
-  });
+  it(
+    '共有モジュールは import しただけでプロセスを終わらせない',
+    () => {
+      // 共有モジュールの一覧 (0 本なら導出が壊れている)
+      const modules = sharedModuleNames();
+      expect(modules.length, '共有モジュールが 1 つも無い').toBeGreaterThan(0);
+      for (const name of modules) {
+        // **子プロセスで import する。** ベンチ側の許可リストはベンチ 1 ファイルしか見ないので、
+        // 共有モジュールの先頭に `if (process.env.VITEST === undefined) process.exit(0);` を
+        // 1 行足すだけで、ベンチが何も出さずに exit 0 になった (実測で 773 件すべて緑)。
+        // vitest の中では `VITEST` が立っているので、同じプロセスでは気付けない
+        const stdout = importsWithoutExiting(join(SCRIPTS_DIR, 'lib', name));
+        // import の先へ進めていること (途中で exit していれば印が出ない)
+        expect(stdout, `${name} が import の時点でプロセスを終わらせる`).toContain('REACHED_END');
+      }
+    },
+    testBudgetFor(1),
+  );
 
   // 料金表のモデルの添字一覧 (件数を書き写さず正本から導く。0 件なら導出が壊れている)
   function pricedModelIndexes(): number[] {

@@ -8,24 +8,11 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+// 子プロセスの起動と終了の判定 (共有。**写しを持たない** — 片方だけ直ると検出網が静かに緩む)
+import { CHILD_TIMEOUT_MS, expectRan, testBudgetFor } from './lib/child-process';
 
-// 子プロセスの待ち時間の上限 (npx がレジストリを見に行って張り付くのを防ぐ)
-const CHILD_TIMEOUT_MS = 180_000;
 // warning を 1 つだけ起こす一時ファイルの名前 (pid を入れて並行実行でも衝突させない)
 const PROBE_PREFIX = 'lint-warning-probe.';
-
-// 子プロセスが実際に起動して正常に終わったことを確かめる。
-// **`status` の null を素通りさせない** — `spawnSync` はコマンドが見つからないときも
-// 時間切れのときも `status: null` を返すので、`expect(status).not.toBe(0)` のような
-// 「非 0 なら合格」の書き方は**何も測れていない状態で緑**になる (§9 fail-closed)
-function expectRan(result: ReturnType<typeof spawnSync>, label: string): void {
-  // 起動そのものに失敗していないこと (ENOENT など)
-  expect(result.error, `${label} を起動できなかった`).toBeUndefined();
-  // シグナルで殺されていないこと (時間切れはここに出る)
-  expect(result.signal, `${label} が途中で打ち切られた`).toBeNull();
-  // 終了コードが数値であること (null のまま判定へ進ませない)
-  expect(typeof result.status, `${label} の終了コードが取れていない`).toBe('number');
-}
 
 describe('lint の指定そのもの', () => {
   // `package.json` の lint スクリプト
@@ -97,8 +84,8 @@ describe('lint の指定そのもの', () => {
         // 一時ファイルを消す
         rmSync(probePath, { force: true });
       }
-      // 子プロセスを 2 本起こすので既定の 5 秒では足りない (子プロセス側の上限は CHILD_TIMEOUT_MS)
+      // 子プロセスを 2 本起こすので既定の 5 秒では足りない（上限の決め方は testBudgetFor）
     },
-    CHILD_TIMEOUT_MS,
+    testBudgetFor(2),
   );
 });

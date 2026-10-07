@@ -611,8 +611,10 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
       // 分割すると `prisma/schema.prisma` が無くなり、読み取りが素の ENOENT で落ちて、
       // そのために書いた下の文言に辿り着けない — 読む側は「スキーマが移った」のか
       // 「検査が壊れた」のかを区別できない。カタログの在処を先に見るのと同じ手当て）
+      // **重複を畳む** — 未解決のマージでは `git ls-files` が同じパスをステージごとに出すので、
+      // 畳まないと「分割した」という**起きていない原因**を名指しして落ちる（下の走査と同じ手当て）
       expect(
-        trackedOnce().filter((path) => path.endsWith('.prisma')),
+        [...new Set(trackedOnce().filter((path) => path.endsWith('.prisma')))],
         'prisma の定義ファイルが 1 枚ではない（分割したら、この検査の読む範囲も広げる）',
       ).toEqual(['prisma/schema.prisma']);
       // スキーマ本文
@@ -658,6 +660,15 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
         models.some((model) => model.name === BOUNDARY_MODEL),
         `prisma/schema.prisma に model ${BOUNDARY_MODEL}（分離境界）が無い`,
       ).toBe(true);
+      // **`model` 以外の宣言が無いことも前提**（fail-closed）。導出は `^model` しか見ないので、
+      // `view`（PostgreSQL で使える preview 機能）や `type` がテナントの資源を `tenantId`
+      // 無しで持つと、**3 つめの例外なのに導出にも散文にも現れない**（実測で全件緑だった。
+      // 本体の飲み込みの検査は、括弧が正しく書かれていれば何も言わない）。足す人が導出を
+      // 広げるように、ここで止める
+      expect(
+        schema.match(/^(view|type)\s+\w+/gm) ?? [],
+        'prisma/schema.prisma に view / type がある（テナントの資源を持ちうるので、tenantId の例外の導出を `^model` から広げる）',
+      ).toEqual([]);
       // 境界以外から、`tenantId String`（非 null）を持たないモデルを例外として拾う。
       // 型が `String` 以外の場合も「持たない」側へ倒れる（fail-closed。多めに要求して落ちる側）
       const exceptions = models

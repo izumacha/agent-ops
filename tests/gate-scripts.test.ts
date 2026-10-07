@@ -24,6 +24,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+// 子プロセスの起動と終了の判定 (判定の正本は tests/lib/child-process.ts)
+import { CHILD_TIMEOUT_MS, expectRan } from './lib/child-process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   benchOutputProblems,
@@ -241,8 +243,13 @@ function runInChild(statements: string[]): { status: number | null; stdout: stri
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
     cwd: ROOT,
     encoding: 'utf8',
-    timeout: 120_000,
+    timeout: CHILD_TIMEOUT_MS,
   });
+  // **起動と完走をここで確かめる。** 呼び出し側は「非 0 終了であること」を
+  // `not.toBe(0)` で見るが、起動に失敗したり時間切れになると `status` は `null` で
+  // `null !== 0` なので**何も測れていない状態で緑**になり、`stdout` も空なので
+  // 「到達印が無いこと」まで通ってしまう（ゲートの最も大事な 2 本がこの形だった）
+  expectRan(result, 'runInChild');
   // 終了コードと標準出力
   return { status: result.status, stdout: result.stdout };
 }

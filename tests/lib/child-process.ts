@@ -4,11 +4,11 @@
 // 挙動は `tests/child-process-helper.test.ts` が合成入力で固定する（順序を戻しても CI では
 // 緑のままなので、テストで押さえないと役割が空洞になる）。
 //
-// **いま通しているのは `docs-gate` と `lint-config` の 2 本だけ。** `gate-scripts` /
-// `contract-database` / `dotenv-env-loading` は各自の子プロセス用ヘルパーを持っており、
-// `error` / `signal` を捨てて `status` だけを見る形が残っている（`not.toBe(0)` は
-// `status: null` でも通るので、下の fail-open がそのまま当てはまる）。**移行は別の変更で行う** —
-// ここで「写しは無い」と書かないのは、無い物を在ると書いた検出網の説明が穴になるため。
+// **通しているのは `docs-gate` / `lint-config` / `gate-scripts` の 3 本。** 残る
+// `contract-database` と `dotenv-env-loading` は各自のヘルパーを持っているが、どちらも
+// `status` の null を自分で弾いている（前者は `typeof status` を `'number'` と比べ、
+// 後者は `toBe(0)` なので null が通らない）ので、下の fail-open は**当てはまらない**。
+// 移行すれば文言が揃うという利点だけで、閉じるべき穴は残っていない。
 // `spawnSync` はコマンドが見つからないときも時間切れのときも `status: null` を返すので、
 // 「非 0 なら合格」の書き方は**何も測れていない状態で緑**になる（§9 fail-closed）。逆に
 // `execFileSync` で例外だけを捕まえる形にすると、ENOENT（git が無い）と「git が走って

@@ -45,8 +45,8 @@ flowchart LR
   U["Anthropic / OpenAI"]
 
   A -->|"POST /api/v1/proxy/…"| P1
-  P5 -->|"2xx はそのまま返す<br/>許可した 4xx 以外は 502 に写す"| A
-  P3 -->|"https のみ"| U
+  P5 -->|"2xx と選んだ番号はそのまま<br/>それ以外は 502 に写す"| A
+  P3 -->|"https のみ<br/>非本番のループバックは http も可"| U
   U -->|"応答"| P3
 ```
 
@@ -58,7 +58,9 @@ flowchart LR
 - **成功も失敗も記録する。** 「課金されたのに台帳に無い」状態を作らない。
 - **記録の失敗で中継を止めない。** 一方で**止める側は失敗したら止める**（安全側へ倒す向きが逆）。
 - **上流のエラーは番号を選んで中継する。** 番号そのものが共有アカウントの状態を語るため、
-  許可した 4xx 以外は 502 に写し、本文も機械可読な項目だけに絞る。
+  通すのは許可リストに載せた 4xx（400 / 413 / 422）だけで、残りは 502 に写し、本文も機械可読な
+  項目だけに絞る。**例外は 429** — 「待てば通る」情報には意味があるので番号と `Retry-After` を
+  中継し、本文は定型文へ差し替える（クライアントはこの番号でバックオフを書ける）。
 
 ## 全体の構成
 
@@ -85,6 +87,7 @@ flowchart TB
 
   PX --> SC
   PX --> API
+  SC --> DOM
   SC --> DATA
   API --> DOM
   API --> DATA
@@ -101,6 +104,8 @@ flowchart TB
   コメントがその fail-open を書いている）。
 - **画面は自分の REST API を HTTP で呼ばない。** Server Component からデータ層を直接読む
   （認証の二重化と往復を避ける。[ADR-0011](./adr/0011-dashboard-session-and-aggregation.md)）。
+  **そのぶん認可も画面側で自分で掛ける** — Server Action は API と同じ許可表を呼び、
+  `tests/server-action-guards.test.ts` がその取りこぼしを落とす。
 - **データ層を差し替えられる**ので、API テストは DB なしで回り、DB 固有の挙動は専用 DB の
   契約テストが受け持つ（[ADR-0006](./adr/0006-ports-and-adapters.md)）。
 
@@ -139,16 +144,20 @@ sequenceDiagram
 erDiagram
   Tenant ||--o{ User : "役割つきで所属"
   Tenant ||--o{ Agent : "登録"
-  Agent ||--o{ ApiKey : "中継に使う"
+  Tenant ||--o{ ApiKey : "テナント共通キー"
+  Tenant ||--o{ GuardrailRule : "テナント全体のしきい値"
+  Agent ||--o{ ApiKey : "エージェント専用キー"
   Agent ||--o{ UsageEvent : "1 呼び出し 1 行"
-  Agent ||--o{ GuardrailRule : "しきい値"
+  Agent ||--o{ GuardrailRule : "エージェントのしきい値"
   GuardrailRule ||--o{ Incident : "発火"
   Agent ||--o{ EvaluationRun : "品質評価"
   Tenant ||--o{ AuditLog : "追記専用・連鎖"
 ```
 
 **テーブルが `tenantId` を持つ行スコープ方式**（[ADR-0002](./adr/0002-multi-tenant-row-scoping.md)）。
-例外は**親経由でしか到達しない子テーブル**（評価ケースは評価セット経由）で、親を `tenantId` で
+**キーとしきい値のルールはエージェント宛てとテナント全体宛ての両方を取れる**（`agentId` が
+`null` ならテナント全体）。`tenantId` を持たない例外は**親経由でしか到達しない子テーブル**
+（評価ケースは評価セット経由）で、親を `tenantId` で
 絞ってから辿る — 子の id だけで直接引かない。全エンティティと列、そして例外の一覧は
 [`spec.md`](./spec.md) の ER 図と §3 が正本。
 

@@ -3,13 +3,23 @@ import { describe, expect, it } from 'vitest';
 // ファイル操作 (Node 標準)
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 // git に追跡対象を聞く共通部分 (起動失敗と「走って失敗」を分ける判定はここが正本)
-import { gitTrackedFiles } from './lib/child-process';
+import { CHILD_TIMEOUT_MS, gitTrackedFiles } from './lib/child-process';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 import { importSharedModule, sharedModuleNames } from './lib/script-files';
 
 // docs/ の場所
 const DOCS = join(process.cwd(), 'docs');
+
+// 追跡集合は 1 回だけ聞いて使い回す (検査ごとに git を起こさない)。**`expect` を含むので
+// モジュール評価時ではなく最初のテストの中で解決する**
+let trackedCache: string[] | undefined;
+function trackedOnce(): string[] {
+  // 1 度目だけ git へ聞く
+  trackedCache ??= gitTrackedFiles('.');
+  // 2 度目以降は覚えておいた結果
+  return trackedCache;
+}
 // 定数の正本 (文書に書かれた数値と突き合わせる)
 import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 // 監査ログの連番の上限 (README が運用者向けに数値で書いているので突き合わせる)
@@ -443,66 +453,71 @@ describe('docs/ の入口の鮮度', () => {
   // 入口そのもの (この表に載るべき対象から外す)
   const INDEX = 'index.md';
 
-  it('index.md が docs/ 直下の追跡対象すべて (ファイルとディレクトリ) を指している', () => {
-    // 追跡されている docs/ 配下のパス
-    const tracked = gitTrackedFiles('docs');
-    // **追跡されていて、いま作業ツリーにも在るものだけ**を対象にする
-    const present = tracked.filter((path) => existsSync(join(process.cwd(), path)));
-    // docs/ 直下の名前へ畳む (`docs/adr/0001-x.md` → `adr/`、`docs/spec.md` → `spec.md`)
-    const entries = [
-      ...new Set(
-        present.map((path) => {
-          // `docs/` を外した残り
-          const rest = path.slice('docs/'.length);
-          // 最初の区切りまでがディレクトリ名
-          const slash = rest.indexOf('/');
-          // 区切りが無ければファイル、あればディレクトリ
-          return slash < 0 ? rest : `${rest.slice(0, slash)}/`;
-        }),
-      ),
-    ]
-      .filter((name) => name !== INDEX)
-      .sort();
-    // **1 件も導けなければ落とす** (「対象ゼロ＝緑」を避ける fail-closed)
-    // **`git ls-files` は未追跡でも exit 0 で空を返す**ので、上の catch はここへ来ない —
-    // リリース tarball を別のリポジトリ配下へ展開した場合がこれで、原因を名指ししないと
-    // 読む側は「カタログの対象が消えた」と読んでしまう (実測で exit 0 ＋ 空だった)
-    expect(
-      entries.length,
-      'docs/ から対象を 1 件も導けていない（`git ls-files` は未追跡でも exit 0 で空を返すので、' +
-        'このディレクトリが agent-ops の git 作業ツリーでない可能性もある）',
-    ).toBeGreaterThan(0);
-    // **名前に空白や括弧を使わない**ことを規約として要求する — 照合は `](./名前)` の素朴な
-    // 一致なので、空白を含む名前はその形でしか通らないが、Markdown は宛先を最初の空白で
-    // 切るので**その行は壊れたリンクとして描画される**。つまり満たせる形が壊れた形しか無い。
-    // 「山括弧で囲む」を受けると宛先の文法を解析する側へ戻るので、名前の側を縛る
-    for (const entry of entries) {
-      // 空白と括弧を含まないこと
+  it(
+    'index.md が docs/ 直下の追跡対象すべて (ファイルとディレクトリ) を指している',
+    () => {
+      // 追跡されている docs/ 配下のパス
+      const tracked = trackedOnce().filter((path) => path.startsWith('docs/'));
+      // **追跡されていて、いま作業ツリーにも在るものだけ**を対象にする
+      const present = tracked.filter((path) => existsSync(join(process.cwd(), path)));
+      // docs/ 直下の名前へ畳む (`docs/adr/0001-x.md` → `adr/`、`docs/spec.md` → `spec.md`)
+      const entries = [
+        ...new Set(
+          present.map((path) => {
+            // `docs/` を外した残り
+            const rest = path.slice('docs/'.length);
+            // 最初の区切りまでがディレクトリ名
+            const slash = rest.indexOf('/');
+            // 区切りが無ければファイル、あればディレクトリ
+            return slash < 0 ? rest : `${rest.slice(0, slash)}/`;
+          }),
+        ),
+      ]
+        .filter((name) => name !== INDEX)
+        .sort();
+      // **1 件も導けなければ落とす** (「対象ゼロ＝緑」を避ける fail-closed)
+      // **`git ls-files` は未追跡でも exit 0 で空を返す**ので、`gitTrackedFiles` の
+      // 「走って失敗した」の判定には掛からない — リリース tarball を別のリポジトリ配下へ
+      // 展開した場合がこれで、原因を名指ししないと読む側は「カタログの対象が消えた」と
+      // 読んでしまう (実測で exit 0 ＋ 空だった)
       expect(
-        /[\s()#<>]/.test(entry),
-        `docs/${entry} の名前に空白・括弧・# < > がある（カタログの照合が素朴な一致なので、名前はこれらなしで付ける）`,
-      ).toBe(false);
-    }
-    // カタログそのものの在処
-    const indexPath = join(DOCS, INDEX);
-    // **もう 1 つの前提も名指しする** — 入口が無ければ素の ENOENT で落ち、読む側は
-    // 「カタログが消えた」のか「検査が壊れた」のかを区別できない
-    expect(existsSync(indexPath), `docs/${INDEX}（カタログそのもの）が無い`).toBe(true);
-    // カタログの本文
-    const index = readFileSync(indexPath, 'utf8');
-    // 1 件ずつ、名前が本文に現れるかを見る
-    for (const entry of entries) {
-      // リンクの宛先として書かれている形 (`](./spec.md)` / `](./adr/)`)。**`./` を要求するのは
-      // カタログの書き方の取り決めで、文法の解析ではない**。**失敗文言に要求する形を書く** —
-      // 「載っていない」だけだと、題名やアンカーを付けた行が見えているのに行が無いものとして
-      // 探され、同じ文書の行を 2 つ足す方向へ誘導される
-      expect(
-        index,
-        `docs/${entry} の行が \`](./${entry})\` の形で docs/${INDEX} に無い` +
-          '（題名・アンカー・山括弧は付けない）',
-      ).toContain(`](./${entry})`);
-    }
-  });
+        entries.length,
+        'docs/ から対象を 1 件も導けていない（`git ls-files` は未追跡でも exit 0 で空を返すので、' +
+          'このディレクトリが agent-ops の git 作業ツリーでない可能性もある）',
+      ).toBeGreaterThan(0);
+      // **名前に空白や括弧を使わない**ことを規約として要求する — 照合は `](./名前)` の素朴な
+      // 一致なので、空白を含む名前はその形でしか通らないが、Markdown は宛先を最初の空白で
+      // 切るので**その行は壊れたリンクとして描画される**。つまり満たせる形が壊れた形しか無い。
+      // 「山括弧で囲む」を受けると宛先の文法を解析する側へ戻るので、名前の側を縛る
+      for (const entry of entries) {
+        // 空白と括弧を含まないこと
+        expect(
+          /[\s()#<>]/.test(entry),
+          `docs/${entry} の名前に空白・括弧・# < > がある（カタログの照合が素朴な一致なので、名前はこれらなしで付ける）`,
+        ).toBe(false);
+      }
+      // カタログそのものの在処
+      const indexPath = join(DOCS, INDEX);
+      // **もう 1 つの前提も名指しする** — 入口が無ければ素の ENOENT で落ち、読む側は
+      // 「カタログが消えた」のか「検査が壊れた」のかを区別できない
+      expect(existsSync(indexPath), `docs/${INDEX}（カタログそのもの）が無い`).toBe(true);
+      // カタログの本文
+      const index = readFileSync(indexPath, 'utf8');
+      // 1 件ずつ、名前が本文に現れるかを見る
+      for (const entry of entries) {
+        // リンクの宛先として書かれている形 (`](./spec.md)` / `](./adr/)`)。**`./` を要求するのは
+        // カタログの書き方の取り決めで、文法の解析ではない**。**失敗文言に要求する形を書く** —
+        // 「載っていない」だけだと、題名やアンカーを付けた行が見えているのに行が無いものとして
+        // 探され、同じ文書の行を 2 つ足す方向へ誘導される
+        expect(
+          index,
+          `docs/${entry} の行が \`](./${entry})\` の形で docs/${INDEX} に無い` +
+            '（題名・アンカー・山括弧は付けない）',
+        ).toContain(`](./${entry})`);
+      }
+    },
+    CHILD_TIMEOUT_MS,
+  );
 });
 
 // 行スコープ方式（**テナントに属する資源が** `tenantId` を持つ）の**例外**を
@@ -521,7 +536,8 @@ describe('docs/ の入口の鮮度', () => {
 // 実害に直結する。
 //
 // **照合先は手書きの一覧ではなく導出から作る**（この repo の規約: 違反の一覧を表で持つと、
-// 載せ忘れたファイルがこの検査からも同時に外れる）。追跡されているテキストファイル全部から
+// 載せ忘れたファイルがこの検査からも同時に外れる）。追跡されている散文のファイル（拡張子の
+// 一覧は `TEXT_FILE` が正本。**全ファイルではない**）から
 // 「`例外は N つ` と `tenantId` を同じ段落に書いているところ」を拾い、*(1)* その N が導出と
 // 一致すること、*(2)* 例外のモデル名を 1 つでも挙げている段落は**全部**挙げていること、
 // *(3)* 正本（`docs/spec.md`）はちょうど 1 段落でその全部を挙げていること、を要求する。
@@ -534,111 +550,144 @@ describe('docs/ の入口の鮮度', () => {
 describe('tenantId の例外（行スコープ方式）の散文', () => {
   // テナントそのもの（`tenantId` ではなく `id` でテナントを表す分離境界）なので例外に数えない
   const BOUNDARY_MODEL = 'Tenant';
-  // 散文を走査するテキストファイルの拡張子（画像・動画は読まない）
+  // 散文を走査する拡張子。**「全ファイル」ではない**ので、守備範囲はここが正本:
+  // `.md` / `.ts` / `.mts` / `.tsx` / `.mjs` / `.prisma` / `.yml` / `.yaml` / `.json`。
+  // 画像・動画・SQL・`.env.example` のような拡張子の無いものは読まない（件数をそこへ書くと
+  // 黙って古くなる。**新しい置き場所へ書くときはここへ足す**）
   const TEXT_FILE = /\.(md|ts|mts|tsx|mjs|prisma|ya?ml|json)$/;
-  // 件数の表記（「例外は 2 つ」など。全角・半角の空白ゆらぎを許す）
+  // ロックファイルは読まない（散文を持たないのに最も大きい。走査の無駄）
+  const SKIP_FILE = /(^|\/)package-lock\.json$/;
+  // 件数の表記（「例外は N つ」の形。全角・半角の空白ゆらぎを許す）。
+  // **このコメントに数字を書かない** — 走査が自分の記法の例を「主張」として読み、
+  // 件数が変わったときに意味の無い編集を要求する（この describe が撤退した誤検知の型）
   const COUNT_PHRASE = /例外は\s*(\d+)\s*つ/g;
 
-  it('例外のモデル名と件数が prisma/schema.prisma から導いたものと一致する', () => {
-    // スキーマ本文
-    const schema = readFileSync(join(process.cwd(), 'prisma', 'schema.prisma'), 'utf8');
-    // `model X { ... }` を全部取る。**本体の終わりは行頭の `}` で決める** — `[^}]*` にすると
-    // `meta Json @default("{}")` のような**文字列リテラル中の波括弧**で本体が途中で切れ、
-    // その手前に `tenantId` があるモデルまで「列を持たない」側へ落ちる（実測で `AuditLog` が
-    // 例外として数えられ、**正しくない理由で赤くなった**）
-    const models = [...schema.matchAll(/^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm)].map((match) => ({
-      // モデル名
-      name: match[1],
-      // 本体（フィールドの並び）
-      body: match[2],
-    }));
-    // **1 つも取れなければ落とす**（「対象ゼロ＝緑」を避ける fail-closed）
-    expect(models.length, 'prisma/schema.prisma から model を 1 つも導けていない').toBeGreaterThan(
-      0,
-    );
-    // **境界のモデルが居ることも前提**（名前を変えたら除外が黙って効かなくなる）
-    expect(
-      models.some((model) => model.name === BOUNDARY_MODEL),
-      `prisma/schema.prisma に model ${BOUNDARY_MODEL}（分離境界）が無い`,
-    ).toBe(true);
-    // 境界以外から、`tenantId String`（非 null）を持たないモデルを例外として拾う。
-    // 型が `String` 以外の場合も「持たない」側へ倒れる（fail-closed。多めに要求して落ちる側）
-    const exceptions = models
-      .filter((model) => model.name !== BOUNDARY_MODEL)
-      .filter((model) => !/^\s*tenantId\s+String(?!\?)/m.test(model.body))
-      .map((model) => model.name)
-      .sort();
-    // 導出の要約（失敗の文言で使う）
-    const summary = `${exceptions.length} 件: ${exceptions.join(' / ')}`;
-    // 追跡されているテキストファイルを全部見る（手書きの一覧を持たない）
-    const files = gitTrackedFiles('.').filter((path) => TEXT_FILE.test(path));
-    // **1 件も拾えなければ落とす**（走査対象ゼロ＝緑を避ける fail-closed）
-    expect(files.length, '走査対象のテキストファイルを 1 件も導けていない').toBeGreaterThan(0);
-    // 「件数の表記と `tenantId` が同じ段落にある」ところを集める
-    const mentions: { file: string; paragraph: string; counts: number[] }[] = [];
-    // ファイルごとに段落へ割る（切り出しは「空行で割る」だけ。見出しもリンクも解析しない）
-    for (const file of files) {
-      // 本文
-      const text = readFileSync(join(process.cwd(), file), 'utf8');
-      // 段落ごとに見る
-      for (const paragraph of text.split(/\n\s*\n/)) {
-        // 行スコープの話でなければ対象外（別の主題の「例外は N つ」を巻き込まない）
-        if (!paragraph.includes('tenantId')) continue;
-        // 件数の表記を全部取る
-        const counts = [...paragraph.matchAll(COUNT_PHRASE)].map((match) => Number(match[1]));
-        // 1 つも無ければ対象外
-        if (counts.length === 0) continue;
-        // 対象として覚える
-        mentions.push({ file, paragraph, counts });
+  it(
+    '例外のモデル名と件数が prisma/schema.prisma から導いたものと一致する',
+    () => {
+      // スキーマ本文
+      const schema = readFileSync(join(process.cwd(), 'prisma', 'schema.prisma'), 'utf8');
+      // `model X { ... }` を全部取る。**本体の終わりは行頭の `}` で決める** — `[^}]*` にすると
+      // `meta Json @default("{}")` のような**文字列リテラル中の波括弧**で本体が途中で切れ、
+      // その手前に `tenantId` があるモデルまで「列を持たない」側へ落ちる（実測で `AuditLog` が
+      // 例外として数えられ、**正しくない理由で赤くなった**）
+      const models = [...schema.matchAll(/^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm)].map((match) => ({
+        // モデル名
+        name: match[1],
+        // 本体（フィールドの並び）
+        body: match[2],
+      }));
+      // **1 つも取れなければ落とす**（「対象ゼロ＝緑」を避ける fail-closed）
+      expect(
+        models.length,
+        'prisma/schema.prisma から model を 1 つも導けていない',
+      ).toBeGreaterThan(0);
+      // **宣言の数と取れた数が一致すること。** 本体の終わりを行頭の `}` で決めているので、
+      // **閉じ括弧が字下げされた model**（Prisma としては妥当。`prisma format` を CI で
+      // 走らせていないので起こりうる）があると、そのモデルの本体が次のモデルまで伸びて
+      // **2 つまとめて取りこぼす** — 実測で、`tenantId String?` を持つモデルを字下げした
+      // 閉じ括弧で足すと「例外ではない」と判定され、全件緑のまま素通りした（fail-open）。
+      // 括弧の置き方を解析しに行くのではなく、**数が合わないことで落とす**
+      expect(
+        models.length,
+        'model の宣言の数と、本体まで取れた数が合わない（閉じ括弧が行頭に無い model がある。`prisma format` で整えるか、宣言の書き方をそろえる）',
+      ).toBe((schema.match(/^model\s+\w+/gm) ?? []).length);
+      // **スキーマが 1 ファイルであることも前提**（Prisma 7 はフォルダへ分割できる。
+      // 分割すると、この検査は読んだ 1 枚の中のモデルしか見ないまま緑になる）
+      expect(
+        trackedOnce().filter((path) => path.endsWith('.prisma')),
+        'prisma の定義ファイルが 1 枚ではない（分割したら、この検査の読む範囲も広げる）',
+      ).toEqual(['prisma/schema.prisma']);
+      // **境界のモデルが居ることも前提**（名前を変えたら除外が黙って効かなくなる）
+      expect(
+        models.some((model) => model.name === BOUNDARY_MODEL),
+        `prisma/schema.prisma に model ${BOUNDARY_MODEL}（分離境界）が無い`,
+      ).toBe(true);
+      // 境界以外から、`tenantId String`（非 null）を持たないモデルを例外として拾う。
+      // 型が `String` 以外の場合も「持たない」側へ倒れる（fail-closed。多めに要求して落ちる側）
+      const exceptions = models
+        .filter((model) => model.name !== BOUNDARY_MODEL)
+        .filter((model) => !/^\s*tenantId\s+String(?!\?)/m.test(model.body))
+        .map((model) => model.name)
+        .sort();
+      // 導出の要約（失敗の文言で使う）
+      const summary = `${exceptions.length} 件: ${exceptions.join(' / ')}`;
+      // 走査対象（手書きの一覧を持たない）。**「追跡されていて、いま在る」ものだけ**を見る —
+      // 追跡だけを見ると、**まだコミットしていない削除**（改名の途中がこの状態）で素の ENOENT に
+      // なり、消そうとしているファイルを指した意味の分からない赤になる（上の検査と同じ手当て）
+      const files = trackedOnce().filter(
+        (path) =>
+          TEXT_FILE.test(path) && !SKIP_FILE.test(path) && existsSync(join(process.cwd(), path)),
+      );
+      // **1 件も拾えなければ落とす**（走査対象ゼロ＝緑を避ける fail-closed）
+      expect(files.length, '走査対象のテキストファイルを 1 件も導けていない').toBeGreaterThan(0);
+      // 「件数の表記と `tenantId` が同じ段落にある」ところを集める
+      const mentions: { file: string; paragraph: string; counts: number[] }[] = [];
+      // ファイルごとに段落へ割る（切り出しは「空行で割る」だけ。見出しもリンクも解析しない）
+      for (const file of files) {
+        // 本文
+        const text = readFileSync(join(process.cwd(), file), 'utf8');
+        // 段落ごとに見る
+        for (const paragraph of text.split(/\n\s*\n/)) {
+          // 行スコープの話でなければ対象外（別の主題の「例外は N つ」を巻き込まない）
+          if (!paragraph.includes('tenantId')) continue;
+          // 件数の表記を全部取る
+          const counts = [...paragraph.matchAll(COUNT_PHRASE)].map((match) => Number(match[1]));
+          // 1 つも無ければ対象外
+          if (counts.length === 0) continue;
+          // 対象として覚える
+          mentions.push({ file, paragraph, counts });
+        }
       }
-    }
-    // **1 件も無ければ落とす** — 散文から件数が消えたら、この検査は何も見ていない
-    expect(
-      mentions.length,
-      `「例外は N つ」と tenantId を同じ段落に書いた箇所が 1 つも無い（導出: ${summary}）`,
-    ).toBeGreaterThan(0);
-    // 箇所ごとに件数と名指しを見る
-    for (const mention of mentions) {
-      // 件数がすべて導出と一致すること
-      for (const count of mention.counts) {
-        // ずれていれば、どのファイルの何件がずれているかを言って落とす
-        expect(
-          count,
-          `${mention.file} の「例外は ${count} つ」が導出（${summary}）と合っていない`,
-        ).toBe(exceptions.length);
+      // **1 件も無ければ落とす** — 散文から件数が消えたら、この検査は何も見ていない
+      expect(
+        mentions.length,
+        `「例外は N つ」と tenantId を同じ段落に書いた箇所が 1 つも無い（導出: ${summary}）`,
+      ).toBeGreaterThan(0);
+      // 箇所ごとに件数と名指しを見る
+      for (const mention of mentions) {
+        // 件数がすべて導出と一致すること
+        for (const count of mention.counts) {
+          // ずれていれば、どのファイルの何件がずれているかを言って落とす
+          expect(
+            count,
+            `${mention.file} の「例外は ${count} つ」が導出（${summary}）と合っていない`,
+          ).toBe(exceptions.length);
+        }
+        // その段落が例外のモデル名を 1 つでも挙げているか。**バッククォートを要求しない** —
+        // 散文は `BillingEvent.tenantId` と列まで書くこともあり、スキーマのコメントのように
+        // 記法そのものが無い場所もある（実測で、`` `名前` `` だけを探す版は両方を取りこぼした）
+        const mentionsModel = (name: string): boolean =>
+          new RegExp(`\\b${name}\\b`).test(mention.paragraph);
+        // 1 つも挙げていない（正本を指すだけの書き方）ならここでは何も要求しない
+        if (!exceptions.some(mentionsModel)) continue;
+        // 挙げているなら**全部**挙げていること（古い部分集合のまま件数だけ更新されるのを防ぐ）
+        for (const name of exceptions) {
+          // 抜けているモデル名を名指しして落とす
+          expect(
+            mentionsModel(name),
+            `${mention.file} は tenantId の例外を挙げているのに ${name} が抜けている（導出: ${summary}）`,
+          ).toBe(true);
+        }
       }
-      // その段落が例外のモデル名を 1 つでも挙げているか。**バッククォートを要求しない** —
-      // 散文は `BillingEvent.tenantId` と列まで書くこともあり、スキーマのコメントのように
-      // 記法そのものが無い場所もある（実測で、`` `名前` `` だけを探す版は両方を取りこぼした）
-      const mentionsModel = (name: string): boolean =>
-        new RegExp(`\\b${name}\\b`).test(mention.paragraph);
-      // 1 つも挙げていない（正本を指すだけの書き方）ならここでは何も要求しない
-      if (!exceptions.some(mentionsModel)) continue;
-      // 挙げているなら**全部**挙げていること（古い部分集合のまま件数だけ更新されるのを防ぐ）
+      // **正本（spec.md）はちょうど 1 段落で全部を挙げていること** — 0 なら件数がずれており、
+      // 2 つ以上あるとどちらが古いかを機械では決められない
+      const specMentions = mentions.filter((mention) => mention.file === 'docs/spec.md');
+      // 正本の段落数
+      expect(
+        specMentions.length,
+        `docs/spec.md に「例外は N つ」と tenantId を含む段落がちょうど 1 つ無い（${specMentions.length} 個）`,
+      ).toBe(1);
+      // 正本は 1 件ずつ名指ししていること（**上の「挙げているなら全部」とは別**に、
+      // 「1 つも挙げない」書き方を正本には許さない）
       for (const name of exceptions) {
-        // 抜けているモデル名を名指しして落とす
+        // 正本がモデル名を名指ししていること
         expect(
-          mentionsModel(name),
-          `${mention.file} は tenantId の例外を挙げているのに ${name} が抜けている（導出: ${summary}）`,
+          new RegExp(`\\b${name}\\b`).test(specMentions[0].paragraph),
+          `tenantId の例外 ${name} が docs/spec.md の該当段落で名指しされていない`,
         ).toBe(true);
       }
-    }
-    // **正本（spec.md）はちょうど 1 段落で全部を挙げていること** — 0 なら件数がずれており、
-    // 2 つ以上あるとどちらが古いかを機械では決められない
-    const specMentions = mentions.filter((mention) => mention.file === 'docs/spec.md');
-    // 正本の段落数
-    expect(
-      specMentions.length,
-      `docs/spec.md に「例外は N つ」と tenantId を含む段落がちょうど 1 つ無い（${specMentions.length} 個）`,
-    ).toBe(1);
-    // 正本は 1 件ずつ名指ししていること（**上の「挙げているなら全部」とは別**に、
-    // 「1 つも挙げない」書き方を正本には許さない）
-    for (const name of exceptions) {
-      // 正本がモデル名を名指ししていること
-      expect(
-        new RegExp(`\\b${name}\\b`).test(specMentions[0].paragraph),
-        `tenantId の例外 ${name} が docs/spec.md の該当段落で名指しされていない`,
-      ).toBe(true);
-    }
-  });
+    },
+    CHILD_TIMEOUT_MS,
+  );
 });

@@ -164,7 +164,12 @@ jobs:
         run: npm run build
 
   docker-smoke:
-    name: Docker (compose up → 5 分以内にデモ動作)
+    # **ジョブ名 (= 必須ステータスチェック名) は変えない。** このジョブが何を確かめるかは
+    # ステップ名で示す (`gate` ジョブと同じ規約)。リポジトリの必須ステータスチェックは
+    # ジョブ名で登録されているので、改名すると「必須チェックが存在しない」状態になり
+    # **CI が全部緑でも PR がマージできなくなる** (実測: 一度 `Docker (compose up →
+    # 5 分以内にデモ動作)` へ改名したら 405 Repository rule violations で止まった)。
+    name: Docker (compose up → /api/v1/health)
     runs-on: ubuntu-latest
     # **これが Step7 の受け入れ基準①そのもの** (クリーン環境の `docker compose up` から数える)。
     # ゲートが毎回回す `bench:demo-ready` は本番ビルドの起動から数える**部分集合**で、

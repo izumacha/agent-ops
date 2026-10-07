@@ -1677,35 +1677,47 @@ describe('guardrailStopProblem', () => {
 });
 
 describe('runSteps', () => {
-  it('ステップが失敗したらその場で非 0 終了する (後続を実行しない)', () => {
-    // 存在しない npm script を 1 つ実行させ、そのあとに到達しないことを見る
-    const result = runInChild([
-      `runSteps('テスト', [{ name: '失敗するステップ', args: ['run', '__agent_ops_missing_script__'] }]);`,
-    ]);
-    // 非 0 終了であること (process.exit を消すと 0 で終わり、続きまで到達する)
-    expect(result.status, 'ゲートが失敗を素通りしている').not.toBe(0);
-    // 後続へ進んでいないこと
-    expect(result.stdout).not.toContain('REACHED_END');
-  });
+  it(
+    'ステップが失敗したらその場で非 0 終了する (後続を実行しない)',
+    () => {
+      // 存在しない npm script を 1 つ実行させ、そのあとに到達しないことを見る
+      const result = runInChild([
+        `runSteps('テスト', [{ name: '失敗するステップ', args: ['run', '__agent_ops_missing_script__'] }]);`,
+      ]);
+      // 非 0 終了であること (process.exit を消すと 0 で終わり、続きまで到達する)
+      expect(result.status, 'ゲートが失敗を素通りしている').not.toBe(0);
+      // 後続へ進んでいないこと
+      expect(result.stdout).not.toContain('REACHED_END');
+    },
+    CHILD_TIMEOUT_MS,
+  );
 });
 
 describe('exitIfFailures', () => {
-  it('満たしていない基準があれば非 0 終了する (判定結果を捨てない)', () => {
-    // 理由を 1 つ渡す
-    const result = runInChild([`exitIfFailures('テスト', ['件数が足りません']);`]);
-    // 非 0 終了で、続きへ進んでいないこと。**ここが実測で一番危なかった** —
-    // この 1 行を消すと、失敗の理由を表示したうえで「ゲート緑」と出て exit 0 になった
-    expect(result.status, 'ゲートが判定結果を捨てている').not.toBe(0);
-    expect(result.stdout).not.toContain('REACHED_END');
-  });
+  it(
+    '満たしていない基準があれば非 0 終了する (判定結果を捨てない)',
+    () => {
+      // 理由を 1 つ渡す
+      const result = runInChild([`exitIfFailures('テスト', ['件数が足りません']);`]);
+      // 非 0 終了で、続きへ進んでいないこと。**ここが実測で一番危なかった** —
+      // この 1 行を消すと、失敗の理由を表示したうえで「ゲート緑」と出て exit 0 になった
+      expect(result.status, 'ゲートが判定結果を捨てている').not.toBe(0);
+      expect(result.stdout).not.toContain('REACHED_END');
+    },
+    CHILD_TIMEOUT_MS,
+  );
 
-  it('基準を満たしていれば何もしない (正常時に落とさない)', () => {
-    // 失敗が無いときは処理を続ける
-    const result = runInChild([`exitIfFailures('テスト', []);`]);
-    // 正常終了し、続きまで到達すること
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('REACHED_END');
-  });
+  it(
+    '基準を満たしていれば何もしない (正常時に落とさない)',
+    () => {
+      // 失敗が無いときは処理を続ける
+      const result = runInChild([`exitIfFailures('テスト', []);`]);
+      // 正常終了し、続きまで到達すること
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('REACHED_END');
+    },
+    CHILD_TIMEOUT_MS,
+  );
 });
 
 describe('intFromEnv', () => {

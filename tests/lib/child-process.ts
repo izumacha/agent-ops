@@ -15,6 +15,22 @@
 // エラーを返した」が同じ catch へ落ち、失敗の文言が**起きていない原因**を名指しする。
 import { expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import type { SpawnSyncReturns } from 'node:child_process';
+// このファイルの場所からリポジトリのルートを導く (ambient な cwd に依存しないため)
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+// リポジトリのルート (`tests/lib/` から 2 つ上)。**子プロセスの cwd をここへ固定する** —
+// git はカレントからの相対でパスを出すので、固定しないと呼び出し側が突き合わせている
+// リテラル (`docs/…` / `prisma/schema.prisma`) と**静かに**食い違い、「スキーマを分割した」
+// のような**起きていない原因**を名指しする失敗になる。
+//
+// **これで「どこから起こしても動く」ようになるわけではない**（実測）。呼び出し側の読み取りは
+// `process.cwd()` 起点のままなので、別のディレクトリから vitest を起こすと検査は落ちる —
+// ただし落ち方は fail-closed で、文言が前提（agent-ops の作業ツリーで走らせること）を
+// 名指しする。リポジトリの他のテストも `process.cwd()` 起点なので、ここだけ直しても
+// 意味が無い（`npm test` はルートから走らせる、が前提）
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 // 子プロセスの待ち時間の上限 (npx がレジストリを見に行って張り付くのを防ぐ)
 export const CHILD_TIMEOUT_MS = 180_000;
@@ -22,15 +38,24 @@ export const CHILD_TIMEOUT_MS = 180_000;
 // 子プロセスが実際に起動して正常に終わったことを確かめる。
 // **`status` の null を素通りさせない**（上のコメントの理由）
 export function expectRan(result: ReturnType<typeof spawnSync>, label: string): void {
+  // 失敗の理由 (errno)。**どちらの文言にも出す** — 時間切れ (ETIMEDOUT) と
+  // 出力の上限超過 (ENOBUFS) は**どちらも `signal: 'SIGTERM'` を立てる**ので (実測)、
+  // シグナルだけを見た文言は「時間切れ」と決め打ちしてしまい、理由が消える
+  const reason = result.error
+    ? ((result.error as NodeJS.ErrnoException).code ?? result.error.message)
+    : '';
   // **シグナルを先に見る。** 時間切れは `error` (ETIMEDOUT) と `signal` (SIGTERM) の
   // **両方**が立つので (実測)、`error` を先に見ると時間切れが常に「起動できなかった」で
   // 落ち、このモジュールが避けるために在る「起きていない原因の名指し」をしてしまう
-  expect(result.signal, `${label} が途中で打ち切られた (時間切れ・シグナル)`).toBeNull();
+  expect(
+    result.signal,
+    `${label} が完走しなかった (シグナルで終了${reason ? `: ${reason}` : ''})`,
+  ).toBeNull();
   // 起動そのものに失敗していないこと (ENOENT など)。**理由のコードも出す** —
   // ENOENT (実行ファイルが無い) と EACCES (権限) を取り違えないため
   expect(
     result.error,
-    `${label} を起動できなかった${result.error ? ` (${(result.error as NodeJS.ErrnoException).code ?? result.error.message})` : ''}`,
+    `${label} を起動できなかった${reason ? ` (${reason})` : ''}`,
   ).toBeUndefined();
   // 終了コードが数値であること (null のまま判定へ進ませない)
   expect(typeof result.status, `${label} の終了コードが取れていない`).toBe('number');
@@ -40,12 +65,24 @@ export function expectRan(result: ReturnType<typeof spawnSync>, label: string): 
 // **前提（git の作業ツリーであること）を名指しして落とす** — `.git` が無い配布物でも
 // `git` の無い環境でも、失敗の理由を取り違えずに読めるようにする
 export function gitTrackedFiles(pathspec: string): string[] {
-  // 追跡集合を聞く
+  // 追跡集合を聞く（**cwd はリポジトリのルートに固定する**。上の REPO_ROOT の理由）
   const result = spawnSync('git', ['ls-files', '-z', '--', pathspec], {
+    cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: CHILD_TIMEOUT_MS,
   });
-  // 起動と終了の仕方をまず確かめる（ENOENT・時間切れをここで分ける）
+  // 結果の読み方は純粋関数へ（挙動を合成入力で固定できるようにする）
+  return interpretTrackedFiles(result, pathspec);
+}
+
+// `git ls-files` の結果を読む判定。**子プロセスを起こさないので合成入力で挙動を固定できる** —
+// ここを空にしても全件緑のままだったので（実測。件数も変わらない）、
+// `tests/child-process-helper.test.ts` がこの関数を直接呼んで押さえる
+export function interpretTrackedFiles(
+  result: SpawnSyncReturns<string>,
+  pathspec: string,
+): string[] {
+  // 起動と終了の仕方をまず確かめる（ENOENT・シグナルをここで分ける）
   expectRan(result, `git ls-files -- ${pathspec}`);
   // **走って失敗した場合は git 自身の出力を見せる** — 所有者違い (`dubious ownership`)・
   // 権限・index の破損がここへ来るので、原因を 1 つに決め打ちしない（§6）

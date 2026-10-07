@@ -448,9 +448,23 @@ describe('docs/ の入口の鮮度', () => {
 
   it('index.md が docs/ 直下の追跡対象すべて (ファイルとディレクトリ) を指している', () => {
     // git が追跡しているパスをリポジトリ相対で全件取る (`-z` は NUL 区切り。改行を含むパスでも壊れない)
-    const tracked = execFileSync('git', ['ls-files', '-z', '--', 'docs'], { encoding: 'utf8' })
-      .split('\0')
-      .filter((line) => line.length > 0);
+    let output: string;
+    try {
+      // 追跡集合を聞く
+      output = execFileSync('git', ['ls-files', '-z', '--', 'docs'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      // **前提を名指しして落とす** — ZIP 展開や `.git` の無いコンテキストでは git の生の
+      // エラーになり、読む側は「カタログが古い」のか「git が無い」のか分からない
+      throw new Error(
+        'docs/ の入口の鮮度は git の作業ツリーを前提にしている（`git ls-files` が実行できない）。' +
+          'ZIP 展開などで `.git` が無い場所では、この検査は成立しない',
+      );
+    }
+    // NUL で割って空を落とす
+    const tracked = output.split('\0').filter((line) => line.length > 0);
     // docs/ 直下の名前へ畳む (`docs/adr/0001-x.md` → `adr/`、`docs/spec.md` → `spec.md`)
     const entries = [
       ...new Set(
@@ -485,10 +499,30 @@ describe('docs/ の入口の鮮度', () => {
     }
     // **逆向きも見る** — 消した・改名した文書の行が取り残されると、カタログが唯一の入口
     // なので 404 の行が残り続ける（改名では新しい名前の要求だけが出るので、言われたとおり
-    // 行を足すと古い行が残る）。**数え上げも素朴な部分文字列のまま**で、文法は解析しない
-    expect(
-      index.split('](./').length - 1,
-      `docs/${INDEX} に docs/ 直下を指す行が ${entries.length} 件より多い（消した・改名した文書の行が残っている）`,
-    ).toBe(entries.length);
+    // 行を足すと古い行が残る）。**出現回数の一致にしてはいけない** — カタログに正当な
+    // 2 本目の相対リンク（散文から ADR へ深く入る等。`docs/overview.md` が実際にそう書く）
+    // を置いた瞬間に赤くなり、しかも文言は起きていない原因（削除・改名）を名指しする（実測）。
+    // **宛先を直下へ畳んだ集合**で突き合わせる（`./adr/0002-x.md` は `adr/` と同じものとして
+    // 数える）。畳む規則は上の導出と同じで、文法は解析しない
+    const pointed = new Set(
+      [...index.matchAll(/\]\(\.\/([^)\s]+)\)/g)].map((match) => {
+        // 宛先から `#fragment` を落とす
+        const path = match[1].split('#')[0];
+        // 最初の区切りまでがディレクトリ名
+        const slash = path.indexOf('/');
+        // 区切りが無ければファイル、あればディレクトリ（末尾にスラッシュを付けて揃える）
+        return slash < 0 ? path : `${path.slice(0, slash)}/`;
+      }),
+    );
+    // 導出に無い宛先（＝消した・改名した文書の行）が残っていないこと
+    for (const target of pointed) {
+      // 入口自身を指す行は対象外
+      if (target === INDEX) continue;
+      // 追跡されている対象のどれかであること
+      expect(
+        entries,
+        `docs/${INDEX} が docs/${target} を指しているが、追跡されていない（消した・改名した文書の行が残っている）`,
+      ).toContain(target);
+    }
   });
 });

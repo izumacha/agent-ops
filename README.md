@@ -325,6 +325,7 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 | `docs/deploy.md` | Vercel + Supabase への配備手順と、サーバーレスでの制限 |
 | `docs/load-test.md` | 負荷試験レポート（同時 100 リクエスト・配備からデモ動作までの実測） |
 | `docs/known-issues.md` | 既知の問題（**未解決のバグの正本**）と既知の制限 |
+| `docs/index.md` | `docs/` の入口（カタログ。鮮度は `tests/docs-gate.test.ts` が実体と突き合わせる） |
 | `vercel.json` | Vercel のビルドの結線（生成物をコミットしないのでビルド前に `gen` / `db:generate` を流す） |
 | `openapi/openapi.yaml` | REST API 定義（OpenAPI 3.1、契約の正本） |
 | `prisma/schema.prisma` | DB スキーマ（全テーブルに `tenantId`） |

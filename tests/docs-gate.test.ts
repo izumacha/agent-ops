@@ -411,3 +411,58 @@ describe('Step0 の設計成果物', () => {
     expect(existsSync(join(DOCS, 'roadmap.md'))).toBe(true);
   });
 });
+
+// docs/ の入口 (`docs/index.md`) が docs/ の中身を取りこぼしていないことを固定する。
+//
+// **手がかりを一覧そのものではなくファイルシステムから採る。** `index.md` は手書きの
+// カタログで、文書を 1 枚足したときに書き足すのを忘れても lint も typecheck も何も言わない
+// (実測で `api.md` / `deploy.md` / `load-test.md` / `known-issues.md` の 4 件が Step5 以前の
+// 状態で取り残されていた)。一覧を一覧自身と突き合わせる形では、載せ忘れた 1 枚がこの検査から
+// も同時に外れるので、**導出とは独立な手がかり = 実在するファイル**と突き合わせる
+// (`e2e/csp.spec.ts` が `git ls-files` を使っているのと同じ考え方)。
+describe('docs/ の入口の鮮度', () => {
+  // 入口そのもの (この表に載るべき対象から外す)
+  const INDEX = 'index.md';
+
+  // docs/ の中身を実在するファイル・ディレクトリから導く
+  function docsEntries(): string[] {
+    // docs/ 直下を型つきで読む (ファイルとディレクトリを区別するため)
+    const entries = readdirSync(DOCS, { withFileTypes: true });
+    // ディレクトリは末尾にスラッシュを付けた形で、`.md` はそのままの名前で集める
+    return entries
+      .filter((entry) => entry.isDirectory() || entry.name.endsWith('.md'))
+      .filter((entry) => entry.name !== INDEX)
+      .map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+      .sort();
+  }
+
+  it('index.md が docs/ の全ファイル・全ディレクトリを載せている', () => {
+    // 実在する対象を導く
+    const entries = docsEntries();
+    // **1 件も導けなければ落とす** (「対象ゼロ＝緑」を避ける fail-closed)
+    expect(entries.length, 'docs/ から対象を 1 件も導けていない').toBeGreaterThan(0);
+    // 入口の本文
+    const index = readFileSync(join(DOCS, INDEX), 'utf8');
+    // 1 件ずつ、相対リンクとして載っているかを見る
+    for (const entry of entries) {
+      // Markdown のリンク先の形 (`](./spec.md)` / `](./adr/)`)
+      expect(index, `docs/${entry} が docs/${INDEX} に載っていない`).toContain(`](./${entry})`);
+    }
+  });
+
+  it('index.md が載せているリンク先がすべて実在する', () => {
+    // 入口の本文
+    const index = readFileSync(join(DOCS, INDEX), 'utf8');
+    // 相対リンクの宛先を抜き出す (`./` と `../` の両方。見出しへのアンカーは対象外)
+    const targets = [...index.matchAll(/\]\((\.\.?\/[^)#]+)\)/g)].map((match) => match[1]);
+    // **1 件も拾えなければ落とす** (表が消えたことに気付けるようにする)
+    expect(targets.length, `docs/${INDEX} からリンクを 1 件も拾えていない`).toBeGreaterThan(0);
+    // 宛先ごとに実在を確かめる (docs/ からの相対として解決する)
+    for (const target of targets) {
+      // 解決した絶対パス
+      const resolved = join(DOCS, target);
+      // 消えた・改名された宛先を落とす
+      expect(existsSync(resolved), `docs/${INDEX} のリンク先 ${target} が実在しない`).toBe(true);
+    }
+  });
+});

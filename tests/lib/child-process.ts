@@ -65,6 +65,43 @@ export function expectRan(result: ReturnType<typeof spawnSync>, label: string): 
   expect(typeof result.status, `${label} の終了コードが取れていない`).toBe('number');
 }
 
+// リポジトリのルートを git に聞く。**`expect` を使わない**（モジュール評価時にも呼べるように
+// するため。失敗は前提を名指しした素の Error で落とす）。
+//
+// **これが要るのは `gitTrackedFiles` との組になってはじめて意味を持つから。** あちらは根からの
+// 相対でパスを返すので、読む側が `process.cwd()` で解決すると**カレントがリポジトリの下位
+// ディレクトリのときだけ**すべて「無い」ことになり、fail-closed の文言が
+// 「作業ツリーでない可能性」と**起きていない原因**を名指しする（実測）。両方を根に合わせる
+export function repoRoot(): string {
+  // 根を聞く
+  const result = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+    encoding: 'utf8',
+    timeout: CHILD_TIMEOUT_MS,
+  });
+  // 起動そのものに失敗した場合（git が無い・権限）
+  if (result.error) {
+    // 理由（errno）を添えて落とす
+    throw new Error(
+      `git rev-parse --show-toplevel を起動できなかった (${(result.error as NodeJS.ErrnoException).code ?? result.error.message})`,
+      { cause: result.error },
+    );
+  }
+  // シグナルで終わった場合（時間切れ・出力の上限超過）
+  if (result.signal !== null) {
+    // どちらかを決め打ちせずに落とす
+    throw new Error(`git rev-parse --show-toplevel が完走しなかった (${result.signal})`);
+  }
+  // 走って失敗した場合（作業ツリーでない・所有者違い・index の破損）
+  if (result.status !== 0) {
+    // 前提と git 自身の出力を見せる
+    throw new Error(
+      `git rev-parse --show-toplevel が失敗した（この検査は git の作業ツリーを前提にしている）: ${result.stderr.trim()}`,
+    );
+  }
+  // 末尾の改行を落とした絶対パス
+  return result.stdout.trim();
+}
+
 // git が追跡しているパスを取る（`-z` は NUL 区切り。改行を含むパスでも壊れない）。
 // **前提（git の作業ツリーであること）を名指しして落とす** — `.git` が無い配布物でも
 // `git` の無い環境でも、失敗の理由を取り違えずに読めるようにする

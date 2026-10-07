@@ -561,6 +561,48 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
   // **このコメントに数字を書かない** — 走査が自分の記法の例を「主張」として読み、
   // 件数が変わったときに意味の無い編集を要求する（この describe が撤退した誤検知の型）
   const COUNT_PHRASE = /例外は\s*(\d+)\s*つ/g;
+  // 箇条書き・表の行の始まり（新しい「箇所」の区切り）
+  const BLOCK_START = /^\s*([-*+]\s|\|)/;
+
+  // 本文を「箇所」へ割る。**空行で割るだけでは粗すぎる** — 箇条書きも表も空行で区切られない
+  // ので、実測で README のディレクトリ表 15 行ぜんぶが 1 つの段落、CLAUDE.md の箇条書きが
+  // 7〜8 行で 1 つになっていた。その単位で `tenantId` と件数を突き合わせると、**同じ箇条書きの
+  // 隣の項目**が別の主題（カバレッジの除外など）で「例外は N つ」と書いただけで落ちる —
+  // 正しい編集を赤にする検出網はいずれ緩められるので、単位を箇条・表の行まで割る
+  function splitBlocks(text: string): string[] {
+    // 集めた箇所
+    const blocks: string[] = [];
+    // まず空行で段落へ
+    for (const paragraph of text.split(/\n\s*\n/)) {
+      // 組み立て中の箇所
+      let current: string[] = [];
+      // 行ごとに見る
+      for (const line of paragraph.split('\n')) {
+        // 箇条・表の行に当たったら、そこまでを 1 つの箇所として確定する
+        if (BLOCK_START.test(line) && current.length > 0) {
+          // 確定
+          blocks.push(current.join('\n'));
+          // 次の箇所へ
+          current = [];
+        }
+        // 継続行はその箇所に属する
+        current.push(line);
+      }
+      // 段落の残りを確定する
+      if (current.length > 0) blocks.push(current.join('\n'));
+    }
+    // 箇所の一覧
+    return blocks;
+  }
+
+  // 箇所がモデル名を名指ししているか。**バッククォートを要求しない** — 散文は
+  // `BillingEvent.tenantId` と列まで書くことがあり、スキーマのコメントのように記法そのものが
+  // 無い場所もある（実測で、`` `名前` `` だけを探す版は両方を取りこぼした）。
+  // **規則は 1 か所だけに置く** — 正本側の照合で同じ式を書き直すと、片方だけ緩められる
+  function mentionsModel(text: string, name: string): boolean {
+    // 語の境界で探す（モデル名は `\w+` なので正規表現のメタ文字は入らない）
+    return new RegExp(`\\b${name}\\b`).test(text);
+  }
 
   it(
     '例外のモデル名と件数が prisma/schema.prisma から導いたものと一致する',
@@ -600,6 +642,17 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
         models.length,
         'model の宣言の数と、本体まで取れた数が合わない（閉じ括弧が行頭に無い model がある。`prisma format` で整えるか、宣言の書き方をそろえる）',
       ).toBe((schema.match(/^model\s+\w+/gm) ?? []).length);
+      // **飲み込み先が `model` 以外なら、上の件数は一致したままになる。** 実測で、字下げした
+      // 閉じ括弧の model のうしろに `type`（または `view`）を置くと、本体がその宣言まで伸びて
+      // `tenantId` を拾い「例外ではない」と判定され、`model` の数は変わらないので全件緑で
+      // 素通りした。**本体の中に別のトップレベル宣言が現れていないこと**を直接見る
+      for (const model of models) {
+        // 本体に別の宣言の始まりが混ざっていないこと
+        expect(
+          model.body,
+          `model ${model.name} の本体が別の宣言まで伸びている（閉じ括弧が行頭に無い model がある。\`prisma format\` で整えるか、宣言の書き方をそろえる）`,
+        ).not.toMatch(/^(model|enum|type|view|datasource|generator)\s+\w+/m);
+      }
       // **境界のモデルが居ることも前提**（名前を変えたら除外が黙って効かなくなる）
       expect(
         models.some((model) => model.name === BOUNDARY_MODEL),
@@ -623,28 +676,29 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
       );
       // **1 件も拾えなければ落とす**（走査対象ゼロ＝緑を避ける fail-closed）
       expect(files.length, '走査対象のテキストファイルを 1 件も導けていない').toBeGreaterThan(0);
-      // 「件数の表記と `tenantId` が同じ段落にある」ところを集める
-      const mentions: { file: string; paragraph: string; counts: number[] }[] = [];
-      // ファイルごとに段落へ割る（切り出しは「空行で割る」だけ。見出しもリンクも解析しない）
-      for (const file of files) {
+      // 「件数の表記と `tenantId` が同じ箇所にある」ところを集める
+      const mentions: { file: string; block: string; counts: number[] }[] = [];
+      // ファイルごとに見る。**重複を畳む** — 未解決のマージでは `git ls-files` が同じパスを
+      // ステージごとに出すので、畳まないと同じファイルを 3 回読んで失敗も 3 重に出る
+      for (const file of [...new Set(files)]) {
         // 本文
         const text = readFileSync(join(process.cwd(), file), 'utf8');
-        // 段落ごとに見る
-        for (const paragraph of text.split(/\n\s*\n/)) {
+        // 箇所ごとに見る
+        for (const block of splitBlocks(text)) {
           // 行スコープの話でなければ対象外（別の主題の「例外は N つ」を巻き込まない）
-          if (!paragraph.includes('tenantId')) continue;
+          if (!block.includes('tenantId')) continue;
           // 件数の表記を全部取る
-          const counts = [...paragraph.matchAll(COUNT_PHRASE)].map((match) => Number(match[1]));
+          const counts = [...block.matchAll(COUNT_PHRASE)].map((match) => Number(match[1]));
           // 1 つも無ければ対象外
           if (counts.length === 0) continue;
           // 対象として覚える
-          mentions.push({ file, paragraph, counts });
+          mentions.push({ file, block, counts });
         }
       }
       // **1 件も無ければ落とす** — 散文から件数が消えたら、この検査は何も見ていない
       expect(
         mentions.length,
-        `「例外は N つ」と tenantId を同じ段落に書いた箇所が 1 つも無い（導出: ${summary}）`,
+        `「例外は N つ」と tenantId を同じ箇所に書いたところが 1 つも無い（導出: ${summary}）`,
       ).toBeGreaterThan(0);
       // 箇所ごとに件数と名指しを見る
       for (const mention of mentions) {
@@ -656,37 +710,32 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
             `${mention.file} の「例外は ${count} つ」が導出（${summary}）と合っていない`,
           ).toBe(exceptions.length);
         }
-        // その段落が例外のモデル名を 1 つでも挙げているか。**バッククォートを要求しない** —
-        // 散文は `BillingEvent.tenantId` と列まで書くこともあり、スキーマのコメントのように
-        // 記法そのものが無い場所もある（実測で、`` `名前` `` だけを探す版は両方を取りこぼした）
-        const mentionsModel = (name: string): boolean =>
-          new RegExp(`\\b${name}\\b`).test(mention.paragraph);
         // 1 つも挙げていない（正本を指すだけの書き方）ならここでは何も要求しない
-        if (!exceptions.some(mentionsModel)) continue;
+        if (!exceptions.some((name) => mentionsModel(mention.block, name))) continue;
         // 挙げているなら**全部**挙げていること（古い部分集合のまま件数だけ更新されるのを防ぐ）
         for (const name of exceptions) {
           // 抜けているモデル名を名指しして落とす
           expect(
-            mentionsModel(name),
+            mentionsModel(mention.block, name),
             `${mention.file} は tenantId の例外を挙げているのに ${name} が抜けている（導出: ${summary}）`,
           ).toBe(true);
         }
       }
-      // **正本（spec.md）はちょうど 1 段落で全部を挙げていること** — 0 なら件数がずれており、
+      // **正本（spec.md）はちょうど 1 箇所で全部を挙げていること** — 0 なら件数がずれており、
       // 2 つ以上あるとどちらが古いかを機械では決められない
       const specMentions = mentions.filter((mention) => mention.file === 'docs/spec.md');
-      // 正本の段落数
+      // 正本の箇所の数
       expect(
         specMentions.length,
-        `docs/spec.md に「例外は N つ」と tenantId を含む段落がちょうど 1 つ無い（${specMentions.length} 個）`,
+        `docs/spec.md に「例外は N つ」と tenantId を含む箇所がちょうど 1 つ無い（${specMentions.length} 個）`,
       ).toBe(1);
       // 正本は 1 件ずつ名指ししていること（**上の「挙げているなら全部」とは別**に、
       // 「1 つも挙げない」書き方を正本には許さない）
       for (const name of exceptions) {
         // 正本がモデル名を名指ししていること
         expect(
-          new RegExp(`\\b${name}\\b`).test(specMentions[0].paragraph),
-          `tenantId の例外 ${name} が docs/spec.md の該当段落で名指しされていない`,
+          mentionsModel(specMentions[0].block, name),
+          `tenantId の例外 ${name} が docs/spec.md の該当箇所で名指しされていない`,
         ).toBe(true);
       }
     },

@@ -27,8 +27,6 @@ import { dirname, join, resolve } from 'node:path';
 // 子プロセスの起動と終了の判定 (判定の正本は tests/lib/child-process.ts)
 import { CHILD_TIMEOUT_MS, expectRan, testBudgetFor } from './lib/child-process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-// YAML の読み口（マージキーの解決と fail-closed をここ 1 か所に集める）
-import { readYaml } from './lib/yaml';
 import {
   benchOutputProblems,
   e2eOutputProblems,
@@ -295,55 +293,32 @@ const MAX_SHIM_CHILDREN = (() => {
   return Math.max(...counts);
 })();
 
-// CI の `gate` ジョブ（このテストが走るジョブ）に書かれた上限をミリ秒で読む。
+// 子プロセスを起こすテストの `it()` の締め切りについて。
 //
-// **下の検査の相手側はここから導く**（45 という数字を書き写すと、ジョブ側を縮めたときに
-// こちらだけが古くなり、検査が「超えていない」と言い続ける）
-function gateJobTimeoutMs(): number {
-  // ワークフロー定義（CI の正本）。**素の `parse` で読まない** — 読み口は
-  // `tests/lib/yaml.ts` に集めてあり、マージキー（`<<: *anchor`）の解決と
-  // 「解釈できなければ落とす」をそこが持つ。自分で読むと、アンカーで `gate` ジョブの
-  // 設定を取り込む書き方（`<<: *base`）に変えた瞬間 `timeout-minutes` が `undefined` になり、
-  // **正しい ci.yml なのに下の fail-closed が落ちる**（実測: 素の parse は `undefined`、
-  // `{ merge: true }` は 45 を返す）
-  const jobs = readYaml('.github', 'workflows', 'ci.yml').jobs as
-    Record<string, { 'timeout-minutes'?: number } | undefined> | undefined;
-  // `gate` ジョブの上限（分）
-  const minutes = jobs?.gate?.['timeout-minutes'];
-  // **読めなければ落とす**（fail-closed。ジョブ名や項目が変わったら、この検査が
-  // 黙って「上限なし」になるのを避ける）
-  expect(
-    typeof minutes,
-    '.github/workflows/ci.yml の gate ジョブから timeout-minutes を読めない',
-  ).toBe('number');
-  // ミリ秒へ
-  return (minutes as number) * 60_000;
-}
-
-// 子プロセスを起こすテストの `it()` の締め切りについて、**機械で見張れているのは上側だけ**。
+// **天井そのものは `testBudgetFor` の中が見張る**（CI の `gate` ジョブの `timeout-minutes` を
+// 超える締め切りは作れない。本数をどこから渡しても効くので、新しいテストが黙って
+// 検査から外れることが無い）。ここで見るのは**この repo で実際にいちばん子を多く起こす 2 形**が
+// その天井に収まっていること — 導出（negative control の行列・共有モジュールの import）が
+// 壊れて 0 本になる退行も、ここで fail-closed に落ちる。
 //
-// **見張っているもの**: いちばん子を多く起こすテストの締め切りが CI の `gate` ジョブの
-// `timeout-minutes` を超えないこと（超えるとジョブ側が先に死ぬので、`expectRan` の
-// 「完走しなかった (…: ETIMEDOUT)」という原因を名指しした assertion が一度も出ない）。
-//
-// **見張っていないもの**: 各 `it()` が渡している本数が、そのテストが実際に起こす本数と
-// 合っているか。`testBudgetFor(1)` と書いたまま子を 17 本起こすテストにしても、
-// ここは落ちない（実際に張り付くまで誰も気付かない）。本数は呼び出し側が自分で数えるので、
-// **子を起こす形を変えたときは渡す本数も直す**のは規約とレビューで守る
+// **どちらも見張っていないもの**: 各 `it()` が渡している本数が、そのテストが実際に起こす本数と
+// 合っているか。`testBudgetFor(1)` と書いたまま子を 17 本起こすテストにしても落ちない
+// （実際に張り付くまで誰も気付かない）。**子を起こす形を変えたときは渡す本数も直す**のは
+// 規約とレビューで守る
 describe('子プロセスを起こすテストの締め切り', () => {
   it('いちばん子を多く起こすテストの締め切りが CI のジョブの上限を超えない', () => {
     // 子を起こすテストのうち最大の本数（negative control と共有モジュールの import）
     const widest = Math.max(MAX_SHIM_CHILDREN, sharedModuleNames().length);
     // 1 本も導けていなければ導出が壊れている（fail-closed）
     expect(widest, '子を起こすテストの本数を導けていない').toBeGreaterThan(0);
-    // **超えるとジョブ側が先に死ぬ**ので、子の時間切れを名指しする assertion が一度も出ない。
-    // 「本数 × 子の上限」で積む形へ戻すとここで落ちる（17 本で 51.5 分 > 45 分）
-    expect(
-      testBudgetFor(widest),
-      `子を ${widest} 本起こすテストの締め切りが gate ジョブの timeout-minutes を超えている` +
-        '（本数ぶん子の上限を積む形へ戻していないか。ジョブが先に死ぬと、子の時間切れを' +
-        '名指しした assertion が出ない）',
-    ).toBeLessThan(gateJobTimeoutMs());
+    // **この呼び出し自体が検査。** `testBudgetFor` は CI の `gate` ジョブの `timeout-minutes` を
+    // 超える締め切りを作らず throw するので、「本数 × 子の上限」で積む形へ戻すと
+    // ここで落ちる（17 本なら 51.5 分 > 45 分）。
+    // **`toBeLessThan(gateJobTimeoutMs())` を書き足さない** — 天井が関数の中にある以上、
+    // その比較は必ず成り立つ恒真式になる（何も測らない検査が 1 本増えるだけ）
+    expect(testBudgetFor(widest), `子を ${widest} 本起こす締め切りを作れない`).toBeGreaterThan(
+      CHILD_TIMEOUT_MS,
+    );
   });
 });
 

@@ -8,6 +8,7 @@ import {
   expectRan,
   interpretRepoRoot,
   interpretTrackedFiles,
+  gateJobTimeoutMs,
   MEASURED_WIDEST_CHILD_COUNT,
   MEASURED_WIDEST_RUNTIME_MS,
   testBudgetFor,
@@ -228,6 +229,18 @@ describe('testBudgetFor（子プロセスを起こすテストの締め切り）
     expect(perChild, '1 本ぶんの見積もりが実測の走行時間を下回っている').toBeGreaterThanOrEqual(
       measuredPerChild,
     );
+  });
+
+  it('CI のジョブの上限を超える締め切りは作らない（本数をどこから渡しても）', () => {
+    // **天井は関数の中にある**ので、呼び出し側が何本渡しても効く（外側に置くと、
+    // そこが導いている形に当てはまらない新しいテストが黙って検査から外れる）。
+    // 1 本ぶんの見積もりは増分から導き（関数は定数を公開しない）、ジョブの上限を
+    // 跨ぐ本数を逆算して拒否されることを見る
+    const perChild = testBudgetFor(2) - testBudgetFor(1);
+    const overflow = Math.ceil(gateJobTimeoutMs() / perChild);
+    expect(() => testBudgetFor(overflow)).toThrow(/gate ジョブの timeout-minutes/);
+    // 実際に使っている本数は通ること（常に throw する実装でも緑にならないよう両側を見る）
+    expect(testBudgetFor(MEASURED_WIDEST_CHILD_COUNT)).toBeGreaterThan(CHILD_TIMEOUT_MS);
   });
 
   it('本数 × 子の上限では積まない（CI のジョブの上限を超えるため）', () => {

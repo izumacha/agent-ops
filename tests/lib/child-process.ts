@@ -16,6 +16,8 @@
 import { expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncReturns } from 'node:child_process';
+// YAML の読み口（CI のジョブの上限を読む）
+import { readYaml } from './yaml';
 
 // 子プロセスの待ち時間の上限 (npx がレジストリを見に行って張り付くのを防ぐ)
 export const CHILD_TIMEOUT_MS = 180_000;
@@ -33,7 +35,12 @@ export const MEASURED_WIDEST_CHILD_COUNT = 17;
 export const MEASURED_WIDEST_RUNTIME_MS = 10_400;
 
 // 子プロセス 1 本が正常に走り終わるまでの見積もり（本数ぶん積む分）。
-// 上の実測（1 本 0.61 秒）に対して**約 8 倍**を取る
+//
+// **「約 8 倍」が成り立つのはシムを噛ませた軽い子に対してだけ**（上の実測 1 本 0.61 秒）。
+// 本物の `npm` を起こす呼び出し側はこれより重く、この機械では `npx eslint` が 0.5 秒、
+// **`npm run lint` が 8.3 秒**で、1 本ぶんの見積もりを既に超えている（実測）。
+// それでも締め切りが足りているのは**張り付いた 1 本ぶん（180 秒）が支配的**だからで、
+// 「どの子でも 8 倍の余裕がある」とは読まないこと。下限の検査が引くのもシム側の実測だけ
 const PER_CHILD_RUNTIME_ALLOWANCE_MS = 5_000;
 
 // vitest 側の上限に足す余裕 (起動・後片付けの分)
@@ -68,7 +75,45 @@ const TEST_TIMEOUT_MARGIN_MS = 30_000;
 // 子を起こす形を変えたときに本数も直すのは規約とレビューで守る
 export function testBudgetFor(children: number): number {
   // 張り付いた 1 本ぶん＋本数ぶんの正常な走行時間＋余裕
-  return CHILD_TIMEOUT_MS + children * PER_CHILD_RUNTIME_ALLOWANCE_MS + TEST_TIMEOUT_MARGIN_MS;
+  const budget =
+    CHILD_TIMEOUT_MS + children * PER_CHILD_RUNTIME_ALLOWANCE_MS + TEST_TIMEOUT_MARGIN_MS;
+  // **CI のジョブの上限を超える締め切りは作らせない（fail-closed）。**
+  // 超えるとジョブ側が先に死ぬので、この締め切りが買っているはずの「原因を名指しした
+  // assertion」が一度も出ない（＝短すぎる締め切りを、意味のない締め切りに置き換えただけ）。
+  // **判定を「いちばん子を多く起こすテスト」の外側に置かない** — 外側（`tests/gate-scripts.test.ts`）
+  // に置くと、そこが導いている 2 形（negative control の行列・共有モジュールの import）に
+  // 当てはまらない新しいテストが黙って検査から外れる。ここなら**本数をどこから渡しても**効く
+  if (budget >= gateJobTimeoutMs())
+    throw new Error(
+      `子を ${children} 本起こすテストの締め切り (${budget}ms) が CI の gate ジョブの ` +
+        `timeout-minutes (${gateJobTimeoutMs()}ms) 以上になっている` +
+        '（本数ぶん子の上限を積む形へ戻していないか。ジョブが先に死ぬと、' +
+        '子の時間切れを名指しした assertion が出ない）',
+    );
+  // 呼び出し側は `it()` の第 3 引数に渡す
+  return budget;
+}
+
+// CI の `gate` ジョブ（ユニットテストが走るジョブ）に書かれた上限をミリ秒で読む。
+// **数字を書き写さない**（ジョブ側を縮めたときにこちらだけが古くなる）。
+// 1 回読んだら覚える（`testBudgetFor` はテストの収集中に何度も呼ばれる）
+let gateJobTimeoutCache: number | undefined;
+export function gateJobTimeoutMs(): number {
+  // 覚えている値があればそれを返す
+  if (gateJobTimeoutCache !== undefined) return gateJobTimeoutCache;
+  // ワークフロー定義（CI の正本）。読み口は共有（マージキーの解決と fail-closed はそちら）
+  const jobs = readYaml('.github', 'workflows', 'ci.yml').jobs as
+    Record<string, { 'timeout-minutes'?: number } | undefined> | undefined;
+  // `gate` ジョブの上限（分）
+  const minutes = jobs?.gate?.['timeout-minutes'];
+  // **読めなければ落とす**（fail-closed。ジョブ名や項目が変わったら、この検査が
+  // 黙って「上限なし」になるのを避ける）
+  if (typeof minutes !== 'number')
+    throw new Error('.github/workflows/ci.yml の gate ジョブから timeout-minutes を読めない');
+  // ミリ秒へ直して覚える
+  gateJobTimeoutCache = minutes * 60_000;
+  // 呼び出し側（締め切りの天井）が使う
+  return gateJobTimeoutCache;
 }
 
 // 子プロセスが実際に起動して正常に終わったことを確かめる。

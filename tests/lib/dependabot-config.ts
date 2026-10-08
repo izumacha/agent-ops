@@ -5,12 +5,8 @@
 // テストごとに書き写すと、設定の書き方が変わったとき (`directories:` の複数形・glob、
 // `dependency-name` のワイルドカード等) に **片方だけが直り、もう片方の検出網が古い読み方のまま
 // 静かに残る** (§6 DRY)。姉妹リポジトリ (my-first-ai-app / helpdesk-hub) も同じ形で集約している。
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { parse } from 'yaml';
-
-// リポジトリのルート (テストは常にルートから実行される)
-const ROOT = process.cwd();
+// YAML の読み口（マージキーの解決と fail-closed をここ 1 か所に集める）
+import { readYaml } from './yaml';
 
 /** `ignore` エントリ 1 件分 (Dependabot の設定に現れる形)。 */
 export interface IgnoreEntry {
@@ -40,7 +36,7 @@ interface UpdateBlock {
  */
 function ignoresFor(ecosystem: string): IgnoreEntry[] {
   // 設定を読む
-  const config = parse(readFileSync(join(ROOT, '.github', 'dependabot.yml'), 'utf8')) as {
+  const config = readYaml('.github', 'dependabot.yml') as {
     updates: UpdateBlock[];
   };
   // そのエコシステムでルートディレクトリのブロックを探す

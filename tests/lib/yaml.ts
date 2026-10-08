@@ -1,10 +1,13 @@
-// テストから YAML の設定ファイル（compose / GitHub Actions のワークフロー）を読む共通部分。
+// テストから YAML の設定ファイル（compose / GitHub Actions のワークフロー / dependabot）を読む共通部分。
 //
 // **ここに集めてあるのは「マージキーを解決する」ことと「読めなければ落とす」ことの 2 つ。**
-// 素の `parse` で読む版を 2 本持つと、片方だけが下の手当てを持つ状態になる（実測の経緯は
+// 素の `parse` で読む版を複数持つと、片方だけが下の手当てを持つ状態になる（実測の経緯は
 // `readYaml` の中のコメント）。**OpenAPI（`openapi/openapi.yaml`）を読む検査はここを通していない** —
-// あちらはアンカーを使わない契約の正本で、取り込み口も別（各テストが自分で読む）。
-import { expect } from 'vitest';
+// あちらは API 契約の正本で、読み手も多く（`tests/openapi.test.ts` ほか）、
+// アンカーを使わない前提で各テストが自分の形に落として読んでいる。
+//
+// **`expect` を使わず素の `Error` で落とす** — モジュール評価時（`it()` の引数を組み立てる段）に
+// 呼ばれる経路があり、そこでは `expect` の失敗が「どのテストの失敗か」を持たないため。
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -20,9 +23,9 @@ export function readYaml(...segments: string[]): Record<string, unknown> {
   // `ports: ['0.0.0.0:5432:5432']` を置いて db へ取り込むだけで、`docker compose config` は
   // 0.0.0.0 への公開を出力するのに全件緑のまま通った
   const parsed = parse(text, { merge: true }) as Record<string, unknown> | null;
-  // オブジェクトとして読めること
-  expect(parsed, `${segments.join('/')} を解釈できない`).toBeTypeOf('object');
-  expect(parsed).not.toBeNull();
+  // オブジェクトとして読めること（配列・スカラ・空ファイルは前提が崩れている）
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+    throw new Error(`${segments.join('/')} を解釈できない（オブジェクトとして読めない）`);
   // 呼び出し側が項目を取り出す
-  return parsed as Record<string, unknown>;
+  return parsed;
 }

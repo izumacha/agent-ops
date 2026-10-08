@@ -282,7 +282,10 @@ erDiagram
 - **設定（`ApiKey` / `GuardrailRule`）はエージェントと一緒に消える（`Cascade`）。** `ApiKey.agentId` を `SetNull` にすると削除で「テナント共通キー」へ黙って昇格し権限が広がるため、Cascade にする。
 - **監査ログの操作者（`AuditLog.actorId`）は `Restrict`。** 監査ログを持つユーザーは削除せず無効化する（`User.disabledAt`。`DELETE /users/{userId}` は無効化）。ユーザーのログイントークン（`UserToken`）は設定なので `Cascade`。テナント解約は `Cascade` でデータ一式を消す（テナント単位の消去要求に応えるため）。
 - **実行履歴を持つ評価セットのケースは変更・削除できない**（ケースの更新・削除 API を作らない。`EvaluationResult` → `EvaluationCase` も `Restrict`）。入力が動くと回帰比較が無意味になるため、変えたいときは新しいセットを作る（ADR-0009）。
-- **子テーブルは複合 FK `(tenantId, 親id)` で親を参照する。** 「別テナントのエージェント／セット／ルール／ユーザーを指す行」をクエリ規律だけでなく DB 制約でも拒否する（`Agent` / `EvaluationSet` / `GuardrailRule` / `User` に `@@unique([tenantId, id])`）。
+- **子テーブルの多くは複合 FK `(tenantId, 親id)` で親を参照する**ので、「別テナントのエージェント／セット／ルール／ユーザーを指す行」をクエリ規律だけでなく DB 制約でも拒否する（参照される側に `@@unique([tenantId, id])` を張る。`Agent` / `EvaluationSet` / `GuardrailRule` / `User`）。**ただし「すべての子テーブルがそうだ」とは読まないこと** — 単一列の FK が 3 つあり、テナント越えを DB が拒まない形と、`tenantId` 以外を錨にしている形がある。
+  - **`AuditLog.actorId` → `User.id` は単一列で、テナントを錨にしていない**（操作者が居ないイベントがあるので nullable で、`(tenantId, actorId)` にすると不在を表せない）。つまり**別テナントのユーザーを操作者として書ける**のはアプリ側のチェックだけが防いでいる。しかも `AuditLog` は追記専用（`UPDATE` は DB トリガが拒否）なので、**書いてしまったら後から直せない**。監査ログを書く経路を足すときは、操作者が同じテナントであることを呼び出し側で確かめる。
+  - **`EvaluationCase` は `tenantId` の列を持たず、`setId` → `EvaluationSet.id` の単一列で親を指す**（例外の 1 つ。上の「行スコープ」の項）。`EvaluationResult` → `EvaluationCase` も `(setId, caseId)` → `@@unique([setId, id])` で、**錨は `tenantId` ではなく `setId`**。テナントの安全は「親の `EvaluationSet` を `tenantId` で絞ってから辿る」ことで保つ（子の id だけで直接引かない）。
+  - **`@@unique` の列の並びは表ごとに違う。** PostgreSQL は参照先の一意制約が**列の並びまで完全に一致**することを要求するので、`(tenantId, id)` の形を他の表へそのまま写すと `there is no unique constraint matching given keys` で失敗する。実例: `EvaluationRun` は `@@unique([tenantId, id, setId])`（`EvaluationResult` が 3 列で参照する）、`EvaluationCase` は `@@unique([setId, id])`。**正本は `prisma/schema.prisma`** で、形を増やすときはそこを見る。
 
 ## 4. API 一覧
 

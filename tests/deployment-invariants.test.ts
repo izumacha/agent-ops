@@ -4,35 +4,20 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
-import { parse } from 'yaml';
 // 契約テスト用 DB の判定 (入口ガード・setupFiles と同じ関数を使う。規則の写しを作らない)
 import { contractDatabaseProblem } from '../scripts/lib/contract-database.mjs';
 // Step0 の検証コマンド一覧 (ゲートが流すものを導く手掛かり。値の写しを作らない)
 import { STEP0_STEPS } from '../scripts/lib/step0-steps.mjs';
 // ゲートのソースから npm の引数を読む (行列の negative control と同じ手掛かり)
 import { latestGateScriptName, npmArgvsInSource, UNREADABLE_ARG } from './lib/script-files';
+// YAML の読み口 (マージキーの解決と fail-closed をここ 1 か所に集める)
+import { readYaml } from './lib/yaml';
 
 // リポジトリのルート
 const ROOT = process.cwd();
 
 // リポジトリルートからの相対パスを `/` 区切りで返す (Windows の `\` を正規化する)
 const relative0 = (absolute: string): string => relative(ROOT, absolute).split(sep).join('/');
-
-// YAML を読んで解釈する (読めなければ前提が崩れているので落とす = fail-closed)
-function readYaml(...segments: string[]): Record<string, unknown> {
-  // ファイルを読む
-  const text = readFileSync(join(ROOT, ...segments), 'utf8');
-  // 解釈する。**マージキー (`<<: *anchor`) を解決する** — compose も GitHub Actions も
-  // アンカーの取り込みを受け付けるので、既定の parse だと `services.db.ports` が undefined になり
-  // 代わりに `'<<'` というリテラルキーが残る。実測では `x-exposed: &exposed` に
-  // `ports: ['0.0.0.0:5432:5432']` を置いて db へ取り込むだけで、`docker compose config` は
-  // 0.0.0.0 への公開を出力するのに全件緑のまま通った
-  const parsed = parse(text, { merge: true }) as Record<string, unknown> | null;
-  // オブジェクトとして読めること
-  expect(parsed, `${segments.join('/')} を解釈できない`).toBeTypeOf('object');
-  expect(parsed).not.toBeNull();
-  return parsed as Record<string, unknown>;
-}
 
 // compose ファイルの名前の形 (docker compose が既定で読む綴りと、`-f` で足す派生ファイル)。
 // **1 ファイルを名指ししない** — `docker-compose.override.yml` は何も書かなくても自動で重ねられるので、

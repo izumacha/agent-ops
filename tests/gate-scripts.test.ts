@@ -263,6 +263,65 @@ function runInChild(statements: string[]): { status: number | null; stdout: stri
 // リポジトリのルート
 const ROOT = process.cwd();
 
+// あるゲートが「流すと書いてある」npm の一覧。**本文と、下の子の本数の見積もりが同じ導出を読む**
+// （書き写すと、片方だけが古くなったときに「予算は 1 本ぶんなのに 10 本起こす」形へ戻る）
+function requiredNpmFor(name: string): string[] {
+  // Step0 の既定のステップと、そのゲートのソースに直接書かれた npm の引数を合わせる
+  return [
+    ...new Set([
+      ...STEP0_STEPS.map((step) => step.args[1]),
+      ...npmInvocationsInSource(join(SCRIPTS_DIR, name)),
+    ]),
+  ];
+}
+
+// negative control の 1 ケースが起こす子の本数（positive control の 1 本 ＋ 壊す対象の本数）の**上限**。
+//
+// **数値を書かない。** 対象の本数は Step が進むと増えるので、導出から採って追随させる。
+//
+// **`Math.max` の展開を素で書かない** — ゲートが 1 本も導けないと `Math.max()` は `-Infinity` を
+// 返し、締め切りが `NaN` になって**「上限なし」と同じ**挙動になる（下の検査は
+// `Math.max(MAX_SHIM_CHILDREN, 共有モジュールの本数)` を見るので、こちらが `-Infinity` でも
+// もう一方の本数で埋まり**気付けない**）。導出が空なら前提が崩れているのでここで落とす
+const MAX_SHIM_CHILDREN = (() => {
+  // ゲートごとの「positive control の 1 本 ＋ 壊す対象の本数」
+  const counts = gateScriptNames().map((name) => 1 + requiredNpmFor(name).length);
+  // 1 本も導けていなければ fail-closed（`-Infinity` を締め切りへ流さない）
+  if (counts.length === 0)
+    throw new Error('ゲートスクリプトを 1 本も導けていない（子の本数の上限が決められない）');
+  // 最大の本数
+  return Math.max(...counts);
+})();
+
+// 子プロセスを起こすテストの `it()` の締め切りについて。
+//
+// **天井そのものは `testBudgetFor` の中が見張る**（CI の `gate` ジョブの `timeout-minutes` を
+// 超える締め切りは作れない。本数をどこから渡しても効くので、新しいテストが黙って
+// 検査から外れることが無い）。ここで見るのは**この repo で実際にいちばん子を多く起こす 2 形**が
+// その天井に収まっていること — 導出（negative control の行列・共有モジュールの import）が
+// 壊れて 0 本になる退行も、ここで fail-closed に落ちる。
+//
+// **どちらも見張っていないもの**: 各 `it()` が渡している本数が、そのテストが実際に起こす本数と
+// 合っているか。`testBudgetFor(1)` と書いたまま子を 17 本起こすテストにしても落ちない
+// （実際に張り付くまで誰も気付かない）。**子を起こす形を変えたときは渡す本数も直す**のは
+// 規約とレビューで守る
+describe('子プロセスを起こすテストの締め切り', () => {
+  it('いちばん子を多く起こすテストの締め切りが CI のジョブの上限を超えない', () => {
+    // 子を起こすテストのうち最大の本数（negative control と共有モジュールの import）
+    const widest = Math.max(MAX_SHIM_CHILDREN, sharedModuleNames().length);
+    // 1 本も導けていなければ導出が壊れている（fail-closed）
+    expect(widest, '子を起こすテストの本数を導けていない').toBeGreaterThan(0);
+    // **この呼び出し自体が検査。** `testBudgetFor` は CI の `gate` ジョブの `timeout-minutes` を
+    // 超える締め切りを作らず throw するので、「本数 × 子の上限」で積む形へ戻すと
+    // ここで落ちる（17 本なら 51.5 分 > 45 分）。
+    // **`toBeLessThan(gateJobTimeoutMs())` を書き足さない** — 天井が関数の中にある以上、
+    // その比較は必ず成り立つ恒真式になる（何も測らない検査が 1 本増えるだけ）
+    expect(testBudgetFor(widest), `子を ${widest} 本起こす締め切りを作れない`).toBeGreaterThan(
+      CHILD_TIMEOUT_MS,
+    );
+  });
+});
+
 /**
  * **必ず失敗する `npm` を PATH の先頭に置いて**ゲートを実行し、終了コードと出力を返す。
  *
@@ -3508,26 +3567,33 @@ describe('判定の結線', () => {
     Object.entries(BENCH_PAYLOADS).flatMap(([label, entry]) =>
       entry.breaks.map((patch, index) => [label, index, patch] as const),
     ),
-  )('素の Node でも基準を破れば passed: false と非 0 終了: %s #%i', (label, _index, patch) => {
-    // **これが「基準が本当に強制されているか」の実行時の担保。全基準を 1 本ずつ破って回す** —
-    // 最初の 1 基準だけを破っていたときは、残りの判定に
-    // `if (process.env.NODE_ENV === 'production') return null;` を入れても全件緑だった (実測)。
-    // 静的検査はどれも「その綴りがあるか」しか見ないので、共有モジュールの中に
-    // `if (process.env.NODE_ENV !== 'test') payload.slowestMs = 0;` を 1 行入れるだけで
-    // 受け入れ基準が完全に無効化されるのに全件緑だった (実測)。**vitest の印と NODE_ENV を
-    // 落とした子プロセス**で、基準を破る実測値を実際に通して落ちることを確かめる
-    const broken = { ...BENCH_PAYLOADS[label].ok, ...patch };
-    const run = runBenchInCleanChild(label, broken);
-    // 基準を満たしていないと出ること
-    expect(run, `${label} が素の Node で passed: false にならない`).toContain('"passed":false');
-    // **実測値がそのまま出ていること** (テストのときだけ本物を使う分岐を落とす)
-    for (const [field, value] of Object.entries(broken))
-      expect(run, `${label} の ${field} が書き換えられている`).toContain(
-        `${JSON.stringify(field)}:${JSON.stringify(value)}`,
-      );
-    // 非 0 で終わること (ゲートは終了コードも見る)
-    expect(run, `${label} が素の Node で非 0 終了しない`).toContain('EXIT_CODE=1');
-  });
+  )(
+    '素の Node でも基準を破れば passed: false と非 0 終了: %s #%i',
+    (label, _index, patch) => {
+      // **これが「基準が本当に強制されているか」の実行時の担保。全基準を 1 本ずつ破って回す** —
+      // 最初の 1 基準だけを破っていたときは、残りの判定に
+      // `if (process.env.NODE_ENV === 'production') return null;` を入れても全件緑だった (実測)。
+      // 静的検査はどれも「その綴りがあるか」しか見ないので、共有モジュールの中に
+      // `if (process.env.NODE_ENV !== 'test') payload.slowestMs = 0;` を 1 行入れるだけで
+      // 受け入れ基準が完全に無効化されるのに全件緑だった (実測)。**vitest の印と NODE_ENV を
+      // 落とした子プロセス**で、基準を破る実測値を実際に通して落ちることを確かめる
+      const broken = { ...BENCH_PAYLOADS[label].ok, ...patch };
+      const run = runBenchInCleanChild(label, broken);
+      // 基準を満たしていないと出ること
+      expect(run, `${label} が素の Node で passed: false にならない`).toContain('"passed":false');
+      // **実測値がそのまま出ていること** (テストのときだけ本物を使う分岐を落とす)
+      for (const [field, value] of Object.entries(broken))
+        expect(run, `${label} の ${field} が書き換えられている`).toContain(
+          `${JSON.stringify(field)}:${JSON.stringify(value)}`,
+        );
+      // 非 0 で終わること (ゲートは終了コードも見る)
+      expect(run, `${label} が素の Node で非 0 終了しない`).toContain('EXIT_CODE=1');
+      // **既定の 5 秒のまま放置しない** — `runBenchInCleanChild` が起こす子の上限は
+      // `CHILD_TIMEOUT_MS`（180 秒）なので、既定だと子が張り付いたときに vitest の
+      // 「Test timed out in 5000ms」が先に出て原因が消える（子は 1 本）
+    },
+    testBudgetFor(1),
+  );
 
   it.each(Object.keys(BENCH_PAYLOADS))(
     '素の Node で基準を満たせば passed: true と終了コード据え置き: %s',
@@ -3537,6 +3603,8 @@ describe('判定の結線', () => {
       expect(run).toContain('"passed":true');
       expect(run).toContain('EXIT_CODE=undefined');
     },
+    // 上と同じ理由で既定の 5 秒を使わない（子は 1 本）
+    testBudgetFor(1),
   );
 
   it('挙動を確かめる表がベンチのラベルを網羅している', () => {
@@ -3817,12 +3885,7 @@ describe('判定の結線', () => {
       // **「実際に呼ばれたもの」から検査対象を導いてはいけない** — 途中で黙って終わる変異は
       // 呼び出しの一覧ごと縮むので、検査も一緒に縮んで素通りする（実測で、判定の直後に
       // 反射的な終了を置く変異も、audit の判定を `if (false && …)` にする変異も全件緑で通った）
-      const required = [
-        ...new Set([
-          ...STEP0_STEPS.map((step) => step.args[1]),
-          ...npmInvocationsInSource(join(SCRIPTS_DIR, name)),
-        ]),
-      ];
+      const required = requiredNpmFor(name);
       // 1 つも無ければ導出が壊れている (fail-closed)
       expect(required.length, `${name} が流す npm を 1 つも導けない`).toBeGreaterThan(0);
       // **書いてあるものは実際に流していること** — 途中で黙って終わる形をここで落とす
@@ -3849,7 +3912,7 @@ describe('判定の結線', () => {
         ).toBe(true);
       }
     },
-    300_000,
+    testBudgetFor(MAX_SHIM_CHILDREN),
   );
 
   it.each(pricedModelIndexes())(
@@ -3876,7 +3939,7 @@ describe('判定の結線', () => {
         `料金表の ${dropAt} 番目のモデルの欠落を見逃した (終了コード ${String(short.status)})`,
       ).toBe(true);
     },
-    120_000,
+    testBudgetFor(1),
   );
 
   it.each(['statements', 'branches', 'functions', 'lines'])(
@@ -3899,7 +3962,7 @@ describe('判定の結線', () => {
         `カバレッジの ${metric} が下限未満なのに見逃した (終了コード ${String(low.status)})`,
       ).toBe(true);
     },
-    120_000,
+    testBudgetFor(1),
   );
 
   it(
@@ -4000,7 +4063,9 @@ describe('判定の結線', () => {
         expect(stdout, `${name} が import の時点でプロセスを終わらせる`).toContain('REACHED_END');
       }
     },
-    testBudgetFor(1),
+    // **子は共有モジュールの本数ぶん起こす**（1 本ぶんの予算だと、2 本目以降が張り付いたときに
+    // vitest の締め切りが先に来て原因の分からない赤になる）。本数は導出から採る
+    testBudgetFor(sharedModuleNames().length),
   );
 
   // 料金表のモデルの添字一覧 (件数を書き写さず正本から導く。0 件なら導出が壊れている)

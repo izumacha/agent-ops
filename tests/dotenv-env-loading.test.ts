@@ -10,6 +10,8 @@
 // `ALLOWED_BENCH_PACKAGES` のコメントが持つ）。
 import { afterAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
+// 子プロセスの上限と `it()` の締め切り（値の写しを持たない。`tests/lib/child-process.ts` が正本）
+import { CHILD_TIMEOUT_MS, testBudgetFor } from './lib/child-process';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -74,7 +76,7 @@ function loadDotenvInChild(
     encoding: 'utf8',
     // 先に入れておきたい環境変数があれば重ねる（「上書きしない」性質を見るために使う）
     env: { ...process.env, ...presetEnv },
-    timeout: 60_000,
+    timeout: CHILD_TIMEOUT_MS,
   });
 
   // 起動そのものに失敗していたら、値を読む前に理由を出して落とす（fail-closed）
@@ -84,62 +86,78 @@ function loadDotenvInChild(
 }
 
 describe('dotenv が .env の値を process.env へ届ける', () => {
-  it('引用符つき・素のどちらの書き方でも値が入る', () => {
-    // このリポジトリの `.env` と同じ書き方を両方入れる
-    // （`DATABASE_URL="postgresql://..."` は引用符つき、`PLATFORM_ADMIN_TOKEN=...` は素）
-    const env = loadDotenvInChild(
-      [
-        'QUOTED_VALUE="postgresql://user:pass@localhost:5432/db?schema=app"',
-        'BARE_VALUE=plain-token',
-      ].join('\n'),
-      ['QUOTED_VALUE', 'BARE_VALUE'],
-    );
+  it(
+    '引用符つき・素のどちらの書き方でも値が入る',
+    () => {
+      // このリポジトリの `.env` と同じ書き方を両方入れる
+      // （`DATABASE_URL="postgresql://..."` は引用符つき、`PLATFORM_ADMIN_TOKEN=...` は素）
+      const env = loadDotenvInChild(
+        [
+          'QUOTED_VALUE="postgresql://user:pass@localhost:5432/db?schema=app"',
+          'BARE_VALUE=plain-token',
+        ].join('\n'),
+        ['QUOTED_VALUE', 'BARE_VALUE'],
+      );
 
-    // 引用符が剥がれた値が届いていること
-    expect(env.QUOTED_VALUE, '引用符つきの値が届いていない').toBe(
-      'postgresql://user:pass@localhost:5432/db?schema=app',
-    );
-    // 素の値も届いていること
-    expect(env.BARE_VALUE, '素の値が届いていない').toBe('plain-token');
-  });
+      // 引用符が剥がれた値が届いていること
+      expect(env.QUOTED_VALUE, '引用符つきの値が届いていない').toBe(
+        'postgresql://user:pass@localhost:5432/db?schema=app',
+      );
+      // 素の値も届いていること
+      expect(env.BARE_VALUE, '素の値が届いていない').toBe('plain-token');
+      // **既定の 5 秒のまま放置しない** — 子側の上限は `CHILD_TIMEOUT_MS` なので、
+      // 既定だと子が張り付いたときに原因を言わない「Test timed out in 5000ms」が先に出る（子は 1 本）
+    },
+    testBudgetFor(1),
+  );
 
-  it('既に設定済みの環境変数は上書きしない', () => {
-    // 先に入っている値と、`.env` 側の別の値を用意する
-    const env = loadDotenvInChild('PRESET_KEY=from-dotenv-file', ['PRESET_KEY'], {
-      PRESET_KEY: 'from-process-env',
-    });
+  it(
+    '既に設定済みの環境変数は上書きしない',
+    () => {
+      // 先に入っている値と、`.env` 側の別の値を用意する
+      const env = loadDotenvInChild('PRESET_KEY=from-dotenv-file', ['PRESET_KEY'], {
+        PRESET_KEY: 'from-process-env',
+      });
 
-    // **固定する理由は運用の側**: ベンチも契約テストも
-    // `DATABASE_URL='…_contract' npm run bench:usage` のように**コマンドラインで接続先を指定して**
-    // 動かす（手順は README と各スクリプト冒頭にある）。上書きする版に変わると、手元に `.env` が
-    // ある開発者ではこの指定が黙って無視され、指したつもりのない DB を指す。
-    // **安全性の話ではない** — 専用 DB ガード（`scripts/lib/contract-database.mjs`）も
-    // `createPrismaClient()` も同じ `process.env.DATABASE_URL` を `import 'dotenv/config'` の**後に**
-    // 読むので両者がずれることはなく、`.env` が勝てばガードが開発 DB を見て止める（fail-closed）
-    expect(env.PRESET_KEY, '.env が既存の環境変数を上書きしている').toBe('from-process-env');
+      // **固定する理由は運用の側**: ベンチも契約テストも
+      // `DATABASE_URL='…_contract' npm run bench:usage` のように**コマンドラインで接続先を指定して**
+      // 動かす（手順は README と各スクリプト冒頭にある）。上書きする版に変わると、手元に `.env` が
+      // ある開発者ではこの指定が黙って無視され、指したつもりのない DB を指す。
+      // **安全性の話ではない** — 専用 DB ガード（`scripts/lib/contract-database.mjs`）も
+      // `createPrismaClient()` も同じ `process.env.DATABASE_URL` を `import 'dotenv/config'` の**後に**
+      // 読むので両者がずれることはなく、`.env` が勝てばガードが開発 DB を見て止める（fail-closed）
+      expect(env.PRESET_KEY, '.env が既存の環境変数を上書きしている').toBe('from-process-env');
 
-    // **残る境界**: これは上流の既定の挙動を固定するものなので、こちら側のコードを変異させて
-    // 赤くすることはできない。落ちるのは dotenv の側が変わったときだけで、「この族は閉じた」とは言えない
-  });
+      // **残る境界**: これは上流の既定の挙動を固定するものなので、こちら側のコードを変異させて
+      // 赤くすることはできない。落ちるのは dotenv の側が変わったときだけで、「この族は閉じた」とは言えない
+      // 上と同じ理由で既定の 5 秒を使わない（子は 1 本）
+    },
+    testBudgetFor(1),
+  );
 
-  it('.env が無くても import が例外を投げない', () => {
-    // `.env` を置かないディレクトリを用意する（**CI が毎回踏んでいるのはこの状況**）
-    const dir = makeEnvDir(null);
+  it(
+    '.env が無くても import が例外を投げない',
+    () => {
+      // `.env` を置かないディレクトリを用意する（**CI が毎回踏んでいるのはこの状況**）
+      const dir = makeEnvDir(null);
 
-    // 取り込むだけの子プロセスを走らせる（値は見ない）
-    const result = spawnSync(
-      process.execPath,
-      ['--input-type=module', '-e', `import 'dotenv/config';`],
-      {
-        cwd: dir,
-        encoding: 'utf8',
-        env: { ...process.env },
-        timeout: 60_000,
-      },
-    );
+      // 取り込むだけの子プロセスを走らせる（値は見ない）
+      const result = spawnSync(
+        process.execPath,
+        ['--input-type=module', '-e', `import 'dotenv/config';`],
+        {
+          cwd: dir,
+          encoding: 'utf8',
+          env: { ...process.env },
+          timeout: CHILD_TIMEOUT_MS,
+        },
+      );
 
-    // 正常終了すること。`.env` が無い状態で throw する版に変わると、CI の `db:deploy` /
-    // `db:seed` と本番コンテナの起動が同時に落ちる
-    expect(result.status, `.env が無いと import が落ちる: ${result.stderr}`).toBe(0);
-  });
+      // 正常終了すること。`.env` が無い状態で throw する版に変わると、CI の `db:deploy` /
+      // `db:seed` と本番コンテナの起動が同時に落ちる
+      expect(result.status, `.env が無いと import が落ちる: ${result.stderr}`).toBe(0);
+      // 上と同じ理由で既定の 5 秒を使わない（子は 1 本）
+    },
+    testBudgetFor(1),
+  );
 });

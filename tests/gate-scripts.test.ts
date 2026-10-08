@@ -27,6 +27,7 @@ import { dirname, join, resolve } from 'node:path';
 // 子プロセスの起動と終了の判定 (判定の正本は tests/lib/child-process.ts)
 import { CHILD_TIMEOUT_MS, expectRan, testBudgetFor } from './lib/child-process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parse } from 'yaml';
 import {
   benchOutputProblems,
   e2eOutputProblems,
@@ -262,6 +263,66 @@ function runInChild(statements: string[]): { status: number | null; stdout: stri
 
 // リポジトリのルート
 const ROOT = process.cwd();
+
+// あるゲートが「流すと書いてある」npm の一覧。**本文と、下の子の本数の見積もりが同じ導出を読む**
+// （書き写すと、片方だけが古くなったときに「予算は 1 本ぶんなのに 10 本起こす」形へ戻る）
+function requiredNpmFor(name: string): string[] {
+  // Step0 の既定のステップと、そのゲートのソースに直接書かれた npm の引数を合わせる
+  return [
+    ...new Set([
+      ...STEP0_STEPS.map((step) => step.args[1]),
+      ...npmInvocationsInSource(join(SCRIPTS_DIR, name)),
+    ]),
+  ];
+}
+
+// negative control の 1 ケースが起こす子の本数（positive control の 1 本 ＋ 壊す対象の本数）の**上限**。
+//
+// **数値を書かない。** `it()` の締め切りが子の上限（`CHILD_TIMEOUT_MS`）の合計より短いと、
+// 子が張り付いたときに vitest の「Test timed out in …」が先に出て、`expectRan` の
+// 「完走しなかった (…: ETIMEDOUT)」という**原因を名指しした assertion が一度も出ない**。
+// 対象の本数は Step が進むと増えるので、導出から採って追随させる
+const MAX_SHIM_CHILDREN = Math.max(
+  ...gateScriptNames().map((name) => 1 + requiredNpmFor(name).length),
+);
+
+// CI の `gate` ジョブ（このテストが走るジョブ）に書かれた上限をミリ秒で読む。
+//
+// **下の検査の相手側はここから導く**（45 という数字を書き写すと、ジョブ側を縮めたときに
+// こちらだけが古くなり、検査が「超えていない」と言い続ける）
+function gateJobTimeoutMs(): number {
+  // ワークフロー定義（CI の正本）
+  const workflow = parse(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')) as {
+    jobs?: Record<string, { 'timeout-minutes'?: number }>;
+  };
+  // `gate` ジョブの上限（分）
+  const minutes = workflow.jobs?.gate?.['timeout-minutes'];
+  // **読めなければ落とす**（fail-closed。ジョブ名や項目が変わったら、この検査が
+  // 黙って「上限なし」になるのを避ける）
+  expect(
+    typeof minutes,
+    '.github/workflows/ci.yml の gate ジョブから timeout-minutes を読めない',
+  ).toBe('number');
+  // ミリ秒へ
+  return (minutes as number) * 60_000;
+}
+
+describe('子プロセスを起こすテストの締め切り', () => {
+  it('いちばん子を多く起こすテストの締め切りが CI のジョブの上限を超えない', () => {
+    // 子を起こすテストのうち最大の本数（negative control と共有モジュールの import）
+    const widest = Math.max(MAX_SHIM_CHILDREN, sharedModuleNames().length);
+    // 1 本も導けていなければ導出が壊れている（fail-closed）
+    expect(widest, '子を起こすテストの本数を導けていない').toBeGreaterThan(0);
+    // **超えるとジョブ側が先に死ぬ**ので、子の時間切れを名指しする assertion が一度も出ない。
+    // 「本数 × 子の上限」で積む形へ戻すとここで落ちる（17 本で 51.5 分 > 45 分）
+    expect(
+      testBudgetFor(widest),
+      `子を ${widest} 本起こすテストの締め切りが gate ジョブの timeout-minutes を超えている` +
+        '（本数ぶん子の上限を積む形へ戻していないか。ジョブが先に死ぬと、子の時間切れを' +
+        '名指しした assertion が出ない）',
+    ).toBeLessThan(gateJobTimeoutMs());
+  });
+});
 
 /**
  * **必ず失敗する `npm` を PATH の先頭に置いて**ゲートを実行し、終了コードと出力を返す。
@@ -3817,12 +3878,7 @@ describe('判定の結線', () => {
       // **「実際に呼ばれたもの」から検査対象を導いてはいけない** — 途中で黙って終わる変異は
       // 呼び出しの一覧ごと縮むので、検査も一緒に縮んで素通りする（実測で、判定の直後に
       // 反射的な終了を置く変異も、audit の判定を `if (false && …)` にする変異も全件緑で通った）
-      const required = [
-        ...new Set([
-          ...STEP0_STEPS.map((step) => step.args[1]),
-          ...npmInvocationsInSource(join(SCRIPTS_DIR, name)),
-        ]),
-      ];
+      const required = requiredNpmFor(name);
       // 1 つも無ければ導出が壊れている (fail-closed)
       expect(required.length, `${name} が流す npm を 1 つも導けない`).toBeGreaterThan(0);
       // **書いてあるものは実際に流していること** — 途中で黙って終わる形をここで落とす
@@ -3849,7 +3905,7 @@ describe('判定の結線', () => {
         ).toBe(true);
       }
     },
-    300_000,
+    testBudgetFor(MAX_SHIM_CHILDREN),
   );
 
   it.each(pricedModelIndexes())(
@@ -3876,7 +3932,7 @@ describe('判定の結線', () => {
         `料金表の ${dropAt} 番目のモデルの欠落を見逃した (終了コード ${String(short.status)})`,
       ).toBe(true);
     },
-    120_000,
+    testBudgetFor(1),
   );
 
   it.each(['statements', 'branches', 'functions', 'lines'])(
@@ -3899,7 +3955,7 @@ describe('判定の結線', () => {
         `カバレッジの ${metric} が下限未満なのに見逃した (終了コード ${String(low.status)})`,
       ).toBe(true);
     },
-    120_000,
+    testBudgetFor(1),
   );
 
   it(
@@ -4000,7 +4056,9 @@ describe('判定の結線', () => {
         expect(stdout, `${name} が import の時点でプロセスを終わらせる`).toContain('REACHED_END');
       }
     },
-    testBudgetFor(1),
+    // **子は共有モジュールの本数ぶん起こす**（1 本ぶんの予算だと、2 本目以降が張り付いたときに
+    // vitest の締め切りが先に来て原因の分からない赤になる）。本数は導出から採る
+    testBudgetFor(sharedModuleNames().length),
   );
 
   // 料金表のモデルの添字一覧 (件数を書き写さず正本から導く。0 件なら導出が壊れている)

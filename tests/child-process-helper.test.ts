@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest';
 // 子プロセスの型（合成した戻り値に型を付ける）
 import type { SpawnSyncReturns } from 'node:child_process';
 // 判定そのもの（この検査が主題にしている関数）
-import { expectRan, interpretTrackedFiles } from './lib/child-process';
+import {
+  CHILD_TIMEOUT_MS,
+  expectRan,
+  interpretRepoRoot,
+  interpretTrackedFiles,
+  testBudgetFor,
+} from './lib/child-process';
 
 // `spawnSync` の戻り値を合成する。**1 つだけ持つ** — 2 つに分けていたときは
 // `status` の既定が `?? null` と `?? 0` で食い違い、**`status: null` を渡しても 0 になって
@@ -113,5 +119,95 @@ describe('interpretTrackedFiles（git ls-files の結果の読み方）', () => 
   it('exit 0 で出力が空なら空配列を返す（ここでは落とさない）', () => {
     // 未追跡のディレクトリを指したときの形。**落とすのは呼び出し側の fail-closed の仕事**
     expect(interpretTrackedFiles(fakeResult({ status: 0, stdout: '' }), 'docs')).toEqual([]);
+  });
+});
+
+// `interpretRepoRoot`（`git rev-parse --show-toplevel` の結果の読み方）の**挙動**を固定する。
+//
+// **なぜ要るか**: `expectRan` とまったく同じ「どの順で見るか」の問題がここにもあり、
+// 実際 PR #26 の時点では**この関数だけが `error` を先に見ていた**（時間切れが
+// 「起動できなかった」で落ちる）。本物の時間切れは CI では起きないので、
+// 順を戻しても・分岐を消しても全件緑のままになる。合成入力でしか押さえられない。
+describe('interpretRepoRoot（リポジトリの根の読み方）', () => {
+  it('正常に終わった結果は末尾の改行を落として返す', () => {
+    // git が根を出して 0 で終わった形
+    expect(interpretRepoRoot(fakeResult({ status: 0, stdout: '/repo/root\n' }))).toBe('/repo/root');
+  });
+
+  it('時間切れは「完走しなかった」と言い、理由も出す（「起動できなかった」と取り違えない）', () => {
+    // 時間切れの実際の形（error と signal の両方が立つ）
+    const timedOut = fakeResult({
+      error: Object.assign(new Error('spawnSync ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      signal: 'SIGTERM',
+    });
+    // 完走しなかった側で落ち、シグナルと errno の両方が出ること（ここが順序の効き目）
+    expect(() => interpretRepoRoot(timedOut)).toThrow(/完走しなかった.*SIGTERM.*ETIMEDOUT/s);
+    // **起動の失敗として落ちないこと**（順を戻すとこちらになる）
+    expect(() => interpretRepoRoot(timedOut)).not.toThrow(/起動できなかった/);
+  });
+
+  it('出力の上限超過（ENOBUFS）も「完走しなかった」側で、時間切れと決め打ちしない', () => {
+    // ENOBUFS も signal: SIGTERM を立てる（実測）
+    const tooMuch = fakeResult({
+      error: Object.assign(new Error('spawnSync ENOBUFS'), { code: 'ENOBUFS' }),
+      signal: 'SIGTERM',
+    });
+    // 理由が ENOBUFS として出ること（「時間切れ」と書かない）
+    expect(() => interpretRepoRoot(tooMuch)).toThrow(/完走しなかった.*ENOBUFS/s);
+  });
+
+  it('git が無い場合は「起動できなかった」と言い、理由のコードも出す', () => {
+    // ENOENT の実際の形（error だけが立つ）
+    const missing = fakeResult({
+      error: Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' }),
+    });
+    // 起動の失敗として落ち、errno も出ること
+    expect(() => interpretRepoRoot(missing)).toThrow(/起動できなかった \(ENOENT\)/);
+  });
+
+  it('走って失敗した場合は前提と git の出力を見せる', () => {
+    // 作業ツリーでないときの形
+    const notRepo = fakeResult({ status: 128, stderr: 'fatal: not a git repository\n' });
+    // 前提（git の作業ツリー）を名指しし、git 自身の出力も出すこと
+    expect(() => interpretRepoRoot(notRepo)).toThrow(/git の作業ツリーを前提/);
+    expect(() => interpretRepoRoot(notRepo)).toThrow(/not a git repository/);
+  });
+
+  it('終了コードが取れていない結果（status: null）を成功として扱わない', () => {
+    // error も signal も無いのに status が null、という形（`?? 0` で畳む退行で起こる）
+    expect(() => interpretRepoRoot(fakeResult({ stdout: '/repo/root' }))).toThrow(/が失敗した/);
+  });
+});
+
+// `testBudgetFor`（子の本数から `it()` の締め切りを出す）の**挙動**を固定する。
+//
+// **なぜ要るか**: この関数が守っているのは「vitest の締め切りが子の上限より先に来ない」
+// ことだけで、短くしても**張り付かない限り誰も気付かない**（原因の分からない
+// 「Test timed out in …」になるのは退行の後に実際に何かが張り付いたときだけ）。
+// 掛け算を落とす・余裕を 0 にするといった退行は本番の挙動を変えないので、ここで押さえる。
+describe('testBudgetFor（子プロセスを起こすテストの締め切り）', () => {
+  it('どの本数でも、張り付いた子 1 本ぶんの上限を必ず上回る', () => {
+    // 1 本から 20 本まで、子側の上限より必ず長いこと。
+    // **ここが買っているもの**: 子が張り付いたとき、子側の時間切れが先に効いて
+    // `expectRan` の「完走しなかった (…: ETIMEDOUT)」が出る（vitest の
+    // 「Test timed out in …」で原因が消えない）
+    for (let children = 1; children <= 20; children += 1)
+      expect(testBudgetFor(children)).toBeGreaterThan(CHILD_TIMEOUT_MS);
+  });
+
+  it('本数に応じて増える（正常に走る子の時間を見込まない退行を落とす）', () => {
+    // 本数が増えれば締め切りも伸びること（定数へ畳む退行だと、本数の多いテストで
+    // 正常な子の走行時間に押し出されて原因の分からない赤になる）
+    expect(testBudgetFor(2)).toBeGreaterThan(testBudgetFor(1));
+    // 増え方が本数に比例していること（1 本ぶんの増分が一定）
+    expect(testBudgetFor(3) - testBudgetFor(2)).toBe(testBudgetFor(2) - testBudgetFor(1));
+  });
+
+  it('本数 × 子の上限では積まない（CI のジョブの上限を超えるため）', () => {
+    // **本数ぶん積む形への退行を落とす。** 17 本のテストがあるので、その形だと
+    // 51.5 分になり CI の `gate` ジョブの `timeout-minutes: 45` を超える
+    // （ジョブが先に死ぬので、この締め切りが買っている assertion が一度も出ない）。
+    // 実際の本数との突き合わせは `tests/gate-scripts.test.ts` が ci.yml から導いて行う
+    expect(testBudgetFor(17)).toBeLessThan(17 * CHILD_TIMEOUT_MS);
   });
 });

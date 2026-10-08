@@ -20,23 +20,42 @@ import type { SpawnSyncReturns } from 'node:child_process';
 // 子プロセスの待ち時間の上限 (npx がレジストリを見に行って張り付くのを防ぐ)
 export const CHILD_TIMEOUT_MS = 180_000;
 
+// 子プロセス 1 本が正常に走り終わるまでの見積もり（本数ぶん積む分）。
+//
+// **実測（この機械、2026-10-08）**: 子を 17 本起こす negative control の最悪ケース
+// （`gate-step7`）が 10.4 秒＝1 本 0.61 秒、15 本起こす共有モジュールの import が
+// 0.84 秒＝1 本 0.06 秒。遅い CI ランナーを見込んで**約 8 倍**を取る
+const PER_CHILD_RUNTIME_ALLOWANCE_MS = 5_000;
+
 // vitest 側の上限に足す余裕 (起動・後片付けの分)
 const TEST_TIMEOUT_MARGIN_MS = 30_000;
 
-// 子プロセスを `children` 本起こすテストに渡す上限（子の本数ぶん＋余裕）。
+// 子プロセスを `children` 本起こすテストに渡す `it()` の上限。
+//
+// **この上限が守っているのは 1 つだけ**: 子が張り付いたとき、**子側の上限が先に効いて**
+// `expectRan` の「完走しなかった (…: ETIMEDOUT)」という原因を名指しした assertion が出ること。
+// vitest の「Test timed out in …」が先に出ると、原因を言わない赤になる。
 //
 // **実測しておく（誤解しやすいので）**: `it()` の上限と子の上限を**同値**にしても、
-// vitest の「Test timed out in …」が勝つことは無かった — `spawnSync` は同期で
-// イベントループを塞ぐので、子側の上限が先に効いて関数が戻り、`expectRan` の
-// 「完走しなかった (シグナルで終了: ETIMEDOUT)」が出た。**同値が壊れているわけではない。**
+// vitest の締め切りが勝つことは無かった — `spawnSync` は同期でイベントループを塞ぐので、
+// 子側の上限が先に効いて関数が戻る。**同値が壊れているわけではない。**
 //
-// それでも余裕を足すのは、子の時間切れの**あと**に走る後片付け・assertion・
-// 複数の子の合計がテストの締め切りを押し出すのを避けるため（2 本起こす
-// `lint-config` が実際にこの形）。**既定の 5 秒のまま放置しない**ことが要点で、
-// そのときだけは原因を言わない「Test timed out in 5000ms」になる
+// **「本数 × 子の上限」で積まない。** 張り付きうるのは実質 1 本だけで、最初に張り付いた子で
+// assertion が落ちてテストは終わる（この repo の呼び出し側はどれも、時間切れの子を
+// `expectRan` か `typeof status === 'number'` で必ず落とす）。本数ぶん積むと、子を 17 本
+// 起こすテストの上限が **51.5 分**になり、**CI の `gate` ジョブの `timeout-minutes: 45` を
+// 超える** — そうなるとジョブ側が先に死ぬので、この上限が買っているはずの「原因を名指しした
+// assertion」は一度も出ない（＝短すぎる締め切りを、意味のない締め切りに置き換えただけになる）。
+// 実際 PR #26 の時点では本数ぶん積む形で、しかも 17 本・15 本のテストが 1 本ぶんの上限
+// （210 秒）を渡していた。**ジョブの上限を超えないことは
+// `tests/gate-scripts.test.ts` が `.github/workflows/ci.yml` から導いて見張る。**
+//
+// 内訳は「張り付いた 1 本ぶん ＋ 残りが正常に走る見積もり ＋ 後片付けの余裕」。
+// **既定の 5 秒のまま放置しない**ことが要点で、そのときだけは原因を言わない
+// 「Test timed out in 5000ms」になる
 export function testBudgetFor(children: number): number {
-  // 子の本数ぶんの上限＋余裕
-  return children * CHILD_TIMEOUT_MS + TEST_TIMEOUT_MARGIN_MS;
+  // 張り付いた 1 本ぶん＋本数ぶんの正常な走行時間＋余裕
+  return CHILD_TIMEOUT_MS + children * PER_CHILD_RUNTIME_ALLOWANCE_MS + TEST_TIMEOUT_MARGIN_MS;
 }
 
 // 子プロセスが実際に起動して正常に終わったことを確かめる。
@@ -78,24 +97,45 @@ export function repoRoot(): string {
     encoding: 'utf8',
     timeout: CHILD_TIMEOUT_MS,
   });
+  // 読み方は純粋関数へ（子プロセスを起こさないので合成入力で挙動を固定できる）
+  return interpretRepoRoot(result);
+}
+
+// `git rev-parse --show-toplevel` の結果を読む判定。**`expect` を使わず素の Error で落とす**
+// （モジュール評価時にも呼べるようにするため）。
+//
+// **子プロセスを起こさないので `tests/child-process-helper.test.ts` が合成入力で挙動を固定する** —
+// `interpretTrackedFiles` と同じ理由で、ここを空にしても全件緑のままだった（実測）。
+// とくに下の「シグナルを先に見る」は、実際の時間切れを起こさないと再現しないので
+// 合成入力でしか押さえられない
+export function interpretRepoRoot(result: SpawnSyncReturns<string>): string {
+  // 失敗の理由（errno）。**どちらの文言にも出す** — `expectRan` と同じ理由
+  const reason = result.error
+    ? ((result.error as NodeJS.ErrnoException).code ?? result.error.message)
+    : '';
+  // **シグナルを先に見る。** 時間切れは `error` (ETIMEDOUT) と `signal` (SIGTERM) の**両方**を
+  // 立てるので（実測）、`error` を先に見ると時間切れが常に「起動できなかった」で落ち、
+  // このモジュールが避けるために在る「起きていない原因の名指し」をしてしまう
+  // （`expectRan` は同じ理由でこの順にしてあり、ここだけ逆だった）
+  if (result.signal !== null) {
+    // シグナルと errno の両方を見せて、原因を決め打ちしない
+    throw new Error(
+      `git rev-parse --show-toplevel が完走しなかった (${result.signal}${reason ? `: ${reason}` : ''})`,
+      result.error ? { cause: result.error } : undefined,
+    );
+  }
   // 起動そのものに失敗した場合（git が無い・権限）
   if (result.error) {
     // 理由（errno）を添えて落とす
-    throw new Error(
-      `git rev-parse --show-toplevel を起動できなかった (${(result.error as NodeJS.ErrnoException).code ?? result.error.message})`,
-      { cause: result.error },
-    );
-  }
-  // シグナルで終わった場合（時間切れ・出力の上限超過）
-  if (result.signal !== null) {
-    // どちらかを決め打ちせずに落とす
-    throw new Error(`git rev-parse --show-toplevel が完走しなかった (${result.signal})`);
+    throw new Error(`git rev-parse --show-toplevel を起動できなかった (${reason})`, {
+      cause: result.error,
+    });
   }
   // 走って失敗した場合（作業ツリーでない・所有者違い・index の破損）
   if (result.status !== 0) {
     // 前提と git 自身の出力を見せる
     throw new Error(
-      `git rev-parse --show-toplevel が失敗した（この検査は git の作業ツリーを前提にしている）: ${result.stderr.trim()}`,
+      `git rev-parse --show-toplevel が失敗した（この検査は git の作業ツリーを前提にしている）: ${result.stderr?.trim() ?? ''}`,
     );
   }
   // 末尾の改行を落とした絶対パス

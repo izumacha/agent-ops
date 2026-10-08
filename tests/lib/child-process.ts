@@ -20,11 +20,20 @@ import type { SpawnSyncReturns } from 'node:child_process';
 // 子プロセスの待ち時間の上限 (npx がレジストリを見に行って張り付くのを防ぐ)
 export const CHILD_TIMEOUT_MS = 180_000;
 
-// 子プロセス 1 本が正常に走り終わるまでの見積もり（本数ぶん積む分）。
+// **実測（この機械、2026-10-08）**: いちばん子を多く起こすテスト（negative control の
+// 最悪ケース＝`gate-step7`）は子 17 本で 10.4 秒＝1 本 0.61 秒、15 本起こす共有モジュールの
+// import が 0.84 秒＝1 本 0.06 秒。
 //
-// **実測（この機械、2026-10-08）**: 子を 17 本起こす negative control の最悪ケース
-// （`gate-step7`）が 10.4 秒＝1 本 0.61 秒、15 本起こす共有モジュールの import が
-// 0.84 秒＝1 本 0.06 秒。遅い CI ランナーを見込んで**約 8 倍**を取る
+// **この 2 つを定数として持つのは、下の見積もりの「下限」をテストから引くため。**
+// 見積もりそのものは遅い CI ランナーを見込んだ数字なので、**実測と一致させる意味はない**
+// （締めると遅い機械で原因の分からない赤になる）。固定できるのは
+// 「この機械で実測した走行時間すら覆えない値へ縮める退行」までで、
+// `tests/child-process-helper.test.ts` がそれを落とす
+export const MEASURED_WIDEST_CHILD_COUNT = 17;
+export const MEASURED_WIDEST_RUNTIME_MS = 10_400;
+
+// 子プロセス 1 本が正常に走り終わるまでの見積もり（本数ぶん積む分）。
+// 上の実測（1 本 0.61 秒）に対して**約 8 倍**を取る
 const PER_CHILD_RUNTIME_ALLOWANCE_MS = 5_000;
 
 // vitest 側の上限に足す余裕 (起動・後片付けの分)
@@ -52,7 +61,11 @@ const TEST_TIMEOUT_MARGIN_MS = 30_000;
 //
 // 内訳は「張り付いた 1 本ぶん ＋ 残りが正常に走る見積もり ＋ 後片付けの余裕」。
 // **既定の 5 秒のまま放置しない**ことが要点で、そのときだけは原因を言わない
-// 「Test timed out in 5000ms」になる
+// 「Test timed out in 5000ms」になる。
+//
+// **渡す本数が正しいかは機械で見張っていない** — `testBudgetFor(1)` と書いたまま子を
+// 17 本起こすテストにしても、上側の検査（CI のジョブの上限を超えないこと）は落ちない。
+// 子を起こす形を変えたときに本数も直すのは規約とレビューで守る
 export function testBudgetFor(children: number): number {
   // 張り付いた 1 本ぶん＋本数ぶんの正常な走行時間＋余裕
   return CHILD_TIMEOUT_MS + children * PER_CHILD_RUNTIME_ALLOWANCE_MS + TEST_TIMEOUT_MARGIN_MS;

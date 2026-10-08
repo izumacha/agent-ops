@@ -8,6 +8,8 @@ import {
   expectRan,
   interpretRepoRoot,
   interpretTrackedFiles,
+  MEASURED_WIDEST_CHILD_COUNT,
+  MEASURED_WIDEST_RUNTIME_MS,
   testBudgetFor,
 } from './lib/child-process';
 
@@ -184,7 +186,17 @@ describe('interpretRepoRoot（リポジトリの根の読み方）', () => {
 // **なぜ要るか**: この関数が守っているのは「vitest の締め切りが子の上限より先に来ない」
 // ことだけで、短くしても**張り付かない限り誰も気付かない**（原因の分からない
 // 「Test timed out in …」になるのは退行の後に実際に何かが張り付いたときだけ）。
-// 掛け算を落とす・余裕を 0 にするといった退行は本番の挙動を変えないので、ここで押さえる。
+//
+// **ここで落とせるもの**: 張り付いた 1 本ぶんを落とす／本数ぶんを定数へ畳む／
+// 本数に比例しない形にする／本数ぶん子の上限を積む（CI のジョブの上限を超える）／
+// **1 本ぶんの見積もりを実測の走行時間より小さくする**（下限は `MEASURED_WIDEST_*` から引く）。
+//
+// **ここで落とせないもの**（どれも規約とレビューで守る）:
+// (a) 後片付けの余裕（`TEST_TIMEOUT_MARGIN_MS`）を 0 にする退行 — 実測の根拠を持たない
+//     判断値で、0 でも「張り付いた 1 本 ＋ 残りの走行時間」は覆えているので下限を置いていない。
+// (b) 見積もりが遅い CI ランナーで足りているか — 締めると遅い機械で原因の分からない赤になる。
+// (c) 呼び出し側が渡す本数が実際の本数と合っているか（`tests/gate-scripts.test.ts` の
+//     締め切りの検査も上側しか見ない）。
 describe('testBudgetFor（子プロセスを起こすテストの締め切り）', () => {
   it('どの本数でも、張り付いた子 1 本ぶんの上限を必ず上回る', () => {
     // 1 本から 20 本まで、子側の上限より必ず長いこと。
@@ -201,6 +213,21 @@ describe('testBudgetFor（子プロセスを起こすテストの締め切り）
     expect(testBudgetFor(2)).toBeGreaterThan(testBudgetFor(1));
     // 増え方が本数に比例していること（1 本ぶんの増分が一定）
     expect(testBudgetFor(3) - testBudgetFor(2)).toBe(testBudgetFor(2) - testBudgetFor(1));
+  });
+
+  it('1 本ぶんの増分が、実測した 1 本の走行時間を下回らない', () => {
+    // **1 本ぶんの見積もりを潰す退行を落とす。** 比例と「1 本ぶんの上限を上回る」だけを
+    // 見ていた版では、見積もりを 1 ミリ秒にしても全件緑だった（実測）— 比は一定のままで、
+    // 180 秒の側が大きいので「上回る」も成り立つ。
+    // 下限は**この機械での実測**（いちばん子を多く起こすテストの所要時間 ÷ その本数）から引く。
+    // 遅い CI ランナー向けの見積もりとは別の、独立した手がかり
+    const measuredPerChild = MEASURED_WIDEST_RUNTIME_MS / MEASURED_WIDEST_CHILD_COUNT;
+    // 1 本増えたときの増分（＝1 本ぶんの見積もり）
+    const perChild = testBudgetFor(2) - testBudgetFor(1);
+    // 実測した 1 本ぶんすら覆えない値にしない
+    expect(perChild, '1 本ぶんの見積もりが実測の走行時間を下回っている').toBeGreaterThanOrEqual(
+      measuredPerChild,
+    );
   });
 
   it('本数 × 子の上限では積まない（CI のジョブの上限を超えるため）', () => {

@@ -27,7 +27,8 @@ import { dirname, join, resolve } from 'node:path';
 // 子プロセスの起動と終了の判定 (判定の正本は tests/lib/child-process.ts)
 import { CHILD_TIMEOUT_MS, expectRan, testBudgetFor } from './lib/child-process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { parse } from 'yaml';
+// YAML の読み口（マージキーの解決と fail-closed をここ 1 か所に集める）
+import { readYaml } from './lib/yaml';
 import {
   benchOutputProblems,
   e2eOutputProblems,
@@ -278,25 +279,37 @@ function requiredNpmFor(name: string): string[] {
 
 // negative control の 1 ケースが起こす子の本数（positive control の 1 本 ＋ 壊す対象の本数）の**上限**。
 //
-// **数値を書かない。** `it()` の締め切りが子の上限（`CHILD_TIMEOUT_MS`）の合計より短いと、
-// 子が張り付いたときに vitest の「Test timed out in …」が先に出て、`expectRan` の
-// 「完走しなかった (…: ETIMEDOUT)」という**原因を名指しした assertion が一度も出ない**。
-// 対象の本数は Step が進むと増えるので、導出から採って追随させる
-const MAX_SHIM_CHILDREN = Math.max(
-  ...gateScriptNames().map((name) => 1 + requiredNpmFor(name).length),
-);
+// **数値を書かない。** 対象の本数は Step が進むと増えるので、導出から採って追随させる。
+//
+// **`Math.max` の展開を素で書かない** — ゲートが 1 本も導けないと `Math.max()` は `-Infinity` を
+// 返し、締め切りが `NaN` になって**「上限なし」と同じ**挙動になる（下の検査は
+// `Math.max(MAX_SHIM_CHILDREN, 共有モジュールの本数)` を見るので、こちらが `-Infinity` でも
+// もう一方の本数で埋まり**気付けない**）。導出が空なら前提が崩れているのでここで落とす
+const MAX_SHIM_CHILDREN = (() => {
+  // ゲートごとの「positive control の 1 本 ＋ 壊す対象の本数」
+  const counts = gateScriptNames().map((name) => 1 + requiredNpmFor(name).length);
+  // 1 本も導けていなければ fail-closed（`-Infinity` を締め切りへ流さない）
+  if (counts.length === 0)
+    throw new Error('ゲートスクリプトを 1 本も導けていない（子の本数の上限が決められない）');
+  // 最大の本数
+  return Math.max(...counts);
+})();
 
 // CI の `gate` ジョブ（このテストが走るジョブ）に書かれた上限をミリ秒で読む。
 //
 // **下の検査の相手側はここから導く**（45 という数字を書き写すと、ジョブ側を縮めたときに
 // こちらだけが古くなり、検査が「超えていない」と言い続ける）
 function gateJobTimeoutMs(): number {
-  // ワークフロー定義（CI の正本）
-  const workflow = parse(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')) as {
-    jobs?: Record<string, { 'timeout-minutes'?: number }>;
-  };
+  // ワークフロー定義（CI の正本）。**素の `parse` で読まない** — 読み口は
+  // `tests/lib/yaml.ts` に集めてあり、マージキー（`<<: *anchor`）の解決と
+  // 「解釈できなければ落とす」をそこが持つ。自分で読むと、アンカーで `gate` ジョブの
+  // 設定を取り込む書き方（`<<: *base`）に変えた瞬間 `timeout-minutes` が `undefined` になり、
+  // **正しい ci.yml なのに下の fail-closed が落ちる**（実測: 素の parse は `undefined`、
+  // `{ merge: true }` は 45 を返す）
+  const jobs = readYaml('.github', 'workflows', 'ci.yml').jobs as
+    Record<string, { 'timeout-minutes'?: number } | undefined> | undefined;
   // `gate` ジョブの上限（分）
-  const minutes = workflow.jobs?.gate?.['timeout-minutes'];
+  const minutes = jobs?.gate?.['timeout-minutes'];
   // **読めなければ落とす**（fail-closed。ジョブ名や項目が変わったら、この検査が
   // 黙って「上限なし」になるのを避ける）
   expect(
@@ -307,6 +320,16 @@ function gateJobTimeoutMs(): number {
   return (minutes as number) * 60_000;
 }
 
+// 子プロセスを起こすテストの `it()` の締め切りについて、**機械で見張れているのは上側だけ**。
+//
+// **見張っているもの**: いちばん子を多く起こすテストの締め切りが CI の `gate` ジョブの
+// `timeout-minutes` を超えないこと（超えるとジョブ側が先に死ぬので、`expectRan` の
+// 「完走しなかった (…: ETIMEDOUT)」という原因を名指しした assertion が一度も出ない）。
+//
+// **見張っていないもの**: 各 `it()` が渡している本数が、そのテストが実際に起こす本数と
+// 合っているか。`testBudgetFor(1)` と書いたまま子を 17 本起こすテストにしても、
+// ここは落ちない（実際に張り付くまで誰も気付かない）。本数は呼び出し側が自分で数えるので、
+// **子を起こす形を変えたときは渡す本数も直す**のは規約とレビューで守る
 describe('子プロセスを起こすテストの締め切り', () => {
   it('いちばん子を多く起こすテストの締め切りが CI のジョブの上限を超えない', () => {
     // 子を起こすテストのうち最大の本数（negative control と共有モジュールの import）
@@ -3569,26 +3592,33 @@ describe('判定の結線', () => {
     Object.entries(BENCH_PAYLOADS).flatMap(([label, entry]) =>
       entry.breaks.map((patch, index) => [label, index, patch] as const),
     ),
-  )('素の Node でも基準を破れば passed: false と非 0 終了: %s #%i', (label, _index, patch) => {
-    // **これが「基準が本当に強制されているか」の実行時の担保。全基準を 1 本ずつ破って回す** —
-    // 最初の 1 基準だけを破っていたときは、残りの判定に
-    // `if (process.env.NODE_ENV === 'production') return null;` を入れても全件緑だった (実測)。
-    // 静的検査はどれも「その綴りがあるか」しか見ないので、共有モジュールの中に
-    // `if (process.env.NODE_ENV !== 'test') payload.slowestMs = 0;` を 1 行入れるだけで
-    // 受け入れ基準が完全に無効化されるのに全件緑だった (実測)。**vitest の印と NODE_ENV を
-    // 落とした子プロセス**で、基準を破る実測値を実際に通して落ちることを確かめる
-    const broken = { ...BENCH_PAYLOADS[label].ok, ...patch };
-    const run = runBenchInCleanChild(label, broken);
-    // 基準を満たしていないと出ること
-    expect(run, `${label} が素の Node で passed: false にならない`).toContain('"passed":false');
-    // **実測値がそのまま出ていること** (テストのときだけ本物を使う分岐を落とす)
-    for (const [field, value] of Object.entries(broken))
-      expect(run, `${label} の ${field} が書き換えられている`).toContain(
-        `${JSON.stringify(field)}:${JSON.stringify(value)}`,
-      );
-    // 非 0 で終わること (ゲートは終了コードも見る)
-    expect(run, `${label} が素の Node で非 0 終了しない`).toContain('EXIT_CODE=1');
-  });
+  )(
+    '素の Node でも基準を破れば passed: false と非 0 終了: %s #%i',
+    (label, _index, patch) => {
+      // **これが「基準が本当に強制されているか」の実行時の担保。全基準を 1 本ずつ破って回す** —
+      // 最初の 1 基準だけを破っていたときは、残りの判定に
+      // `if (process.env.NODE_ENV === 'production') return null;` を入れても全件緑だった (実測)。
+      // 静的検査はどれも「その綴りがあるか」しか見ないので、共有モジュールの中に
+      // `if (process.env.NODE_ENV !== 'test') payload.slowestMs = 0;` を 1 行入れるだけで
+      // 受け入れ基準が完全に無効化されるのに全件緑だった (実測)。**vitest の印と NODE_ENV を
+      // 落とした子プロセス**で、基準を破る実測値を実際に通して落ちることを確かめる
+      const broken = { ...BENCH_PAYLOADS[label].ok, ...patch };
+      const run = runBenchInCleanChild(label, broken);
+      // 基準を満たしていないと出ること
+      expect(run, `${label} が素の Node で passed: false にならない`).toContain('"passed":false');
+      // **実測値がそのまま出ていること** (テストのときだけ本物を使う分岐を落とす)
+      for (const [field, value] of Object.entries(broken))
+        expect(run, `${label} の ${field} が書き換えられている`).toContain(
+          `${JSON.stringify(field)}:${JSON.stringify(value)}`,
+        );
+      // 非 0 で終わること (ゲートは終了コードも見る)
+      expect(run, `${label} が素の Node で非 0 終了しない`).toContain('EXIT_CODE=1');
+      // **既定の 5 秒のまま放置しない** — `runBenchInCleanChild` が起こす子の上限は
+      // `CHILD_TIMEOUT_MS`（180 秒）なので、既定だと子が張り付いたときに vitest の
+      // 「Test timed out in 5000ms」が先に出て原因が消える（子は 1 本）
+    },
+    testBudgetFor(1),
+  );
 
   it.each(Object.keys(BENCH_PAYLOADS))(
     '素の Node で基準を満たせば passed: true と終了コード据え置き: %s',
@@ -3598,6 +3628,8 @@ describe('判定の結線', () => {
       expect(run).toContain('"passed":true');
       expect(run).toContain('EXIT_CODE=undefined');
     },
+    // 上と同じ理由で既定の 5 秒を使わない（子は 1 本）
+    testBudgetFor(1),
   );
 
   it('挙動を確かめる表がベンチのラベルを網羅している', () => {

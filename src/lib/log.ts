@@ -208,6 +208,31 @@ export type LogEventName = keyof typeof LOG_EVENTS;
 
 // 語彙も引けなかったときの深刻度。**最も重い側へ倒す**（縮退した行を見落とさせない）
 const FALLBACK_LOG_LEVEL: LogLevel = 'error';
+
+/**
+ * 語彙から宣言を引く。**自身のキーとして持つものだけを信用する。**
+ *
+ * **素の添字だと `Object.prototype` 由来の値が返る**（実測: `formatLogLine('constructor')` は
+ * `level` も `message` も無い行を出し、`logEvent('valueOf')` はログに深刻度の無い行を出しながら
+ * メトリクスには `level="error"` で数えた）。`spec.level` が `undefined` になるだけで
+ * `TypeError` にならないので、素の添字のままでは縮退の経路へ一度も届かなかった。
+ *
+ * **守備範囲を正確に書く。** 上の実測は**縮退の受け（`spec?.level ?? …`）が無かった版**での
+ * ものなので、いま `Object.hasOwn` を外しても**観測できる挙動は変わらない**（実測: 67 件すべて
+ * 緑）— `Object.prototype.constructor` は `level` も `message` も持たないため、受けが
+ * そのまま拾う。実際に約束（「語彙に無いキーでも必ず深刻度と文言が付く」）を支えているのは
+ * **受けの側**で、そこを素の `spec.level` へ戻す変異は 7 件が落ちる（実測）。
+ * この引きを残すのは**宣言した戻り値の型を本当のことにする**ため — 外すと `LogEventSpec`
+ * ではない値が `LogEventSpec | undefined` として出ていき、次に `spec.level` と素で書いた人が
+ * 受け取るのは `undefined` ではなく Object 由来の値になる（それが上の壊れた行の正体）。
+ * `src/domain/plan.ts` の `planLimitsFor` と `tests/error-logging.test.ts` も同じ引き方。
+ * @param event 出来事の名前（型の外から渡されることもある）
+ * @returns 語彙の宣言（無ければ undefined）
+ */
+function lookupLogEvent(event: LogEventName): LogEventSpec | undefined {
+  // 表が自身のキーとして持つものだけを返す
+  return Object.hasOwn(LOG_EVENTS, event) ? LOG_EVENTS[event] : undefined;
+}
 // 語彙も引けなかったときの説明（表の文言が使えないので、何が起きたかだけを書く）
 const FALLBACK_LOG_MESSAGE = 'ログ 1 行の整形に失敗したため、出来事の識別子だけを残しました';
 
@@ -237,28 +262,29 @@ export function formatLogLine(
   now: Date = new Date(),
 ): string {
   // **失敗しうる操作はすべて同じ try の中で行う**:
-  //   - 語彙の引き（型の外から呼ばれると `undefined` になり、`spec.level` で TypeError）
   //   - 時刻の整形（無効な `Date` の `toISOString()` は RangeError）
   //   - JSON 化（循環参照・BigInt）
   try {
-    // 語彙から深刻度と説明を引く（表に無いキーは型が拒むが、型の外からの呼び出しもありうる）
-    const spec = LOG_EVENTS[event];
-    // 行の骨組み。順番を固定して、目で追うときに読みやすくする
+    // 語彙から深刻度と説明を引く。**`lookupLogEvent` を通す** — 素の添字だと
+    // `Object.prototype` 由来の値が `LogEventSpec` として返るので、宣言した型が嘘になる
+    // （下の `?? FALLBACK_…` が実際の縮退を担うことは `lookupLogEvent` の説明に書いた）
+    const spec = lookupLogEvent(event);
+    // 行の骨組み。順番を固定して、目で追うときに読みやすくする。
+    // 引けなければ最も重い側へ倒し、文言も定型文で埋める（下の catch と同じ扱い）
     const line: Record<string, unknown> = {
       ts: now.toISOString(),
-      level: spec.level,
+      level: spec?.level ?? FALLBACK_LOG_LEVEL,
       event,
-      message: spec.message,
+      message: spec?.message ?? FALLBACK_LOG_MESSAGE,
     };
     // 診断があれば添える（無い出来事では鍵そのものを出さない）
     if (described !== undefined) line.error = described;
     // 1 行の JSON にして返す
     return JSON.stringify(line);
   } catch {
-    // **語彙は `?.` で引く。** 以前は `spec.level` を読み直していたので、語彙を引けなかった
-    // 場合は縮退の経路も投げていた（docstring の「例外を投げない」が成り立っていなかった）。
+    // ここへ来るのは時刻の整形か JSON 化が失敗したときだけ（語彙の引きは上で縮退済み）。
     // 引けるなら表の文言を使う（診断が JSON にできなかっただけなら、文言は有用なまま）
-    const spec: LogEventSpec | undefined = LOG_EVENTS[event];
+    const spec: LogEventSpec | undefined = lookupLogEvent(event);
     // 時刻はその場で取り直す（`new Date()` は必ず有効）。深刻度は引けなければ最も重い側へ倒す
     return JSON.stringify({
       ts: new Date().toISOString(),
@@ -275,23 +301,35 @@ export function formatLogLine(
  * **数えるのはここ 1 か所** — 出口とカウンタを同じ関数に置くので、同じモジュール実体の中では
  * 「ログには出たのにメトリクスには出ない」食い違いが起きない。
  *
- * **ただし実体をまたぐと起きる（実測）。** 入口（`src/proxy.ts`）は Route Handler とは別の
- * モジュール実体で評価されるので、そこから出した出来事の行は stderr に出るのに
- * `agentops_log_events_total` には**永久に現れない**（`countHttpResponse` について本番ビルドで
- * 実測したのと同じ分離）。だから `entry.undecodable_path` を系列の有無で警報に使わないこと
- * （条件はログ側の `event` で書く）。種類の一覧は `src/lib/metrics.ts` の
+ * **ただし実体をまたぐと起きる（実測）。** Next.js はアプリを**複数の束**へ分けて配るので、
+ * `src/lib/metrics.ts` の系列も束ごとに別の実体になる。本番ビルドで確認した束は 3 つ:
+ * (a) Route Handler（`src/app` 配下の `route.ts`。`/metrics` が読むのはこの実体）、
+ * (b) 画面の描画と **Server Action**（`app` 配下の `page.js` が読む `chunks/ssr/` の束）、
+ * (c) 入口（`src/proxy.ts`）。
+ *
+ * **つまり `agentops_log_events_total` に現れるのは (a) が実行した分だけ。**
+ * `session.login_rejected` / `session.cross_origin_action` は Server Action からしか出ないので
+ * **系列に永久に現れず**、`plan.unknown_plan` のように両方の層から出る出来事は**一部しか
+ * 数えられない**。
+ *
+ * **だから `event` の警報はログの行で組む。** メトリクスの系列を条件にすると、(b) や (c) の
+ * 出来事では一度も発火しない（`docs/deploy.md` の「監視を繋ぐ」にも同じことを書いてある）。
+ * 応答の側で数えない種類の一覧は `src/lib/metrics.ts` の
  * `UNCOUNTED_RESPONSE_SOURCES` が正本。
  * @param event 出来事の名前
  * @param described `describeError()` が作った診断（省略可）
  */
 export function logEvent(event: LogEventName, described?: Record<string, unknown>): void {
   // 語彙から宣言を引く。**`formatLogLine` と同じく防御的に引く** — 以前はここで
-  // `LOG_EVENTS[event].level` を直接読んでいたので、**語彙に無いキーではここで TypeError**
+  // `LOG_EVENTS[event].level` を直接読んでいたので、**語彙に無いキーではここで TypeError**（※）
   // になり、`formatLogLine` に入れた縮退の経路へ一度も届かなかった（固めたのは到達しない側）。
   // この関数は `catch` の中からも、`pg` のプール障害ハンドラ（要求の外。
   // `src/lib/prisma-client.ts`）からも呼ばれるので、投げると本来の失敗が別の失敗に化けるか、
   // 誰も捕まえられない例外になる
-  const spec: LogEventSpec | undefined = LOG_EVENTS[event];
+  const spec: LogEventSpec | undefined = lookupLogEvent(event);
+  // ※ 正確には `Object.prototype` のキー（`constructor` / `valueOf` 等）では TypeError にも
+  // ならず、深刻度も文言も無い行が出ていた。だから引きは `lookupLogEvent`（`Object.hasOwn`）に
+  // 寄せてある。
   // 深刻度をラベルに使う（語彙が閉じているので系列は増えない。引けなければ最も重い側へ倒す）
   incrementCounter('agentops_log_events_total', {
     event,

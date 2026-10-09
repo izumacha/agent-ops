@@ -128,6 +128,38 @@ describe('整形が失敗しても投げない', () => {
     expect(Number.isNaN(Date.parse(parsed.ts as string))).toBe(false);
   });
 
+  it.each(['constructor', 'valueOf', 'toString', '__proto__'])(
+    'Object.prototype のキー (%s) でも深刻度と文言が付く',
+    (event) => {
+      // **実測した退行**: 素の添字だと `Object.prototype` 由来の値が返るので `spec.level` は
+      // `undefined` になるだけで `TypeError` にならず、**縮退の経路へ一度も届かない**。
+      // 結果 `{"ts":"…","event":"constructor"}` という**深刻度も文言も無い行**が出ていた
+      // （深刻度で振り分けるログ基盤はその行を捨てる）。語彙に**無い**キーだけを試していた
+      // 版では拾えなかった
+      const line = JSON.parse(formatLogLine(event as never)) as Record<string, unknown>;
+      // 深刻度は最も重い側へ倒れる
+      expect(line.level).toBe('error');
+      // 文言も定型文で埋まる（空の行にしない）
+      expect(typeof line.message).toBe('string');
+      expect((line.message as string).length).toBeGreaterThan(0);
+      // 出来事の識別子はそのまま残る
+      expect(line.event).toBe(event);
+    },
+  );
+
+  it('Object.prototype のキーでも、ログとメトリクスの深刻度がそろう', () => {
+    // ログを端末へ出さない
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // 語彙に無い「継承しているだけ」のキーで出す
+      logEvent('valueOf' as never);
+      // ログ側の深刻度
+      expect(parseLoggedLine(spy.mock.calls[0]).level).toBe('error');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('logEvent も語彙に無いキーで投げない（固めた縮退へ実際に届く）', () => {
     // ログを端末へ出さない
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});

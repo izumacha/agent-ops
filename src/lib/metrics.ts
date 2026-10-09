@@ -18,7 +18,8 @@ export const COUNTERS = {
   // 応答の数。method と status で分ける（どちらも閉じた集合なので系列は増えない）
   agentops_http_responses_total: 'HTTP で返した応答の数 (method / status 別)',
   // ログに出した出来事の数。event と level で分ける（語彙は LOG_EVENTS が閉じている）
-  agentops_log_events_total: 'ログに出した出来事の数 (event / level 別)',
+  agentops_log_events_total:
+    'ログに出した出来事の数 (event / level 別。Route Handler の束が実行した分だけ)',
   // 系列の上限を超えて捨てた増加の数（0 でないときはラベルの設計を間違えている）
   agentops_metrics_series_dropped_total: '系列数の上限を超えて捨てたカウントの数',
 } as const;
@@ -114,12 +115,35 @@ const KEY_SEPARATOR = '\u0000';
  * @returns Map のキーに使う文字列
  */
 function seriesKey(name: CounterName, labels: MetricLabels): string {
-  // ラベルを名前順に並べて `名前=値` の列にする
+  // ラベルを名前順に並べて `名前=値` の列にする（**値から区切り文字を除く**。理由は下記）
   const pairs = Object.keys(labels)
     .sort()
-    .map((label) => `${label}=${labels[label] ?? ''}`);
+    .map((label) => `${label}=${withoutKeySeparator(labels[label] ?? '')}`);
   // カウンタ名と連結する
   return [name, ...pairs].join(KEY_SEPARATOR);
+}
+
+/**
+ * キーの区切りに使う文字を値から除く。
+ *
+ * **この 1 行が無いと、ラベル値に NUL が 1 つ入るだけで出力全体が壊れる**（実測）。
+ * `renderMetrics` はキーを同じ区切りで割り直すので、値の中の NUL が余分な区切りになり、
+ * その断片に `=` が無いまま**ラベル名が空の標本**（`{event="a",="b",level="error"}`）が出る。
+ * Prometheus はその行だけでなく**そのターゲットのスクレイプ全体を捨てる**ので、系列が
+ * 1 本壊れるのではなく監視が丸ごと止まる。
+ *
+ * `escapeLabelValue` は「将来うっかり可変の値を渡しても出力が壊れない」ために `\` / `"` /
+ * 改行を逃がしているが、**区切り文字だけはその保証から漏れていた** — あれは出力のときに
+ * 掛かるので、キーの段で崩れた構造は直せない。
+ *
+ * 置き換え先は U+FFFD（置換文字）。閉じた語彙の値に NUL は現れないので、見えたら呼び出し側の
+ * 不具合であり、**潰して隠すのではなく読める形で残す**。
+ * @param value ラベル値
+ * @returns 区切り文字を含まない値
+ */
+function withoutKeySeparator(value: string): string {
+  // 区切りに使う文字だけを置換文字へ替える
+  return value.replaceAll(KEY_SEPARATOR, '\uFFFD');
 }
 
 /**

@@ -37,6 +37,9 @@ export interface DashboardSession {
  * `agentops_http_responses_total` に乗らない（`src/lib/metrics.ts` の
  * `UNCOUNTED_RESPONSE_SOURCES`）ので、ログが唯一の出口になる。**判定の呼び出し側ではなく
  * ここで出す** — 画面ごとに書くと、Server Action を足した人が出し忘れたぶんだけ黙る。
+ *
+ * **毎回出す**（1 プロセスに 1 度にしない）。設定の通知と違い、率そのものが信号なので
+ * 間引くと意味が消える。量は前段のレート制限で抑える（理由は `src/app/login/actions.ts`）。
  */
 export async function isSameOriginAction(): Promise<boolean> {
   // ヘッダを読む（Next.js 16 では非同期）

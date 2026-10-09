@@ -178,6 +178,21 @@ describe('メトリクスのカウンタ', () => {
     );
   });
 
+  it('ラベル値の NUL で出力が壊れない（キーの区切りと衝突させない）', () => {
+    // **実測**: 以前はキーを同じ文字で割り直していたので、値の中の NUL が余分な区切りになり
+    // `{event="a",="b",level="error"}` という**ラベル名が空の標本**が出た。Prometheus は
+    // その行だけでなく**そのターゲットのスクレイプ全体を捨てる**ので、監視が丸ごと止まる
+    incrementCounter('agentops_log_events_total', { event: 'a\u0000b', level: 'error' });
+    // 書き出した行
+    const line = renderMetrics(new Date())
+      .split('\n')
+      .find((text) => text.startsWith('agentops_log_events_total{'));
+    // ラベル名が空の項目が無いこと（`,="` や `{="` が現れない）
+    expect(line).not.toMatch(/[{,]="/);
+    // 値は置換文字として読める形で残る（潰して隠さない）
+    expect(line).toBe('agentops_log_events_total{event="a\uFFFDb",level="error"} 1');
+  });
+
   it('逃がさなければ行が割れる文字が、1 つも生のまま出ない', () => {
     // **規則の 3 文字を数え上げるのではなく「行が割れないこと」を見る** — CR は規則の一覧に
     // 無いので、綴りを数える検査では落ちない（CRLF で行を割る収集側は値の途中で切るか

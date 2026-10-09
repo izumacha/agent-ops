@@ -42,7 +42,15 @@ export async function login(_previous: LoginState, formData: FormData): Promise<
   // 通らなければ理由を区別せず同じ文言を返す。**サーバログには 1 行残す** —
   // Server Action の応答は `agentops_http_responses_total` に乗らないので
   // （`src/lib/metrics.ts` の `UNCOUNTED_RESPONSE_SOURCES`）、ログが唯一の出口になる。
-  // 残さないと、貼り付けトークンへの総当たりがどの出口にも現れない
+  // 残さないと、貼り付けトークンへの総当たりがどの出口にも現れない。
+  //
+  // **1 プロセスに 1 度ではなく毎回出す。** `src/proxy.ts` の `entry.undecodable_path` と
+  // `metrics-auth.ts` の短すぎるトークンの警告は「毎回出すとログを埋められる」として
+  // 1 度だけにしているが、あの 2 つは**設定・要求の形**の通知で 2 件目以降に情報が無い。
+  // こちらは**率そのものが信号**（1 件は打ち間違い、1 分で 500 件は総当たり）なので、
+  // 間引くと足したことの意味が消える。量は前段で抑える — README の「前段の責務」が
+  // **認証経路のレート制限は前段で掛ける**と決めている（アプリ側の枠のキーは認証済みの
+  // 主体から作るので、まだ認証していないこの経路には無い）
   if (principal === null) {
     // 拒否したことだけを出す（トークンも理由も出さない。理由を区別しないのは上の方針と同じ）
     logEvent('session.login_rejected');

@@ -194,8 +194,10 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     画面の通信量・エラー率は**前段のアクセスログ**で見る。
   - Server Action（`'use server'` のモジュール）。<!--uncounted:serverAction-->
     同じく包める入口が無い。**ダッシュボードのログインの拒否はログに出る**ので、総当たりは
-    `session.login_rejected` の増加で警報にできる（別オリジンからの送信は
-    `session.cross_origin_action`）。`agentops_http_responses_total` では見えない。
+    `session.login_rejected` の行を数えて警報にする（別オリジンからの送信は
+    `session.cross_origin_action`）。**条件はログの `event` で組むこと** —
+    `agentops_http_responses_total` にも `agentops_log_events_total` にも現れない
+    （下の「ログの出来事の数は Route Handler の束の分だけ」を参照）。
   - Next.js がルートの代わりに組み立てる応答。<!--uncounted:frameworkSynthesized-->
     export の無いメソッドへの **405** と、自動実装される **`OPTIONS`** の 204。
     本番ビルドで実測（3 件とも系列に現れない）。**メソッド総当たりの 405 の急増は
@@ -204,7 +206,17 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - Route Handler から投げた Next.js の制御フローの例外。<!--uncounted:nextControlFlow-->
     `redirect()` / `notFound()` などは応答を Next.js が組み立てるので、アプリ側に数える場所が
     無い（包むラッパーはこれを 500 へ写さず投げ直す。写すと遷移も 404 も起きない）。
+    **数えられないだけでなく `Cache-Control: no-store` も `Vary` も付かない**（押印も
+    ラッパーの中なので投げ直した時点で通らない）。遷移先は共通のログイン画面でテナント固有の
+    内容を持たないが、**認証付きの経路から投げるようになったら前段のキャッシュ設定を見直す**。
     **いま投げている経路は 1 本も無い**が、画面側のルートを `requireSession()` へ寄せると
     生まれる。前段のアクセスログで見る。
+- **`agentops_log_events_total` は Route Handler の束が実行した分だけ。** Next.js はアプリを
+  複数の束へ分けて配るので、カウンタの状態も束ごとに別の実体になる（本番ビルドで確認した束は
+  3 つ: Route Handler ／ 画面の描画と Server Action ／ 入口）。`/metrics` が読むのは
+  Route Handler の実体なので、**Server Action や入口からしか出ない出来事は系列に現れず**
+  （`session.login_rejected` / `session.cross_origin_action` / `entry.undecodable_path`）、
+  両方の層から出る出来事（`plan.unknown_plan`）は一部しか数えられない。
+  **`event` の警報はログの行で組むこと。** メトリクスの系列を条件にすると一度も発火しない。
 - **耐久する事実はここに出さない。** 利用量・コストは `GET /api/v1/usage/daily`、
   インシデントは画面と `GET /api/v1/incidents`、操作の記録は `GET /api/v1/audit-logs`。

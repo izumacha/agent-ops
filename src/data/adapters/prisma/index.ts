@@ -1774,7 +1774,14 @@ class PrismaRateLimit implements RateLimitPort {
     // 期限切れを古い順に `limit` 件まで消す（`at` の索引が効く）。
     // **`deleteMany` では上限を書けない**ので、消す対象を副問い合わせで決める。
     // **境目は DB の時計が決める**（`statement_timestamp()`）— 呼び出し側の壁時計で決めると
-    // アプリが進んでいる配備で生きている記録を消す（理由は Port の `sweep`）
+    // アプリが進んでいる配備で生きている記録を消す（理由は Port の `sweep`）。
+    //
+    // **`FOR UPDATE SKIP LOCKED` で、別のトランザクションが掴んでいる行は飛ばす。**
+    // この掃きはキーで絞らないので `consume` の per-key の掃き出しと対象が重なる
+    // （どちらも最も古い行を狙う）。待つ形にすると `consume` 側が `lock_timeout` の中で
+    // 待たされて 429 になり、しかも理由は「枠の混雑」として記録される — 原因は定期掃きなので
+    // 運用者は上限を調べて空振りする。飛ばした行は次のバッチか次の一巡で消えるので
+    // 取りこぼしにはならない（呼び出し側は「上限未満が返るまで」繰り返す）
     const deleted = await this.db.$executeRaw`
       DELETE FROM "RateLimitHit"
       WHERE "id" IN (
@@ -1783,6 +1790,8 @@ class PrismaRateLimit implements RateLimitPort {
                        - make_interval(secs => ${windowSeconds}::double precision)
         ORDER BY "at"
         LIMIT ${limit}
+        -- 別のトランザクションが掴んでいる行は飛ばす（理由は下のコメント）
+        FOR UPDATE SKIP LOCKED
       )
     `;
     // 消した件数（`$executeRaw` は影響行数を返す）

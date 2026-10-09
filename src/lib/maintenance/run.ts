@@ -276,8 +276,10 @@ export async function runMaintenance(
         // 飛ばした事実を残す（ティックの終了コードにも出る）。
         // **渡すのは語彙のキーと `describeError(...)` だけ** — 出口の規約（`src/lib/log.ts` と
         // `tests/error-logging.test.ts`）で、例外に触れてよいのはあの関数だけなので
-        // テナント ID は添えない（どのテナントかは例外の文脈から追う）
-        logEvent('maintenance.tenant_scan_failed', describeError(error));
+        // テナント ID は添えない（どのテナントかは例外の文脈から追う）。
+        // **語彙はテナントの一覧が読めなかった場合と分ける** — 同じ文言だと運用者が
+        // 「1 テナントだけ取りこぼした」と読んで規模を取り違える
+        logEvent('maintenance.tenant_skipped', describeError(error));
         progress.failed += 1;
         // カーソルを進めて次のテナントへ（同じテナントで止まり続けない）
         tenantCursor = { createdAt: tenant.createdAt, id: tenant.id };

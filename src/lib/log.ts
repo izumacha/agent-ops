@@ -200,9 +200,18 @@ export const LOG_EVENTS = {
     message: 'ガードレールの判定に失敗しました',
   },
   // --- 保守の定期実行（ADR-0016） ---
+  // **2 つに分けてある。** 文言は「その項目について真であること」だけを守る規約なので
+  // （`AllowedHostsPolicy` の `DeadEntryReason` を分けたのと同じ理由）、1 テナントを飛ばした
+  // 場合と、それ以降を 1 件も歩けなかった場合を同じ文言で出すと規模を取り違える
+  'maintenance.tenant_skipped': {
+    level: 'error',
+    message:
+      'エージェントの一覧を読めませんでした (このテナントは今回の一巡では判定していません。次のテナントへ進みます)',
+  },
   'maintenance.tenant_scan_failed': {
     level: 'error',
-    message: 'テナントを歩けませんでした (このテナントは今回の一巡では判定していません)',
+    message:
+      'テナントの一覧を読めませんでした (この要求はここで終わり、以降のテナントは次の要求が続きから歩きます)',
   },
   // --- 通知（Step4） ---
   'notify.response_drain_failed': {

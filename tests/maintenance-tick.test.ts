@@ -282,6 +282,35 @@ describe('保守の定期実行のティック', () => {
     expect(received.paths).toEqual(['/ops/api/v1/maintenance/run']);
   });
 
+  it('入口にクエリが付いていても接頭辞を落とさない', async () => {
+    // `href` の末尾に `/` を足す形だとクエリに付いてしまい、接頭辞が消える
+    const { baseUrl, received } = await startStub([result()]);
+    const tick = await runTick({
+      MAINTENANCE_BASE_URL: `${baseUrl}/ops?x=1`,
+      PLATFORM_ADMIN_TOKEN: TOKEN,
+    });
+    expect(tick.status, tick.stderr).toBe(0);
+    expect(received.paths).toEqual(['/ops/api/v1/maintenance/run']);
+  });
+
+  it('本文が null でも理由を名乗って非 0 で終わる（添字の TypeError にしない）', async () => {
+    // 200 で本文が JSON の `null`（`json()` は成功するので上の包みを通り抜ける）
+    server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('null');
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('ポートを取れません');
+    const tick = await runTick({
+      MAINTENANCE_BASE_URL: `http://127.0.0.1:${address.port}`,
+      PLATFORM_ADMIN_TOKEN: TOKEN,
+    });
+    expect(tick.status).not.toBe(0);
+    expect(tick.stderr).toContain('[maintenance:tick]');
+    expect(tick.stderr).not.toContain('TypeError');
+  });
+
   it('予算の指定があれば本文に載せる', async () => {
     const { baseUrl, received } = await startStub([result()]);
     const tick = await runTick({

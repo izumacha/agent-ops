@@ -1340,30 +1340,39 @@ class MemoryRateLimit implements RateLimitPort {
   sweep(windowMs: number, limit: number): Promise<number> {
     // 境目は**表の時計**が決める（prisma が `statement_timestamp()` で決めるのと同じ分担）
     const before = new Date(this.store.now().getTime() - windowMs);
-    // 消した件数
-    let deleted = 0;
+    // **期限切れをいったん全キーぶん集める。** キーごとに消して上限で打ち切る形にすると、
+    // 打ち切りの順が `Map` の挿入順になり、**先頭のキーが枠を使い切ると後ろのキーの行が
+    // 1 件も掃かれない** — prisma 側は表全体から `ORDER BY at` で古い順に `LIMIT` 件消すので
+    // 並びがそろわず、ADR-0006 が閉じようとしている「2 つのアダプタで同じことをさせる」死角が
+    // この Port だけに開く（memory は本番ではないが、Port の約束＝「上限未満が返るまで
+    // 繰り返す」の下で特定のキーを永久に後回しにする挙動を許してしまう）
+    const expired: { key: string; hit: { tier: string; at: Date } }[] = [];
     // 全キーを見る（これが要るのは二度と来ないキーの記録なので、キーで絞らない）
-    for (const [key, hits] of this.store.rateLimitHits) {
-      // 上限に達したらそこで止める（prisma 側の `LIMIT` と同じ振る舞い）
-      if (deleted >= limit) break;
-      // 残す分と消す分に分ける（**古い順**に消すので、prisma 側の `ORDER BY at` と並びがそろう）
-      const expired = hits
-        .filter((hit) => hit.at.getTime() <= before.getTime())
-        .sort((left, right) => left.at.getTime() - right.at.getTime());
-      // この回で消せる分だけを対象にする
-      const removing = expired.slice(0, limit - deleted);
-      // 1 件も消さないなら次のキーへ
-      if (removing.length === 0) continue;
-      // 消す分を除いた残り
-      const remaining = hits.filter((hit) => !removing.includes(hit));
-      // 落ちた分を数える
-      deleted += removing.length;
+    for (const [key, hits] of this.store.rateLimitHits)
+      for (const hit of hits)
+        // 境目より古い（同値を含む）行だけを対象にする
+        if (hit.at.getTime() <= before.getTime()) expired.push({ key, hit });
+    // **表全体で古い順**に並べ、上限ぶんだけ取る（prisma 側の `ORDER BY at ... LIMIT` と同じ）
+    expired.sort((left, right) => left.hit.at.getTime() - right.hit.at.getTime());
+    const removing = expired.slice(0, limit);
+    // キーごとに消す分をまとめる（1 キーに複数件あるので集合で持つ）
+    const byKey = new Map<string, Set<{ tier: string; at: Date }>>();
+    for (const { key, hit } of removing) {
+      // そのキーの集合を用意する
+      const set = byKey.get(key) ?? new Set();
+      set.add(hit);
+      byKey.set(key, set);
+    }
+    // 表から落とす
+    for (const [key, drop] of byKey) {
+      // 残す分（消す対象に入っていない行）
+      const remaining = (this.store.rateLimitHits.get(key) ?? []).filter((hit) => !drop.has(hit));
       // 1 件も残らなければキーごと消す（表が無限に伸びないようにする）
       if (remaining.length === 0) this.store.rateLimitHits.delete(key);
       else this.store.rateLimitHits.set(key, remaining);
     }
     // 消した件数
-    return Promise.resolve(deleted);
+    return Promise.resolve(removing.length);
   }
 }
 

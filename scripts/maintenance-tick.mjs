@@ -144,11 +144,15 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   // 叩く先（**入口のパスを捨てない**）。`new URL('/api/v1/...', base)` は絶対パスなので
   // `https://host/ops` のような接頭辞付きの入口だと `/ops` が黙って落ち、毎回 404 になる
   // （しかも理由は「HTTP 404」としか出ないので、運用者は原因から遠ざけられる）。
-  // 検証済みの `entry` に末尾の `/` を足してから相対パスで足す
-  const endpoint = new URL(
-    'api/v1/maintenance/run',
-    entry.href.endsWith('/') ? entry.href : `${entry.href}/`,
-  );
+  //
+  // **組み立てはパスで行い、`href` に `/` を足す形にしない** — `href` はクエリや
+  // フラグメントを含むので、`https://host/ops?x=1` だと `/` がクエリに付いて（`?x=1/`）
+  // パスは `/ops` のままになり、相対参照が最終セグメントを落として接頭辞が消える
+  // （フラグメント付きも同じ。`docs/deploy.md` は「接頭辞はそのまま使われる」と約束している）。
+  // 入口のクエリ・フラグメントは API の呼び出しには関係しないので捨てる
+  const endpoint = new URL(entry.origin);
+  // 接頭辞の末尾に `/` を足してから足し込む（`/ops` → `/ops/api/v1/...`）
+  endpoint.pathname = `${entry.pathname.replace(/\/+$/, '')}/api/v1/maintenance/run`;
 
   // 1 要求送る。**例外をそのまま外へ出さない** — 素の `await` で落とすと Node が未処理の
   // reject として stack trace だけを出し、`[maintenance:tick]` の 1 行も下の合計の JSON も
@@ -198,6 +202,18 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   // 別の JSON を返すと `total.failed += undefined` で NaN になり、`NaN > 0` は偽なので
   // **取りこぼしの唯一の出口が黙って 0 終了する**（しかも合計の JSON には `null` と出るので
   // 「データなし」に見える）。予算の環境変数と同じく、叩く前後で数を確かめる扱いにそろえる
+  // **オブジェクトでなければ添字を引けない。** 本文が JSON の `null` だと `json()` は成功して
+  // `result === null` になり、下の添字が `TypeError` を投げて**未処理の reject**になる
+  // （名指しの 1 行も合計の JSON も残らない＝上の 2 つの包みで避けたのと同じ形）。
+  // 配列・文字列・数値は添字が `undefined` になって下の検査で名指しされるので、`null` だけが
+  // 門番の手前で落ちる非対称だった
+  if (typeof result !== 'object' || result === null) {
+    console.error(
+      '[maintenance:tick]',
+      `応答がオブジェクトではありません（受け取った値: ${JSON.stringify(result)}）`,
+    );
+    process.exit(1);
+  }
   for (const field of COUNTED_FIELDS) {
     if (!Number.isFinite(result[field])) {
       console.error(

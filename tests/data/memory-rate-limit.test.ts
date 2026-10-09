@@ -230,6 +230,23 @@ describe('窓から外れた記録の掃き出し (sweep)', () => {
     expect(repos.store.rateLimitHits.has(KEY)).toBe(false);
   });
 
+  it('上限で打ち切るときは表全体で古い順に消す（キーの並びで後回しにしない）', async () => {
+    // **キー A に新しめの 3 件、キー B に最も古い 1 件**を入れる（A を先に入れるので
+    // `Map` の挿入順では A が先頭になる）
+    await consume({ key: 'tenant:A', at: new Date(T0.getTime() + 10), sharedLimit: 10 });
+    await consume({ key: 'tenant:A', at: new Date(T0.getTime() + 11), sharedLimit: 10 });
+    await consume({ key: 'tenant:A', at: new Date(T0.getTime() + 12), sharedLimit: 10 });
+    await consume({ key: 'tenant:B', at: T0, sharedLimit: 10 });
+    // 表の時計を進めて 4 件すべてを窓の外へ出す
+    clock = new Date(T0.getTime() + WINDOW_MS * 2);
+    // **上限 1 で掃く**。キーごとに消して打ち切る実装だと A の 1 件が消えるが、
+    // prisma は表全体から `ORDER BY at` で選ぶので消えるのは B の行
+    expect(await repos.rateLimit.sweep(WINDOW_MS, 1)).toBe(1);
+    // **B が消えている**（キーの並びで後回しにしない）
+    expect(repos.store.rateLimitHits.has('tenant:B')).toBe(false);
+    expect(repos.store.rateLimitHits.get('tenant:A')).toHaveLength(3);
+  });
+
   it('消すものが無ければ 0 を返す（何度呼んでも安全）', async () => {
     // 記録を 1 件入れ、まだ窓の中であるうちに掃く
     await consume({ at: T0 });

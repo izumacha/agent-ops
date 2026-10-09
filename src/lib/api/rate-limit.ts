@@ -187,8 +187,10 @@ export function sharedRateLimitFor(
  * （ベンダーへの課金・外部の応答時間・DB と CPU）なので、上位プランでも 1 要求の重さは同じ。
  */
 export function extraRateLimitFor(tier: RateLimitTier): number | null {
-  // 追加の枠を持たない種類
-  const limit = EXTRA_FRAME_LIMIT[tier];
+  // 追加の枠を持たない種類。**素の添字では引かない** — 型の外から `constructor` のような値が
+  // 届くと `Object.prototype` 由来の関数が返り、以降の比較が意図しない経路へ落ちる
+  // （`src/domain/plan.ts` の `planLimitsFor` と `src/lib/log.ts` の `lookupLogEvent` と同じ引き方）
+  const limit = Object.hasOwn(EXTRA_FRAME_LIMIT, tier) ? EXTRA_FRAME_LIMIT[tier] : null;
   if (limit === null) return null;
   // テスト専用の上書きがあればそれを使う
   return extraLimitOverrideForTesting ?? limit;

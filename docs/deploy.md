@@ -204,8 +204,9 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - **未認証で誰でも叩ける経路の「断った」記録は間引いてある**（1 要求 1 行だと匿名の相手が
     ログの量＝保存の費用を好きなだけ増やせる）。対象は `billing.signature_rejected` /
     `metrics.token_rejected` / `session.login_rejected` / `session.cross_origin_action`
-    （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**。ここに件数も
-    ファイル名も書かない）。
+    （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
+    `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
+    ここが古いままなら落ちる。件数とファイル名は書かない）。
   - **間引きは「窓あたり 1 本」ではなく、窓の中の通算件数が 2 の冪のときだけ行にする**
     （1 / 2 / 4 / 8 / … 件目）。行には**その時点の通算件数**が `occurrence` として載る。
     だから**警報は「行が出たこと」で組み、規模は最後に出た行の `occurrence` で読む**。

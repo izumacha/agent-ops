@@ -300,14 +300,19 @@ describe('メトリクスのカウンタ', () => {
     expect(Math.abs(start! + uptime! - now.getTime() / 1_000)).toBeLessThan(0.01);
   });
 
-  it('稼働秒数は渡した時刻から求める（引数を無視していれば増えない）', () => {
-    // 起動時刻を読む
-    const start = valueOf(renderMetrics(new Date()), 'agentops_process_start_time_seconds');
-    expect(start).not.toBeNull();
-    // 起動から 1 時間後の時刻で書き出す
-    const later = new Date((start! + 3_600) * 1_000);
-    // 稼働秒数が約 1 時間になる（固定値を返していれば落ちる）
-    expect(valueOf(renderMetrics(later), 'agentops_process_uptime_seconds')).toBeCloseTo(3_600, 1);
+  // **稼働秒数は壁時計に依存しない。**
+  //
+  // `いま − 起動時刻` で求めていた版は、NTP が壁時計を稼働秒数より大きく巻き戻すと**負の値**を
+  // 書き出した（実測で `-1791547215.343`）。負になると用途が反転し、`< 60`（再起動の検出）の
+  // 警報が実体の無い再起動で鳴る。**巻き戻しは書き出す時刻を過去にして再現できる**
+  it('稼働秒数は壁時計の巻き戻しで負にならない（モノトニックな時計から求める）', () => {
+    // 1 年前の時刻で書き出す（壁時計が大きく巻き戻った配備と同じ）
+    const rewound = new Date(Date.now() - 365 * 24 * 3_600 * 1_000);
+    const uptime = valueOf(renderMetrics(rewound), 'agentops_process_uptime_seconds');
+    expect(uptime).not.toBeNull();
+    // 負にならず、Node が報告する経過秒数と一致する（**別の手掛かり**）
+    expect(uptime!).toBeGreaterThanOrEqual(0);
+    expect(Math.abs(uptime! - process.uptime())).toBeLessThan(1);
   });
 
   it('ゲージはカウンタと混ざらない（型の宣言が counter にならない）', () => {

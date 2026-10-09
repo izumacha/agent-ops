@@ -329,6 +329,40 @@ export function formatLogLine(
 }
 
 /**
+ * 1 行を組み立てて `console` へ出す（**出口はこの関数だけ**）。
+ *
+ * **深刻度で `console` のメソッドを選ぶ。** 行の JSON には `level` が入っているが、
+ * **配備先のログ基盤は `console` のメソッドで深刻度を付ける**（Vercel の runtime logs が
+ * そう）。全部 `console.error` で出していた頃は、利用者がダッシュボードのトークンを 1 回
+ * 打ち間違えただけで ERROR のレコードが立ち、プラットフォーム側のエラー率の警報が鳴った
+ * — 「文書どおり `level` で見ている運用者」と「基盤の深刻度で見ている運用者」で答えが
+ * 割れる。**1 行 1 JSON という形は変えない**（環境で分けないという決定はそのまま）。
+ *
+ * **この選び分けを呼び出し側へ写さない。** `logEvent` と `logEventThrottled` の 2 か所に
+ * 同じ分岐を書いていたので、深刻度を 1 つ増やすと**片方だけ直した**時点で間引く側の行が
+ * 黙って `console.error` へ落ちる（まさにこの分岐が塞いだ壊れ方が、間引く側だけで再発する）。
+ *
+ * **`console` へは `formatLogLine(...)` を直接渡す**（変数に入れない） —
+ * `tests/error-logging.test.ts` は実引数の**形**で許しているため。
+ * @param level 深刻度（呼び出し側が語彙から引いた値。ラベルと同じものを渡す）
+ * @param event 出来事の名前
+ * @param described 添える診断（無ければ undefined）
+ * @param now 行に載せる時刻
+ * @param occurrence その窓での通算件数（0 なら載せない）
+ */
+function writeLogLine(
+  level: LogLevel,
+  event: LogEventName,
+  described: Record<string, unknown> | undefined,
+  now: Date,
+  occurrence: number,
+): void {
+  // 深刻度で出口のメソッドを選ぶ（行の形は同じ）
+  if (level === 'warn') console.warn(formatLogLine(event, described, now, occurrence));
+  else console.error(formatLogLine(event, described, now, occurrence));
+}
+
+/**
  * 出来事をログへ出し、同時に数える。
  *
  * **数えるのはここ 1 か所** — 出口とカウンタを同じ関数に置くので、同じモジュール実体の中では
@@ -367,16 +401,8 @@ export function logEvent(event: LogEventName, described?: Record<string, unknown
   const level = spec?.level ?? FALLBACK_LOG_LEVEL;
   // 深刻度をラベルに使う（語彙が閉じているので系列は増えない。引けなければ最も重い側へ倒す）
   incrementCounter('agentops_log_events_total', { event, level });
-  // 1 行の JSON を出す。**`console` を呼ぶのは src 全体でこの 2 行だけ**（どちらも stderr）。
-  //
-  // **深刻度で `console` のメソッドを選ぶ。** 行の JSON には `level` が入っているが、
-  // **配備先のログ基盤は `console` のメソッドで深刻度を付ける**（Vercel の runtime logs が
-  // そう）。全部 `console.error` で出していた頃は、利用者がダッシュボードのトークンを 1 回
-  // 打ち間違えただけで ERROR のレコードが立ち、プラットフォーム側のエラー率の警報が鳴った
-  // — 「文書どおり `level` で見ている運用者」と「基盤の深刻度で見ている運用者」で答えが
-  // 割れる。**1 行 1 JSON という形は変えない**（環境で分けないという決定はそのまま）。
-  if (level === 'warn') console.warn(formatLogLine(event, described));
-  else console.error(formatLogLine(event, described));
+  // 1 行の JSON を出す（出口の選び分けは `writeLogLine` が持つ。通算件数は無いので 0）
+  writeLogLine(level, event, described, new Date(), 0);
 }
 
 // 間引くときの窓（ミリ秒）。この長さを 1 つの窓として通算件数を数え直す
@@ -462,12 +488,8 @@ export function logEventThrottled(event: LogEventName): void {
   if (!isReportableOccurrence(count)) return;
   // 1 行出す。**通算件数（`occurrence`）を添える**ので、最後の行がそのまま規模を表す。
   // **`logEvent` へ渡さずここで出す** — あちらは件数を知らないので、通してしまうと
-  // 数えるのが 2 度になるか、件数を載せる引数を公開の署名へ足すことになる。
-  // **`console` へは `formatLogLine(...)` を直接渡す**（変数に入れない） —
-  // `tests/error-logging.test.ts` は実引数の**形**で許しており、変数を挟むと
-  // 「何を渡しているか」が構文から読めなくなるので落ちる（`logEvent` 側も同じ形）
-  if (level === 'warn') console.warn(formatLogLine(event, undefined, new Date(now), count));
-  else console.error(formatLogLine(event, undefined, new Date(now), count));
+  // 数えるのが 2 度になるか、件数を載せる引数を公開の署名へ足すことになる
+  writeLogLine(level, event, undefined, new Date(now), count);
 }
 
 // 既に 1 度出した出来事（プロセス内）。`logEventOnce` が使う

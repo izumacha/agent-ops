@@ -7,6 +7,9 @@ import { gitTrackedFiles, repoRoot, testBudgetFor } from './lib/child-process';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 import { importSharedModule, sharedModuleNames } from './lib/script-files';
+// ソースを構文で読む共通部分（間引く出口の呼び出し箇所を導くのに使う）
+import { forEachNode, parseSourceFiles } from './lib/source-files';
+import ts from 'typescript';
 
 // リポジトリのルート（**`process.cwd()` ではなく git が報告する根**。`gitTrackedFiles` が
 // 根からの相対でパスを返すので、読む側もそこへそろえないと下位ディレクトリから走らせたときに
@@ -14,6 +17,25 @@ import { importSharedModule, sharedModuleNames } from './lib/script-files';
 const ROOT = repoRoot();
 // docs/ の場所
 const DOCS = join(ROOT, 'docs');
+
+/**
+ * 文書を「いちばん小さい塊」へ切る（空行・箇条書きの項目・表の行）。
+ *
+ * **空行だけで切ってはいけない。** 箇条書きは空行を挟まないので全体が 1 つの塊になり、
+ * **別の項目が言っている綴り**で条件が満たされる（実測: 一覧から 1 つ消しても、同じ
+ * 箇条書きの兄弟の項目がその名前を持っていたため全件緑だった）。表も同じで、環境変数の表は
+ * 別の行が同じ綴りを持つ。
+ *
+ * **箇条書きの判定で行頭の字下げを飛ばす。** `docs/deploy.md` の項目は入れ子で 2 文字
+ * 字下げされているので、`\n- ` だけを切れ目にすると**入れ子の項目がまったく切れない**
+ * （これも実測で素通りした）。
+ * @param text 文書の全文
+ * @returns 塊の配列
+ */
+function docBlocks(text: string): string[] {
+  // 空行 / 字下げを許した箇条書きの項目 / 表の行で切る
+  return text.split(/\n\s*\n|\n(?=[ \t]*- )|\n(?=[ \t]*\|)/);
+}
 
 // 追跡集合は 1 回だけ聞いて使い回す (検査ごとに git を起こさない)。**`expect` を含むので
 // モジュール評価時ではなく最初のテストの中で解決する**
@@ -147,10 +169,10 @@ describe('Step0 の設計成果物', () => {
       join(ROOT, '.env.example'),
       join(ROOT, 'README.md'),
     ]) {
-      // 変数名を含む塊 (空行・箇条書きの項目・表の行で区切る) だけを取り出す
-      const blocks = readFileSync(path, 'utf8')
-        .split(/\n\s*\n|\n(?=- )|\n(?=\|)/)
-        .filter((block) => block.includes('METRICS_TOKEN'));
+      // 変数名を含む塊 (切り方は docBlocks。空行・箇条書きの項目・表の行で区切る) だけを取り出す
+      const blocks = docBlocks(readFileSync(path, 'utf8')).filter((block) =>
+        block.includes('METRICS_TOKEN'),
+      );
       // 変数名に触れている段落が無ければ、記述そのものが消えている (fail-closed)
       expect(blocks.length, `${path} に METRICS_TOKEN の記述が無い`).toBeGreaterThan(0);
       // そのうち少なくとも 1 つが最小長を言っていること
@@ -875,6 +897,60 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
           mentionsModel(specMentions[0].paragraph, name),
           `tenantId の例外 ${name} が docs/spec.md の該当箇所で名指しされていない（件数とモデル名は同じ段落に書く。空行で分けると名前が別の段落になる）`,
         ).toBe(true);
+      }
+    },
+    testBudgetFor(1),
+  );
+
+  // **間引く出口（`logEventThrottled`）で出す出来事の一覧を、文書とソースで突き合わせる。**
+  //
+  // `docs/deploy.md` は運用者に「この 4 つが間引かれる」と**名前を並べて**案内しつつ、同じ文で
+  // 「一覧の正本は `src/` 全体で呼んでいる箇所」と断っている。並べた名前そのものが写しなので、
+  // 5 つ目（いちばん自然なのはレート制限の拒否）を足すとこの案内が黙って古くなる — 行が出る
+  // 条件を誤解した警報（行数をしきい値にする等）はそこから生まれる。**導出はソース側から**
+  // 行い、文書がその集合と一致していることだけを要求する（件数は書かない）。
+  it(
+    '間引く出口で出す出来事が docs/deploy.md の一覧と一致する',
+    () => {
+      // ソースから `logEventThrottled('<出来事>')` の第 1 引数を集める（**綴りではなく構文**）
+      const thrown = new Set<string>();
+      for (const parsed of parseSourceFiles()) {
+        forEachNode(parsed.source, (node) => {
+          // 関数呼び出しで、呼ばれている名前が素の識別子であること
+          if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)) return;
+          if (node.expression.text !== 'logEventThrottled') return;
+          // 第 1 引数が文字列リテラルのときだけ拾う（変数渡しは error-logging 側が落とす）
+          const [first] = node.arguments;
+          if (first !== undefined && ts.isStringLiteralLike(first)) thrown.add(first.text);
+        });
+      }
+      // 1 件も拾えなければ走査が壊れている（fail-closed）
+      expect(thrown.size, '間引く出口の呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
+      // 文書の中で `logEventThrottled` に触れている塊（切り方は docBlocks）
+      const blocks = docBlocks(readFileSync(join(DOCS, 'deploy.md'), 'utf8')).filter((block) =>
+        block.includes('logEventThrottled'),
+      );
+      expect(blocks.length, 'docs/deploy.md に logEventThrottled の記述が無い').toBeGreaterThan(0);
+      // 並べた名前を持つ塊（一覧はそのうち 1 つ）
+      const listed = blocks.filter((block) => [...thrown].some((event) => block.includes(event)));
+      expect(
+        listed.length,
+        'docs/deploy.md に間引く出来事を並べた箇所が無い（名前を 1 つも挙げていない）',
+      ).toBe(1);
+      // その塊が**全部**挙げていること（部分集合のまま残るのを防ぐ）
+      for (const event of thrown) {
+        expect(
+          listed[0].includes(event),
+          `docs/deploy.md の一覧に ${event} が無い（間引く出口で出しているのに案内されていない）`,
+        ).toBe(true);
+      }
+      // 逆向き: 間引いていない出来事を一覧に書いていないこと（消した出来事が残るのを防ぐ）
+      for (const event of Object.keys(LOG_EVENTS)) {
+        if (thrown.has(event)) continue;
+        expect(
+          listed[0].includes(event),
+          `docs/deploy.md の一覧に ${event} が載っているが、間引く出口では出していない`,
+        ).toBe(false);
       }
     },
     testBudgetFor(1),

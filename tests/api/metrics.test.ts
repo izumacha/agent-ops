@@ -53,6 +53,23 @@ describe('GET /metrics', () => {
     for (const name of Object.keys(GAUGES)) expect(result.text).toContain(`# TYPE ${name} gauge`);
   });
 
+  // **設定値の前後の空白は落とす。**
+  //
+  // 落とさないと「設定漏れより厄介な壊れ方」になる — 長さの門番は通る一方 `secretsEqual` は
+  // ハッシュ同士の比較なので**完全な不一致**で、収集側が正しい値を持っていても永久に 401。
+  // しかも唯一の信号（`metrics.token_rejected`）の文言は収集側を疑わせる。秘密を入れる
+  // 2 つの兄弟（監査ログの鍵・課金の共有シークレット）は同じ理由で落としている
+  it('設定値に貼り付けの改行や空白が混ざっても通る', async () => {
+    // 環境変数の側に改行と空白が付いた状態（秘密をファイルから流し込む配備で起きる）
+    vi.stubEnv('METRICS_TOKEN', ` ${METRICS_TOKEN}\n`);
+    try {
+      // 収集側が持っている正しい値で通ること
+      expect((await fetchMetrics(METRICS_TOKEN)).status).toBe(200);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('保存を禁じている（認証付きの運用情報なので中間のキャッシュに残さない）', async () => {
     // 包むラッパーが route() を通る応答と同じキャッシュ制御を付けている
     const result = await fetchMetrics(METRICS_TOKEN);

@@ -43,8 +43,6 @@ function isDecodablePath(url: string): boolean {
   }
 }
 
-// 読めないパスの 404 を 1 度ログへ出したか (未認証で叩ける経路なので毎回は出さない)
-
 // **この入口が `@/lib/log` を取り込む費用（測った上で受け入れている）。**
 // `log.ts` は `@/lib/metrics` を取り込むので、1 本のログ行のために入口の束へカウンタの表と
 // Prometheus の整形まで入り、モジュール評価時に `process.uptime()` / `Date.now()` を読む。

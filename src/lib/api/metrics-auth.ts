@@ -45,8 +45,14 @@ function notConfiguredError(): ApiError {
  * @param request 受け取った要求
  */
 export function assertMetricsToken(request: Request): void {
-  // 環境変数を読む（運用者が設定する値なので信頼する。§9 の「環境変数は信頼値」）
-  const configured = process.env.METRICS_TOKEN;
+  // 環境変数を読み、**前後の空白を落とす**（§9 の「環境変数は信頼値」なので中身は信頼する）。
+  // **落とさないと設定漏れより厄介な壊れ方になる** — 秘密を入れる 2 つの兄弟
+  // （`auditHmacSecret` / `billingWebhookSecret`）は同じ理由で落としており、ここだけ
+  // 落としていなかった。貼り付けの改行が 1 つ混ざると、長さの門番は通る一方
+  // `secretsEqual` はハッシュ同士の比較なので**完全な不一致**になり、収集側が正しい値を
+  // 持っていても永久に 401。しかも唯一の信号である `metrics.token_rejected` の文言は
+  // 「収集側の設定ミス、または総当たり」と案内するので、運用者は逆側を調べることになる
+  const configured = process.env.METRICS_TOKEN?.trim();
   // 未設定・空なら監視の入口は閉じたまま。**1 度だけ記録する** —
   // ここだけログを出していなかったので、**いちばん起きやすい設定漏れが唯一どの出口にも
   // 現れない**状態だった（もう 1 つの痕跡である `agentops_http_responses_total{status="503"}`

@@ -31,7 +31,8 @@ export type CounterName = keyof typeof COUNTERS;
 interface GaugeSpec {
   // `# HELP` に出る説明
   readonly help: string;
-  // 出す値（`renderMetrics` に渡された時刻から求める）
+  // 出す値。**`renderMetrics` に渡された時刻を受け取れる**が、使わないゲージは引数を
+  // 宣言しない（稼働秒数は壁時計に依存しないので Node のモノトニックな時計から読む）
   readonly value: (now: Date) => number;
 }
 
@@ -48,10 +49,17 @@ export const GAUGES = {
     help: 'プロセスが起動した時刻 (UNIX 秒)',
     value: () => STARTED_AT_MS / MILLIS_PER_SECOND,
   },
-  // 現在時刻から求めた稼働秒数。スクレイプの間隔より短い再起動を見落とさないために添える
+  // 稼働秒数。スクレイプの間隔より短い再起動を見落とさないために添える。
+  // **壁時計ではなく Node のモノトニックな時計から読む。** `いま − 起動時刻` で求めていた
+  // 版は、NTP が壁時計を稼働秒数より大きく巻き戻すと**負の値**を書き出した（実測で
+  // `agentops_process_uptime_seconds -1791547215.343`）。負になると「再起動を見つける」
+  // という本来の用途が反転し（`< 60` の警報が実体の無い再起動で鳴る）、同じ原点を指す
+  // `..._start_time_seconds` は未来を指す。**この PR は同じ危険を間引きの窓では手当てして
+  // いる**（`src/lib/log.ts` の `elapsed >= 0`）ので、ここだけ壁時計に頼る理由が無い。
+  // 引数の `now` は使わない（書き出す時刻に依存しない値なので）
   agentops_process_uptime_seconds: {
     help: 'プロセスの稼働秒数',
-    value: (now: Date) => (now.getTime() - STARTED_AT_MS) / MILLIS_PER_SECOND,
+    value: () => process.uptime(),
   },
 } as const satisfies Record<string, GaugeSpec>;
 
@@ -375,7 +383,13 @@ export function renderMetrics(now: Date): string {
     // 宣言と値を並べる（小数 3 桁まで。ミリ秒の分解能をそのまま表す）
     lines.push(`# HELP ${name} ${escapeHelpText(GAUGES[name].help)}`);
     lines.push(`# TYPE ${name} gauge`);
-    lines.push(`${name} ${GAUGES[name].value(now).toFixed(3)}`);
+    // **宣言を `GaugeSpec` として受け直してから呼ぶ。** 表の値は `as const` で推論されるので、
+    // すべてのゲージが `now` を使わなくなると**この呼び出しだけが型エラー**になる
+    // （引数を取らない関数の合併になる）。契約は「書き出す時刻を受け取れる」ままにしておき、
+    // 使わないゲージはその引数を宣言しない（受け取って捨てる形にすると「使っているつもり」の
+    // 読み違いを招く）
+    const gauge: GaugeSpec = GAUGES[name];
+    lines.push(`${name} ${gauge.value(now).toFixed(3)}`);
   }
   // 末尾の改行まで含めて返す（テキスト形式は行指向）
   return `${lines.join('\n')}\n`;

@@ -39,7 +39,7 @@ import {
   TARGET_ID_FIELD_NAME,
   type DashboardActionState,
 } from '@/lib/dashboard/form';
-import { currentSession, isSameOriginAction } from '@/lib/session-server';
+import { currentSession, checkSameOriginAction } from '@/lib/session-server';
 
 // 状態変更が成功したときに出す文言。**表で持つ**ので、状態を足したら typecheck が落ちる
 const SUCCESS_MESSAGE: Readonly<Record<SettableAgentStatus, string>> = {
@@ -60,7 +60,7 @@ export async function changeAgentStatus(
   formData: FormData,
 ): Promise<DashboardActionState> {
   // 1 枚目: 他サイトのフォームからの送信を断る
-  if (!(await isSameOriginAction())) return { error: UI_TEXT.actionRejected, message: null };
+  if (!(await checkSameOriginAction())) return { error: UI_TEXT.actionRejected, message: null };
   // セッションを読む（素のトークンは CSRF トークンの導出にだけ使う）
   const session = await currentSession();
   // 未ログイン・失効していればログイン画面へ送る（この行より下は実行されない）

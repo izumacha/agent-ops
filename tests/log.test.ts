@@ -11,6 +11,7 @@ import {
   logEvent,
   type LogEventName,
   logEventThrottled,
+  logEventOnce,
   resetThrottledLogsForTesting,
 } from '@/lib/log';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
@@ -24,7 +25,7 @@ beforeEach(() => {
   // カウンタを空へ戻す（前のテストを引きずらない）
   resetMetricsForTesting();
   lines = [];
-  // 間引きの記憶を空へ戻す（窓あたり 1 本の出口を使うテストが互いに影響しないように）
+  // 間引きと「1 度だけ」の記憶を空へ戻す（間引く出口を使うテストが互いに影響しないように）
   resetThrottledLogsForTesting();
   // **`warn` と `error` の両方**を捕まえる — 出口のメソッドは深刻度で決まるので、
   // `error` だけを差し替えていた頃は **`warn` の出来事（`plan.unknown_plan` 等）が
@@ -184,7 +185,7 @@ describe('整形が失敗しても投げない', () => {
 
   it('burst が止まっても規模が残る（最後の行が通算件数を言う）', () => {
     // **これが無いと、止まった burst は 1 件の打ち間違いと見分けが付かない**
-    // （窓あたり 1 本だった頃は 1 本目が必ず 0 件で、2 本目が永久に来なかった）
+    // （窓あたり 1 本だった頃は 1 本目が必ず 0 件で、抑えた件数を載せる 2 本目が永久に来なかった）
     resetThrottledLogsForTesting();
     const outlet = captureLogOutlet();
     try {
@@ -236,6 +237,34 @@ describe('整形が失敗しても投げない', () => {
       logEventThrottled('metrics.token_rejected');
       // 2 本出る（窓の判定が「常に出さない」へ退行していないこと）
       expect(loggedEvents(outlet.calls())).toHaveLength(2);
+    } finally {
+      outlet.restore();
+    }
+  });
+
+  // **1 度だけの出口（`logEventOnce`）は設定の通知に使う。**
+  //
+  // 間引く側（2 の冪）との違いは「率そのものが信号か」で、設定ミスは直すまで毎リクエスト
+  // 同じ 503 を返すので有無だけで足りる。**2 件目以降を出すと、未認証で誰でも叩ける経路から
+  // ログの量（＝保存の費用）を匿名の相手に決めさせることになる**
+  it('1 度だけの出口は 2 度目以降を出さず、記憶を忘れるとまた 1 本出る', () => {
+    const outlet = captureLogOutlet();
+    try {
+      // 記憶を空にしてから 3 回呼ぶ
+      resetThrottledLogsForTesting();
+      for (let i = 0; i < 3; i += 1) logEventOnce('metrics.token_not_configured');
+      // 1 本だけ出る
+      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_not_configured']);
+      // **記憶は出来事ごと** — 別の出来事は巻き添えで黙らない
+      logEventOnce('metrics.token_too_short');
+      expect(loggedEvents(outlet.calls())).toEqual([
+        'metrics.token_not_configured',
+        'metrics.token_too_short',
+      ]);
+      // 記憶を忘れるとまた出る（「常に出さない」へ退行していないこと）
+      resetThrottledLogsForTesting();
+      logEventOnce('metrics.token_not_configured');
+      expect(loggedEvents(outlet.calls())).toHaveLength(3);
     } finally {
       outlet.restore();
     }

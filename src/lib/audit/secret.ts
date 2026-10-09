@@ -4,12 +4,19 @@
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES, AUDIT_HMAC_SECRET_MIN_LENGTH } from '@/lib/constants';
+import { logEventOnce } from '@/lib/log';
 
 // 鍵を入れる環境変数の名前 (ここが唯一の参照元。.env.example とドキュメントはこの名前を指す)
 export const AUDIT_HMAC_SECRET_ENV = 'AUDIT_HMAC_SECRET';
 
 // 設定が使えないときの例外 (503)。何が足りないかは応答に出さない
 function notConfiguredError(): ApiError {
+  // **設定ミスを 1 度だけ記録する。** `ApiError` は応答へ写されるだけでログを通らないので、
+  // ここで出さないと「鍵が無いので人の操作（停止・復帰・解決・ルール登録）と課金の反映が
+  // すべて 503」という状態が**どの出口にも現れない**（系列には経路のラベルが無く、
+  // サーバーレスでは引きに行く収集そのものが成り立たない）。**1 度だけ**にする理由は
+  // `logEventOnce` の説明（設定の通知なので 2 件目以降に情報が無い）
+  logEventOnce('audit.secret_not_configured');
   // 503: 設定が無いので今はこの操作を行えない (上流未設定と同じ扱い)
   return new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.auditNotConfigured);
 }

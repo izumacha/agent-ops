@@ -10,7 +10,7 @@ import { getRepos } from '@/data';
 import { DASHBOARD_PATH, LOGIN_PATH, UI_TEXT } from '@/lib/constants';
 import { logEventThrottled } from '@/lib/log';
 import { resolveSessionPrincipal } from '@/lib/session';
-import { clearSessionCookie, isSameOriginAction, setSessionCookie } from '@/lib/session-server';
+import { clearSessionCookie, checkSameOriginAction, setSessionCookie } from '@/lib/session-server';
 
 // ログインフォームの状態 (useActionState が受け取る形)。エラーが無ければ null
 export interface LoginState {
@@ -23,11 +23,11 @@ export interface LoginState {
  * **失敗の理由は区別しない**（形が違う・失効・期限切れ・ユーザー無効化はすべて同じ文言）。
  * 区別するとトークンの状態を外から探れる（API 側の 401 と同じ方針。ADR-0005）。
  * 画面へ返す文言は区別しないが、**拒否したこと自体はサーバログに残す**
- * （`session.login_rejected`。別オリジンからの送信は `isSameOriginAction` が残す）。
+ * （`session.login_rejected`。別オリジンからの送信は `checkSameOriginAction` が残す）。
  */
 export async function login(_previous: LoginState, formData: FormData): Promise<LoginState> {
   // 他サイトからのフォーム送信を断る (セッション固定攻撃を防ぐ)
-  if (!(await isSameOriginAction())) return { error: UI_TEXT.loginFailed };
+  if (!(await checkSameOriginAction())) return { error: UI_TEXT.loginFailed };
   // 入力を取り出す (FormData は File も返しうるので型で確かめる)
   const submitted = formData.get('token');
   // 文字列でない・空なら入力を促す
@@ -75,7 +75,7 @@ export async function login(_previous: LoginState, formData: FormData): Promise<
 /** ログアウトする。Cookie を消してログイン画面へ戻す。 */
 export async function logout(): Promise<void> {
   // 他サイトから勝手にログアウトさせられないようにする
-  if (!(await isSameOriginAction())) return;
+  if (!(await checkSameOriginAction())) return;
   // Cookie を消す (属性は発行時とそろえる)
   await clearSessionCookie();
   // ログイン画面へ送る

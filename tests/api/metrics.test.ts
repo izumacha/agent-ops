@@ -15,7 +15,6 @@ import {
 } from '@/lib/constants';
 import { Role } from '@/domain/types';
 import { COUNTERS, GAUGES, renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
-import { resetMetricsAuthForTesting } from '@/lib/api/metrics-auth';
 import { resetThrottledLogsForTesting } from '@/lib/log';
 import { captureLogOutlet, loggedEvents } from '../lib/log-lines';
 import { METRICS_TOKEN, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
@@ -102,8 +101,8 @@ describe('GET /metrics', () => {
   });
 
   it('METRICS_TOKEN が未設定なら 503 で、警告は 1 度だけ出す', async () => {
-    // 警告の「出したか」を忘れる（テストの独立性のため）
-    resetMetricsAuthForTesting();
+    // 「1 度だけ」の記憶を忘れる（テストの独立性のため。間引きの記憶と同じ 1 本で戻す）
+    resetThrottledLogsForTesting();
     // 設定を消す（このテストの中だけ）
     vi.stubEnv('METRICS_TOKEN', '');
     // 出口を捕まえる
@@ -121,7 +120,7 @@ describe('GET /metrics', () => {
       expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_not_configured']);
     } finally {
       outlet.restore();
-      resetMetricsAuthForTesting();
+      resetThrottledLogsForTesting();
     }
   });
 
@@ -199,8 +198,8 @@ describe('GET /metrics', () => {
   });
 
   it('METRICS_TOKEN が短すぎれば 503 で、警告は 1 度だけ出す', async () => {
-    // 警告の「出したか」を忘れる（テストの独立性のため）
-    resetMetricsAuthForTesting();
+    // 「1 度だけ」の記憶を忘れる（テストの独立性のため。間引きの記憶と同じ 1 本で戻す）
+    resetThrottledLogsForTesting();
     // 下限より 1 文字短い値を設定する
     const tooShort = 'a'.repeat(METRICS_TOKEN_MIN_LENGTH - 1);
     vi.stubEnv('METRICS_TOKEN', tooShort);
@@ -215,24 +214,7 @@ describe('GET /metrics', () => {
     } finally {
       // 元へ戻す
       spy.mockRestore();
-      resetMetricsAuthForTesting();
-    }
-  });
-
-  it('resetMetricsAuthForTesting は本番では呼べない（警告 1 度だけの抑止を解除させない）', () => {
-    // 本番のふりをする
-    vi.stubEnv('NODE_ENV', 'production');
-    try {
-      // 呼ぶと投げる（`resetMetricsForTesting` / `setReposForTesting` と同じ扱い）。
-      // **この 1 本が無いとガードの 3 行を消しても全件緑で通った**（実測）— 消えると本番で
-      // 「短すぎる設定の警告」を毎リクエスト出せるようになり、未認証の総当たりで
-      // エラーログを埋められる状態（上のテストが固定している抑止）へ戻る
-      expect(() => resetMetricsAuthForTesting()).toThrow(/本番/);
-    } finally {
-      // **このテストの中で戻す** — このファイルは `seedEachTest()` の後始末が
-      // `setReposForTesting` を呼ぶので、`NODE_ENV` を本番のまま抜けるとその後始末が
-      // 同じ種類のガードで投げ、無関係なテストまで赤くなる（実測で 2 件落ちた）
-      vi.unstubAllEnvs();
+      resetThrottledLogsForTesting();
     }
   });
 

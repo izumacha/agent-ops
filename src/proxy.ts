@@ -25,7 +25,7 @@
 // (ADR-0005 の宿題)。
 import { NextResponse, type NextRequest } from 'next/server';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
-import { logEvent } from '@/lib/log';
+import { logEventOnce } from '@/lib/log';
 import { errorResponse } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES } from '@/lib/constants';
@@ -44,7 +44,6 @@ function isDecodablePath(url: string): boolean {
 }
 
 // 読めないパスの 404 を 1 度ログへ出したか (未認証で叩ける経路なので毎回は出さない)
-let warnedUndecodablePath = false;
 
 // **この入口が `@/lib/log` を取り込む費用（測った上で受け入れている）。**
 // `log.ts` は `@/lib/metrics` を取り込むので、1 本のログ行のために入口の束へカウンタの表と
@@ -68,17 +67,14 @@ export function proxy(request: NextRequest): Response {
     // 別の表に入る（本番ビルドで確認: health の 200 は現れるのに、ここの 404 は 2 件とも
     // 現れなかった）。数えたように見えて見えない形を作るより、**ログで非可視だけは解く**。
     // 既知の非可視として ADR-0014 と docs/deploy.md にも書いてある
-    if (!warnedUndecodablePath) {
-      // **1 度だけ出す** — 未認証で誰でも叩ける経路なので、毎回出すとログを埋められる。
-      // **間引いても率は失われない**: 読めないパスは URL の形そのものなので、前段の
-      // アクセスログが 1 件ずつ記録している（この出来事の説明文もそう案内する）。
-      // ここの 1 行が解いているのは「この配備が 404 にした」という非可視だけ。
-      // **他の未認証経路（ログイン・越境・署名・監視トークン）は「窓あたり 1 本 ＋ 間引いた
-      // 件数を行に載せる」形** (`logEventThrottled`)。こちらだけ 1 度きりにしてよいのは、
-      // 読めないパスの率が**前段のアクセスログに 1 件ずつ残る**から (上記)
-      warnedUndecodablePath = true;
-      logEvent('entry.undecodable_path');
-    }
+    // **1 度だけ出す** — 未認証で誰でも叩ける経路なので、毎回出すとログを埋められる。
+    // **間引いても率は失われない**: 読めないパスは URL の形そのものなので、前段の
+    // アクセスログが 1 件ずつ記録している（この出来事の説明文もそう案内する）。
+    // ここの 1 行が解いているのは「この配備が 404 にした」という非可視だけ。
+    // **他の未認証経路（ログイン・越境・署名・監視トークン）は率そのものが信号**なので、
+    // 窓の中の通算件数が 2 の冪の回だけ出す形 (`logEventThrottled`)。こちらだけ 1 度きりに
+    // してよいのは、読めないパスの率が**前段のアクセスログに 1 件ずつ残る**から (上記)
+    logEventOnce('entry.undecodable_path');
     // キャッシュ制御も route() の応答と同じ規律に揃える (この 1 経路だけ外れていると、
     // 将来 proxy が分岐を増やしたときに気付けない)
     return withPrivateCacheHeaders(errorResponse(HTTP_STATUS.NOT_FOUND, API_MESSAGES.notFound));

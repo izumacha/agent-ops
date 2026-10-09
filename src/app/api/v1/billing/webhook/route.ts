@@ -81,10 +81,11 @@ async function respond(request: Request): Promise<Response> {
     // 収集そのものが成り立たない（`docs/deploy.md`）。共有シークレットのローテーションを
     // し損ねて全配信が 401 になった状態を無言にしないため。**理由（`verified` の値）は出さない**
     // — 形・時刻・一致のどれで落ちたかは総当たりの手がかりになる。
-    // **行は窓あたり 1 本に間引く**（`logEventThrottled`）— 未認証で誰でも叩ける経路なので、
-    // 1 要求 1 行だと匿名の相手がログの量（＝保存の費用）を好きなだけ増やせる。
-    // **数えるのは毎回**なので率は `agentops_log_events_total` に残り、鍵のローテーション
-    // 漏れが続いているあいだは窓ごとに 1 本出る（理由は `logEventThrottled` の説明）
+    // **行は間引く**（`logEventThrottled`。窓の中の通算件数が 2 の冪の回だけ出し、その件数を
+    // 行の `occurrence` に載せるので、止まった総当たりでも規模が残る）— 未認証で誰でも叩ける
+    // 経路なので、1 要求 1 行だと匿名の相手がログの量（＝保存の費用）を好きなだけ増やせる。
+    // **数えるのは毎回**なので率は `agentops_log_events_total` に残る（理由は
+    // `logEventThrottled` の説明）
     logEventThrottled('billing.signature_rejected');
     throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.billingSignatureInvalid);
   }

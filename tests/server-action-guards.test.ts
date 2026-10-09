@@ -4,7 +4,7 @@
 // は「`route.ts` は必ず `route()` を通る」ことを実際のモジュールから確かめるが、Step5 で書き込みは
 // Server Action へ移った。CLAUDE.md は守りの順序（Origin → セッション → CSRF → 入力 → RBAC）を
 // 明記しているのに、それを機械で確かめるものが 1 つも無く、**6 本目の Server Action が
-// `isSameOriginAction()` や `csrfTokenMatches` を書き忘れても lint・typecheck・全テスト・
+// `checkSameOriginAction()` や `csrfTokenMatches` を書き忘れても lint・typecheck・全テスト・
 // `gate:step5` がすべて緑のまま通る**状態だった（このリポジトリが繰り返し塞いできた
 // 「書いたつもりが一度も確かめられていない」形）。
 //
@@ -21,7 +21,7 @@ const APP_DIR = join(SRC_DIR, 'app');
 // 守りの名前（所有モジュールと、そこから取り込むべき関数名）
 const ORIGIN_GUARD = {
   module: join(SRC_DIR, 'lib', 'session-server.ts'),
-  name: 'isSameOriginAction',
+  name: 'checkSameOriginAction',
 };
 const CSRF_GUARD = { module: join(SRC_DIR, 'lib', 'csrf.ts'), name: 'csrfTokenMatches' };
 

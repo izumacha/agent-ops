@@ -22,16 +22,10 @@
 // （応答数とログの出来事数は、どの経路が叩かれているか・どの失敗が起きているかを外から読める）。
 import { API_MESSAGES, METRICS_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { secretsEqual } from '@/lib/tokens';
-import { logEvent, logEventThrottled } from '@/lib/log';
+import { logEventOnce, logEventThrottled } from '@/lib/log';
 import { bearerTokenOrNull, invalidTokenError, unauthorizedError } from './auth';
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
-
-// 短すぎる METRICS_TOKEN の警告を出したか（設定ミスは 1 度だけ知らせる。
-// 毎リクエストで出すと、未認証の総当たりでエラーログを埋められる）
-let warnedShortToken = false;
-// 未設定の警告を出したか（同じ理由で 1 プロセスに 1 度）
-let warnedMissingToken = false;
 
 /**
  * 設定が使えないときの例外（503）。何が足りないかは応答に出さない。
@@ -60,19 +54,13 @@ export function assertMetricsToken(request: Request): void {
   // **1 プロセスに 1 度**にするのは「短すぎる値」の警告と同じ理由（設定の通知なので
   // 2 件目以降に情報が無く、未認証で誰でも叩ける経路なので毎回出すと埋められる）
   if (!configured) {
-    if (!warnedMissingToken) {
-      warnedMissingToken = true;
-      logEvent('metrics.token_not_configured');
-    }
+    logEventOnce('metrics.token_not_configured');
     throw notConfiguredError();
   }
   // 短すぎる値は設定ミスとみなして使わない（弱いトークンで運用の数字を読ませない）
   if (configured.length < METRICS_TOKEN_MIN_LENGTH) {
     // 1 度だけ警告する（設定を直す手掛かりは残すが、総当たりでログを埋められないようにする）
-    if (!warnedShortToken) {
-      warnedShortToken = true;
-      logEvent('metrics.token_too_short');
-    }
+    logEventOnce('metrics.token_too_short');
     // 設定が使えないので 503（「短い値でも通る」にはしない）
     throw notConfiguredError();
   }
@@ -97,25 +85,11 @@ export function assertMetricsToken(request: Request): void {
     // ここで出さないと**どの出口にも現れない**（応答の系列には出るが、経路を示すラベルが無いので
     // 期限切れトークンの 401 と区別できず、サーバーレスでは引きに行く収集そのものが
     // 成り立たない＝`docs/deploy.md`）。収集エージェントの設定ミスは無言にしない。
-    // **行は窓あたり 1 本に間引く**（`logEventThrottled`）— 未認証で誰でも叩ける経路なので、
-    // 1 要求 1 行だと匿名の相手がログの量を好きなだけ増やせる。**数えるのは毎回**なので
-    // 率は `agentops_log_events_total` に残る（理由は `logEventThrottled` の説明）
+    // **行は間引く**（`logEventThrottled`。窓の中の通算件数が 2 の冪の回だけ出し、その件数を
+    // 行の `occurrence` に載せる）— 未認証で誰でも叩ける経路なので、1 要求 1 行だと匿名の
+    // 相手がログの量を好きなだけ増やせる。**数えるのは毎回**なので率は
+    // `agentops_log_events_total` に残る（理由は `logEventThrottled` の説明）
     logEventThrottled('metrics.token_rejected');
     throw failure;
   }
-}
-
-/**
- * テスト用に「短すぎる警告を出したか」を忘れる。
- * **本番の経路からは呼ばない**（`resetMetricsForTesting` と同じ扱いで、テストの独立性のためだけにある）。
- */
-export function resetMetricsAuthForTesting(): void {
-  // 本番で呼べると、短すぎる設定の警告が毎リクエスト出せるようになる（1 度だけにした理由が崩れる）
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('resetMetricsAuthForTesting は本番では使えません。');
-  }
-  // 次のテストでも 1 度目の警告が出るように戻す（**両方**。片方だけ戻す形にすると、
-  // 先に走ったテストの状態で次のテストが黙る）
-  warnedShortToken = false;
-  warnedMissingToken = false;
 }

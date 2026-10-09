@@ -19,7 +19,7 @@ import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { PLAN_CHANGE_LINK, PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
-import { loggedEvents } from '../lib/log-lines';
+import { captureLogOutlet, loggedEvents } from '../lib/log-lines';
 import { resetThrottledLogsForTesting } from '@/lib/log';
 
 // seed（各テストの前に作り直す）
@@ -290,15 +290,31 @@ describe('POST /billing/webhook', () => {
     expect(await planOfA()).toBe(Plan.free);
   });
 
-  it('共有シークレットが未設定なら 503（検証を飛ばして受け入れない）', async () => {
+  it('共有シークレットが未設定なら 503 で、1 プロセスに 1 度だけ記録する', async () => {
     // 鍵を消す（この経路を主題にするテストだけが明示的に消す）
     vi.stubEnv('STRIPE_WEBHOOK_SECRET', '');
-    await linkCustomer();
-    const result = await postWebhook(webhookBody({ plan: Plan.enterprise }));
-    expect(result.status).toBe(503);
-    expect(await planOfA()).toBe(Plan.free);
-    // 後片付け
-    vi.unstubAllEnvs();
+    // 「1 度だけ」の記憶を忘れる（前のテストが出していると、ここで出ない）
+    resetThrottledLogsForTesting();
+    // 出口を捕まえる（深刻度でメソッドが分かれるので両方）
+    const outlet = captureLogOutlet();
+    try {
+      await linkCustomer();
+      const result = await postWebhook(webhookBody({ plan: Plan.enterprise }));
+      expect(result.status).toBe(503);
+      expect(await planOfA()).toBe(Plan.free);
+      // 2 通目も 503（検証を飛ばして受け入れることはしない）
+      expect((await postWebhook(webhookBody({ plan: Plan.pro }))).status).toBe(503);
+      // **行は 1 本だけ出る。** `ApiError` は包む側でログを通らない（応答へ写すだけ）ので、
+      // ここで出さないと鍵の設定漏れが**どの出口にも現れない** — 事業者は 503 を受けて
+      // バックオフののちエンドポイントを無効化するので、解約の反映が止まって有料の権限が
+      // 残り続ける。**設定の通知なので 1 度だけ**（2 件目以降に情報が無い）
+      expect(loggedEvents(outlet.calls())).toEqual(['billing.secret_not_configured']);
+    } finally {
+      outlet.restore();
+      // 後片付け
+      vi.unstubAllEnvs();
+      resetThrottledLogsForTesting();
+    }
   });
 
   it('顧客 ID に対応するテナントが無ければ記録だけして 200', async () => {
@@ -421,15 +437,26 @@ describe('POST /billing/webhook', () => {
     });
   });
 
-  it('監査ログの鍵が無ければ 503 で、受信記録も残さない', async () => {
+  it('監査ログの鍵が無ければ 503 で、受信記録も残さず 1 度だけ記録する', async () => {
     // **記録してから反映に失敗すると、再送は「2 通目」として無視され永久に反映されない。**
     // 鍵が無いなら 1 行も記録せず 503 を返し、事業者の再送でやり直させる
     await linkCustomer();
     vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    // 「1 度だけ」の記憶を忘れてから出口を捕まえる
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
     const body = webhookBody({ plan: Plan.pro, eventId: 'evt_no_audit' });
-    expect((await postWebhook(body)).status).toBe(503);
-    // 鍵を戻すと、同じイベントがやり直せる（記録が残っていれば duplicate で無視されてしまう）
-    vi.unstubAllEnvs();
+    try {
+      expect((await postWebhook(body)).status).toBe(503);
+      // **鍵が無いことが 1 行残る** — 残さないと「人の操作と課金の反映が全部 503」という
+      // 状態がどの出口にも現れない（応答の系列には経路のラベルが無い）
+      expect(loggedEvents(outlet.calls())).toEqual(['audit.secret_not_configured']);
+    } finally {
+      outlet.restore();
+      // 鍵を戻すと、同じイベントがやり直せる（記録が残っていれば duplicate で無視されてしまう）
+      vi.unstubAllEnvs();
+      resetThrottledLogsForTesting();
+    }
     expect((await postWebhook(body)).json).toEqual({ received: true, applied: true });
     expect(await planOfA()).toBe(Plan.pro);
   });

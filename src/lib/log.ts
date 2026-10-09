@@ -50,7 +50,18 @@ export const LOG_EVENTS = {
     message:
       'PLATFORM_ADMIN_TOKEN が短すぎます (必要な長さは src/lib/constants.ts の PLATFORM_ADMIN_TOKEN_MIN_LENGTH)。無視します。',
   },
+  // --- 監査ログ ---
+  'audit.secret_not_configured': {
+    level: 'error',
+    message:
+      'AUDIT_HMAC_SECRET が設定されていません (または短すぎます)。人の操作と課金の反映を 503 で断ります。',
+  },
   // --- 課金（受信 Webhook） ---
+  'billing.secret_not_configured': {
+    level: 'error',
+    message:
+      'STRIPE_WEBHOOK_SECRET が設定されていません (または短すぎます)。課金の受信 Webhook を 503 で断ります。',
+  },
   'billing.customer_unknown': {
     level: 'error',
     message: '受信した顧客 ID に対応するテナントがありません',
@@ -381,7 +392,7 @@ const throttleStates = new Map<LogEventName, ThrottleState>();
 /**
  * その通算件数で行を出すか（**2 の冪のときだけ出す**: 1, 2, 4, 8, 16 …）。
  *
- * **窓あたり 1 本では burst の規模が残らなかった。** 1 本目は「その前に抑えた件数」を
+ * **窓あたり 1 本（1 要求 1 行でも 1 度だけでもない形）では burst の規模が残らなかった。** 1 本目は「その前に抑えた件数」を
  * 載せられないので必ず 0 で、burst が**止まってしまうと**抑えた件数を載せる 2 本目が
  * 永久に来ない（実測の指摘）。つまり「1 人の打ち間違い 1 件」と「50 秒で 1 万件の
  * 総当たり」がまったく同じ 1 行になる — 画面側の出来事は系列も `/metrics` から
@@ -459,8 +470,40 @@ export function logEventThrottled(event: LogEventName): void {
   else console.error(formatLogLine(event, undefined, new Date(now), count));
 }
 
+// 既に 1 度出した出来事（プロセス内）。`logEventOnce` が使う
+const loggedOnce = new Set<LogEventName>();
+
 /**
- * テスト用に間引きの記憶を忘れる。
+ * 出来事を**1 プロセスに 1 度だけ**行にする（2 度目以降は何もしない）。
+ *
+ * **設定の通知に使う。** 鍵が未設定・短すぎる、という類は 2 件目以降に新しい情報が無く、
+ * しかも未認証で誰でも叩ける経路から起きるので、毎回出すとログの量（＝保存の費用）を
+ * 匿名の相手に決めさせることになる。**直すまで続く**ので「いま続いているか」を知る必要も無い
+ * （続いている最中は毎リクエストが同じ 503 を返す）。
+ *
+ * **「断った」記録には使わない。** あちらは率そのものが信号なので `logEventThrottled`
+ * （窓の中の通算件数が 2 の冪の回だけ行にする）を使う。**この違いが 2 つの出口を分ける唯一の
+ * 理由**で、設定の通知を間引く側へ寄せると直すまで毎分 1 本以上出続け、逆に「断った」記録を
+ * こちらへ寄せると 2 度目以降の総当たりがどの出口にも現れない。
+ *
+ * **数えるのも 1 度だけ**（`logEvent` を通すので、行を出した回だけ `agentops_log_events_total`
+ * に積まれる）。設定ミスは率ではなく有無が信号なので、これで足りる。
+ * @param event 出来事の名前
+ */
+export function logEventOnce(event: LogEventName): void {
+  // 既に出していれば何もしない
+  if (loggedOnce.has(event)) return;
+  // 出したことを覚える（**出す前に覚える** — 出口が投げても 2 度目を出さない）
+  loggedOnce.add(event);
+  // 1 行出す（深刻度・文言・出口の選び分けは `logEvent` が持つ）
+  logEvent(event);
+}
+
+/**
+ * テスト用に間引きの記憶を忘れる（**窓の記憶と「1 度だけ」の記憶の両方**）。
+ *
+ * **片方だけ戻す形にしない** — 先に走ったテストが出した 1 度きりの行のせいで、
+ * 次のテストが「設定ミスを記録している」ことを確かめられなくなる（実測でそうなっていた）。
  * **本番の経路からは呼ばない**（`resetMetricsForTesting` と同じ扱い）。
  */
 export function resetThrottledLogsForTesting(): void {
@@ -470,4 +513,6 @@ export function resetThrottledLogsForTesting(): void {
   }
   // 次のテストでも 1 本目が出るように空へ戻す
   throttleStates.clear();
+  // 「1 度だけ」の記憶も空へ戻す
+  loggedOnce.clear();
 }

@@ -73,7 +73,9 @@ export function proxy(request: NextRequest): Response {
       // **間引いても率は失われない**: 読めないパスは URL の形そのものなので、前段の
       // アクセスログが 1 件ずつ記録している（この出来事の説明文もそう案内する）。
       // ここの 1 行が解いているのは「この配備が 404 にした」という非可視だけ。
-      // 率を観測できる場所が他に無い出来事は間引かない (`src/app/login/actions.ts` が例)
+      // **他の未認証経路（ログイン・越境・署名・監視トークン）は「窓あたり 1 本 ＋ 間引いた
+      // 件数を行に載せる」形** (`logEventThrottled`)。こちらだけ 1 度きりにしてよいのは、
+      // 読めないパスの率が**前段のアクセスログに 1 件ずつ残る**から (上記)
       warnedUndecodablePath = true;
       logEvent('entry.undecodable_path');
     }

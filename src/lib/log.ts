@@ -96,6 +96,11 @@ export const LOG_EVENTS = {
     message:
       '監視の読み取りトークンが一致しませんでした。続く増加は収集エージェントの設定ミス、または総当たりの可能性があります。',
   },
+  'metrics.token_not_configured': {
+    level: 'error',
+    message:
+      '監視の読み取りトークンが設定されていないため GET /api/v1/metrics を閉じています (以降は出しません)。環境変数 METRICS_TOKEN を設定してください。',
+  },
   'metrics.token_too_short': {
     level: 'error',
     message:
@@ -265,12 +270,14 @@ const FALLBACK_LOG_MESSAGE = 'ログ 1 行の整形に失敗したため、出�
  * @param event 出来事の名前
  * @param described `describeError()` が作った診断（無い出来事もある）
  * @param now 行に入れる時刻
+ * @param suppressed この行の直前に**間引いた件数**（`logEventThrottled` だけが渡す。0 なら載せない）
  * @returns 1 行の JSON
  */
 export function formatLogLine(
   event: LogEventName,
   described?: Record<string, unknown>,
   now: Date = new Date(),
+  suppressed = 0,
 ): string {
   // **失敗しうる操作はすべて同じ try の中で行う**:
   //   - 時刻の整形（無効な `Date` の `toISOString()` は RangeError）
@@ -290,6 +297,10 @@ export function formatLogLine(
     };
     // 診断があれば添える（無い出来事では鍵そのものを出さない）
     if (described !== undefined) line.error = described;
+    // **間引いた件数があれば添える**（この行より前に何件起きたか）。0 なら鍵を出さない。
+    // これが無いと、窓あたり 1 本に間引いた時点で「毎分 1 件の打ち間違い」と
+    // 「毎分 1 万件の総当たり」が同じ 1 行になり、率がどの出口にも残らない
+    if (suppressed > 0) line.suppressed = suppressed;
     // 1 行の JSON にして返す
     return JSON.stringify(line);
   } catch {
@@ -359,8 +370,13 @@ export function logEvent(event: LogEventName, described?: Record<string, unknown
 
 // 間引くときの窓（ミリ秒）。1 分に 1 行までに抑える
 const THROTTLED_LOG_WINDOW_MS = 60_000;
-// 出来事ごとに「最後に行を出した時刻」（間引きのための状態。プロセス内）
-const lastThrottledAt = new Map<LogEventName, number>();
+// 出来事ごとの間引きの状態（プロセス内）。`at` は最後に行を出した時刻、
+// `suppressed` はそれ以降に起きて**行にしなかった**件数
+interface ThrottleState {
+  at: number;
+  suppressed: number;
+}
+const throttleStates = new Map<LogEventName, ThrottleState>();
 
 /**
  * 出来事を**数えつつ、行は窓あたり 1 本までに間引いて**出す。
@@ -373,33 +389,58 @@ const lastThrottledAt = new Map<LogEventName, number>();
  * 「いま続いているか」が運用者の知りたいことなので（共有シークレットのローテーション漏れは
  * 直すまで続く）、窓ごとに 1 本出せば続いていることが分かる。
  *
- * **数える側は毎回**なので、率そのものは `agentops_log_events_total{event=…}` に残る
- * （これらの出来事は Route Handler の束から出るので、`/metrics` が読む実体と同じ＝
- * `logEvent` の説明にある (a)）。**ただしサーバーレスでは引きに行く収集が成り立たない**
- * （`docs/deploy.md`）ので、そこで読めるのは「窓ごとに 1 本のログ行」だけになる。
+ * **数える側は毎回**なので、率そのものは `agentops_log_events_total{event=…}` に残る。
+ * **ただしその系列が読めるかは呼び出し元の束による**（`logEvent` の説明にある実測）:
+ * Route Handler から出る分は `/metrics` が読む実体と同じだが、**Server Action・入口から
+ * 出る分は別実体なので永久に現れない**。さらにサーバーレスでは引きに行く収集そのものが
+ * 成り立たない（`docs/deploy.md`）。
+ *
+ * **だから行そのものに「間引いた件数」（`suppressed`）を載せる。** これが無いと、
+ * 窓あたり 1 本にした時点で「毎分 1 件の打ち間違い」と「毎分 1 万件の総当たり」が
+ * まったく同じ 1 行になり、**率がどの出口にも残らない**（画面側の出来事では系列も読めない
+ * ので、行が唯一の運び手）。載せるのは「この行より前に抑えた件数」で、0 なら鍵を出さない。
  * @param event 出来事の名前
  */
 export function logEventThrottled(event: LogEventName): void {
   // いまの時刻（単調増加でなくてよい。窓の粗い刻みにしか使わない）
   const now = Date.now();
-  // 前回この出来事で行を出した時刻（初回は無い）
-  const last = lastThrottledAt.get(event);
+  // この出来事の間引きの状態（初回は無い）
+  const state = throttleStates.get(event);
   // 前回からの経過。**壁時計なので負になりうる**（NTP の巻き戻し・ライブマイグレーション）
-  const elapsed = last === undefined ? undefined : now - last;
+  const elapsed = state === undefined ? undefined : now - state.at;
   // 窓の中ならもう行は出さない。**それでも数える**（率は失わない）。
   // **負の経過は「窓を越えた」として扱う** — `elapsed < 窓` だけを見ていると、時計が 1 時間
   // 巻き戻った配備でその 1 時間ぶん行が 1 本も出なくなる（しかもサーバーレスではこの行が
   // 唯一の読める信号なので、運用者が原因を調べたいまさにその時間が沈黙する）
-  if (elapsed !== undefined && elapsed >= 0 && elapsed < THROTTLED_LOG_WINDOW_MS) {
+  if (
+    state !== undefined &&
+    elapsed !== undefined &&
+    elapsed >= 0 &&
+    elapsed < THROTTLED_LOG_WINDOW_MS
+  ) {
     // 深刻度は語彙から引く（出口と同じ引き方。引けなければ最も重い側へ倒す）
     const level = lookupLogEvent(event)?.level ?? FALLBACK_LOG_LEVEL;
-    // 行は出さずに数えるだけ
+    // 行は出さずに数えるだけ。**次に出す行へ載せる件数も覚える**
+    state.suppressed += 1;
     incrementCounter('agentops_log_events_total', { event, level });
     return;
   }
-  // 窓を越えたので出した時刻を覚えてから、通常の出口へ渡す（数えるのもそこ 1 か所）
-  lastThrottledAt.set(event, now);
-  logEvent(event);
+  // 窓を越えた。**間引いた件数を次の行へ載せる**ので、ここで取り出してから状態を更新する
+  const suppressed = state?.suppressed ?? 0;
+  throttleStates.set(event, { at: now, suppressed: 0 });
+  // 深刻度は語彙から引く（出口と同じ引き方）
+  const level = lookupLogEvent(event)?.level ?? FALLBACK_LOG_LEVEL;
+  // 数えるのは毎回（間引いた回と同じ系列）
+  incrementCounter('agentops_log_events_total', { event, level });
+  // 1 行出す。**間引いた件数を添える**（`suppressed`）ので、
+  // 「毎分 1 件の打ち間違い」と「毎分 1 万件の総当たり」が同じ行にならない。
+  // **`logEvent` へ渡さずここで出す** — あちらは件数を知らないので、通してしまうと
+  // 数えるのが 2 度になるか、件数を載せる引数を公開の署名へ足すことになる
+  // **`console` へは `formatLogLine(...)` を直接渡す**（変数に入れない） —
+  // `tests/error-logging.test.ts` は実引数の**形**で許しており、変数を挟むと
+  // 「何を渡しているか」が構文から読めなくなるので落ちる（`logEvent` 側も同じ形）
+  if (level === 'warn') console.warn(formatLogLine(event, undefined, new Date(now), suppressed));
+  else console.error(formatLogLine(event, undefined, new Date(now), suppressed));
 }
 
 /**
@@ -412,5 +453,5 @@ export function resetThrottledLogsForTesting(): void {
     throw new Error('resetThrottledLogsForTesting は本番では使えません。');
   }
   // 次のテストでも 1 本目が出るように空へ戻す
-  lastThrottledAt.clear();
+  throttleStates.clear();
 }

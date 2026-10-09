@@ -30,6 +30,8 @@ import { HTTP_STATUS } from './http-status';
 // 短すぎる METRICS_TOKEN の警告を出したか（設定ミスは 1 度だけ知らせる。
 // 毎リクエストで出すと、未認証の総当たりでエラーログを埋められる）
 let warnedShortToken = false;
+// 未設定の警告を出したか（同じ理由で 1 プロセスに 1 度）
+let warnedMissingToken = false;
 
 /**
  * 設定が使えないときの例外（503）。何が足りないかは応答に出さない。
@@ -51,8 +53,19 @@ function notConfiguredError(): ApiError {
 export function assertMetricsToken(request: Request): void {
   // 環境変数を読む（運用者が設定する値なので信頼する。§9 の「環境変数は信頼値」）
   const configured = process.env.METRICS_TOKEN;
-  // 未設定・空なら監視の入口は閉じたまま
-  if (!configured) throw notConfiguredError();
+  // 未設定・空なら監視の入口は閉じたまま。**1 度だけ記録する** —
+  // ここだけログを出していなかったので、**いちばん起きやすい設定漏れが唯一どの出口にも
+  // 現れない**状態だった（もう 1 つの痕跡である `agentops_http_responses_total{status="503"}`
+  // は `/metrics` 経由でしか読めず、その `/metrics` 自身が 503 なので到達できない）。
+  // **1 プロセスに 1 度**にするのは「短すぎる値」の警告と同じ理由（設定の通知なので
+  // 2 件目以降に情報が無く、未認証で誰でも叩ける経路なので毎回出すと埋められる）
+  if (!configured) {
+    if (!warnedMissingToken) {
+      warnedMissingToken = true;
+      logEvent('metrics.token_not_configured');
+    }
+    throw notConfiguredError();
+  }
   // 短すぎる値は設定ミスとみなして使わない（弱いトークンで運用の数字を読ませない）
   if (configured.length < METRICS_TOKEN_MIN_LENGTH) {
     // 1 度だけ警告する（設定を直す手掛かりは残すが、総当たりでログを埋められないようにする）
@@ -101,6 +114,8 @@ export function resetMetricsAuthForTesting(): void {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('resetMetricsAuthForTesting は本番では使えません。');
   }
-  // 次のテストでも 1 度目の警告が出るように戻す
+  // 次のテストでも 1 度目の警告が出るように戻す（**両方**。片方だけ戻す形にすると、
+  // 先に走ったテストの状態で次のテストが黙る）
   warnedShortToken = false;
+  warnedMissingToken = false;
 }

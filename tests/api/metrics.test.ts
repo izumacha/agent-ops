@@ -101,13 +101,28 @@ describe('GET /metrics', () => {
     expect(result.status).toBe(401);
   });
 
-  it('METRICS_TOKEN が未設定なら 503（誰も通れない = fail-closed）', async () => {
+  it('METRICS_TOKEN が未設定なら 503 で、警告は 1 度だけ出す', async () => {
+    // 警告の「出したか」を忘れる（テストの独立性のため）
+    resetMetricsAuthForTesting();
     // 設定を消す（このテストの中だけ）
     vi.stubEnv('METRICS_TOKEN', '');
-    // 正しい値を知っていても通れない
-    expect((await fetchMetrics(METRICS_TOKEN)).status).toBe(503);
-    // 未認証でも同じ（設定済みかどうかを応答の違いから読ませない）
-    expect((await fetchMetrics()).status).toBe(503);
+    // 出口を捕まえる
+    const outlet = captureLogOutlet();
+    try {
+      // 正しい値を知っていても通れない
+      expect((await fetchMetrics(METRICS_TOKEN)).status).toBe(503);
+      // 未認証でも同じ 503。**「設定済みかどうかを隠す」という意味ではない** —
+      // 503 と 401 の違いから設定の有無は読める（`API_MESSAGES.metricsNotConfigured` の
+      // コメントがその割り切りの正本）。ここで見ているのは「未認証でも通らない」ことだけ
+      expect((await fetchMetrics()).status).toBe(503);
+      // **1 行は出る** — ここだけ記録していなかったので、いちばん起きやすい設定漏れが
+      // 唯一どの出口にも現れなかった（`{status="503"}` は `/metrics` 経由でしか読めず、
+      // その `/metrics` 自身が 503 なので到達できない）。**設定の通知なので 1 度だけ**
+      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_not_configured']);
+    } finally {
+      outlet.restore();
+      resetMetricsAuthForTesting();
+    }
   });
 
   // **401 を読むのは系列ではなくログ**（経路を示すラベルが無いので他の 401 と区別できず、

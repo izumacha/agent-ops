@@ -170,6 +170,8 @@ describe('整形が失敗しても投げない', () => {
       for (let i = 0; i < 3; i += 1) logEventThrottled('metrics.token_rejected');
       // 行は 1 本だけ
       expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
+      // **1 本目には間引いた件数が無い**（その前に抑えた分は無いので鍵を出さない）
+      expect(parseLoggedLine(outlet.calls()[0])).not.toHaveProperty('suppressed');
     } finally {
       outlet.restore();
     }
@@ -177,6 +179,34 @@ describe('整形が失敗しても投げない', () => {
     expect(renderMetrics(new Date())).toContain(
       'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 3',
     );
+  });
+
+  it('次に出す行へ間引いた件数を載せる（率が行からも読めること）', () => {
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 1 本目（ここで窓が始まる）
+      logEventThrottled('metrics.token_rejected');
+      // 窓の中で 9 件（行にならない）
+      for (let i = 0; i < 9; i += 1) logEventThrottled('metrics.token_rejected');
+      // 窓を越える
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+      // 2 本目
+      logEventThrottled('metrics.token_rejected');
+      // 2 本目に**抑えた 9 件**が載る。これが無いと「毎分 1 件の打ち間違い」と
+      // 「毎分 1 万件の総当たり」が同じ 1 行になり、率がどの出口にも残らない
+      // （画面側の出来事は `/metrics` から読めないので、行が唯一の運び手）
+      expect(parseLoggedLine(outlet.calls()[1])).toMatchObject({
+        event: 'metrics.token_rejected',
+        suppressed: 9,
+      });
+      // **3 本目は 0 件なので鍵を出さない**（間引いた分を二重に数えない）
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+      logEventThrottled('metrics.token_rejected');
+      expect(parseLoggedLine(outlet.calls()[2])).not.toHaveProperty('suppressed');
+    } finally {
+      outlet.restore();
+    }
   });
 
   it('時計が巻き戻っても間引きが居座らない（負の経過は窓を越えたとみなす）', () => {

@@ -201,11 +201,17 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - **だから「署名鍵の設定ミス」「収集側の設定ミス」はログの `event` で見る**:
     `billing.signature_rejected` / `metrics.token_rejected`。`{status="401"}` の増加は
     「何かが 401 を積んでいる」までしか言わない。
-  - **この 2 つの行は 1 分あたり 1 本までに間引いてある**（未認証で誰でも叩ける経路なので、
-    1 要求 1 行だと匿名の相手がログの量＝保存の費用を好きなだけ増やせる）。**続いている
-    あいだは窓ごとに 1 本出る**ので「いま起きているか」は分かる。**数えるのは毎回**なので、
-    率は `agentops_log_events_total{event="…"}` に残る（常駐配備ならこちらで率が読める。
-    サーバーレスでは上記のとおり読めないので、窓ごとの 1 本が信号）。
+  - **未認証で誰でも叩ける経路の「断った」記録は 1 分あたり 1 本までに間引いてある**
+    （1 要求 1 行だと匿名の相手がログの量＝保存の費用を好きなだけ増やせる）。対象は
+    `billing.signature_rejected` / `metrics.token_rejected` / `session.login_rejected` /
+    `session.cross_origin_action`（**一覧の正本は `src/lib/log.ts` で `logEventThrottled` を
+    呼んでいる箇所**。ここに件数を書かない）。
+  - **間引いた件数は次に出る行の `suppressed` に載る。** だから**警報は「行が出たこと」で
+    組み、規模は `suppressed` で読む** — 行数をしきい値にすると、窓あたり 1 本なので
+    「毎分 1 件の打ち間違い」と「毎分 1 万件の総当たり」が同じ数になる。
+    `agentops_log_events_total{event="…"}` にも毎回積まれるが、**画面側（Server Action）の
+    出来事はその系列が `/metrics` から読めない**（上記の実体の違い）ので、そこでは
+    `suppressed` が唯一の規模の手掛かり。
 - **ただし `agentops_http_responses_total` は「アプリが返す HTTP 応答のすべて」ではない。**
   乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が別にある**
   （正本は `src/lib/uncounted-response-sources.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから
@@ -222,8 +228,10 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     画面の通信量・エラー率は**前段のアクセスログ**で見る。
   - Server Action（`'use server'` のモジュール）。<!--uncounted:serverAction-->
     同じく包める入口が無い。**ダッシュボードのログインの拒否はログに出る**ので、総当たりは
-    `session.login_rejected` の行を数えて警報にする（別オリジンからの送信は
-    `session.cross_origin_action`）。**条件はログの `event` で組むこと** —
+    `session.login_rejected` で警報にする（別オリジンからの送信は
+    `session.cross_origin_action`）。**行は 1 分あたり 1 本に間引いてあるので、行数ではなく
+    行の `suppressed`（間引いた件数）で規模を読む** — 行数をしきい値にすると、打ち間違いの
+    1 件と総当たりの 1 万件が同じ数になる（下の「間引き」の項）。**条件はログの `event` で組むこと** —
     `agentops_http_responses_total` にも `agentops_log_events_total` にも現れない
     （下の「ログの出来事の数は Route Handler の束の分だけ」を参照）。
   - Next.js がルートの代わりに組み立てる応答。<!--uncounted:frameworkSynthesized-->

@@ -80,22 +80,29 @@ describe('上限の引き方', () => {
     // ログを捕まえる（黙って倒れると運用者が気付けないので、1 行出ることまで見る）。
     // **出口のメソッドは深刻度で決まる**ので両方を捕まえる（正本は `LOG_EVENTS`）
     const outlet = captureLogOutlet();
-    // DB の enum 外の値が来た状況を作る（型は Plan だが実行時は任意の文字列になりうる）
-    const limits = planLimitsFor('platinum' as Plan);
-    // 倒れ先の上限が返る
-    expect(limits).toBe(PLAN_LIMITS[FALLBACK_PLAN]);
-    // ログが 1 行出ている
-    expect(outlet.calls()).toHaveLength(1);
-    // 後片付け
-    outlet.restore();
+    try {
+      // DB の enum 外の値が来た状況を作る（型は Plan だが実行時は任意の文字列になりうる）
+      const limits = planLimitsFor('platinum' as Plan);
+      // 倒れ先の上限が返る
+      expect(limits).toBe(PLAN_LIMITS[FALLBACK_PLAN]);
+      // ログが 1 行出ている
+      expect(outlet.calls()).toHaveLength(1);
+    } finally {
+      // **`finally` で戻す** — 検査が落ちた回に `console` のスパイが残ると、
+      // 後続のテストの出力が消えて原因が読めなくなる
+      outlet.restore();
+    }
   });
 
   it('プロトタイプ由来の名前でも倒れる（素の添字にしていないこと）', () => {
     // `constructor` は Object.prototype 経由で引けてしまう名前。素の添字だと関数が返り、
     // 上限の比較が TypeError になる（`canPerform` が同じ理由で Object.hasOwn を使っている）
     const outlet = captureLogOutlet();
-    expect(planLimitsFor('constructor' as Plan)).toBe(PLAN_LIMITS[FALLBACK_PLAN]);
-    outlet.restore();
+    try {
+      expect(planLimitsFor('constructor' as Plan)).toBe(PLAN_LIMITS[FALLBACK_PLAN]);
+    } finally {
+      outlet.restore();
+    }
   });
 });
 

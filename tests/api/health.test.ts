@@ -10,6 +10,7 @@ vi.mock('@/lib/prisma', () => ({ prisma: { $queryRaw: queryRaw } }));
 import { GET } from '@/app/api/v1/health/route';
 import { parseLoggedLine, renderLoggedLine } from '../lib/log-lines';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
+import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 
 /**
  * このルートへ渡す要求を作る。
@@ -37,9 +38,12 @@ describe('GET /health', () => {
     const response = await GET(healthRequest());
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true, db: 'up' });
-    // route() を通らない唯一の経路なので、キャッシュ制御を自分で付けているか見る
-    // (付いていないと前段のキャッシュ層が DB 障害中も古い ok:true を配り、監視が沈黙する)
-    expect(response.headers.get('cache-control')).toBe('no-store');
+    // **包む側 (`withResponseCount`) がキャッシュ制御を付けているか見る**
+    // (付いていないと前段のキャッシュ層が DB 障害中も古い ok:true を配り、監視が沈黙する)。
+    // このルートは `route()` を通らないが、キャッシュ制御を決めるのは全ルート共通の 1 か所
+    expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
+    // Vary はちょうど 1 回 (自分でも付けていた経路は二重に並んでいた＝実測)
+    expect(response.headers.get('vary')).toBe('Authorization');
   });
 
   it('DB 障害時は 503 で、応答に内部詳細を 1 文字も含まない (サーバログにだけ残す)', async () => {

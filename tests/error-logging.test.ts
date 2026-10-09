@@ -495,15 +495,15 @@ describe('エラーのログ出力', () => {
     const emitted = new Set<string>();
     for (const { source } of SOURCES)
       forEachNode(source, (node) => {
-        // `logEvent('<キー>')` の第 1 引数を集める
-        if (
-          ts.isCallExpression(node) &&
-          ts.isIdentifier(node.expression) &&
-          node.expression.text === LOG_EVENT
-        ) {
-          const first = node.arguments[0];
-          if (first !== undefined && ts.isStringLiteralLike(first)) emitted.add(first.text);
-        }
+        // `logEvent('<キー>')` の第 1 引数を集める。**実引数の取り出しは
+        // `namedCallArguments` に任せる** — 素の識別子の呼び出しだけを見ていた版は、
+        // 同じファイルが実引数の形の検査のために剥がしている包み方（`(0, logEvent)(...)` /
+        // `.call` / `Reflect.apply`）をここでは剥がしておらず、**同じ 1 つの網の片方だけが
+        // 緩い写し**になっていた（倒れる向きは誤った赤だが、写しは必ずどちらかが古くなる）
+        const args = namedCallArguments(node, LOG_EVENT);
+        if (args === null) return;
+        const first = args[0];
+        if (first !== undefined && ts.isStringLiteralLike(first)) emitted.add(first.text);
       });
     // 語彙が空なら走査が壊れている (fail-closed)
     expect(Object.keys(LOG_EVENTS).length, '語彙が空').toBeGreaterThan(0);

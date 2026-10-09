@@ -74,15 +74,50 @@ describe('メトリクスのカウンタ', () => {
     );
   });
 
-  it('1 件も無いカウンタも宣言と 0 を出す（「まだ 0」と「名前が無い」を区別できる）', () => {
+  it('1 件も無いカウンタも宣言は出す（「まだ 0」と「名前が無い」を区別できる）', () => {
     // 何も数えずに書き出す
     const text = renderMetrics(new Date());
     // 宣言したカウンタはすべて現れる
     for (const name of Object.keys(COUNTERS)) {
       expect(text).toContain(`# HELP ${name} `);
       expect(text).toContain(`# TYPE ${name} counter`);
-      expect(valueOf(text, name)).toBe(0);
     }
+  });
+
+  it('ラベルを取るカウンタは、系列が無いあいだ標本を出さない', () => {
+    // **ラベル無しの `<名前> 0` を出していた版の退行を固定する** — 1 件目が数えられた瞬間に
+    // 同じカウンタがラベル付きとラベル無しの両方の形を持ち、ラベル無しの系列がそのまま
+    // 古く残る（`sum by (status)` に空の `status` のバケツが現れる）
+    expect(valueOf(renderMetrics(new Date()), 'agentops_http_responses_total')).toBeNull();
+    // 1 件数えるとラベル付きの系列だけが現れる
+    countHttpResponse('GET', HTTP_STATUS.OK);
+    const text = renderMetrics(new Date());
+    expect(text).toContain('agentops_http_responses_total{method="GET",status="200"} 1');
+    // ラベル無しの標本は出ない
+    expect(valueOf(text, 'agentops_http_responses_total')).toBeNull();
+  });
+
+  it('書き出した本文のどの行も、テキスト形式の 3 つの形のどれかである', () => {
+    // 1 件数えてから（宣言・ラベル付きの標本・ラベル無しの標本が全部出る状態にする）
+    countHttpResponse('GET', HTTP_STATUS.OK);
+    incrementCounter('agentops_log_events_total', { event: 'x', level: 'error' });
+    // 末尾の改行で分かれる空行を落として 1 行ずつ見る
+    const lines = renderMetrics(new Date()).split('\n').slice(0, -1);
+    // **行の文法を固定する** — 宣言の説明文に改行が入ると「続きが別の行になる」形で壊れるが、
+    // 説明文は定数なのでテストから値を差し込めない。**行の形で見れば、改行が入った時点で
+    // どちらの `# HELP` でも落ちる**（`escapeHelpText` が無い版は本文に素の改行を通す）
+    const grammar =
+      /^(# (HELP|TYPE) [a-z_]+ .+|[a-z_]+(\{[a-z_]+="[^"]*"(,[a-z_]+="[^"]*")*\})? -?[0-9.]+)$/;
+    // 1 行も無ければ走査が壊れている
+    expect(lines.length).toBeGreaterThan(0);
+    // 文法から外れた行を名指しして落とす
+    expect(lines.filter((line) => !grammar.test(line))).toEqual([]);
+  });
+
+  it('ラベルを取らないカウンタ（捨てた数）は 0 でも標本を出す', () => {
+    // **こちらは常にラベル無しの 1 系列**なので、0 を出しても形が混ざらない
+    // （「捨てていない」ことを見せる必要がある）
+    expect(valueOf(renderMetrics(new Date()), 'agentops_metrics_series_dropped_total')).toBe(0);
   });
 
   it('系列が上限に達したら新しい系列を捨て、捨てた数を数える', () => {
@@ -312,8 +347,11 @@ describe('テスト専用の初期化', () => {
   it('本番以外では空へ戻す', () => {
     // 1 件数えてから
     countHttpResponse('GET', HTTP_STATUS.OK);
-    // 戻すと系列が消える（`renderMetrics` はラベル無しの 0 だけを出す）
+    // 戻すと系列が消える（宣言だけが残り、標本は 1 本も出ない）
     resetMetricsForTesting();
-    expect(valueOf(renderMetrics(new Date()), 'agentops_http_responses_total')).toBe(0);
+    const text = renderMetrics(new Date());
+    expect(text).toContain('# TYPE agentops_http_responses_total counter');
+    expect(text).not.toContain('agentops_http_responses_total{');
+    expect(valueOf(text, 'agentops_http_responses_total')).toBeNull();
   });
 });

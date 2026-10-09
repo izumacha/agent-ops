@@ -18,9 +18,8 @@ import { declaresDirective, forEachNode, parseSourceFiles } from './lib/source-f
 import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
+import { withResponseCount, RESPONSE_COUNT_BRAND } from '@/lib/api/response-count';
 import {
-  withResponseCount,
-  RESPONSE_COUNT_BRAND,
   ROUTE_HANDLER_BRAND,
   ROUTE_RATE_LIMIT_BRAND,
   ROUTE_REQUIRED_ACTION_BRAND,
@@ -323,6 +322,58 @@ describe('Route Handler の結線', () => {
     await expect(handler(new Request('http://test.local/x'))).rejects.toBe(control);
   });
 
+  // **制御フローの判定そのものが例外で壊れないこと。**
+  //
+  // 判定を上流の `unstable_rethrow(error)` に丸ごと任せていた版は、あれが最後に
+  // `error.cause` を辿るため **`cause` がゲッターなら判定が投げ**、自分を指していれば
+  // `RangeError` になった（どちらも実測）。そうなると 500 の契約も `api.unexpected_error` の
+  // ログも `countHttpResponse` もまとめて飛び、**ラッパーの外へ素の例外が漏れる**。
+  // `src/lib/describe-error.ts` が同じ罠を記録している（`'cause' in error` はゲッターを
+  // 起こさないが、続く読み出しは起こす）
+  it.each([
+    {
+      label: 'cause のゲッターが投げる',
+      build: (): unknown => {
+        const error = new Error('inner');
+        Object.defineProperty(error, 'cause', {
+          get() {
+            throw new Error('cause getter exploded');
+          },
+        });
+        return error;
+      },
+    },
+    {
+      label: 'cause が自分を指す',
+      build: (): unknown => {
+        const error = new Error('cyclic');
+        Object.defineProperty(error, 'cause', { value: error });
+        return error;
+      },
+    },
+    {
+      label: 'digest のゲッターが投げる',
+      build: (): unknown => {
+        const error = new Error('digest');
+        Object.defineProperty(error, 'digest', {
+          get() {
+            throw new Error('digest getter exploded');
+          },
+        });
+        return error;
+      },
+    },
+  ])('$label 例外でも、ラッパーは 500 の応答を返す', async ({ build }) => {
+    // 本体がその例外を投げる形で包む
+    const handler = withResponseCount(() => Promise.reject(build()));
+    // 応答が返ること（例外が外へ漏れない）
+    const response = await handler(new Request('http://test.local/x'));
+    // 内部エラーとして写っていること
+    expect(response.status).toBe(HTTP_STATUS.INTERNAL_SERVER_ERROR);
+    // キャッシュ制御も付いていること（この経路も全応答と同じ扱い）
+    expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
+  });
+
   // **`src/app` 配下で応答を返すものの種類を数え上げる。**
   //
   // 応答を数えるのは `route.ts` の export だけで、そこは上の印の検査が全数を押さえている。
@@ -348,7 +399,10 @@ describe('Route Handler の結線', () => {
     const counted = appFiles.filter((parsed) => basename(parsed.path) === ALLOWED_ROUTE_FILE_NAME);
     const rendered = appFiles.filter((parsed) => parsed.path.endsWith('.tsx'));
     const actions = appFiles.filter((parsed) => declaresDirective(parsed, 'use server'));
-    // 分類できた種類ごとに、`metrics.ts` の表に宣言があること（文書の目印もそこから導く）
+    // 分類できた種類ごとに、`metrics.ts` の表に宣言があること（文書の目印もそこから導く）。
+    // **`entryProxy` と `nextControlFlow` はここに並べない** — 前者は `src/app` の外、
+    // 後者は「ファイルの種類」ではなく投げる箇所なので、ファイルの分類では表せない
+    // （それぞれ別の検査と `docs-gate` の目印が受け持つ）
     const declared: { source: UncountedResponseSource; files: string[] }[] = [
       { source: 'pageRender', files: rendered.map((parsed) => parsed.path) },
       { source: 'serverAction', files: actions.map((parsed) => parsed.path) },

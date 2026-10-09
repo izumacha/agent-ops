@@ -9,7 +9,7 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { buildDailyReportCsv, dailyReportFileName } from '@/lib/dashboard/csv';
 import { resolveDashboardRange } from '@/lib/dashboard/range';
 import { loadDashboardSummary } from '@/lib/dashboard/summary';
-import { withResponseCount } from '@/lib/api/handler';
+import { withResponseCount } from '@/lib/api/response-count';
 import { currentSession } from '@/lib/session-server';
 
 // **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**（`route()` を通る

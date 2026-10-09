@@ -23,7 +23,7 @@
 import { parseJsonText, readRawJsonText } from '@/lib/api/body';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { withResponseCount } from '@/lib/api/handler';
+import { withResponseCount } from '@/lib/api/response-count';
 import { getRepos } from '@/data';
 import type { BillingPlanApplication } from '@/data/ports';
 import type { Plan } from '@/domain/types';

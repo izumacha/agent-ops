@@ -8,14 +8,10 @@ import type { HealthDto } from '@/lib/api-types';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 // エラーをログへ落とす形の唯一の参照元 (message を出さず name / code / フレームだけを残す)
 import { describeError } from '@/lib/describe-error';
-// 保存を禁じる Cache-Control の値 (route() が全ルートへ付けているのと同じ値。唯一の参照元は constants)
-import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 import { logEvent } from '@/lib/log';
-// 応答を数えて例外を応答へ写す共通のラッパー (route() を通らない経路もこれを使う)
-import { withResponseCount } from '@/lib/api/handler';
-
-// 応答に付けるキャッシュ制御 (成功・失敗のどちらにも同じものを付ける)
-const CACHE_HEADERS = { 'Cache-Control': NO_STORE_CACHE_CONTROL };
+// 応答を数え、例外を応答へ写し、**キャッシュ制御を付ける**共通のラッパー
+// (route() を通らない経路もこれを使う)
+import { withResponseCount } from '@/lib/api/response-count';
 
 // DB を毎回叩くので、Next.js の静的化を無効にして常に動的に応答する
 export const dynamic = 'force-dynamic';
@@ -31,10 +27,12 @@ async function probe(): Promise<NextResponse<HealthDto>> {
   try {
     // SELECT 1 が返れば DB は生きている
     await prisma.$queryRaw`SELECT 1`;
-    // 正常応答 (OpenAPI の Health スキーマに一致させる)
-    // このルートだけは route() を通らないので、キャッシュ制御は自分で付ける。
-    // 付けないと前段のキャッシュ層が DB 障害中も古い ok:true を配り、生存確認が「健康」と答え続ける
-    return NextResponse.json({ ok: true, db: 'up' }, { headers: CACHE_HEADERS });
+    // 正常応答 (OpenAPI の Health スキーマに一致させる)。
+    // **キャッシュ制御は書かない** — 付けるのは包む側 (`withResponseCount`) の 1 か所。
+    // 付け忘れると前段のキャッシュ層が DB 障害中も古い ok:true を配り、生存確認が「健康」と
+    // 答え続けるので、**どのルートも自分では決めない**形にしてある
+    // (自分でも付けていた経路は `Vary` が二重に並んでいた＝実測)
+    return NextResponse.json({ ok: true, db: 'up' });
   } catch (error) {
     // 内部詳細は応答へ返さず、サーバログにだけ残す (§9)。
     // **message は出さない。** ドライバの接続失敗は message に DSN をそのまま埋める
@@ -46,7 +44,7 @@ async function probe(): Promise<NextResponse<HealthDto>> {
     // 503 で「DB が落ちている」ことだけを伝える
     return NextResponse.json(
       { ok: false, db: 'down' },
-      { status: HTTP_STATUS.SERVICE_UNAVAILABLE, headers: CACHE_HEADERS },
+      { status: HTTP_STATUS.SERVICE_UNAVAILABLE },
     );
   }
 }

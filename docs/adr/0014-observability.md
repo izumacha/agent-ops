@@ -132,6 +132,12 @@ PII が、pg のプールエラー経由で接続文字列が載る）。
     実体の中での話**で、docstring をそう書き直した。
   - 画面の描画（`src/app` 配下の `.tsx`）。<!--uncounted:pageRender-->
     Next.js は描画の応答を Route Handler として扱わないので、包める入口が無い。
+  - Route Handler から投げた Next.js の制御フローの例外。<!--uncounted:nextControlFlow-->
+    包むラッパーは `redirect()` / `notFound()` / `forbidden()` / `unauthorized()` を**応答へ
+    写さず投げ直す**（写すと遷移も 404 も起きず 500 の JSON になり、`api.unexpected_error` の
+    警報まで鳴る＝実測）。応答を作るのは Next.js なので数える場所が無い。**いま投げている
+    経路は 1 本も無い**が、画面側の CSV を `currentSession()` から `requireSession()` へ
+    寄せる 1 行の整理で生まれる。
   - Server Action（`'use server'` のモジュール）。<!--uncounted:serverAction-->
     同じく包める入口が無い。**代わりにログで見えるようにした** —
     `session.login_rejected`（ログインの拒否。理由は区別しない）と

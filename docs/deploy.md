@@ -169,6 +169,9 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   権限になる（§15 の「このトークンは配らない」と同じ理由）。
 - **テナントの利用者には見せない**（値はテナントごとに分かれていないので、他テナントの
   活動量が読める）。テナントが見るべき数字は画面と `GET /api/v1/usage/daily`。
+- **レート制限は前段で掛ける**（受信 Webhook と同じ）。アプリ側の枠のキーは認証済みの主体から
+  作るので、テナントを持たないこの経路にはキーが無い。照合は定数時間比較なので総当たりは
+  トークンの乱数長に対して行うことになるが、**前段で経路ごとの上限を掛けておく**こと。
 - **値はインスタンスごと。** 足し合わせるのはスクレイプ側で、サーバーレスではインスタンスが
   短命なので `agentops_process_start_time_seconds` / `..._uptime_seconds` を見て
   「カウンタが 0 へ戻った」ことを判別する。
@@ -192,5 +195,10 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     同じく包める入口が無い。**ダッシュボードのログインの拒否はログに出る**ので、総当たりは
     `session.login_rejected` の増加で警報にできる（別オリジンからの送信は
     `session.cross_origin_action`）。`agentops_http_responses_total` では見えない。
+  - Route Handler から投げた Next.js の制御フローの例外。<!--uncounted:nextControlFlow-->
+    `redirect()` / `notFound()` などは応答を Next.js が組み立てるので、アプリ側に数える場所が
+    無い（包むラッパーはこれを 500 へ写さず投げ直す。写すと遷移も 404 も起きない）。
+    **いま投げている経路は 1 本も無い**が、画面側のルートを `requireSession()` へ寄せると
+    生まれる。前段のアクセスログで見る。
 - **耐久する事実はここに出さない。** 利用量・コストは `GET /api/v1/usage/daily`、
   インシデントは画面と `GET /api/v1/incidents`、操作の記録は `GET /api/v1/audit-logs`。

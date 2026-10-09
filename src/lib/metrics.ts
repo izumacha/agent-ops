@@ -164,8 +164,8 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
  * 以前は入口の 404 だけを「数えられない経路が 1 つある」と書いており、画面の描画と
  * Server Action が**1 件も数えられていないのに言及されていなかった** — 運用者が
  * 「他の HTTP 通信はすべてこの系列に乗る」と読め、ダッシュボードのログイン総当たりや
- * 描画中の 500 を警報の条件に書いても一度も発火しない（`src/app` 配下に `page.tsx` が
- * 6 枚と `'use server'` のモジュールが 3 本ある）。
+ * 描画中の 500 を警報の条件に書いても一度も発火しない（**件数は書かない** — 画面を 1 枚
+ * 足すたびに数字だけが古くなる。実在することは下の検査が導出で確かめる）。
  *
  * **鍵はそのまま文書の目印。** `docs/deploy.md` と `docs/adr/0014-observability.md` が
  * `<!--uncounted:<鍵>-->` を持つことを `tests/docs-gate.test.ts` がこの表から導いて要求する
@@ -188,6 +188,13 @@ export const UNCOUNTED_RESPONSE_SOURCES = {
   // `session.cross_origin_action`）ので、総当たりは警報の条件に書ける＝ただし条件は
   // ログ側の `event` で、この系列ではない
   serverAction: "Server Action ('use server' のモジュール)。包める入口が無い",
+  // **包む側が投げ直した Next.js の制御フローの例外から Next.js が組み立てる応答。**
+  // `redirect()` / `notFound()` / `forbidden()` / `unauthorized()` は Route Handler の中から
+  // でも投げられ、`withResponseCount` はそれを**応答へ写さず投げ直す**（写すと遷移も 404 も
+  // 起きず 500 の JSON になる）。応答を作るのは Next.js なので、こちらには数える場所が無い。
+  // いま投げている経路は 1 本も無いが、画面側の CSV を `currentSession()` から
+  // `requireSession()` へ寄せる 1 行の整理で生まれる（`response-count.ts` がその例を挙げている）
+  nextControlFlow: 'Route Handler から投げた Next.js の制御フローの例外（応答は Next.js が作る）',
 } as const;
 
 /** 数えない応答の種類の名前（上の表の鍵） */
@@ -238,6 +245,21 @@ function escapeLabelValue(value: string): string {
 }
 
 /**
+ * `# HELP` の説明文を 1 行に収める。
+ *
+ * **ラベル値とは規則が違う** — 説明文は行末までが本文なので二重引用符は逃がさず、
+ * 逃がすのは**行を割りうるもの**（`\` と改行 LF / CR）だけ。いま渡しているのは
+ * `COUNTERS` / `GAUGES` の定型文なので改行は入っていないが、説明を書き足した人が
+ * うっかり改行を入れたときに**その 1 行から先が壊れる**（続きが別の行として解析される）。
+ * @param text 逃がす前の説明文
+ * @returns 逃がした後の説明文
+ */
+function escapeHelpText(text: string): string {
+  // 逆斜線と改行（LF / CR）だけを逃がす
+  return text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+
+/**
  * 系列のキーをカウンタ名で束ねる（走査は 1 度だけ）。
  *
  * **カウンタ名ごとに `COUNTS` を読み直さない** — 以前は名前ごとに全系列を `filter` して
@@ -279,7 +301,7 @@ export function renderMetrics(now: Date): string {
   // カウンタごとに HELP / TYPE と系列を並べる（名前順で安定させる）
   for (const name of Object.keys(COUNTERS).sort() as CounterName[]) {
     // 1 件も無いカウンタも宣言だけは出す（スクレイプ側が「まだ 0」と「名前が無い」を区別できる）
-    lines.push(`# HELP ${name} ${COUNTERS[name]}`);
+    lines.push(`# HELP ${name} ${escapeHelpText(COUNTERS[name])}`);
     lines.push(`# TYPE ${name} counter`);
     // 捨てた数だけは `COUNTS` の外（上限の外）に持つので、ここは変数から出す
     if (name === DROPPED_COUNTER) {
@@ -288,11 +310,12 @@ export function renderMetrics(now: Date): string {
     }
     // この名前の系列
     const series = grouped.get(name) ?? [];
-    // 系列が無ければラベル無しの 0 を出す
-    if (series.length === 0) {
-      lines.push(`${name} 0`);
-      continue;
-    }
+    // **系列が無ければ標本を出さない**（宣言だけを出す）。
+    // ラベル無しの `<名前> 0` を出していた版では、1 件目が数えられた瞬間に
+    // **同じカウンタがラベル付きとラベル無しの両方の形を持つ**ことになり、ラベル無しの系列が
+    // そのまま古く残る（`sum by (status)` に空の `status` のバケツが現れる）。
+    // 宣言（HELP / TYPE）を出してあれば「まだ 0」と「名前が無い」はスクレイプ側で区別できる
+    if (series.length === 0) continue;
     // 系列をキー順に並べて出す（同じ状態なら同じ出力になるようにする）
     for (const { labels, value } of series.sort((a, b) =>
       a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
@@ -311,7 +334,7 @@ export function renderMetrics(now: Date): string {
   // ゲージも同じ表から出す（名前を直書きしない）
   for (const name of Object.keys(GAUGES).sort() as GaugeName[]) {
     // 宣言と値を並べる（小数 3 桁まで。ミリ秒の分解能をそのまま表す）
-    lines.push(`# HELP ${name} ${GAUGES[name].help}`);
+    lines.push(`# HELP ${name} ${escapeHelpText(GAUGES[name].help)}`);
     lines.push(`# TYPE ${name} gauge`);
     lines.push(`${name} ${GAUGES[name].value(now).toFixed(3)}`);
   }

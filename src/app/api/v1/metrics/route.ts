@@ -13,11 +13,19 @@
 // それを返す経路は既にある。ここで数えるのは**DB に残らないもの**（応答の数と、ログに出した
 // 出来事の数）だけなので、スクレイプのたびに DB を触らない＝監視が本番の負荷にならない。
 //
+// **レート制限はアプリ側で掛けられない。** 枠のキーは認証済みの主体（テナント・ユーザー・
+// エージェントの id）から作るので、テナントを持たないこの経路にはキーが無い。未認証の相手を
+// ヘッダ（偽装できる `X-Forwarded-For`）で数える形は、正規の収集エージェントの枠を third party に
+// 枯渇させられるので採らない。**前段のリバースプロキシの責務**（受信 Webhook と同じ扱い。
+// README の「前段の責務」と `docs/deploy.md` に書いてある）。照合そのものは
+// `secretsEqual`（定数時間・両辺をハッシュしてから比較）なので、総当たりはトークンの
+// 乱数長（`METRICS_TOKEN_MIN_LENGTH` 以上）に対して行うことになる。
+//
 // **`route()` を通らない**（Bearer から `Principal` を決める仕組みに乗らないため）。代わりに
 // `tests/route-wrapping.test.ts` の理由付きの表へ登録し、**監視用トークンの入口へ到達すること**を
 // 機械で要求している（応答を数えることと `no-store` は `withResponseCount` を通ることで満たす。
 // 同テストが全 export にその印を要求し、実際のヘッダも応答を作って確かめる）。
-import { withResponseCount } from '@/lib/api/handler';
+import { withResponseCount } from '@/lib/api/response-count';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { assertMetricsToken } from '@/lib/api/metrics-auth';
 import { PROMETHEUS_CONTENT_TYPE } from '@/lib/constants';

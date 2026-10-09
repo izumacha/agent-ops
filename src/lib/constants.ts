@@ -448,8 +448,10 @@ export const API_MESSAGES = {
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;
 
-// 保存を禁じる Cache-Control の値。route() が全応答に付けるのと、route() を通らない /health が
-// 自分で付けるのとで同じ値を使うため、ここを唯一の参照元にする
+// 保存を禁じる Cache-Control の値。**付けるのは `withResponseCount` の 1 か所**
+// （`route()` を通る経路も通らない経路も同じラッパーを通る）と、入口の `src/proxy.ts`。
+// その 2 つが同じ値を使うため、ここを唯一の参照元にする
+// （ルートごとに自分でも付けていた頃は `Vary` が二重に並んでいた＝実測）
 export const NO_STORE_CACHE_CONTROL = 'no-store';
 
 /**

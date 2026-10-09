@@ -110,7 +110,7 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 
 | 項目 | 内容 | 出典 |
 | ---- | ---- | ---- |
-| **レート制限がインスタンスごとになる** | 枠の保持はインプロセスの `Map`。複数インスタンスでは**台数分だけ緩くなる**（共有ストアは宿題） | ADR-0010 |
+| **レート制限の記録が DB に増える** | 枠は配備全体で 1 つ（`RateLimitHit`）。`consume` が**そのキーの**期限切れを同じ操作で掃くので通常は膨らまないが、**二度と来ないキー**（解約したテナント）の行は残る（定期掃きは宿題） | ADR-0015 |
 | **本文サイズ・タイムアウト・未対応メソッド** | アプリ手前のリバースプロキシの責務。Vercel の既定で足りるかを配備先ごとに確認する | ADR-0005 / ADR-0007 |
 | **関数の実行時間上限** | 上流 LLM の中継は 1 リクエストが長い。プランの `maxDuration` を超えると 504 になるので、必要なら `vercel.json` の `functions` で延ばす | — |
 | **接続数** | プーラ（Transaction mode）を使う。直結のままだと Supabase の接続上限に当たる | 上記「1.」 |
@@ -208,7 +208,8 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     `audit.secret_too_short` / `auth.platform_token_not_configured` /
     `auth.platform_token_too_short` /
     `billing.secret_not_configured` / `billing.secret_too_short` /
-    `metrics.token_not_configured` / `metrics.token_too_short` / `plan.unknown_plan`
+    `metrics.token_not_configured` / `metrics.token_too_short` / `plan.unknown_plan` /
+    `rate_limit.contended` / `rate_limit.store_unavailable`
     （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
     `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
     ここが古いままなら落ちる。件数とファイル名は書かない）。

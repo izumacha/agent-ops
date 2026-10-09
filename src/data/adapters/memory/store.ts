@@ -35,6 +35,19 @@ export interface BillingEventRow {
   receivedAt: Date;
 }
 
+/**
+ * レート制限の記録 1 本（memory 専用）。
+ *
+ * **キーは Port の `key` なので、行に `key` は持たない**（表の鍵が持っている）。
+ * 本番の表（`RateLimitHit`）は `id` を持つが、アプリから id で引く経路が無いので写さない。
+ */
+export interface RateLimitHitRow {
+  // 枠の種類（`standard` / `fanOut` / `outbound` / `heavyRead`）
+  tier: string;
+  // 呼び出しの時刻
+  at: Date;
+}
+
 export class MemoryStore {
   // テナント (id → 行)
   readonly tenants = new Map<string, TenantRecord>();
@@ -68,6 +81,11 @@ export class MemoryStore {
   // `@@unique([provider, eventId])` が 2 行目を拒否するので、memory 側も「同じキーなら 2 行目を
   // 作らない」形にしておく (ADR-0006 の死角。緩いと API テストだけが二重処理を通してしまう)
   readonly billingEvents = new Map<string, BillingEventRow>();
+  // レート制限の記録 (キー → その窓の中の呼び出し)。**業務データではない** —
+  // 窓から外れた行は捨ててよい。prisma 側は 1 文の CTE で「掃く → 数える → 条件付きで足す」を
+  // 行うので、こちらも同じ順で同じことをする (ADR-0006 の死角。緩いと API テストだけが
+  // 「上限を超えても通る世界」で緑になる)
+  readonly rateLimitHits = new Map<string, RateLimitHitRow[]>();
   // 採番用の連番 (cuid の代わり。テストで読みやすいよう接頭辞 + 連番にする)
   private sequence = 0;
 

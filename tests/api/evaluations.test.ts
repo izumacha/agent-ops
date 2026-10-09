@@ -27,7 +27,7 @@ import { call, seedEachTest } from './helpers';
 // ガードレールのルールを作るときの上限（上限そのものを主題にしないので共有の値）
 import { TEST_GUARDRAIL_RULE_LIMITS } from '../lib/guardrail-limits';
 import { AuditAction } from '@/domain/audit/action';
-import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
+import { setRateLimitOverridesForTesting } from '@/lib/api/rate-limit';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -479,7 +479,7 @@ describe('評価の実行のレート制限', () => {
 
   // 各テストの前に小さい上限で作り直す（seedEachTest も作り直すので、この順で上書きする）
   beforeEach(() => {
-    resetSharedRateLimiterForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
+    setRateLimitOverridesForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
   });
 
   it('権限の無い要求は枠を消費しない (403 が先に出る)', async () => {

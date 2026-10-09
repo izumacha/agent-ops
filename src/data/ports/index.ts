@@ -5,6 +5,7 @@ import type { AuditLogsPort } from './audit-logs';
 import type { BillingEventsPort } from './billing-events';
 import type { EvaluationsPort } from './evaluations';
 import type { GuardrailRulesPort, IncidentsPort } from './guardrails';
+import type { RateLimitPort } from './rate-limit';
 import type { TenantsPort } from './tenants';
 import type { UserTokensPort } from './user-tokens';
 import type { UsageEventsPort } from './usage-events';
@@ -23,6 +24,8 @@ export interface Repositories {
   incidents: IncidentsPort;
   auditLogs: AuditLogsPort;
   billingEvents: BillingEventsPort;
+  // レート制限の記録（ADR-0015。**業務データではない** — 窓から外れた行は捨ててよい）
+  rateLimit: RateLimitPort;
 }
 
 // 各 Port の型と入力型をここから再公開する (利用側は個別ファイルのパスを知らなくてよい)
@@ -32,6 +35,7 @@ export type * from './audit-logs';
 export type * from './billing-events';
 export type * from './evaluations';
 export type * from './guardrails';
+export type * from './rate-limit';
 export type * from './tenants';
 export type * from './types';
 export type * from './usage-events';

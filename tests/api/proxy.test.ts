@@ -23,7 +23,7 @@ import {
 } from '@/lib/constants';
 import { GUARDRAIL_ERROR_RATE_MIN_REQUESTS } from '@/domain/guardrail/rule';
 import { call, seedApiKey, seedEachTest } from './helpers';
-import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
+import { setRateLimitOverridesForTesting } from '@/lib/api/rate-limit';
 // エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
 import { createTestAgent } from '../lib/agent-limits';
 // ガードレールのルールを作るときの上限（上限そのものを主題にしないので共有の値）
@@ -987,7 +987,7 @@ describe('プロキシのレート制限', () => {
 
   // 各テストの前に小さい上限で作り直す（helpers の seedEachTest も作り直すので、この順で上書きする）
   beforeEach(() => {
-    resetSharedRateLimiterForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
+    setRateLimitOverridesForTesting({ limit: TEST_LIMIT, windowMs: TEST_WINDOW_MS });
   });
 
   // 中継を 1 回呼ぶ

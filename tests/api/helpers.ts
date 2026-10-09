@@ -2,7 +2,7 @@
 // Route Handler を HTTP を介さずに直接呼ぶ (本番と同じ認証・認可・検証の経路を通す)
 import { afterEach, beforeEach } from 'vitest';
 import { setReposForTesting } from '@/data';
-import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
+import { setRateLimitOverridesForTesting, type RateLimitTier } from '@/lib/api/rate-limit';
 import { PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, ApiKeyRecord, UserRecord, UserTokenRecord } from '@/data';
@@ -169,7 +169,7 @@ const NOTIFY_ENV_NAMES = [
 /**
  * **レート制限の上限も実行環境から切り離す。**
  *
- * `resetSharedRateLimiterForTesting()` を引数なしで呼ぶと、上限は本番と同じ決め方
+ * `setRateLimitOverridesForTesting()` を引数なしで呼ぶと、上限は本番と同じ決め方
  * （環境変数の上書き → 契約プラン）になるので `process.env.PROXY_RATE_LIMIT_PER_MINUTE` を読む。シェルや CI でこれが小さい値
  * （`PROXY_RATE_LIMIT_PER_MINUTE=1` 等）になっていると、1 テストの中で中継や評価を 2 回以上
  * 呼ぶテストが**一斉に 429 で落ちる** — 通知の宛先を空にしたのと同じ理由（テストの結果が
@@ -179,6 +179,32 @@ const RATE_LIMIT_ENV_NAMES = [PROXY_RATE_LIMIT_ENV] as const;
 
 // 上の 2 組を合わせた「setupSeed が空にする設定」
 const BLANKED_ENV_NAMES = [...NOTIFY_ENV_NAMES, ...RATE_LIMIT_ENV_NAMES] as const;
+
+/**
+ * レート制限の記録の件数（**枠を消費したか**を見るテストが使う）。
+ *
+ * 以前は制限器のインスタンスを覗いていたが、記録は data 層へ移った（ADR-0015）ので
+ * memory の表を数える。`tier` を渡すとその種類だけ数える（追加の枠が見るのと同じ粒度）。
+ *
+ * **`tier` は `RateLimitTier` で受ける（素の `string` にしない）。** 呼び出し側は
+ * `toBe(0)` を期待するので、綴りを間違えると `filter` が空になって**何も見ていないのに緑**に
+ * なる（以前の「制限器のインスタンスを覗く」形は未知の種類で `undefined` を返したので、
+ * 取り違えがその場で落ちていた）。
+ * @param store memory の表
+ * @param tier 枠の種類（省略すると種類を問わない合計）
+ * @returns 記録の件数
+ */
+export function rateLimitHitCount(store: MemoryStore, tier?: RateLimitTier): number {
+  // 全キーの記録を数える（テストは 1 テナントぶんしか作らないのでキーで絞らない）
+  let count = 0;
+  // キーごとの配列を足していく
+  for (const hits of store.rateLimitHits.values()) {
+    // 種類の指定があればその分だけ数える
+    count += tier === undefined ? hits.length : hits.filter((hit) => hit.tier === tier).length;
+  }
+  // 合計
+  return count;
+}
 
 // memory アダプタへ差し替え、テナント A / B を seed する (各テストの beforeEach で呼ぶ。afterEach で teardownSeed を対にする)
 function setupSeed(): Seed {
@@ -203,13 +229,13 @@ function setupSeed(): Seed {
     notifyBefore.set(name, process.env[name]);
     process.env[name] = '';
   }
-  // **レート制限の表を作り直すのは、設定を空にした後。** 表はプロセスの寿命いっぱい残るので、
-  // 作り直さないと「前のテストが使った枠」が次のテストへ漏れ、同じファイルの後ろのテストだけが
-  // 429 になる（実行順に依存した赤になり、原因が分かりにくい）。**順序が逆だと上限を
-  // 開発機・CI の環境変数から読む** — `PROXY_RATE_LIMIT_PER_MINUTE=1` を設定した環境で
-  // 中継・評価・E2E の 6 件が 429 で落ちた（実測）。しかも値を見張るテストは
-  // 「テスト本体の中で空であること」しか見ないので、その状態でも緑のまま通る
-  resetSharedRateLimiterForTesting();
+  // **上限の上書きを戻すのは、設定を空にした後。** **順序が逆だと上限を開発機・CI の
+  // 環境変数から読む** — `PROXY_RATE_LIMIT_PER_MINUTE=1` を設定した環境で中継・評価・E2E の
+  // 6 件が 429 で落ちた（実測）。しかも値を見張るテストは「テスト本体の中で空であること」
+  // しか見ないので、その状態でも緑のまま通る。
+  // **記録そのものは毎テストで新しい memory の表**（上の `createMemoryRepos`）なので、
+  // 以前のような「前のテストが使った枠が漏れる」形はもう起きない（ADR-0015）
+  setRateLimitOverridesForTesting();
   // 2 テナント分を seed する
   return {
     store: repos.store,

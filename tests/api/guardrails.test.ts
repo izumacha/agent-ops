@@ -25,8 +25,8 @@ import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 import { PG_BIGINT_MAX_DIGITS } from '@/domain/pg-bigint';
 import { AgentStatus, IncidentStatus, Plan, Provider, RuleAction, RuleKind } from '@/domain/types';
 import { API_MESSAGES, HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE } from '@/lib/constants';
-import { extraRateLimiter, RATE_LIMIT_TIER, sharedRateLimiter } from '@/lib/api/rate-limit';
-import { call, seedEachTest } from './helpers';
+import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
+import { call, rateLimitHitCount, seedEachTest } from './helpers';
 // ルールを仕込むときの上限（上限そのものを主題にしない seed なので共有の値）
 import { TEST_GUARDRAIL_RULE_LIMITS } from '../lib/guardrail-limits';
 import { guardrailRuleLimitsFor } from '@/domain/plan';
@@ -1030,9 +1030,9 @@ describe('監査ログと連鎖の検証', () => {
       expect(refused.status).toBe(403);
     }
     // 共有の枠にも重い枠にも 1 件も記録されていない
-    expect(sharedRateLimiter().trackedKeys, '共有の枠を消費している').toBe(0);
+    expect(rateLimitHitCount(seed.store), '共有の枠を消費している').toBe(0);
     expect(
-      extraRateLimiter(RATE_LIMIT_TIER.heavyRead)?.trackedKeys,
+      rateLimitHitCount(seed.store, RATE_LIMIT_TIER.heavyRead),
       '重い経路の枠を消費している',
     ).toBe(0);
   });
@@ -1107,7 +1107,7 @@ describe('監査ログと連鎖の検証', () => {
       expect(refused.status, `${index + 1} 回目`).toBe(403);
     }
     // **枠は 1 つも使われていない**（印の種類ごとの表を直接覗く）
-    expect(extraRateLimiter(RATE_LIMIT_TIER.heavyRead)?.trackedKeys).toBe(0);
+    expect(rateLimitHitCount(seed.store, RATE_LIMIT_TIER.heavyRead)).toBe(0);
     // admin はそのまま通る
     const ok = await call(verifyAuditLogs, { token: seed.a.tokens.admin });
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);

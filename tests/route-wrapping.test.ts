@@ -117,6 +117,11 @@ const spec = parse(readFileSync(join(process.cwd(), 'openapi', 'openapi.yaml'), 
 // 「1 度作って使い回す」ことを前提にしている）
 const importGraph = sourceImportGraph();
 
+// 解析済みの src 全体。**同じ理由でここも 1 度だけ作る** — テストの中で呼ぶと、1 回の
+// `npm test` でこのファイルだけが src を何度も解析する（この PR は 1 か所だったものを
+// 3 か所に増やしていた）。`tests/layering.test.ts` も同じ形で持っている
+const parsedSources = parseSourceFiles();
+
 describe('Route Handler の結線', () => {
   // 走査が壊れて 0 件になったら落とす (fail-closed)
   it('Route Handler を 1 つ以上見つけている', () => {
@@ -427,7 +432,7 @@ describe('Route Handler の結線', () => {
   // どちらも「数えない種類が増えたのに文書が古いまま」になる前に手を止める必要がある
   it('src/app 配下で応答を返すものは、数える経路か宣言済みの「数えない種類」のどちらか', () => {
     // src/app 配下の .ts / .tsx を構文木つきで集める
-    const appFiles = parseSourceFiles().filter((parsed) => parsed.path.startsWith(`${APP_DIR}/`));
+    const appFiles = parsedSources.filter((parsed) => parsed.path.startsWith(`${APP_DIR}/`));
     // 1 つも拾えなければ走査が壊れている（fail-closed）
     expect(appFiles.length, 'src/app 配下のファイルを拾えている').toBeGreaterThan(0);
     // 数える入口（route.ts）と、数えない種類に当たるもの
@@ -477,7 +482,7 @@ describe('Route Handler の結線', () => {
     // 表に宣言があること
     expect(UNCOUNTED_RESPONSE_SOURCES.entryProxy).toBeDefined();
     // 入口の構文木（拾えなければ fail-closed）
-    const entry = parseSourceFiles().find((parsed) => parsed.path === join(SRC_DIR, 'proxy.ts'));
+    const entry = parsedSources.find((parsed) => parsed.path === join(SRC_DIR, 'proxy.ts'));
     expect(entry, '入口を走査できていない').toBeDefined();
     // 名前付き import の識別子を集める
     const imported: string[] = [];
@@ -937,7 +942,7 @@ describe('秘密の生成と比較', () => {
   // 秘密を読む場所が 1 か所だけであること (別の場所で読めば、そこで安い比較を書けてしまう)
   it('PLATFORM_ADMIN_TOKEN に触れるのは照合の中だけ', () => {
     // 認証のファイル以外では 1 度も現れないこと (別の場所で読めば、そこで安い比較を書ける)
-    for (const { path, source } of parseSourceFiles()) {
+    for (const { path, source } of parsedSources) {
       // 認証のファイルは下で中身を見る
       if (path === AUTH_SOURCE_PATH) continue;
       // コードとして触れている位置が 1 つも無いこと (コメントでの言及は数えない)

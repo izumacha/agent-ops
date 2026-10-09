@@ -36,9 +36,8 @@ export function withPrivateCacheHeaders(response: Response): Response {
   // 要素を作る**（実測: `Vary: ''` の応答へ通すと `Vary: ", Authorization, Cookie"`。
   // RFC 9110 の `Vary` は `1#field-name` なので空の要素は文法違反で、解析に失敗した
   // 共有キャッシュがヘッダを丸ごと無視すると、この関数が防いでいる多層防御が消える）
-  const varyBefore = headers.get('Vary');
   // いま並んでいる項目。**空の要素は落とす**（上記の文法違反を持ち込まないため）
-  const listed = (varyBefore ?? '')
+  const listed = (headers.get('Vary') ?? '')
     .split(',')
     .map((field) => field.trim())
     .filter((field) => field.length > 0);
@@ -50,13 +49,12 @@ export function withPrivateCacheHeaders(response: Response): Response {
     : CREDENTIAL_HEADERS.filter(
         (field) => !listed.some((entry) => entry.toLowerCase() === field.toLowerCase()),
       );
-  // 並べるものがあれば組み立てて 1 度だけ設定する
-  if (listed.length > 0 || missing.length > 0) {
-    headers.set('Vary', [...listed, ...missing].join(', '));
-  } else if (varyBefore !== null) {
-    // 並べるものが 1 つも無いのにヘッダだけある（空文字など）なら、文法違反を残さず消す
-    headers.delete('Vary');
-  }
+  // 組み立てて 1 度だけ設定する。**空になる場合は無い** — `missing` が空になるのは
+  // `*` が並んでいるとき（＝`listed` が空でない）か、2 項目とも既に並んでいるとき
+  // （＝`listed` が 2 つ以上）だけなので、`CREDENTIAL_HEADERS` が空でない限り
+  // 「どちらも空」は起こりえない（空の `Vary` もこの 1 文が 2 項目へ直す）。
+  // 「念のため消す」分岐を置いた版は到達せず、消しても全件緑だった（実測。§6 デッドコード）
+  headers.set('Vary', [...listed, ...missing].join(', '));
   // 本文・状態はそのままで作り直す (204 の null 本文もそのまま通る)
   return new Response(response.body, {
     status: response.status,

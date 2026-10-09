@@ -158,6 +158,14 @@ describe('整形が失敗しても投げない', () => {
     } finally {
       spy.mockRestore();
     }
+    // **メトリクス側のラベルも見る。** ログ行だけを見ていた版は、数える側の縮退だけを
+    // `'warn'` へ差し替える変異が全件緑のまま通った（実測）— ログは `level="error"` を
+    // 出すのにカウンタは `level="warn"` で数え、`level="error"` で警報を組んだ運用者には
+    // 縮退した行が 1 件も見えない。ADR-0014 が「同じモジュール実体の中では食い違わない」と
+    // 名乗っているのはまさにこの一致なので、両辺を同じテストで固定する
+    expect(renderMetrics(new Date())).toContain(
+      'agentops_log_events_total{event="valueOf",level="error"} 1',
+    );
   });
 
   it('logEvent も語彙に無いキーで投げない（固めた縮退へ実際に届く）', () => {

@@ -196,11 +196,36 @@ export function extraRateLimitFor(tier: RateLimitTier): number | null {
 
 /**
  * 窓の長さ（ミリ秒）。テストの上書きがあればそれを使う。
+ *
+ * **正の整数でなければ落とす（fail-closed）。** 0 以下だと窓の下端が「いま」と同値以降になり、
+ * **どの記録も数えられず全部通る**＝レート制限が無言で消える（以前はこの検証を制限器の
+ * コンストラクタが持っていた）。渡す側のバグを隠さない。
  * @returns 窓の長さ
  */
 function rateLimitWindowMs(): number {
   // 上書きが無ければ既定（毎分）
-  return windowMsOverrideForTesting ?? RATE_LIMIT_WINDOW_MS;
+  const windowMs = windowMsOverrideForTesting ?? RATE_LIMIT_WINDOW_MS;
+  // 壊れていれば落とす（0 以下は「制限が丸ごと無効」を意味する）
+  if (!Number.isInteger(windowMs) || windowMs <= 0) {
+    throw new RangeError('レート制限の窓の長さは正の整数でなければなりません');
+  }
+  // 使う値
+  return windowMs;
+}
+
+/**
+ * 上限が使える値か確かめる（**正の整数でなければ落とす**）。
+ *
+ * 0 や NaN を通すと「上限に達することが無い」か「全部断る」のどちらかになり、前者は保護が
+ * 黙って消える（以前はこの検証を制限器の `evaluate` が持っていた）。
+ * @param limit 確かめる上限
+ * @param label どちらの枠か（失敗文言に出す）
+ */
+function assertUsableLimit(limit: number, label: string): void {
+  // 整数でない・0 以下はいずれも設定の誤り
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new RangeError(`${label}の上限は正の整数でなければなりません`);
+  }
 }
 
 /**
@@ -213,17 +238,19 @@ function rateLimitWindowMs(): number {
  * **「最も古い記録」は記録側が最小値として返す**（配列の先頭ではない）。時刻は壁時計なので
  * NTP の時刻合わせで巻き戻りうる — 先頭を信じると巻き戻った幅のぶん長く待たせる。
  *
- * @param result 記録側が返した件数と最古の時刻
+ * **待ち時間は窓の長さを超えない。** 記録側の時計が巻き戻れば「最も古い記録」が未来に
+ * なりうるが、どんな場合でも窓の長さだけ待てば必ず 1 回ぶんの空きができる（それより長く
+ * 待たせるのは、素直に従うクライアントを理由なく止めることになる）。
+ *
+ * @param result 記録側が返した件数・最古の時刻・記録側の「いま」
  * @param windowMs 窓の長さ（ミリ秒）
- * @param now いまの時刻
  * @param sharedLimit 共有の枠の上限
  * @param extraLimit 追加の枠の上限（持たない種類は null）
- * @returns 待つべき秒数（1 以上の整数）
+ * @returns 待つべき秒数（1 以上・窓の長さ以下の整数）
  */
 export function retryAfterSecondsFor(
   result: RateLimitConsumeResult,
   windowMs: number,
-  now: Date,
   sharedLimit: number,
   extraLimit: number | null,
 ): number {
@@ -239,8 +266,11 @@ export function retryAfterSecondsFor(
   }
   // どの枠も「最も古い記録」を持たないなら最低値で答える（上限が壊れている場合の保険）
   if (blocking.length === 0) return MIN_RETRY_AFTER_SECONDS;
-  // 空きができるまでのミリ秒（複数あれば長いほう）
-  const waitMs = Math.max(...blocking.map((oldest) => oldest.getTime() + windowMs - now.getTime()));
+  // 空きができるまでのミリ秒（複数あれば長いほう）。**窓の長さで頭打ちにする**（上の説明）
+  const waitMs = Math.min(
+    windowMs,
+    Math.max(...blocking.map((oldest) => oldest.getTime() + windowMs - result.at.getTime())),
+  );
   // 秒へ切り上げ、最低 1 秒にする（RFC 9110 の delay-seconds は整数）
   return Math.max(MIN_RETRY_AFTER_SECONDS, Math.ceil(waitMs / MILLIS_PER_SECOND));
 }
@@ -256,16 +286,18 @@ export function retryAfterSecondsFor(
  * レート制限が丸ごと無効になる（しかも上流への課金は止まらない）。例外はそのまま投げて
  * 500 にし、**上流への呼び出しは 1 度も起こさない**。
  *
+ * **「いま」を受け取らない。** 窓の判定に使う時刻は**記録側（1 つの DB）の時計**が決める —
+ * アプリのインスタンスごとの壁時計を使うと、記録が配備全体で 1 つでも時刻がずれた台数ぶん
+ * 枠が割れる（この PR が閉じた穴が、時刻の側から戻ってくる）。
+ *
  * @param repos リポジトリの束（`rateLimit` を使う）
  * @param principal 認証済みの主体
  * @param tier 枠の種類
- * @param now いまの時刻
  */
 export async function enforceRateLimit(
   repos: Repositories,
   principal: Principal,
   tier: RateLimitTier,
-  now: Date,
 ): Promise<void> {
   // 数える単位（認証済みの id。偽装できる値は使わない）
   const key = rateLimitKeyFor(principal);
@@ -273,18 +305,23 @@ export async function enforceRateLimit(
   const sharedLimit = sharedRateLimitFor(principal);
   // 追加の枠の上限（持たない種類は null）
   const extraLimit = extraRateLimitFor(tier);
-  // 窓の長さと下端（**半開区間**。下端より後の記録だけを数える）
+  // 上限が使える値であること（壊れていたら落とす。fail-closed）
+  assertUsableLimit(sharedLimit, '共有の枠');
+  if (extraLimit !== null) assertUsableLimit(extraLimit, '追加の枠');
+  // 窓の長さ（下端は記録側が自分の時計から決める。理由は Port の `windowMs`）
   const windowMs = rateLimitWindowMs();
-  const windowStart = new Date(now.getTime() - windowMs);
   // 数えて、通せるなら 1 行足す（1 回の操作）
   const result = await consumeOrFail({
     repos,
-    input: { key, tier, windowStart, now, sharedLimit, extraLimit },
+    input: { key, tier, windowMs, sharedLimit, extraLimit },
   });
   // 通るならここで終わり（記録はもう足されている）
   if (result.allowed) return;
-  // 断るので待ち時間を決めて 429 にする
-  throw rateLimitedError(retryAfterSecondsFor(result, windowMs, now, sharedLimit, extraLimit));
+  // **枠を数えられなかった（混雑）場合も記録を残す** — 上限超過と区別できないと、
+  // 運用者は「上限を上げれば直る」と読む（直らない。詰まっているのは判定そのもの）
+  if (result.contended) logEventThrottled('rate_limit.contended');
+  // 断るので待ち時間を決めて 429 にする（**基準は記録側の時計**。理由は結果の `at`）
+  throw rateLimitedError(retryAfterSecondsFor(result, windowMs, sharedLimit, extraLimit));
 }
 
 /**

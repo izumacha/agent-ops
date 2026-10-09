@@ -1289,8 +1289,16 @@ class MemoryBillingEvents implements BillingEventsPort {
 /**
  * レート制限の記録（ADR-0015）。
  *
- * **prisma 側（1 文の CTE）と同じ順で同じことをする**（ADR-0006 の死角）。
+ * **prisma 側と同じ順で同じことをする**（ADR-0006 の死角）。
  * 緩いと API テストだけが「上限を超えても通る世界」で緑になるので、契約テストと対で守る。
+ *
+ * **時刻は表の時計（`MemoryStore.now()`）が決める** — Port の約束どおり、呼び出し側から
+ * 「いま」を渡させない（アプリの時計がインスタンスごとにずれると枠が割れる）。
+ * テストは `store.now` を差し替えて窓の境界を決定的に動かす。
+ *
+ * **直列化は要らない。** JavaScript の実行は単一スレッドで、この実装に `await` が 1 つも無いので
+ * 「数えて足す」の途中へ別の呼び出しが割り込めない（prisma 側が助言ロックで作っている状態が、
+ * ここでは言語の実行モデルから自然に成り立つ）。だから `contended` は常に `false`。
  */
 class MemoryRateLimit implements RateLimitPort {
   // 共有の表を受け取る
@@ -1298,10 +1306,14 @@ class MemoryRateLimit implements RateLimitPort {
 
   // 窓の中を数えて、両方の枠が上限未満なら 1 行足す
   consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
+    // **時刻は表の時計から取る**（Port の約束）
+    const at = this.store.now();
+    // 窓の下端（半開区間なので、この時刻と同値の記録は外れる）
+    const windowStart = at.getTime() - input.windowMs;
     // そのキーの記録（無ければ空）
     const hits = this.store.rateLimitHits.get(input.key) ?? [];
-    // **期限切れをその場で捨てる**（prisma 側の `purge` CTE と同じ。半開区間なので下端は含まない）
-    const live = hits.filter((hit) => hit.at.getTime() > input.windowStart.getTime());
+    // **期限切れをその場で捨てる**（prisma 側の `purge` と同じ）
+    const live = hits.filter((hit) => hit.at.getTime() > windowStart);
     // この種類だけの記録（追加の枠が見るのはこちら）
     const sameTier = live.filter((hit) => hit.tier === input.tier);
     // 両方の枠が上限未満のときだけ通す（追加の枠を持たない種類は共有の枠だけを見る）
@@ -1309,12 +1321,14 @@ class MemoryRateLimit implements RateLimitPort {
       live.length < input.sharedLimit &&
       (input.extraLimit === null || sameTier.length < input.extraLimit);
     // 通すときだけ 1 行足す（**断った呼び出しは数えない** — 数えると窓が延びて永久に通れない）
-    const next = allowed ? [...live, { tier: input.tier, at: input.now }] : live;
+    const next = allowed ? [...live, { tier: input.tier, at }] : live;
     // 掃いた結果を書き戻す（断ったときも期限切れは落ちる）
     this.store.rateLimitHits.set(input.key, next);
     // 件数は**今回を足す前**の値を返す（上限との比較が呼び出し側でも再現できる）
     return Promise.resolve({
       allowed,
+      at,
+      contended: false,
       sharedCount: live.length,
       extraCount: sameTier.length,
       sharedOldest: oldestHitAt(live),
@@ -1322,19 +1336,29 @@ class MemoryRateLimit implements RateLimitPort {
     });
   }
 
-  // 窓から外れた記録をまとめて消す（**キーで絞らない**）
-  sweep(before: Date): Promise<number> {
+  // 窓から外れた記録を消す（**キーで絞らず、件数に上限を置く**）
+  sweep(before: Date, limit: number): Promise<number> {
     // 消した件数
     let deleted = 0;
     // 全キーを見る（これが要るのは二度と来ないキーの記録なので、キーで絞らない）
     for (const [key, hits] of this.store.rateLimitHits) {
-      // 期限内だけを残す
-      const live = hits.filter((hit) => hit.at.getTime() > before.getTime());
+      // 上限に達したらそこで止める（prisma 側の `LIMIT` と同じ振る舞い）
+      if (deleted >= limit) break;
+      // 残す分と消す分に分ける（**古い順**に消すので、prisma 側の `ORDER BY at` と並びがそろう）
+      const expired = hits
+        .filter((hit) => hit.at.getTime() <= before.getTime())
+        .sort((left, right) => left.at.getTime() - right.at.getTime());
+      // この回で消せる分だけを対象にする
+      const removing = expired.slice(0, limit - deleted);
+      // 1 件も消さないなら次のキーへ
+      if (removing.length === 0) continue;
+      // 消す分を除いた残り
+      const remaining = hits.filter((hit) => !removing.includes(hit));
       // 落ちた分を数える
-      deleted += hits.length - live.length;
+      deleted += removing.length;
       // 1 件も残らなければキーごと消す（表が無限に伸びないようにする）
-      if (live.length === 0) this.store.rateLimitHits.delete(key);
-      else this.store.rateLimitHits.set(key, live);
+      if (remaining.length === 0) this.store.rateLimitHits.delete(key);
+      else this.store.rateLimitHits.set(key, remaining);
     }
     // 消した件数
     return Promise.resolve(deleted);
@@ -1344,16 +1368,20 @@ class MemoryRateLimit implements RateLimitPort {
 /**
  * 窓の中で最も古い記録の時刻（1 件も無ければ null）。
  *
- * **`[0]` ではなく最小値を取る** — 配列は push 順で、時刻は呼び出し側が渡す壁時計なので
- * NTP の時刻合わせで巻き戻りうる。先頭を信じると `Retry-After` を必要以上に長く返す。
+ * **`[0]` ではなく最小値を取る** — 配列は push 順で、時刻は表の時計が返す値なので、テストが
+ * 差し替えた時計や実時刻の巻き戻りで前後しうる。先頭を信じると `Retry-After` が長くなる。
+ *
+ * **`Math.min(...rows)` で広げない** — 引数の個数には上限があり（およそ 10 万）、上限を
+ * 大きく設定した配備では窓の中の件数がそこへ届いて `RangeError` になる（判定を返す代わりに
+ * 投げるので、呼び出し側は「ストアが落ちた」として 500 にしてしまう）。
  * @param rows 窓の中の記録
  * @returns 最も古い時刻、または null
  */
 function oldestHitAt(rows: readonly RateLimitHitRow[]): Date | null {
   // 1 件も無ければ null（呼び出し側が「待ち時間を決められない」と分かる）
   if (rows.length === 0) return null;
-  // 最小の時刻を選ぶ
-  return new Date(Math.min(...rows.map((hit) => hit.at.getTime())));
+  // 1 周で最小値を選ぶ（引数へ広げないので件数に依存しない）
+  return rows.reduce<Date>((min, hit) => (hit.at < min ? hit.at : min), rows[0]!.at);
 }
 
 // memory アダプタ一式を組み立てる (テストはこれを setReposForTesting へ渡し、store で seed する)

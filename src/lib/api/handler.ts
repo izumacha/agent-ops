@@ -193,7 +193,7 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
     // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる。
     // **記録は DB の共有ストア**なので待つ（ADR-0015。インプロセスの表だった頃は同期だった）
     if (options.rateLimit !== undefined) {
-      await enforceRateLimit(repos, principal, options.rateLimit, new Date());
+      await enforceRateLimit(repos, principal, options.rateLimit);
     }
     // 動的セグメントを解決する
     const params = await context.params;

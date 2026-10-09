@@ -136,19 +136,19 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
     // 共有は 10、追加は 2
     setRateLimitOverridesForTesting({ limit: 10, windowMs: WINDOW_MS }, { limit: 2 });
     // 重い経路を 2 回通す（追加の枠の上限まで）
-    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0);
-    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0);
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut);
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut);
     // 3 回目は追加の枠で断られる
-    await expect(
-      enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0),
-    ).rejects.toBeInstanceOf(ApiError);
+    await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut)).rejects.toBeInstanceOf(
+      ApiError,
+    );
     // **共有の枠も 2 件ぶん消費されている** — 置き換えだと、重い経路と中継を交互に叩くだけで
     // 合計が共有の上限を超える。残りは 10 - 2 = 8 件なので、8 回は通って 9 回目で断られる
     for (let index = 0; index < 8; index += 1) {
-      await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0);
+      await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard);
     }
     await expect(
-      enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0),
+      enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard),
     ).rejects.toBeInstanceOf(ApiError);
   });
 
@@ -162,16 +162,16 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
       // 共有は 10、追加は 2
       setRateLimitOverridesForTesting({ limit: 10, windowMs: WINDOW_MS }, { limit: 2 });
       // 追加の枠の上限まで通す
-      await enforceRateLimit(repos, principal, tier, T0);
-      await enforceRateLimit(repos, principal, tier, T0);
+      await enforceRateLimit(repos, principal, tier);
+      await enforceRateLimit(repos, principal, tier);
       // 次は追加の枠で断られる（共有にはまだ 8 件の余裕がある）
-      await expect(enforceRateLimit(repos, principal, tier, T0)).rejects.toBeInstanceOf(ApiError);
+      await expect(enforceRateLimit(repos, principal, tier)).rejects.toBeInstanceOf(ApiError);
       // 共有の枠は 2 件ぶん減っている（置き換えではなく「加えて」消費する）
       for (let index = 0; index < 8; index += 1) {
-        await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0);
+        await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard);
       }
       await expect(
-        enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0),
+        enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard),
       ).rejects.toBeInstanceOf(ApiError);
     },
   );
@@ -180,11 +180,11 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
     // 共有は 1、追加は 5（**共有のほうが先に尽きる**組み合わせ）
     setRateLimitOverridesForTesting({ limit: 1, windowMs: WINDOW_MS }, { limit: 5 });
     // 共有の枠を使い切る
-    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0);
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard);
     // 重い経路は共有の枠で断られる
-    await expect(
-      enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0),
-    ).rejects.toBeInstanceOf(ApiError);
+    await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut)).rejects.toBeInstanceOf(
+      ApiError,
+    );
     // **記録は使い切った 1 件だけ** — 判定と記録が同じ操作なので、片方だけ消費された
     // 状態にならない（以前は 2 つの表を順に数えていたので、通った側だけが減りえた）
     expect(repos.store.rateLimitHits.get('tenant:t1')).toHaveLength(1);
@@ -193,19 +193,49 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
   it('断るときは待ち時間を Retry-After に載せる（窓の残りぶん）', async () => {
     // 共有も追加も 1 で、両方を使い切る
     setRateLimitOverridesForTesting({ limit: 1, windowMs: WINDOW_MS }, { limit: 1 });
-    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0);
-    // 1 秒後に同じ経路を叩くと断られる
-    const thrown = await enforceRateLimit(
-      repos,
-      principal,
-      RATE_LIMIT_TIER.fanOut,
-      new Date(T0.getTime() + 1_000),
-    ).catch((error: unknown) => error);
+    // **記録側の時計を固定して進める**（待ち時間は記録側の時刻で決まる。理由は結果の `at`）
+    let clock = T0;
+    repos.store.now = () => clock;
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut);
+    // 1 秒進めてから同じ経路を叩くと断られる
+    clock = new Date(T0.getTime() + 1_000);
+    const thrown = await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut).catch(
+      (error: unknown) => error,
+    );
     // 429 ＋ Retry-After が載る
     expect(thrown).toBeInstanceOf(ApiError);
     expect((thrown as ApiError).status).toBe(HTTP_STATUS.TOO_MANY_REQUESTS);
     // 残り 59 秒（窓 60 秒 - 経過 1 秒）
     expect(((thrown as ApiError).headers ?? {})['Retry-After']).toBe('59');
+  });
+
+  it('枠を数えられなかった（混雑）ときは 429 で断り、専用の出来事を残す', async () => {
+    // 記録側が「順番待ちを打ち切った」と返す状況を作る
+    vi.spyOn(repos.rateLimit, 'consume').mockResolvedValue({
+      allowed: false,
+      at: T0,
+      contended: true,
+      sharedCount: 0,
+      extraCount: 0,
+      sharedOldest: null,
+      extraOldest: null,
+    });
+    const outlet = captureLogOutlet();
+    try {
+      // 429 で断る（**500 ではない** — 断れているので上限超過と同じ扱い）
+      const thrown = await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard).catch(
+        (error: unknown) => error,
+      );
+      expect(thrown).toBeInstanceOf(ApiError);
+      expect((thrown as ApiError).status).toBe(HTTP_STATUS.TOO_MANY_REQUESTS);
+      // **数えられていないので最短の待ち時間**（最古が無いので下限の 1 秒）
+      expect(((thrown as ApiError).headers ?? {})['Retry-After']).toBe('1');
+      // **上限超過と区別できる記録が残る** — 混ざると運用者は「上限を上げれば直る」と読む
+      expect(loggedEvents(outlet.calls())).toEqual(['rate_limit.contended']);
+    } finally {
+      outlet.restore();
+      vi.restoreAllMocks();
+    }
   });
 
   it('ストアが落ちたら通さず、専用の出来事を残す（fail-closed）', async () => {
@@ -216,7 +246,7 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
     const outlet = captureLogOutlet();
     try {
       // **通さない**（例外はそのまま上がって 500 になる。429 ではない）
-      await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0)).rejects.toBe(
+      await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard)).rejects.toBe(
         failure,
       );
       // **汎用の 500 に埋もれさせない** — 運用者が知りたいのは「上限超過か、数えられていないか」
@@ -228,12 +258,64 @@ describe('枠の組み合わせ (enforceRateLimit)', () => {
   });
 });
 
+describe('壊れた設定は落とす (fail-closed)', () => {
+  // 検査に使う主体
+  const principal = {
+    kind: 'agent',
+    apiKeyId: 'key-1',
+    tenantId: 't1',
+    plan: Plan.pro,
+    agent: { id: 'a1', status: 'active', provider: Provider.anthropic, model: 'm' },
+  } as unknown as Principal;
+
+  // 記録は毎テストで新しい memory の表にする
+  let repos: Repositories & { store: MemoryStore };
+
+  beforeEach(() => {
+    repos = createMemoryRepos(new MemoryStore());
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    '窓の長さが %s なら落とす（制限が丸ごと消える）',
+    async (windowMs) => {
+      // 壊れた窓の長さを設定する
+      setRateLimitOverridesForTesting({ limit: 10, windowMs });
+      // **0 以下だと「どの記録も数えられず全部通る」** = レート制限が無言で消える
+      await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard)).rejects.toThrow(
+        RangeError,
+      );
+      // 記録も増えていない（通していない）
+      expect(repos.store.rateLimitHits.size).toBe(0);
+    },
+  );
+
+  it.each([0, -1, 1.5, Number.NaN])('共有の枠の上限が %s なら落とす', async (limit) => {
+    // 壊れた上限を設定する
+    setRateLimitOverridesForTesting({ limit });
+    // 0 だと「全部断る」、負や小数だと比較が壊れる — どちらも渡す側のバグなので隠さない
+    await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard)).rejects.toThrow(
+      RangeError,
+    );
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('追加の枠の上限が %s なら落とす', async (limit) => {
+    // 共有は正しく、追加だけ壊す
+    setRateLimitOverridesForTesting({ limit: 10 }, { limit });
+    // 追加の枠を持つ種類で確かめる（持たない種類では `null` なので検証に入らない）
+    await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut)).rejects.toThrow(
+      RangeError,
+    );
+  });
+});
+
 describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
   // 記録側の戻りを組み立てる補助
   function result(overrides: Partial<RateLimitConsumeResult>): RateLimitConsumeResult {
-    // 既定は「どちらの枠も空」
+    // 既定は「どちらの枠も空・記録側の時計は T0」
     return {
       allowed: false,
+      at: T0,
+      contended: false,
       sharedCount: 0,
       extraCount: 0,
       sharedOldest: null,
@@ -247,7 +329,6 @@ describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
     const seconds = retryAfterSecondsFor(
       result({ sharedCount: 1, sharedOldest: new Date(T0.getTime() - 1_500) }),
       WINDOW_MS,
-      T0,
       1,
       null,
     );
@@ -264,7 +345,6 @@ describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
         extraOldest: new Date(T0.getTime() - 10_000),
       }),
       WINDOW_MS,
-      T0,
       1,
       1,
     );
@@ -282,7 +362,6 @@ describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
         extraOldest: new Date(T0.getTime() - 10_000),
       }),
       WINDOW_MS,
-      T0,
       10,
       2,
     );
@@ -300,7 +379,6 @@ describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
         extraOldest: new Date(T0.getTime() - 1_000),
       }),
       WINDOW_MS,
-      T0,
       1,
       null,
     );
@@ -314,7 +392,6 @@ describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
     const seconds = retryAfterSecondsFor(
       result({ sharedCount: 1, sharedOldest: new Date(T0.getTime() - WINDOW_MS) }),
       WINDOW_MS,
-      T0,
       1,
       null,
     );
@@ -322,23 +399,23 @@ describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
   });
 
   it('時計が巻き戻っても窓の長さを超えない', () => {
-    // 最古が「未来」になっている（NTP の巻き戻り）
+    // 最古が「未来」になっている（記録側の時計の巻き戻り）
     const seconds = retryAfterSecondsFor(
       result({ sharedCount: 1, sharedOldest: new Date(T0.getTime() + 5_000) }),
       WINDOW_MS,
-      T0,
       1,
       null,
     );
-    // 窓の長さ + 5 秒ではなく…素直に計算すると 65 秒になるので、**上限を置いていない**ことを
-    // ここで明示する。記録側が最小値を返す約束（`tests/data/memory-rate-limit.test.ts`）が
-    // あるので未来の最古は「全件が未来」のときだけ起き、その場合は窓の長さぶん待たせるのが正しい
-    expect(seconds).toBe(65);
+    // **素直に計算すると 65 秒になるので頭打ちにする。** どんな場合でも窓の長さだけ待てば
+    // 必ず 1 回ぶんの空きができるので、それより長く待たせるのは素直に従うクライアントを
+    // 理由なく止めることになる（以前の実装は `now` を初期値にした `reduce` で最小値を
+    // 取っていたため構造的に起こりえず、移行で失われていた）
+    expect(seconds).toBe(WINDOW_MS / 1_000);
   });
 
   it('最も古い記録が分からなければ最低値で答える（上限が壊れている場合の保険）', () => {
     // 件数は上限を超えているのに最古が null（記録が無いのに断られる状態）
-    const seconds = retryAfterSecondsFor(result({ sharedCount: 0 }), WINDOW_MS, T0, 0, null);
+    const seconds = retryAfterSecondsFor(result({ sharedCount: 0 }), WINDOW_MS, 0, null);
     expect(seconds).toBe(1);
   });
 });

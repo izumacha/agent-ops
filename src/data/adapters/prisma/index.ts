@@ -871,10 +871,10 @@ class PrismaUsageEvents implements UsageEventsPort {
     // SQL の戻り (BIGINT) を Port の型へ写す
     return rows.map((row) => ({
       day: row.day,
-      requests: toSafeCount(row.requests, '呼び出し回数'),
-      errorRequests: toSafeCount(row.errorRequests, '失敗した呼び出し回数'),
-      inputTokens: toSafeCount(row.inputTokens, '入力トークン'),
-      outputTokens: toSafeCount(row.outputTokens, '出力トークン'),
+      requests: toSafeCount(row.requests, '日次集計の呼び出し回数'),
+      errorRequests: toSafeCount(row.errorRequests, '日次集計の失敗した呼び出し回数'),
+      inputTokens: toSafeCount(row.inputTokens, '日次集計の入力トークン'),
+      outputTokens: toSafeCount(row.outputTokens, '日次集計の出力トークン'),
       costMicroUsd: row.costMicroUsd,
     }));
   }
@@ -905,8 +905,8 @@ class PrismaUsageEvents implements UsageEventsPort {
     if (row === undefined) return { requests: 0, errorRequests: 0, costMicroUsd: 0n };
     // SQL の戻り (BIGINT) を Port の型へ写す
     return {
-      requests: toSafeCount(row.requests, '呼び出し回数'),
-      errorRequests: toSafeCount(row.errorRequests, '失敗した呼び出し回数'),
+      requests: toSafeCount(row.requests, '日次集計の呼び出し回数'),
+      errorRequests: toSafeCount(row.errorRequests, '日次集計の失敗した呼び出し回数'),
       costMicroUsd: row.costMicroUsd,
     };
   }
@@ -1551,12 +1551,91 @@ class PrismaBillingEvents implements BillingEventsPort {
 
 /** `consume` の 1 文が返す行の形（BIGINT は bigint で来る） */
 interface RateLimitConsumeRow {
+  at: Date;
   sharedCount: bigint;
   sharedOldest: Date | null;
   extraCount: bigint;
   extraOldest: Date | null;
   inserted: bigint;
 }
+
+/**
+ * 同じキーの判定を待つ上限（ミリ秒）。
+ *
+ * **待たせ続けない**のが要点。助言ロックを無制限に待つと、順番待ちの要求が接続プールの枠を
+ * 握ったままになり、**1 テナントの混雑が無関係なテナントの要求を失敗させる**
+ * （プールが尽きるとトランザクションの取得が時間切れになる＝fail-closed で 500）。
+ * レート制限が、止めるべき濫用の増幅器になってしまう。
+ *
+ * 既定の上限は毎分 600 回（＝毎秒 10 回）で、判定 1 回はミリ秒の単位なので、この待ちへ届くのは
+ * 同じキーに何十本も同時に来ているとき＝**すでに上限を大きく超えている**とき。そこで断るのは
+ * 安全側（§9 fail-closed）。
+ */
+const RATE_LIMIT_LOCK_TIMEOUT_MS = 50;
+
+// 上の値を `set_config` へ渡す形（文字列）。**生 SQL の埋め込みは変数の参照だけ**という規約
+// （`tests/raw-sql.test.ts`）に合わせて、変換はここで済ませておく
+const RATE_LIMIT_LOCK_TIMEOUT_SETTING = String(RATE_LIMIT_LOCK_TIMEOUT_MS);
+
+// PostgreSQL が「ロックが取れなかった（lock_timeout）」ときに返す SQLSTATE
+const LOCK_NOT_AVAILABLE = '55P03';
+// 生 SQL の失敗を表す Prisma のエラーコード（SQLSTATE はこの下の `meta` に入る）
+const RAW_QUERY_FAILED = 'P2010';
+// `meta` を辿る深さの上限（ドライバの形が変わっても無限に潜らない）
+const DRIVER_META_MAX_DEPTH = 6;
+
+/**
+ * その値（または入れ子のどこか）が指定の SQLSTATE を名乗っているか。
+ *
+ * **Prisma は生 SQL の失敗を `P2010` に畳む**ので、どの SQL エラーだったかは
+ * `meta.driverAdapterError.cause.code` のような**ドライバ依存の入れ子**にしか無い（実測）。
+ * 綴りを決め打つとドライバの更新で静かに外れるため、`code` / `originalCode` という名前の
+ * 文字列を深さを限って探す。
+ *
+ * **見つからなければ `false`**（＝元の例外をそのまま投げる）。レート制限で言えば
+ * 429 ではなく 500 になる側なので、取り違えても緩まない（§9 fail-closed）。
+ * 形が変わったことは契約テスト（`同じキーの助言ロックを掴んでいる間は、数えずに断る`）が落とす。
+ * @param value 調べる値
+ * @param sqlState 探す SQLSTATE
+ * @param depth 残りの深さ
+ * @returns 名乗っていれば true
+ */
+function mentionsSqlState(
+  value: unknown,
+  sqlState: string,
+  depth = DRIVER_META_MAX_DEPTH,
+): boolean {
+  // 深さの上限に達したら探すのをやめる
+  if (depth <= 0 || typeof value !== 'object' || value === null) return false;
+  // 配列は要素を見る
+  if (Array.isArray(value)) {
+    return value.some((item) => mentionsSqlState(item, sqlState, depth - 1));
+  }
+  // オブジェクトの各項目を見る
+  for (const [key, item] of Object.entries(value)) {
+    // SQLSTATE を載せる名前なら値を突き合わせる
+    if ((key === 'code' || key === 'originalCode') && item === sqlState) return true;
+    // そうでなければ 1 段潜る
+    if (mentionsSqlState(item, sqlState, depth - 1)) return true;
+  }
+  // どこにも無い
+  return false;
+}
+
+/**
+ * 「ロックの順番待ちを `lock_timeout` で打ち切られた」失敗か。
+ * @param error 受け取った例外
+ * @returns 打ち切りなら true
+ */
+function isLockTimeout(error: unknown): boolean {
+  // 生 SQL の失敗であること（それ以外は SQLSTATE を持たない）
+  if (!isPrismaError(error, RAW_QUERY_FAILED)) return false;
+  // その下の入れ子が `55P03` を名乗っていること
+  return mentionsSqlState((error as Prisma.PrismaClientKnownRequestError).meta, LOCK_NOT_AVAILABLE);
+}
+
+// 1 秒のミリ秒数（窓の長さを `make_interval` の秒へ直すのに使う）
+const MILLIS_PER_SECOND = 1_000;
 
 /**
  * レート制限の記録（ADR-0015）。
@@ -1584,76 +1663,125 @@ class PrismaRateLimit implements RateLimitPort {
    * 取り、**次の文**で数えると、その文は「ロックが下りた時点までにコミット済みの行」を見る。
    * 助言ロックはトランザクションの終わりで必ず解放されるので、取りこぼしの心配が無い。
    *
-   * **直列化するのは同じキーの「数える文」だけ**（上流への呼び出しは外側）。既定の毎分 600 回
-   * （＝毎秒 10 回）に対してロックを握るのは数ミリ秒なので、入口が詰まる水準ではない。
+   * **待ちは `lock_timeout` で打ち切る**（理由は `RATE_LIMIT_LOCK_TIMEOUT_MS`）。
+   * 打ち切ったときは `contended: true` で断る（数えていないので件数は 0）。
+   *
+   * **時刻は DB の時計で決める**（`statement_timestamp()`）。アプリのインスタンスごとの壁時計を
+   * 使うと、記録が 1 つでも**時刻がずれた台数ぶん枠が割れる** — 90 秒遅れているインスタンスが
+   * 入れた行は、進んでいるインスタンスの窓から外れて数えられない（ADR-0015 がこの PR で
+   * 閉じようとした穴そのものが、時刻の側から戻ってくる）。
    *
    * 数える本体は 1 文の CTE で「期限切れを掃く → 窓の中を数える → 条件を満たせば 1 行入れる →
    * 結果を返す」を行う。**CTE はどれも同じスナップショットを見る**ので、`purge` の DELETE は
-   * `live` の集計に影響しない（`purge` が消すのは `at <= windowStart` の行で、`live` はそもそも
-   * 除いている）。**`FILTER` で種類ごとの数を同じ走査から出す** — 共有の枠と追加の枠で 2 回読まない。
+   * `live` の集計に影響しない（`purge` が消すのは窓の下端以前の行で、`live` はそもそも除いている）。
+   * **`FILTER` で種類ごとの数を同じ走査から出す** — 共有の枠と追加の枠で 2 回読まない。
    */
   async consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
     // 追加の枠を持たない種類は null を渡す（SQL 側で `IS NULL` の分岐に入る）
     const extraLimit = input.extraLimit;
+    // 窓の長さを秒へ（`make_interval` は秒を受けるので、ミリ秒をそのまま渡さない）
+    const windowSeconds = input.windowMs / MILLIS_PER_SECOND;
     // **ロックを取る文と数える文を 1 つのトランザクションに入れる**（理由は上の説明）
-    const rows = await this.db.$transaction(async (tx: Db) => {
-      // キーごとの助言ロック（`hashtext` の衝突は無関係なキーが時々直列化するだけで害が無い）。
-      // **この文より後の文は、ロックが下りた時点のコミット済みの行を見る**
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.key}))`;
-      // 1 文で「掃く → 数える → 条件付きで足す → 返す」を行う（値はすべてパラメータとして渡る）
-      return await tx.$queryRaw<RateLimitConsumeRow[]>`
-      WITH purge AS (
-        DELETE FROM "RateLimitHit"
-        WHERE "key" = ${input.key} AND "at" <= ${input.windowStart}
-      ), live AS (
-        SELECT "tier", "at" FROM "RateLimitHit"
-        WHERE "key" = ${input.key} AND "at" > ${input.windowStart}
-      ), agg AS (
-        SELECT
-          COUNT(*)::bigint AS shared_count,
-          MIN("at") AS shared_oldest,
-          COUNT(*) FILTER (WHERE "tier" = ${input.tier})::bigint AS extra_count,
-          MIN("at") FILTER (WHERE "tier" = ${input.tier}) AS extra_oldest
-        FROM live
-      ), ins AS (
-        INSERT INTO "RateLimitHit" ("key", "tier", "at")
-        SELECT ${input.key}, ${input.tier}, ${input.now} FROM agg
-        WHERE agg.shared_count < ${input.sharedLimit}
-          AND (${extraLimit}::int IS NULL OR agg.extra_count < ${extraLimit}::int)
-        RETURNING 1
-      )
-      SELECT
-        agg.shared_count AS "sharedCount",
-        agg.shared_oldest AS "sharedOldest",
-        agg.extra_count AS "extraCount",
-        agg.extra_oldest AS "extraOldest",
-        (SELECT COUNT(*) FROM ins)::bigint AS "inserted"
-      FROM agg
-    `;
-    });
-    // 集約なので記録が 0 件でも必ず 1 行返る
-    const row = rows[0];
-    // 読めなければ落とす（**黙って「通す」側へ倒さない**。§9 fail-closed）
-    if (row === undefined) throw new Error('レート制限の記録を読めませんでした。');
-    // 1 行入ったかどうかが「通したか」（判定と記録が同じ文なので食い違わない）
-    return {
-      allowed: row.inserted > 0n,
-      sharedCount: toSafeCount(row.sharedCount, 'レート制限の件数'),
-      extraCount: toSafeCount(row.extraCount, 'レート制限の件数 (種類ごと)'),
-      sharedOldest: row.sharedOldest,
-      extraOldest: row.extraOldest,
-    };
+    try {
+      const rows = await this.db.$transaction(async (tx: Db) => {
+        // 待ちの上限をこのトランザクションだけに設定する。
+        // **`SET LOCAL` ではなく `set_config(..., true)`** を使う — `SET` は値をパラメータで
+        // 受け取れないので文字列を組み立てることになり、`$executeRawUnsafe` の禁止
+        // （`src/lib/raw-sql-guard.ts`）に当たる。`set_config` の第 3 引数が `SET LOCAL` と
+        // 同じ「このトランザクションだけ」の意味で、値はパラメータとして渡せる
+        await tx.$executeRaw`SELECT set_config('lock_timeout', ${RATE_LIMIT_LOCK_TIMEOUT_SETTING}, true)`;
+        // キーごとの助言ロック（`hashtext` の衝突は無関係なキーが時々直列化するだけで害が無い）。
+        // **この文より後の文は、ロックが下りた時点のコミット済みの行を見る**
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.key}))`;
+        // 1 文で「掃く → 数える → 条件付きで足す → 返す」を行う（値はすべてパラメータとして渡る）
+        return await tx.$queryRaw<RateLimitConsumeRow[]>`
+          WITH bounds AS (
+            SELECT
+              -- **ミリ秒へ丸めてから使う。** 列は TIMESTAMP(3) なので保存時に丸められ、
+              -- 丸める前の値を「いま」として返すと**返した時刻と入った行が 1 ミリ秒ずれる**
+              -- （待ち時間の計算が 1 ミリ秒ぶん狂うだけだが、同じ 1 回の判定の中で
+              --   2 つの時刻が存在する状態を作らない）
+              date_trunc('milliseconds', statement_timestamp()) AS now_at,
+              date_trunc('milliseconds', statement_timestamp())
+                - make_interval(secs => ${windowSeconds}::double precision) AS window_start
+          ), purge AS (
+            DELETE FROM "RateLimitHit"
+            WHERE "key" = ${input.key} AND "at" <= (SELECT window_start FROM bounds)
+          ), live AS (
+            SELECT "tier", "at" FROM "RateLimitHit"
+            WHERE "key" = ${input.key} AND "at" > (SELECT window_start FROM bounds)
+          ), agg AS (
+            SELECT
+              COUNT(*)::bigint AS shared_count,
+              MIN("at") AS shared_oldest,
+              COUNT(*) FILTER (WHERE "tier" = ${input.tier})::bigint AS extra_count,
+              MIN("at") FILTER (WHERE "tier" = ${input.tier}) AS extra_oldest
+            FROM live
+          ), ins AS (
+            INSERT INTO "RateLimitHit" ("key", "tier", "at")
+            SELECT ${input.key}, ${input.tier}, (SELECT now_at FROM bounds) FROM agg
+            WHERE agg.shared_count < ${input.sharedLimit}
+              AND (${extraLimit}::int IS NULL OR agg.extra_count < ${extraLimit}::int)
+            RETURNING 1
+          )
+          SELECT
+            (SELECT now_at FROM bounds) AS "at",
+            agg.shared_count AS "sharedCount",
+            agg.shared_oldest AS "sharedOldest",
+            agg.extra_count AS "extraCount",
+            agg.extra_oldest AS "extraOldest",
+            (SELECT COUNT(*) FROM ins)::bigint AS "inserted"
+          FROM agg
+        `;
+      });
+      // 集約なので記録が 0 件でも必ず 1 行返る
+      const row = rows[0];
+      // 読めなければ落とす（**黙って「通す」側へ倒さない**。§9 fail-closed）
+      if (row === undefined) throw new Error('レート制限の記録を読めませんでした。');
+      // 1 行入ったかどうかが「通したか」（判定と記録が同じ文なので食い違わない）
+      return {
+        allowed: row.inserted > 0n,
+        at: row.at,
+        contended: false,
+        sharedCount: toSafeCount(row.sharedCount, 'レート制限の件数'),
+        extraCount: toSafeCount(row.extraCount, 'レート制限の件数 (種類ごと)'),
+        sharedOldest: row.sharedOldest,
+        extraOldest: row.extraOldest,
+      };
+    } catch (error) {
+      // ロックが取れなかっただけなら、数えずに断る（原因が違う失敗はそのまま投げる）
+      if (!isLockTimeout(error)) throw error;
+      // **数えていないので件数も最古も返さない**（`contended` が理由を伝える）
+      return {
+        allowed: false,
+        at: new Date(),
+        contended: true,
+        sharedCount: 0,
+        extraCount: 0,
+        sharedOldest: null,
+        extraOldest: null,
+      };
+    }
   }
 
   /**
-   * 窓から外れた記録をまとめて消す。
-   * **キーで絞らない**（これが要るのは二度と来ないキーの記録なので、全キーを対象にする）。
+   * 窓から外れた記録を消す。
+   * **キーで絞らず、件数に上限を置く**（理由は Port の説明）。
    */
-  async sweep(before: Date): Promise<number> {
-    // 期限切れを一括で消す（`at` の索引が効く）
-    const deleted = await this.db.rateLimitHit.deleteMany({ where: { at: { lte: before } } });
-    // 消した件数
-    return deleted.count;
+  async sweep(before: Date, limit: number): Promise<number> {
+    // 期限切れを古い順に `limit` 件まで消す（`at` の索引が効く）。
+    // **`deleteMany` では上限を書けない**ので、消す対象を副問い合わせで決める
+    const deleted = await this.db.$executeRaw`
+      DELETE FROM "RateLimitHit"
+      WHERE "id" IN (
+        SELECT "id" FROM "RateLimitHit"
+        WHERE "at" <= ${before}
+        ORDER BY "at"
+        LIMIT ${limit}
+      )
+    `;
+    // 消した件数（`$executeRaw` は影響行数を返す）
+    return deleted;
   }
 }
 

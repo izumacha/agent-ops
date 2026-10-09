@@ -209,7 +209,7 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     `auth.platform_token_too_short` /
     `billing.secret_not_configured` / `billing.secret_too_short` /
     `metrics.token_not_configured` / `metrics.token_too_short` / `plan.unknown_plan` /
-    `rate_limit.store_unavailable`
+    `rate_limit.contended` / `rate_limit.store_unavailable`
     （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
     `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
     ここが古いままなら落ちる。件数とファイル名は書かない）。

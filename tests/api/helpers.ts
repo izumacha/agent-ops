@@ -2,7 +2,7 @@
 // Route Handler を HTTP を介さずに直接呼ぶ (本番と同じ認証・認可・検証の経路を通す)
 import { afterEach, beforeEach } from 'vitest';
 import { setReposForTesting } from '@/data';
-import { setRateLimitOverridesForTesting } from '@/lib/api/rate-limit';
+import { setRateLimitOverridesForTesting, type RateLimitTier } from '@/lib/api/rate-limit';
 import { PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 import { createMemoryRepos, type MemoryStore } from '@/data/adapters/memory';
 import type { AgentRecord, ApiKeyRecord, UserRecord, UserTokenRecord } from '@/data';
@@ -185,11 +185,16 @@ const BLANKED_ENV_NAMES = [...NOTIFY_ENV_NAMES, ...RATE_LIMIT_ENV_NAMES] as cons
  *
  * 以前は制限器のインスタンスを覗いていたが、記録は data 層へ移った（ADR-0015）ので
  * memory の表を数える。`tier` を渡すとその種類だけ数える（追加の枠が見るのと同じ粒度）。
+ *
+ * **`tier` は `RateLimitTier` で受ける（素の `string` にしない）。** 呼び出し側は
+ * `toBe(0)` を期待するので、綴りを間違えると `filter` が空になって**何も見ていないのに緑**に
+ * なる（以前の「制限器のインスタンスを覗く」形は未知の種類で `undefined` を返したので、
+ * 取り違えがその場で落ちていた）。
  * @param store memory の表
  * @param tier 枠の種類（省略すると種類を問わない合計）
  * @returns 記録の件数
  */
-export function rateLimitHitCount(store: MemoryStore, tier?: string): number {
+export function rateLimitHitCount(store: MemoryStore, tier?: RateLimitTier): number {
   // 全キーの記録を数える（テストは 1 テナントぶんしか作らないのでキーで絞らない）
   let count = 0;
   // キーごとの配列を足していく

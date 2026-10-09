@@ -126,3 +126,61 @@ describe('生 SQL の書き方', () => {
     expect(found).toEqual([]);
   });
 });
+
+// レート制限の判定の時刻の出どころを構文で固定する。
+//
+// **なぜ別の検査が要るか。** 「時刻は記録側（1 つの DB）の時計が決める」は ADR-0015 の中心的な
+// 決定で、アプリのインスタンスごとの壁時計を使うと**記録が配備全体で 1 つでも時刻がずれた
+// 台数ぶん枠が割れる**（90 秒遅れているインスタンスが入れた行は、進んでいるインスタンスの窓から
+// 外れて数えられない）。ところが**契約テストでは確かめられない** — テストの DB とアプリは同じ
+// ホストで動くので、アプリの時計と DB の時計が一致してしまう（実測: `statement_timestamp()` を
+// `${new Date()}` へ差し替える変異が契約テスト 10 件すべて緑のまま通った）。
+//
+// **捕まえられる範囲**: `consume` の SQL テンプレートに `statement_timestamp()` が無い／
+// テンプレートの中へ `Date` を埋め込んでいる、という**直接の綴り**だけ。アプリ側で作った時刻を
+// 変数へ入れて渡す形は（`tests/raw-sql.test.ts` の他の検査と同じ理由で）捕まえられないので、
+// これは「証明」ではなく「増やしたことに気付く」ための網。
+describe('レート制限の判定の時刻', () => {
+  // レート制限の記録を実装しているクラスの名前（改名したら fail-closed で落ちる）
+  const RATE_LIMIT_CLASS = 'PrismaRateLimit';
+  // 時刻を DB に尋ねる関数の綴り
+  const DB_CLOCK = 'statement_timestamp()';
+
+  // prisma アダプタの `consume` の本体を切り出す
+  function consumeSource(): string {
+    // prisma アダプタのファイル
+    const file = FILES.find(({ path }) => path.endsWith('/data/adapters/prisma/index.ts'));
+    // 読めなければ走査が壊れている (fail-closed)
+    expect(file, 'prisma アダプタを読めない').toBeDefined();
+    // クラス宣言を探す
+    let body: string | null = null;
+    forEachNode(file!.source, (node) => {
+      // 目当てのクラスでなければ関係ない
+      if (!ts.isClassDeclaration(node) || node.name?.text !== RATE_LIMIT_CLASS) return;
+      // その中の `consume` メソッド
+      for (const member of node.members) {
+        if (ts.isMethodDeclaration(member) && member.name.getText() === 'consume') {
+          body = member.getText();
+        }
+      }
+    });
+    // 見つからなければ落とす (改名・移動に気付けるように)
+    expect(body, `${RATE_LIMIT_CLASS}.consume を読めない`).not.toBeNull();
+    return body!;
+  }
+
+  it('時刻は DB に尋ねる（アプリの時計を SQL へ埋め込まない）', () => {
+    // 本体の綴り
+    const body = consumeSource();
+    // DB の時計を使っていること
+    expect(body.includes(DB_CLOCK), `${DB_CLOCK} を使っていない`).toBe(true);
+    // SQL のテンプレート（タグ付きテンプレートの中身）を取り出す
+    const templates = body.match(/\$queryRaw<[^>]*>`[\s\S]*?`/g) ?? [];
+    // 1 つも無ければ走査が壊れている (fail-closed)
+    expect(templates.length, 'SQL のテンプレートを読めない').toBeGreaterThan(0);
+    // テンプレートの中に `Date` を埋め込んでいないこと
+    for (const template of templates) {
+      expect(template.includes('Date'), 'SQL のテンプレートへ時刻を埋め込んでいる').toBe(false);
+    }
+  });
+});

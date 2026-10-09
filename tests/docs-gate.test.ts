@@ -37,6 +37,32 @@ function docBlocks(text: string): string[] {
   return text.split(/\n\s*\n|\n(?=[ \t]*- )|\n(?=[ \t]*\|)/);
 }
 
+/**
+ * `src/` 全体から「その出口へ渡した出来事の名前」を集める。
+ *
+ * **綴りではなく構文で読み、包みも剥がす**（規則は `namedCallArguments` が唯一の持ち主。
+ * 素の識別子だけを見ていた版は `(0, f)(…)` / `.call` / `.apply` / `.bind` /
+ * `Reflect.apply` の 5 形を素通りした）。
+ * @param outlet 出口の関数名
+ * @returns 渡された出来事の名前（文字列リテラルの分だけ）
+ */
+function eventsPassedTo(outlet: string): Set<string> {
+  // 見つけた名前
+  const found = new Set<string>();
+  // src 配下を構文で走査する
+  for (const parsed of parseSourceFiles()) {
+    forEachNode(parsed.source, (node) => {
+      // その出口の呼び出しなら実引数を得る
+      const args = namedCallArguments(node, outlet);
+      if (args === null) return;
+      // 第 1 引数が文字列リテラルのときだけ拾う（変数渡しは error-logging 側が落とす）
+      const [first] = args;
+      if (first !== undefined && ts.isStringLiteralLike(first)) found.add(first.text);
+    });
+  }
+  return found;
+}
+
 // 追跡集合は 1 回だけ聞いて使い回す (検査ごとに git を起こさない)。**`expect` を含むので
 // モジュール評価時ではなく最初のテストの中で解決する**
 let trackedCache: string[] | undefined;
@@ -917,20 +943,8 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
   it(
     '間引く出口で出す出来事が docs/deploy.md の一覧と一致する',
     () => {
-      // ソースから `logEventThrottled('<出来事>')` の第 1 引数を集める（**綴りではなく構文**）
-      const thrown = new Set<string>();
-      for (const parsed of parseSourceFiles()) {
-        forEachNode(parsed.source, (node) => {
-          // **包みを剥がしてから**呼び先を見る（規則は `namedCallArguments` が唯一の持ち主。
-          // 素の識別子だけを見ていた版は `(0, f)(…)` / `.call` / `.apply` / `.bind` /
-          // `Reflect.apply` の 5 形を素通りし、兄弟の検出網より緩かった）
-          const args = namedCallArguments(node, 'logEventThrottled');
-          if (args === null) return;
-          // 第 1 引数が文字列リテラルのときだけ拾う（変数渡しは error-logging 側が落とす）
-          const [first] = args;
-          if (first !== undefined && ts.isStringLiteralLike(first)) thrown.add(first.text);
-        });
-      }
+      // ソースから `logEventThrottled('<出来事>')` の第 1 引数を集める
+      const thrown = eventsPassedTo('logEventThrottled');
       // 1 件も拾えなければ走査が壊れている（fail-closed）
       expect(thrown.size, '間引く出口の呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
       // 文書の中で `logEventThrottled` に触れている塊（切り方は docBlocks）
@@ -957,6 +971,49 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
         expect(
           listed[0].includes(event),
           `docs/deploy.md の一覧に ${event} が載っているが、間引く出口では出していない`,
+        ).toBe(false);
+      }
+    },
+    testBudgetFor(1),
+  );
+
+  // **1 度きりの出口（`logEventOnce`）に載せてよい出来事は、率を別の出口から読めるものだけ。**
+  //
+  // ADR-0014 §3-c はこの軸を「率を別の場所から読めるか」1 つに置き直した（当初は設定ミスを
+  // 1 度きりにしており、**それが誤りだった** — 1 行を取りこぼした配備では以降どの出口にも
+  // 何も現れず、数える側も 1 で止まる）。**間引く側だけを導出していたころは、新しい設定ミスを
+  // `logEventOnce` へ載せても全件緑だった** — その出来事は間引く側の一覧に現れないので、
+  // どちらの照合にも掛からない（CLAUDE.md が言う「片方だけが緩い」形）。
+  it(
+    '1 度きりの出口で出す出来事が docs/deploy.md の案内と一致する',
+    () => {
+      // ソースから `logEventOnce('<出来事>')` の第 1 引数を集める
+      const once = eventsPassedTo('logEventOnce');
+      // 1 件も無ければ、その出口は使われていない（走査の壊れと区別できないので落とす）
+      expect(once.size, '1 度きりの出口の呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
+      // 文書の中で `logEventOnce` に触れている塊（切り方は docBlocks）
+      const blocks = docBlocks(readFileSync(join(DOCS, 'deploy.md'), 'utf8')).filter((block) =>
+        block.includes('1 プロセスに 1 度だけ'),
+      );
+      expect(
+        blocks.length,
+        'docs/deploy.md に「1 プロセスに 1 度だけ」の案内が無い',
+      ).toBeGreaterThan(0);
+      // **塊の数は決め打たない** — 「1 プロセスに 1 度だけ」は方針の節と「数えない応答の種類」の
+      // 節の両方で触れるのが自然で、1 つに絞ると正しい文書で落ちる。案内の合計で照合する
+      const guidance = blocks.join('\n');
+      // 載せている出来事が**全部**名指しされていること
+      for (const event of once) {
+        expect(
+          guidance.includes(event),
+          `docs/deploy.md の案内に ${event} が無い（1 度きりの出口で出しているのに案内されていない）`,
+        ).toBe(true);
+      }
+      // 逆向き: 間引く側の出来事をこちらの案内に書いていないこと（軸がぶれていないこと）
+      for (const event of eventsPassedTo('logEventThrottled')) {
+        expect(
+          guidance.includes(event),
+          `docs/deploy.md の「1 度きり」の案内に ${event} が載っているが、その出来事は間引く側で出している`,
         ).toBe(false);
       }
     },

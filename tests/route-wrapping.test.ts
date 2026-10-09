@@ -635,7 +635,7 @@ describe('Route Handler の結線', () => {
     let checked = 0;
     for (const { full, relativeToApp } of routeFiles) {
       // 公開エンドポイントは対象外 (理由は表に書く)
-      if (relativeToApp in UNAUTHENTICATED_ROUTES) continue;
+      if (Object.hasOwn(UNAUTHENTICATED_ROUTES, relativeToApp)) continue;
       // 画面側ルートは route() を通らない代わりに上の 3 つを要求されている (理由は表に書く)
       if (Object.hasOwn(SESSION_PAGE_ROUTES, relativeToApp)) continue;
       // 署名で認証する受信 Webhook も同じ扱い (理由は表に書く。要求は下の専用テスト)

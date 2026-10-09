@@ -161,6 +161,25 @@ describe('整形が失敗しても投げない', () => {
     },
   );
 
+  // **縮退の経路そのものも投げない。**
+  //
+  // `formatLogLine` は「絶対に投げない」ことを約束しており、`incrementCounter` の try/catch も
+  // その約束に乗っている（`src/lib/metrics.ts`）。`logEvent` は `onPoolError`（要求の外。
+  // `src/lib/prisma-client.ts`）からも呼ばれるので、ここが投げると**ログを 1 行も残さずに
+  // プロセスが落ちる**。型の外から来た値（`BigInt`）は `JSON.stringify` が投げるため、
+  // 縮退の経路が出来事の名前をそのまま載せていると**同じ理由で 2 度目の例外**になっていた
+  it('JSON にできない出来事の名前でも投げず、1 行の JSON を返す', () => {
+    // `JSON.stringify` が TypeError を投げる値（型の上では起きないが実行時には来うる）
+    const line = formatLogLine(10n as never);
+    // JSON として読めること（縮退の経路も投げていない）
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    // 出来事の名前は文字列へ落として残す（警報の条件はここを見る）
+    expect(parsed.event).toBe('10');
+    // 深刻度は最も重い側へ倒れ、文言も定型文で埋まる
+    expect(parsed.level).toBe('error');
+    expect(typeof parsed.message).toBe('string');
+  });
+
   it('2 の冪の回だけ行にし、通算件数を載せる（規模が行から読める）', () => {
     // 記憶とカウンタを空にする
     resetThrottledLogsForTesting();

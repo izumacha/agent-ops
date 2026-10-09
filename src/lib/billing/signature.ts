@@ -125,7 +125,7 @@ export function verifyBillingSignature(
 
 // 設定が使えないときの例外（503）。何が足りないかは応答に出さない
 function notConfiguredError(): ApiError {
-  // **設定ミスを 1 度だけ記録する。** `ApiError` は `withResponseCount` の中でログを通らない
+  // **設定ミスを記録する。** `ApiError` は `withResponseCount` の中でログを通らない
   // （応答へ写すだけ）ので、ここで出さないと**どの出口にも現れない** — 受信 Webhook は
   // 未認証なので 503 を見た運用者がいるとは限らず、残る痕跡は
   // `agentops_http_responses_total{status="503"}` だけだが、系列には経路のラベルが無く

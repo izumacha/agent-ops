@@ -53,19 +53,19 @@ export function assertMetricsToken(request: Request): void {
   // 持っていても永久に 401。しかも唯一の信号である `metrics.token_rejected` の文言は
   // 「収集側の設定ミス、または総当たり」と案内するので、運用者は逆側を調べることになる
   const configured = process.env.METRICS_TOKEN?.trim();
-  // 未設定・空なら監視の入口は閉じたまま。**1 度だけ記録する** —
-  // ここだけログを出していなかったので、**いちばん起きやすい設定漏れが唯一どの出口にも
-  // 現れない**状態だった（もう 1 つの痕跡である `agentops_http_responses_total{status="503"}`
-  // は `/metrics` 経由でしか読めず、その `/metrics` 自身が 503 なので到達できない）。
-  // **1 プロセスに 1 度**にするのは「短すぎる値」の警告と同じ理由（設定の通知なので
-  // 2 件目以降に情報が無く、未認証で誰でも叩ける経路なので毎回出すと埋められる）
+  // 未設定・空なら監視の入口は閉じたまま。**記録する** — ここだけログを出していなかったので、
+  // **いちばん起きやすい設定漏れが唯一どの出口にも現れない**状態だった（もう 1 つの痕跡で
+  // ある `agentops_http_responses_total{status="503"}` は `/metrics` 経由でしか読めず、
+  // その `/metrics` 自身が 503 なので到達できない）。**1 度きりにはしない** — 直すまで続く
+  // 状態なので続いていることと規模を残す（量は窓あたり対数に収まる。理由は
+  // `logEventThrottled`）
   if (!configured) {
     logEventThrottled('metrics.token_not_configured');
     throw notConfiguredError();
   }
   // 短すぎる値は設定ミスとみなして使わない（弱いトークンで運用の数字を読ませない）
   if (configured.length < METRICS_TOKEN_MIN_LENGTH) {
-    // 1 度だけ警告する（設定を直す手掛かりは残すが、総当たりでログを埋められないようにする）
+    // 間引いて警告する（設定を直す手掛かりは残すが、総当たりでログを埋められないようにする）
     logEventThrottled('metrics.token_too_short');
     // 設定が使えないので 503（「短い値でも通る」にはしない）
     throw notConfiguredError();

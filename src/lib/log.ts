@@ -110,7 +110,7 @@ export const LOG_EVENTS = {
   'metrics.token_not_configured': {
     level: 'error',
     message:
-      '監視の読み取りトークンが設定されていないため GET /api/v1/metrics を閉じています (以降は出しません)。環境変数 METRICS_TOKEN を設定してください。',
+      '監視の読み取りトークンが設定されていないため GET /api/v1/metrics を閉じています。環境変数 METRICS_TOKEN を設定してください。',
   },
   'metrics.token_too_short': {
     level: 'error',
@@ -318,11 +318,15 @@ export function formatLogLine(
     // ここへ来るのは時刻の整形か JSON 化が失敗したときだけ（語彙の引きは上で縮退済み）。
     // 引けるなら表の文言を使う（診断が JSON にできなかっただけなら、文言は有用なまま）
     const spec: LogEventSpec | undefined = lookupLogEvent(event);
-    // 時刻はその場で取り直す（`new Date()` は必ず有効）。深刻度は引けなければ最も重い側へ倒す
+    // 時刻はその場で取り直す（`new Date()` は必ず有効）。深刻度は引けなければ最も重い側へ倒す。
+    // **出来事の名前も `String(...)` で落とす** — 型の外から来た値（`BigInt` など）は
+    // `JSON.stringify` が投げるので、そのまま載せると**この縮退の経路が同じ理由で投げる**。
+    // ここが投げると「絶対に投げない」という約束が崩れ、`onPoolError`（要求の外。
+    // `src/lib/prisma-client.ts`）から呼ばれた時にログを 1 行も残さずプロセスが落ちる
     return JSON.stringify({
       ts: new Date().toISOString(),
       level: spec?.level ?? FALLBACK_LOG_LEVEL,
-      event,
+      event: String(event),
       message: spec?.message ?? FALLBACK_LOG_MESSAGE,
     });
   }
@@ -455,13 +459,14 @@ function isReportableOccurrence(count: number): boolean {
 /**
  * 出来事を**数えつつ、行は間引いて**出す（窓の中の通算件数が 2 の冪の回だけ）。
  *
- * **未認証で誰でも叩ける経路の「断った」記録に使う。** 1 要求 1 行で出すと、匿名の相手が
- * ログの量（＝保存の費用）を好きなだけ増やせる — この repo は同じ理由で
- * `entry.undecodable_path` と「短すぎる `METRICS_TOKEN`」の警告を 1 プロセス 1 度にしている。
+ * **これが既定の出口。** 未認証で誰でも叩ける経路の「断った」記録と「設定が使えない」記録は
+ * どちらもここを通る。1 要求 1 行で出すと匿名の相手がログの量（＝保存の費用）を好きなだけ
+ * 増やせるので間引くが、**1 度きりにはしない** — どちらも「いま続いているか」と規模が
+ * 運用者の知りたいことで（共有シークレットのローテーション漏れも鍵の設定漏れも直すまで続く）、
+ * 窓ごとに出し直せば続いていることが分かる。
  *
- * **1 度だけにはしない。** あの 2 つは**設定の通知**で 2 件目以降に情報が無いが、こちらは
- * 「いま続いているか」が運用者の知りたいことなので（共有シークレットのローテーション漏れは
- * 直すまで続く）、窓ごとに出し直せば続いていることが分かる。
+ * **1 プロセスに 1 度だけ（`logEventOnce`）でよいのは、率を別の出口から読める出来事だけ**
+ * （いまは入口の読めないパスの 404。率は前段のアクセスログが 1 件ずつ持つ）。
  *
  * **数える側は毎回**なので、率そのものは `agentops_log_events_total{event=…}` に残る。
  * **ただしその系列が読めるかは呼び出し元の束による**（`logEvent` の説明にある実測）:

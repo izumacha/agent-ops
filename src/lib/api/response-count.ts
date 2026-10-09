@@ -86,10 +86,13 @@ export const RESPONSE_COUNT_BRAND = Symbol.for('agent-ops.responseCount');
 /**
  * 例外を HTTP 応答へ写す。
  *
- * **`route()` を通らない経路（署名付きの受信 Webhook。Step6）も同じ関数を通す** —
- * 写し方を 2 か所に分けると、一意制約違反の 422 への翻訳や 500 のログの有無がずれる。
+ * **このモジュールの外からは呼べない。** 以前は受信 Webhook が自分で呼んでいたが、
+ * いまはどの経路も `withResponseCount` を通る。export したままにすると「応答を数えずに
+ * 例外だけ写す」公開の入口が残り、次に `route()` を通らない経路を足す人がそちらを呼ぶ誘導に
+ * なる（§6 デッドコードを残さない）。写し方を 2 か所に分けないのが要点で、分けると
+ * 一意制約違反の 422 への翻訳や 500 のログの有無がずれる。
  */
-export function toErrorResponse(error: unknown): Response {
+function toErrorResponse(error: unknown): Response {
   // 明示的な API エラーはそのまま (ApiError → Response の写しはここ 1 か所)
   if (error instanceof ApiError) {
     return errorResponse(error.status, error.message, error.issues, error.headers);
@@ -127,13 +130,13 @@ export function withResponseCount<A extends unknown[]>(
 ): (request: Request, ...rest: A) => Promise<Response> {
   // Next.js が呼ぶ形の関数
   const counted = async (request: Request, ...rest: A): Promise<Response> => {
-    // 応答を組み立てる（例外も応答へ写す）。**キャッシュ制御もここで付ける** —
+    // 応答を組み立てる（例外も応答へ写し、**キャッシュ制御も中で付ける**） —
     // 以前は例外の経路にだけ付けていたので、本体が**返した**早期の 401 / 404 には
     // 付かなかった（画面側の CSV がそれで、認証付きの経路の 401 / 404 が共有キャッシュへ
     // 載りうる状態だった）。**付けるのはここだけ** — `route()` も Webhook も自分で付けていた
     // 頃は、`Vary` が `append` で冪等でないため全 API 応答が
     // `Vary: Authorization, Authorization` を返していた（実測）
-    const response = withPrivateCacheHeaders(await buildResponse(() => handler(request, ...rest)));
+    const response = await buildResponse(() => handler(request, ...rest));
     // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）
     countHttpResponse(request.method, response.status);
     // 組み立てた応答をそのまま返す
@@ -159,20 +162,27 @@ export function withResponseCount<A extends unknown[]>(
  * **判定は `isNextControlFlowError`**（綴りを写さず上流に判定させるが、例外そのものは渡さない。
  * 理由は同関数の説明）。
  *
- * **キャッシュ制御はここでは付けない** — 付けるのは呼び出し側（`withResponseCount`）の
- * 1 か所。両方で付けていた頃は、エラー応答 1 件につき使い捨ての `Response` を 2 つ作って
- * いた（2 回目は `Cache-Control` を同じ値で上書きし、`Vary` は冪等化で素通り＝完全な無駄）。
+ * **ヘッダの押印もこの `try` の中で行う。** 呼び出し側で押していた版では、
+ * `withPrivateCacheHeaders` が投げたときに**例外がラッパーの外へ漏れ**、500 の契約も
+ * `api.unexpected_error` のログも `countHttpResponse` もまとめて飛んだ（あの関数は
+ * `new Response(response.body, …)` で作り直すので、本体が本文ストリームを既に読んだ／
+ * 奪われた `Response` を返すと Fetch の仕様どおり `TypeError` になる。差分前の `route()` は
+ * 押印を `try` の中に置いていたので 500 へ写っていた）。`catch` の側で押す相手は
+ * `toErrorResponse` が作ったばかりの文字列本文なので、同じ壊れ方をしない。
+ *
+ * 押すのは**この 2 か所だけ**（呼び出し側では押さない）。両方で押していた頃は、エラー応答
+ * 1 件につき使い捨ての `Response` を 2 つ作っていた（2 回目は同じ値の上書き＝完全な無駄）。
  * @param run 本体の呼び出し
  * @returns 応答（制御フローの例外は投げ直すので、戻るのは本体の応答かエラー応答だけ）
  */
 async function buildResponse(run: () => Promise<Response>): Promise<Response> {
   try {
-    // 本体を実行する
-    return await run();
+    // 本体を実行し、そのままヘッダを押す（**押印も try の中**。理由は下記）
+    return withPrivateCacheHeaders(await run());
   } catch (error) {
     // Next.js の制御フローの例外なら、ここで止めずに投げ直す
     if (isNextControlFlowError(error)) throw error;
-    // それ以外は応答へ写す（**キャッシュ制御は付けない** — 包む側が全応答へ付ける 1 か所）
-    return toErrorResponse(error);
+    // それ以外は応答へ写し、同じヘッダを押す（成功の経路と同じ扱い）
+    return withPrivateCacheHeaders(toErrorResponse(error));
   }
 }

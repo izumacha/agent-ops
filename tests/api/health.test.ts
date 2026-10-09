@@ -43,7 +43,7 @@ describe('GET /health', () => {
     // このルートは `route()` を通らないが、キャッシュ制御を決めるのは全ルート共通の 1 か所
     expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
     // Vary はちょうど 1 回 (自分でも付けていた経路は二重に並んでいた＝実測)
-    expect(response.headers.get('vary')).toBe('Authorization');
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
   it('DB 障害時は 503 で、応答に内部詳細を 1 文字も含まない (サーバログにだけ残す)', async () => {

@@ -159,7 +159,7 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
  *
  * 数えるのは `src/app/**` の `route.ts` が export する関数の応答だけで、そこは
  * `withResponseCount` を通ること（`tests/route-wrapping.test.ts` が印から全数を要求）で
- * 漏れが出ない。**それ以外に応答を返す経路が 3 種類ある。**
+ * 漏れが出ない。**それ以外にも応答を返す経路がある**（下の鍵がその一覧で、ここが正本）。
  *
  * 以前は入口の 404 だけを「数えられない経路が 1 つある」と書いており、画面の描画と
  * Server Action が**1 件も数えられていないのに言及されていなかった** — 運用者が
@@ -210,8 +210,8 @@ export type UncountedResponseSource = keyof typeof UNCOUNTED_RESPONSE_SOURCES;
  * 「どの Route Handler もこのラッパーを通っていること」は `tests/route-wrapping.test.ts` が
  * 印から導いて要求する。
  *
- * **数えないものは `UNCOUNTED_RESPONSE_SOURCES` が正本**（入口の短絡・画面の描画・
- * Server Action の 3 種類）。この系列だけを見て「アプリの HTTP 通信はすべて覆われている」と
+ * **数えないものは `UNCOUNTED_RESPONSE_SOURCES` が正本**（種類も件数もここへ写さない。
+ * 写した側が先に古くなる）。この系列だけを見て「アプリの HTTP 通信はすべて覆われている」と
  * 読まないこと。
  * @param method 要求のメソッド（閉じた集合へ写してからラベルにする）
  * @param status 応答のステータス（同じく閉じた集合へ写す）
@@ -378,14 +378,44 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set(
 );
 
 /**
- * ステータスをラベル値へ写す（`HTTP_STATUS` に無い番号は 1 つにまとめる）。
+ * ラベルに使える「ステータスの級」。
+ *
+ * **`HTTP_STATUS` に無い番号を `other` へまとめると、`other` の意味が割れる。**
+ * あれは「未知・敵対的な値のまとめ先」として設計した値だが、中継（`proxy-route.ts`）は
+ * 上流の 2xx を**そのまま**返すので（`canRelayStatus` は 300 未満を無条件に通す）、
+ * `HTTP_STATUS` が持たない 202 / 206 / 207 の**成功した中継**が同じバケットへ入っていた
+ * （実測: `statusLabel(202)` が `other`）。`status="other"` の増加で警報を組むと成功で
+ * 誤発火し、逆に本当に未知の値が来たときは成功分に埋もれる。
+ *
+ * 級へ丸めれば集合は閉じたまま（+4 値）で、成功した中継は `2xx` として読める。
+ */
+const STATUS_CLASS_LABELS = ['2xx', '3xx', '4xx', '5xx'] as const;
+
+/** ステータスの級を表すラベル値の型 */
+export type StatusClassLabel = (typeof STATUS_CLASS_LABELS)[number];
+
+/** 級に丸めるときの桁（HTTP のステータスは 3 桁） */
+const STATUS_CLASS_DIVISOR = 100;
+
+/**
+ * ステータスをラベル値へ写す。
+ *
+ * 1. `HTTP_STATUS` にある番号はその値（アプリ自身が返すものは 1 件ずつ読みたい）。
+ * 2. それ以外で級が分かるもの（100〜599）は級（`2xx` 等）。上流から中継した番号がここへ来る。
+ * 3. どちらでもない値は `other`（**未知・敵対的な値のまとめ先**。`Response` の status は
+ *    200〜599 に限られるので、普通の経路ではここへ来ない）。
  * @param status 応答のステータス
  * @returns ラベル値
  */
 export function statusLabel(status: number): string {
   // 文字列にしてから閉じた集合と照合する
   const text = String(status);
-  return KNOWN_STATUSES.has(text) ? text : OTHER_LABEL;
+  // アプリ自身が返す番号はそのまま
+  if (KNOWN_STATUSES.has(text)) return text;
+  // 級に丸める（`2xx` 等）。整数でない・範囲外は級が決まらない
+  const label = `${Math.floor(status / STATUS_CLASS_DIVISOR)}xx`;
+  // 閉じた集合にある級ならそれを使い、無ければまとめ先へ
+  return (STATUS_CLASS_LABELS as readonly string[]).includes(label) ? label : OTHER_LABEL;
 }
 
 /**

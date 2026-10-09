@@ -244,7 +244,7 @@ describe('POST /billing/webhook', () => {
     // **キャッシュ制御も包む側が 1 度だけ付ける** — このルートが自分でも付けていた頃は、
     // `Vary: Authorization, Authorization` を返していた（実測）
     expect(result.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
-    expect(result.headers.get('vary')).toBe('Authorization');
+    expect(result.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
   it('別の鍵で署名した本文は 401（鍵を知らない相手は通れない）', async () => {

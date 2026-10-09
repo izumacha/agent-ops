@@ -10,41 +10,49 @@ import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 
 describe('キャッシュ禁止のヘッダ', () => {
-  it('保存禁止と Authorization での分離を付ける', () => {
+  it('保存禁止と、資格情報を運ぶヘッダでの分離を付ける', () => {
     // 素の応答に付ける
     const response = withPrivateCacheHeaders(new Response('x'));
     // 保存させない
     expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
-    // 資格情報ごとに分ける
-    expect(response.headers.get('vary')).toBe('Authorization');
+    // **`Cookie` も並べる** — 画面側の CSV はセッション Cookie で認証してテナント固有の
+    // 数字を返すので、`Authorization` だけを鍵にすると**どのテナントも送らない**＝鍵が衝突する
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
-  it('2 度通しても Vary は 1 回だけ並ぶ（冪等）', () => {
+  it('2 度通しても Vary の項目は 1 回だけ並ぶ（冪等）', () => {
     // 同じ応答へ 2 度通す（包む側と包まれる側の両方が呼んでいた形）
     const response = withPrivateCacheHeaders(withPrivateCacheHeaders(new Response('x')));
-    // 並ぶのは 1 回だけ
-    expect(response.headers.get('vary')).toBe('Authorization');
+    // 並ぶのは 1 回ずつ
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
-  it('既にある Vary の項目は消さず、Authorization だけを足す', () => {
+  it('既にある Vary の項目は消さず、足りないものだけを足す', () => {
     // 別の項目を持つ応答
     const response = withPrivateCacheHeaders(
       new Response('x', { headers: { Vary: 'Accept-Encoding' } }),
     );
-    // 既存の項目は残り、Authorization が足される
-    expect(response.headers.get('vary')).toBe('Accept-Encoding, Authorization');
+    // 既存の項目は残り、資格情報の 2 つが足される
+    expect(response.headers.get('vary')).toBe('Accept-Encoding, Authorization, Cookie');
   });
 
   it('大文字小文字が違う既存の項目も「ある」と見なす（フィールド名は区別しない）', () => {
     // 綴りだけが違う形
     const response = withPrivateCacheHeaders(
-      new Response('x', { headers: { Vary: 'authorization' } }),
+      new Response('x', { headers: { Vary: 'authorization, cookie' } }),
     );
     // 足さない（2 度並べない）
-    expect(response.headers.get('vary')).toBe('authorization');
+    expect(response.headers.get('vary')).toBe('authorization, cookie');
   });
 
-  it('Vary: * には足さない（すべてで分ける指定の意味を薄めない）', () => {
+  it('一部だけ並んでいる Vary には足りない項目だけを足す', () => {
+    // Cookie だけが並んでいる応答
+    const response = withPrivateCacheHeaders(new Response('x', { headers: { Vary: 'Cookie' } }));
+    // Authorization だけが足される（順序は既存のものが先）
+    expect(response.headers.get('vary')).toBe('Cookie, Authorization');
+  });
+
+  it('Vary: * には何も足さない（すべてで分ける指定の意味を薄めない）', () => {
     // すべてで分ける指定
     const response = withPrivateCacheHeaders(new Response('x', { headers: { Vary: '*' } }));
     // そのまま

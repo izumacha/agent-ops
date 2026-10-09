@@ -29,6 +29,16 @@ import { HTTP_METHOD_EXPORTS } from './lib/route-files';
  */
 const MODULE_EVAL_DELAY_MS = 1_200;
 
+/**
+ * `statusLabel` が返しうる「級」の数（`2xx` / `3xx` / `4xx` / `5xx`）。
+ *
+ * **実装の配列を import せず、ここで数える** — 上界の導出を実装側の集合から取ると、
+ * 級を減らす変異が導出も一緒に狭めて「上界を超えていない＝緑」で素通りする
+ * （`KNOWN_METHODS` 自身から網羅を導いていた版が実際にそうだった）。級の数は HTTP の
+ * ステータスが 1xx〜5xx の 5 クラスで、そのうち 1xx は応答として返さないので 4。
+ */
+const STATUS_CLASSES = 4;
+
 // 1 本ずつ独立に見る（カウンタはモジュールの状態なので前のテストを引きずる）
 beforeEach(() => {
   resetMetricsForTesting();
@@ -279,8 +289,10 @@ describe('ラベル値の閉じ込め', () => {
       expect(statusLabel(status)).toBe(String(status));
   });
 
-  it.each([418, 999, 0, -1])('HTTP_STATUS に無い番号 (%i) は 1 つにまとめる', (status) => {
-    expect(statusLabel(status)).toBe('other');
+  it.each([999, 0, -1])('級も決まらない番号 (%i) は 1 つにまとめる', (status) => {
+    // **まとめ先は 1 本だけ**（系列を外から増やせる形を残さない）。
+    // `HTTP_STATUS` に無いが級が決まる番号は `other` ではなく級へ入る（下の describe が見る）
+    expect(statusLabel(status)).toBe(OTHER_LABEL);
   });
 });
 
@@ -288,7 +300,7 @@ describe('応答を数える入口', () => {
   it('メソッドとステータスを閉じた集合へ写してから数える', () => {
     // 既知のメソッド・既知のステータス
     countHttpResponse('POST', HTTP_STATUS.CREATED);
-    // 未知のメソッド・未知のステータス（どちらもまとめ先へ入る）
+    // 未知のメソッド・`HTTP_STATUS` に無い番号（メソッドはまとめ先、ステータスは級へ入る）
     countHttpResponse('TRACE', 418);
     // 書き出して確かめる
     const text = renderMetrics(new Date());
@@ -296,10 +308,7 @@ describe('応答を数える入口', () => {
       valueOf(text, `agentops_http_responses_total{method="POST",status="${HTTP_STATUS.CREATED}"}`),
     ).toBe(1);
     expect(
-      valueOf(
-        text,
-        `agentops_http_responses_total{method="${OTHER_LABEL}",status="${OTHER_LABEL}"}`,
-      ),
+      valueOf(text, `agentops_http_responses_total{method="${OTHER_LABEL}",status="4xx"}`),
     ).toBe(1);
   });
 
@@ -316,14 +325,43 @@ describe('応答を数える入口', () => {
   });
 });
 
+describe('ステータスのラベル', () => {
+  it('アプリ自身が返す番号はそのまま出す', () => {
+    // `HTTP_STATUS` にある値は 1 件ずつ読みたい
+    expect(statusLabel(HTTP_STATUS.OK)).toBe('200');
+    expect(statusLabel(HTTP_STATUS.UNAUTHORIZED)).toBe('401');
+  });
+
+  it('中継した上流の番号は級へ丸める（まとめ先 other と混ぜない）', () => {
+    // **`other` は「未知・敵対的な値のまとめ先」**。中継（`canRelayStatus` は 300 未満を
+    // 無条件に通す）が返す成功した 2xx を同じバケットへ入れていた頃は、`status="other"` の
+    // 増加で警報を組むと成功で誤発火し、本当に未知の値は成功分に埋もれた
+    expect(statusLabel(202)).toBe('2xx');
+    expect(statusLabel(206)).toBe('2xx');
+    expect(statusLabel(301)).toBe('3xx');
+    expect(statusLabel(418)).toBe('4xx');
+    expect(statusLabel(507)).toBe('5xx');
+    // どれも `other` ではない（混ぜないことが要点）
+    expect([202, 206, 301, 418, 507].map(statusLabel)).not.toContain(OTHER_LABEL);
+  });
+
+  it('級の決まらない値だけが other になる', () => {
+    // `Response` の status は 200〜599 なので普通の経路では来ないが、来たらまとめ先へ
+    expect(statusLabel(0)).toBe(OTHER_LABEL);
+    expect(statusLabel(99)).toBe(OTHER_LABEL);
+    expect(statusLabel(600)).toBe(OTHER_LABEL);
+    expect(statusLabel(Number.NaN)).toBe(OTHER_LABEL);
+  });
+});
+
 describe('系列数の上限', () => {
   // **上限の根拠を正本から導く**（metrics.ts の docstring に算術を書き写すと、語彙を増やした
   // ときにそこだけが古くなる。以前は「メソッド 5 種 × ステータス約 15 種 = 75」と書いてあり、
   // まとめ先の `other` を数えておらず実際の上界と合っていなかった）
   it('いま数えうる系列の上界より十分に大きい', () => {
-    // (a) 応答 = メソッドの値（既知 + まとめ先）× ステータスの値（既知 + まとめ先）
+    // (a) 応答 = メソッドの値（既知 + まとめ先）× ステータスの値（既知 + 級 + まとめ先）
     const methods = KNOWN_METHODS.length + 1;
-    const statuses = new Set(Object.values(HTTP_STATUS)).size + 1;
+    const statuses = new Set(Object.values(HTTP_STATUS)).size + STATUS_CLASSES + 1;
     // (b) ログの出来事 = 語彙の件数（level は event から定まるので倍にならない）
     const logEvents = Object.keys(LOG_EVENTS).length;
     // 捨てた数は `COUNTS` の外（上限の外）に持つので数えない

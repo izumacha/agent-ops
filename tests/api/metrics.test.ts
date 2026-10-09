@@ -60,7 +60,7 @@ describe('GET /metrics', () => {
     // **Vary はちょうど 1 回だけ** — このルートが自分でも付けていた頃は、包む側と二重に
     // 掛かって `Vary: Authorization, Authorization` を返していた（実測）。
     // 付ける場所が 1 か所であることを、実際の応答で固定する
-    expect(result.headers.get('vary')).toBe('Authorization');
+    expect(result.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
   it('自分の応答も数える（結線が外れていれば増えない）', async () => {

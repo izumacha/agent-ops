@@ -300,7 +300,7 @@ describe('Route Handler の結線', () => {
     // 資格情報ごとに分ける。**ちょうど 1 回だけ並ぶこと** — `append` は冪等でないので、
     // 包む側と包まれる側が両方これを呼んでいた頃は全 API 応答が
     // `Vary: Authorization, Authorization` を返していた（実測）
-    expect(response.headers.get('vary')).toBe('Authorization');
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
   // **Next.js の制御フローの例外は応答へ写さない。**
@@ -371,6 +371,41 @@ describe('Route Handler の結線', () => {
     // 内部エラーとして写っていること
     expect(response.status).toBe(HTTP_STATUS.INTERNAL_SERVER_ERROR);
     // キャッシュ制御も付いていること（この経路も全応答と同じ扱い）
+    expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
+  });
+
+  // **ヘッダの押印そのものが投げても、例外はラッパーの外へ漏らさない。**
+  //
+  // `withPrivateCacheHeaders` は `new Response(response.body, …)` で作り直すので、本体が
+  // **本文を既に読んだ／奪われた** `Response` を返すと Fetch の仕様どおり `TypeError` になる
+  // （実測: `Response body object should not be disturbed or locked`）。押印を包む側（`try` の
+  // 外）で行っていた版では、そのとき 500 の契約も `api.unexpected_error` のログも
+  // `countHttpResponse` もまとめて飛んだ
+  it.each([
+    {
+      label: '本文を読んだ',
+      build: async (): Promise<Response> => {
+        const response = new Response('x');
+        await response.text();
+        return response;
+      },
+    },
+    {
+      label: '本文を奪われた',
+      build: (): Promise<Response> => {
+        const response = new Response('y');
+        response.body?.getReader();
+        return Promise.resolve(response);
+      },
+    },
+  ])('$label 応答を返す本体でも、ラッパーは 500 の応答を返す', async ({ build }) => {
+    // 本体がその応答を返す形で包む
+    const handler = withResponseCount(build);
+    // 応答が返ること（例外が外へ漏れない）
+    const response = await handler(new Request('http://test.local/x'));
+    // 内部エラーとして写っていること
+    expect(response.status).toBe(HTTP_STATUS.INTERNAL_SERVER_ERROR);
+    // キャッシュ制御も付いていること
     expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
   });
 

@@ -179,8 +179,9 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   画面側の CSV・`/metrics` 自身も同じ系列に乗るので、`agentops_http_responses_total{status="401"}`
   の増加で署名鍵の設定ミスやなりすましの総当たりが分かる。
 - **ただし `agentops_http_responses_total` は「アプリが返す HTTP 応答のすべて」ではない。**
-  乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が 3 つある**
-  （正本は `src/lib/metrics.ts` の `UNCOUNTED_RESPONSE_SOURCES`）。この系列だけを見て
+  乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が別にある**
+  （正本は `src/lib/metrics.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから
+  導いた写しで、`tests/docs-gate.test.ts` が両向きに突き合わせる）。この系列だけを見て
   「他の通信はすべて覆われている」と読まないこと。
   - 入口（`src/proxy.ts`）が percent-decode できないパスへ返す 404。<!--uncounted:entryProxy-->
     入口は Route Handler とは**別のモジュール実体**で評価されるため、そこで数えてもこの

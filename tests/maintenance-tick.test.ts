@@ -32,6 +32,42 @@ interface Received {
 }
 
 /**
+ * 要求ごとに**ステータスも**変えられるスタブを立てる（`startStub` はステータスが 1 つ）。
+ * @param steps 1 要求ごとの応答（足りなくなったら最後のものを返し続ける）
+ * @returns 入口の URL と、受け取った本文の記録
+ */
+async function startStubSequence(
+  steps: { status: number; body: Record<string, unknown> }[],
+): Promise<{ baseUrl: string; received: Received }> {
+  // 受け取った本文を控える
+  const received: Received = { bodies: [], paths: [] };
+  // 何回目の要求かを数える
+  let call = 0;
+  // 要求ごとに応答を返す
+  server = createServer((request, response) => {
+    // 本文を読み捨てつつ控える
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      received.bodies.push(text === '' ? {} : (JSON.parse(text) as Record<string, unknown>));
+      received.paths.push(request.url ?? '');
+      // その回の応答（足りなければ最後のもの）
+      const step = steps[Math.min(call, steps.length - 1)];
+      call += 1;
+      if (step === undefined) throw new Error('応答が 1 つも無い');
+      response.writeHead(step.status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(step.body));
+    });
+  });
+  // 空きポートで待ち受ける
+  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('ポートを取れません');
+  return { baseUrl: `http://127.0.0.1:${address.port}`, received };
+}
+
+/**
  * 応答を順に返すスタブを立てる。
  * @param responses 1 要求ごとに返す本文（足りなくなったら最後のものを返し続ける）
  * @param status 返すステータス（既定 200）
@@ -328,6 +364,23 @@ describe('保守の定期実行のティック', () => {
     const tick = await runTick({ MAINTENANCE_BASE_URL: baseUrl, PLATFORM_ADMIN_TOKEN: TOKEN });
     expect(tick.status).not.toBe(0);
     expect(tick.stderr).toContain('nextTenantCursor');
+  });
+
+  it('途中で失敗しても合計を残す（数えた取りこぼしを捨てない）', async () => {
+    // 1 回目は取りこぼし 3 件つきで続きを返し、2 回目は 500 を返す
+    const { baseUrl } = await startStubSequence([
+      { status: 200, body: result({ passComplete: false, failed: 3, nextTenantCursor: 'T1' }) },
+      { status: 500, body: { message: 'boom' } },
+    ]);
+    const tick = await runTick({ MAINTENANCE_BASE_URL: baseUrl, PLATFORM_ADMIN_TOKEN: TOKEN });
+    expect(tick.status).not.toBe(0);
+    // **合計が標準出力に残っている**（`process.exit` だけで抜けるとここが空になり、
+    // 数えた 3 件がどこにも出ない＝`failed` を数えている理由が消える）
+    expect(JSON.parse(tick.stdout.trim())).toMatchObject({
+      event: 'maintenance.tick',
+      requests: 1,
+      failed: 3,
+    });
   });
 
   it('予算の指定があれば本文に載せる', async () => {

@@ -22,6 +22,12 @@ const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
  * @returns {Promise<Response>} 応答
  */
 export function fetchWithTimeout(url, init = {}, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
-  // 上限を過ぎたら中断する signal を付けて叩く
-  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  // 上限を過ぎたら中断する signal を付けて叩く。
+  // **リダイレクトは追わない（`redirect: 'error'`）。** 呼び出し側は資格情報を
+  // `Authorization` に載せるので（保守のティックは**配備でいちばん強いトークン**）、追うと
+  // 前段の設定ミス 1 つで別ホストや `http://` へ POST を付け替えられ、同一オリジンの
+  // リダイレクトでも Bearer ヘッダーがそのまま転送される。アプリ側の外向き通信も同じ理由で
+  // 追わない（`src/lib/notify/send.ts` は `'manual'`、`src/lib/proxy/upstream.ts` は `'error'`）。
+  // 叩く先は自分のアプリの API なのでリダイレクトは返らない（返ったら設定の異常として落とす）
+  return fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
 }

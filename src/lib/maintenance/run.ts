@@ -145,6 +145,36 @@ async function sweepRateLimitHits(
   return { deleted, complete: false };
 }
 
+/**
+ * 回収を**投げさせずに**行う。
+ *
+ * **この 1 本だけが裸だった。** 一覧の読み出しは両方包んである（理由はそれぞれの catch）のに
+ * 回収は投げうるので、`DELETE` が落ちると（文のタイムアウト・接続の枯渇）500 になり、
+ * **テナントを 1 件も歩かないままこの機能の本題＝ガードレールの定期掃きが走らない**。
+ * しかも回収は一巡の開始でだけ行うので、**毎回のティックが同じ所で落ちる** — 2 つの仕事の
+ * うち軽いほうの失敗が重いほうを恒久的に止める、いちばん悪い倒れ方になる。
+ *
+ * 失敗したときは「確かめていない」（`complete: null`）として返し、取りこぼしに数えて続ける
+ * （`false` で返すと呼び出し側が同じ要求を送り直し、落ちている DB を叩き続ける）。
+ * @param repos データ層
+ * @param progress 取りこぼしを数える集計（破壊的に更新する）
+ * @returns 消した件数と、回収しきったか（`null` は確かめられなかった）
+ */
+async function sweepRateLimitHitsSafely(
+  repos: Repositories,
+  progress: Progress,
+): Promise<{ deleted: number; complete: boolean | null }> {
+  try {
+    // 通常はこちら
+    return await sweepRateLimitHits(repos);
+  } catch (error) {
+    // 残して数えて続ける（判定を止めない）
+    logEvent('maintenance.sweep_failed', describeError(error));
+    progress.failed += 1;
+    return { deleted: 0, complete: null };
+  }
+}
+
 /** 判定の進み具合（結果を組み立てるのに使う可変の集計） */
 interface Progress {
   tenantsVisited: number;
@@ -186,13 +216,6 @@ export async function runMaintenance(
   // 一巡の開始か（テナントのカーソルが無ければ先頭から）
   const startsPass = input.tenantCursor === undefined && input.agentCursor === undefined;
   // レート制限の記録の回収（一巡の開始でだけ行う。理由は入力の `tenantCursor`）
-  // 回収は一巡の開始でだけ行う。**それ以外の要求では `complete` を `null` にする** —
-  // `true` を返すと「確かめて、残っていなかった」と読めてしまい、応答を眺めた運用者には
-  // ほとんどの要求が健全に見える（実際には 1 度も確かめていない）。`passComplete` を旗にした
-  // のと同じ理由で、「見ていない」を別の値にする
-  const swept: { deleted: number; complete: boolean | null } = startsPass
-    ? await sweepRateLimitHits(repos)
-    : { deleted: 0, complete: null };
   // 判定した件数の集計
   const progress: Progress = {
     tenantsVisited: 0,
@@ -201,6 +224,13 @@ export async function runMaintenance(
     fired: 0,
     failed: 0,
   };
+  // 回収は一巡の開始でだけ行う。**それ以外の要求では `complete` を `null` にする** —
+  // `true` を返すと「確かめて、残っていなかった」と読めてしまい、応答を眺めた運用者には
+  // ほとんどの要求が健全に見える（実際には 1 度も確かめていない）。`passComplete` を旗にした
+  // のと同じ理由で、「見ていない」を別の値にする
+  const swept: { deleted: number; complete: boolean | null } = startsPass
+    ? await sweepRateLimitHitsSafely(repos, progress)
+    : { deleted: 0, complete: null };
 
   // 結果を組み立てる（掃きの結果と集計は共通で、違うのは続きの位置だけ）
   const build = (

@@ -203,6 +203,11 @@ export const LOG_EVENTS = {
   // **2 つに分けてある。** 文言は「その項目について真であること」だけを守る規約なので
   // （`AllowedHostsPolicy` の `DeadEntryReason` を分けたのと同じ理由）、1 テナントを飛ばした
   // 場合と、それ以降を 1 件も歩けなかった場合を同じ文言で出すと規模を取り違える
+  'maintenance.sweep_failed': {
+    level: 'error',
+    message:
+      'レート制限の記録を回収できませんでした (判定は続けます。回収は次の一巡で再試行します)',
+  },
   'maintenance.tenant_skipped': {
     level: 'error',
     message:

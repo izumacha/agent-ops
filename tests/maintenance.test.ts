@@ -161,6 +161,27 @@ describe('保守の定期実行', () => {
       expect(result.rateLimitSweepComplete).toBe(true);
     });
 
+    it('回収が落ちても判定は続ける（軽い仕事の失敗で本題を止めない）', async () => {
+      // 判定対象を 1 件用意する
+      const tenantId = await makeTenant('a');
+      await makeAgent(tenantId, 'a1');
+      // 回収を失敗させる（文のタイムアウト・接続の枯渇がこの形）
+      vi.spyOn(repos.rateLimit, 'sweep').mockRejectedValue(new Error('掃きに失敗'));
+      // 一巡を始める
+      const result = await run();
+      // **テナントを歩き、エージェントを判定している**（投げると 500 になり、
+      // 回収は一巡の開始でだけ走るので**毎回のティックが同じ所で落ちて**
+      // この機能の本題＝ガードレールの定期掃きが永久に走らない）
+      expect(result.tenantsVisited).toBe(1);
+      expect(result.agentsEvaluated).toBe(1);
+      // 取りこぼしとして数え、回収は「確かめられなかった」として返す
+      expect(result.failed).toBe(1);
+      expect(result.rateLimitSweepComplete).toBeNull();
+      expect(result.rateLimitHitsDeleted).toBe(0);
+      // 一巡そのものは終わっている
+      expect(result.passComplete).toBe(true);
+    });
+
     it('一巡の途中（カーソルあり）では回収しない（同じ掃きを何十回も繰り返さない）', async () => {
       // 窓から外れる記録を 1 件入れる
       await recordRateLimitHit('tenant:gone');

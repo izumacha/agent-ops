@@ -117,6 +117,32 @@ const COUNTED_FIELDS = [
   'failed',
 ];
 
+/**
+ * 理由を出し、**合計も残して**から非 0 で終わる。
+ *
+ * **`process.exit(1)` だけだと合計の JSON が出ない。** 1 要求を包んだのは
+ * 「`[maintenance:tick]` の 1 行も合計の JSON も残らない」のを避けるためだったが、
+ * 途中の失敗で素に抜けると後者はやはり残らない — 400 要求ぶん歩いて `failed: 37` を
+ * 積んだ末に接続が切れると、**その 37 件がどこにも出ない**（`failed` を数えている理由が消える）。
+ * @param {string} message 失敗の理由
+ * @param {unknown} [cause] 添える値（例外など）
+ * @returns {never}
+ */
+function die(message, cause) {
+  // 理由（名札付き）
+  if (cause === undefined) console.error('[maintenance:tick]', message);
+  else console.error('[maintenance:tick]', message, cause);
+  // ここまでの合計（1 行 1 JSON）
+  writeSummary();
+  // 非 0 で終わる
+  process.exit(1);
+}
+
+/** ここまでの合計を 1 行 1 JSON で出す（アプリのログと同じ形） */
+function writeSummary() {
+  process.stdout.write(`${JSON.stringify({ event: 'maintenance.tick', ...total })}\n`);
+}
+
 // 一巡の合計（ログに出す）。
 //
 // **`tenantVisits` は「テナントの件数」ではない。** 同じテナントにエージェントが残っている
@@ -176,8 +202,7 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
     );
   } catch (error) {
     // 理由を添えて落とす（中断・名前解決の失敗・接続断がここへ来る）
-    console.error('[maintenance:tick]', '要求が失敗しました', error);
-    process.exit(1);
+    die('要求が失敗しました', error);
   }
   // 2xx 以外は続けられない（状態が分からないまま叩き続けない）。
   // **本文も添える** — アプリ側の 422 は検証に失敗した項目を本文で名乗るので、ここで出すと
@@ -187,12 +212,7 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   if (!response.ok) {
     // 本文は読めないこともある（読めなければ空として扱う）
     const detail = await response.text().catch(() => '');
-    console.error(
-      '[maintenance:tick]',
-      `HTTP ${response.status} が返りました`,
-      detail.slice(0, MAX_ERROR_BODY_CHARS),
-    );
-    process.exit(1);
+    die(`HTTP ${response.status} が返りました`, detail.slice(0, MAX_ERROR_BODY_CHARS));
   }
   // 進み具合を読む。**ここも包む** — 200 なのに JSON でない応答（ログイン画面・中間装置の
   // HTML）だと `json()` が投げ、素の `await` では理由が `SyntaxError` の stack trace だけに
@@ -201,8 +221,7 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   try {
     result = await response.json();
   } catch (error) {
-    console.error('[maintenance:tick]', '応答が JSON として読めません', error);
-    process.exit(1);
+    die('応答が JSON として読めません', error);
   }
   // **数として読めない応答はここで落とす（fail-closed）。** 200 を返す中間装置やログイン画面が
   // 別の JSON を返すと `total.failed += undefined` で NaN になり、`NaN > 0` は偽なので
@@ -214,19 +233,11 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   // 配列・文字列・数値は添字が `undefined` になって下の検査で名指しされるので、`null` だけが
   // 門番の手前で落ちる非対称だった
   if (typeof result !== 'object' || result === null) {
-    console.error(
-      '[maintenance:tick]',
-      `応答がオブジェクトではありません（受け取った値: ${JSON.stringify(result)}）`,
-    );
-    process.exit(1);
+    die(`応答がオブジェクトではありません（受け取った値: ${JSON.stringify(result)}）`);
   }
   for (const field of COUNTED_FIELDS) {
     if (!Number.isFinite(result[field])) {
-      console.error(
-        '[maintenance:tick]',
-        `応答の ${field} が数として読めません（受け取った値: ${JSON.stringify(result[field])}）`,
-      );
-      process.exit(1);
+      die(`応答の ${field} が数として読めません（受け取った値: ${JSON.stringify(result[field])}）`);
     }
   }
   total.requests += 1;
@@ -242,20 +253,16 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   // **1 度も掃いていないのに 0 終了で「一巡を回し切った」と報告する**（数の検査を足した
   // 理由そのものが、それを使う側の欄で破れる）。カーソルも同じく形を確かめる
   if (typeof result.passComplete !== 'boolean') {
-    console.error(
-      '[maintenance:tick]',
+    die(
       `応答の passComplete が真偽値ではありません（受け取った値: ${JSON.stringify(result.passComplete)}）`,
     );
-    process.exit(1);
   }
   for (const field of ['nextTenantCursor', 'nextAgentCursor']) {
     // 文字列か `null` のどちらかでなければ続きの位置を送り返せない
     if (typeof result[field] !== 'string' && result[field] !== null) {
-      console.error(
-        '[maintenance:tick]',
+      die(
         `応答の ${field} が文字列でも null でもありません（受け取った値: ${JSON.stringify(result[field])}）`,
       );
-      process.exit(1);
     }
   }
 
@@ -272,19 +279,9 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   break;
 }
 
-// 1 行 1 JSON（アプリのログと同じ形にして、収集側で同じように扱えるようにする）
-process.stdout.write(`${JSON.stringify({ event: 'maintenance.tick', ...total })}\n`);
-
 // 回し切る前にループを抜けたのは異常（カーソルが進んでいない可能性がある）
-if (!completed) {
-  console.error(
-    '[maintenance:tick]',
-    `要求が ${MAX_REQUESTS} 回に達しました（一巡が終わりません）`,
-  );
-  process.exit(1);
-}
+if (!completed) die(`要求が ${MAX_REQUESTS} 回に達しました（一巡が終わりません）`);
 // 判定の取りこぼしがあればスケジューラの失敗として見えるようにする
-if (total.failed > 0) {
-  console.error('[maintenance:tick]', `判定できなかった件数: ${total.failed}`);
-  process.exit(1);
-}
+if (total.failed > 0) die(`判定できなかった件数: ${total.failed}`);
+// 1 行 1 JSON（アプリのログと同じ形にして、収集側で同じように扱えるようにする）
+writeSummary();

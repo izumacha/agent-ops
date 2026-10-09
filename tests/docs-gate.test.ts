@@ -242,7 +242,12 @@ describe('Step0 の設計成果物', () => {
         );
       }
       // **表に無い鍵の目印が残っていないこと**（種類を消したときの掃除漏れ）
-      const found = [...text.matchAll(/<!--uncounted:([A-Za-z]+)-->/g)].map((match) => match[1]);
+      // **鍵の文字種は識別子と同じに取る** — `[A-Za-z]+` だけを見ていた版では、数字や
+      // 下線を含む鍵（`entry404` / `page_render`）が**掃除側の照合から外れ**、表から鍵を
+      // 消しても文書の目印が残り続けた（前向きの照合はもう要求しないので両方緑になる）
+      const found = [...text.matchAll(/<!--uncounted:([A-Za-z0-9_]+)-->/g)].map(
+        (match) => match[1],
+      );
       for (const key of found) {
         // 文書側の目印が正本の鍵であること
         expect(sources, `${path} の <!--uncounted:${key}--> は正本に無い鍵`).toContain(key);

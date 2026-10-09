@@ -222,6 +222,25 @@ describe('メトリクスのカウンタ', () => {
     expect(withoutDefined.includes('\\\\'), '定義の無いエスケープが出ている').toBe(false);
   });
 
+  // **CR と LF しか違わない値を 2 つの系列にしない。**
+  //
+  // 書き出す側は（テキスト形式に `\r` の定義が無いので）CR も LF も同じ `\n` へ逃がす。
+  // 取り込み側でそろえていないと、**まったく同じ行が 1 回のスクレイプに 2 行現れる** —
+  // Prometheus は同じ metric ＋ labelset の重複標本でそのスクレイプ全体を落とすので、
+  // 系列 1 本ではなくターゲットの数字がまるごと消える（逃がし方を揃えた時点で生まれた穴）
+  it('CR と LF しか違わない値は同じ系列へ寄る（同じ行が 2 つ出ない）', () => {
+    // LF と CR で、ほかは同じ値を 1 回ずつ数える
+    incrementCounter('agentops_log_events_total', { event: 'x\ny', level: 'warn' });
+    incrementCounter('agentops_log_events_total', { event: 'x\ry', level: 'warn' });
+    const text = renderMetrics();
+    // 同じ行が 2 本出ていないこと
+    const line = 'agentops_log_events_total{event="x\\ny",level="warn"}';
+    const occurrences = text.split('\n').filter((row) => row.startsWith(line));
+    expect(occurrences, '同じ metric ＋ labelset の行が重複している').toHaveLength(1);
+    // 2 件が 1 つの系列へ寄っていること（捨てていない）
+    expect(valueOf(text, line)).toBe(2);
+  });
+
   it('ラベル値の NUL で出力が壊れない（キーの区切りと衝突させない）', () => {
     // **実測**: 以前はキーを同じ文字で割り直していたので、値の中の NUL が余分な区切りになり
     // `{event="a",="b",level="error"}` という**ラベル名が空の標本**が出た。Prometheus は

@@ -11,7 +11,7 @@ import { API_MESSAGES, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { hashSecret, isApiKey, isUserToken, secretsEqual } from '@/lib/tokens';
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
-import { logEventOnce } from '@/lib/log';
+import { logEventThrottled } from '@/lib/log';
 
 // テナント内のユーザーとして認証された主体
 export interface UserPrincipal {
@@ -114,8 +114,9 @@ function matchesPlatformAdminToken(token: string): boolean {
   if (!configured) return false;
   // 短すぎる値は設定ミスとみなし、使わない (弱いトークンで全テナントを作れる状態を作らない)
   if (configured.length < PLATFORM_ADMIN_TOKEN_MIN_LENGTH) {
-    // 設定ミスの警告は 1 プロセスに 1 度だけ出す（理由は `logEventOnce`）
-    logEventOnce('auth.platform_token_too_short');
+    // 設定ミスの警告は間引いて出す（1 要求 1 行にはしないが、直すまで続く状態なので
+    // 1 度きりにもしない。理由は `logEventThrottled`）
+    logEventThrottled('auth.platform_token_too_short');
     return false;
   }
   // 定数時間で比較する

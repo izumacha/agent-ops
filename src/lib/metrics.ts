@@ -151,8 +151,19 @@ function seriesKey(name: CounterName, labels: MetricLabels): string {
  * @returns 区切り文字を含まない値
  */
 function withoutKeySeparator(value: string): string {
-  // 区切りに使う文字だけを置換文字へ替える
-  return value.replaceAll(KEY_SEPARATOR, '\uFFFD');
+  // 区切りに使う文字を置換文字へ替える
+  return (
+    value
+      .replaceAll(KEY_SEPARATOR, '\uFFFD')
+      // **改行は取り込みの時点で LF へそろえる。** 書き出す側は CR も LF も同じ `\n` へ
+      // 逃がす（テキスト形式に `\r` の定義が無いため）ので、ここでそろえないと
+      // **CR と LF しか違わない 2 つの系列がまったく同じ行として並ぶ** — 1 回のスクレイプに
+      // 同じ metric ＋ labelset が 2 行現れると、Prometheus は重複標本としてその
+      // スクレイプ全体を落とす（系列 1 本ではなくターゲットの数字がまるごと消える）。
+      // 逃がし方を揃えた時点で生まれた穴なので、鍵を作る側で閉じる（実測で 2 行出た）
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+  );
 }
 
 // Prometheus のラベル名として許される形（テキスト形式の仕様。`[a-zA-Z_][a-zA-Z0-9_]*`）

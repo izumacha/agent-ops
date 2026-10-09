@@ -8,7 +8,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES, BILLING_WEBHOOK_SECRET_MIN_LENGTH } from '@/lib/constants';
-import { logEventOnce } from '@/lib/log';
+import { logEventThrottled } from '@/lib/log';
 
 // 鍵を入れる環境変数の名前（ここが唯一の参照元。.env.example とドキュメントはこの名前を指す）
 export const BILLING_WEBHOOK_SECRET_ENV = 'STRIPE_WEBHOOK_SECRET';
@@ -132,8 +132,11 @@ function notConfiguredError(): ApiError {
   // サーバーレスでは引きに行く収集そのものが成り立たない（`docs/deploy.md`）。
   // 無言だと、鍵の設定漏れで**全配信が 503 → 事業者がバックオフののちエンドポイントを無効化**し、
   // 解約の反映が止まって有料の権限が残り続ける（`metrics.token_not_configured` と同じ形）。
-  // **1 度だけ**にするのは設定の通知で 2 件目以降に情報が無いから（理由は `logEventOnce`）
-  logEventOnce('billing.secret_not_configured');
+  // **1 度だけにはしない。** 鍵の設定漏れは直すまで続き、続いていること自体が運用者の
+  // 知りたいこと（事業者はバックオフしてやがてエンドポイントを無効化する）。1 度きりだと
+  // その 1 行を取りこぼした配備では以降どの出口にも何も現れず、数える側も 1 で止まるので
+  // 率が残らない。`logEventThrottled` なら量は窓あたり対数に収まり、信号は生き続ける
+  logEventThrottled('billing.secret_not_configured');
   // 503: 設定が無いので今はこの操作を行えない（監査ログの鍵と同じ扱い）
   return new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.billingNotConfigured);
 }

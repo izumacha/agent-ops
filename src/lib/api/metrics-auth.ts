@@ -22,7 +22,7 @@
 // （応答数とログの出来事数は、どの経路が叩かれているか・どの失敗が起きているかを外から読める）。
 import { API_MESSAGES, METRICS_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { secretsEqual } from '@/lib/tokens';
-import { logEventOnce, logEventThrottled } from '@/lib/log';
+import { logEventThrottled } from '@/lib/log';
 import { bearerTokenOrNull, invalidTokenError, unauthorizedError } from './auth';
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
@@ -60,13 +60,13 @@ export function assertMetricsToken(request: Request): void {
   // **1 プロセスに 1 度**にするのは「短すぎる値」の警告と同じ理由（設定の通知なので
   // 2 件目以降に情報が無く、未認証で誰でも叩ける経路なので毎回出すと埋められる）
   if (!configured) {
-    logEventOnce('metrics.token_not_configured');
+    logEventThrottled('metrics.token_not_configured');
     throw notConfiguredError();
   }
   // 短すぎる値は設定ミスとみなして使わない（弱いトークンで運用の数字を読ませない）
   if (configured.length < METRICS_TOKEN_MIN_LENGTH) {
     // 1 度だけ警告する（設定を直す手掛かりは残すが、総当たりでログを埋められないようにする）
-    logEventOnce('metrics.token_too_short');
+    logEventThrottled('metrics.token_too_short');
     // 設定が使えないので 503（「短い値でも通る」にはしない）
     throw notConfiguredError();
   }

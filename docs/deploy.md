@@ -201,12 +201,23 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - **だから「署名鍵の設定ミス」「収集側の設定ミス」はログの `event` で見る**:
     `billing.signature_rejected` / `metrics.token_rejected`。`{status="401"}` の増加は
     「何かが 401 を積んでいる」までしか言わない。
-  - **未認証で誰でも叩ける経路の「断った」記録は間引いてある**（1 要求 1 行だと匿名の相手が
-    ログの量＝保存の費用を好きなだけ増やせる）。対象は `billing.signature_rejected` /
-    `metrics.token_rejected` / `session.login_rejected` / `session.cross_origin_action`
+  - **「断った」記録と「設定が使えない」記録は間引いてある**（1 要求 1 行だと匿名の相手が
+    ログの量＝保存の費用を好きなだけ増やせる）。対象は、断った側が
+    `billing.signature_rejected` / `metrics.token_rejected` / `session.login_rejected` /
+    `session.cross_origin_action`、設定が使えない側が `audit.secret_not_configured` /
+    `auth.platform_token_too_short` / `billing.secret_not_configured` /
+    `metrics.token_not_configured` / `metrics.token_too_short`
     （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
     `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
     ここが古いままなら落ちる。件数とファイル名は書かない）。
+    - **設定が使えない側も 1 度きりにはしない。** 鍵やトークンの設定漏れは直すまで続き、
+      続いていること自体が運用者の知りたいこと（たとえば `STRIPE_WEBHOOK_SECRET` の
+      設定漏れは受信 Webhook を全滅させ、事業者はバックオフののちエンドポイントを無効化する
+      ので、解約が反映されず有料の権限が残る）。1 度きりだと、その 1 行を取りこぼした配備では
+      以降どの出口にも何も現れず、`agentops_log_events_total` も 1 で止まる。
+    - **1 プロセスに 1 度だけ出すのは、率を別の出口から読める出来事に限る。** いま該当するのは
+      入口が返す読めないパスの 404（`entry.undecodable_path`）で、その率は**前段のアクセス
+      ログが 1 件ずつ持っている**。
   - **間引きは「窓あたり 1 本」ではなく、窓の中の通算件数が 2 の冪のときだけ行にする**
     （1 / 2 / 4 / 8 / … 件目）。行には**その時点の通算件数**が `occurrence` として載る。
     だから**警報は「行が出たこと」で組み、規模は最後に出た行の `occurrence` で読む**。
@@ -223,6 +234,13 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   （正本は `src/lib/uncounted-response-sources.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから
   導いた写しで、`tests/docs-gate.test.ts` が両向きに突き合わせる）。この系列だけを見て
   「他の通信はすべて覆われている」と読まないこと。
+  - **スクレイプ自身もこの系列に乗る。** `/metrics` も包むラッパーを通るので、1 回の収集が
+    `{method="GET",status="200"}` を 1 つ積む（実測）。系列に経路のラベルは無いので、
+    **PromQL で除くことはできない**。15 秒間隔なら 1 時間に 240 件の 200 が分母へ入るので、
+    **率（`rate(…{status=~"5.."}[5m]) / rate(…[5m])`）はこの配備では当てにならない** —
+    とくに本来の流量が少ない配備では、全要求が 500 でも率が数％に見える。**警報は率ではなく
+    5xx の絶対数**（`rate(…{status=~"5.."}[5m])`）で組むこと。401 / 503 を数えているのは
+    収集側の設定ミスを見つけるためで、そこは有用（上記のログの `event` と併せて読む）。
   - 入口（`src/proxy.ts`）が percent-decode できないパスへ返す 404。<!--uncounted:entryProxy-->
     入口は Route Handler とは**別のモジュール実体**で評価されるため、そこで数えてもこの
     カウンタには入らない（本番ビルドで実測）。代わりに `entry.undecodable_path` を

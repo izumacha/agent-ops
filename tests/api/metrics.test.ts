@@ -117,7 +117,7 @@ describe('GET /metrics', () => {
     expect(result.status).toBe(401);
   });
 
-  it('METRICS_TOKEN が未設定なら 503 で、警告は 1 度だけ出す', async () => {
+  it('METRICS_TOKEN が未設定なら 503 で、続いていることが記録に残る', async () => {
     // 「1 度だけ」の記憶を忘れる（テストの独立性のため。間引きの記憶と同じ 1 本で戻す）
     resetThrottledLogsForTesting();
     // 設定を消す（このテストの中だけ）
@@ -131,10 +131,14 @@ describe('GET /metrics', () => {
       // 503 と 401 の違いから設定の有無は読める（`API_MESSAGES.metricsNotConfigured` の
       // コメントがその割り切りの正本）。ここで見ているのは「未認証でも通らない」ことだけ
       expect((await fetchMetrics()).status).toBe(503);
-      // **1 行は出る** — ここだけ記録していなかったので、いちばん起きやすい設定漏れが
+      // **記録が残る** — ここだけ記録していなかったので、いちばん起きやすい設定漏れが
       // 唯一どの出口にも現れなかった（`{status="503"}` は `/metrics` 経由でしか読めず、
-      // その `/metrics` 自身が 503 なので到達できない）。**設定の通知なので 1 度だけ**
-      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_not_configured']);
+      // その `/metrics` 自身が 503 なので到達できない）。**1 度きりにはしない**（直すまで
+      // 続く状態なので続いていることを残す）。2 回叩いたので 2 本（通算 1 件目と 2 件目）
+      expect(loggedEvents(outlet.calls())).toEqual([
+        'metrics.token_not_configured',
+        'metrics.token_not_configured',
+      ]);
     } finally {
       outlet.restore();
       resetThrottledLogsForTesting();
@@ -216,7 +220,7 @@ describe('GET /metrics', () => {
     );
   });
 
-  it('METRICS_TOKEN が短すぎれば 503 で、警告は 1 度だけ出す', async () => {
+  it('METRICS_TOKEN が短すぎれば 503 で、記録が残る', async () => {
     // 「1 度だけ」の記憶を忘れる（テストの独立性のため。間引きの記憶と同じ 1 本で戻す）
     resetThrottledLogsForTesting();
     // 下限より 1 文字短い値を設定する
@@ -228,8 +232,11 @@ describe('GET /metrics', () => {
       // 2 回叩く（どちらも 503）
       expect((await fetchMetrics(tooShort)).status).toBe(503);
       expect((await fetchMetrics(tooShort)).status).toBe(503);
-      // 警告は 1 件だけ（未認証の総当たりでエラーログを埋められないようにしている）
-      expect(loggedEvents(spy.mock.calls)).toEqual(['metrics.token_too_short']);
+      // 間引いて出る（2 回なので 2 本。未認証の総当たりでも量は窓あたり対数に収まる）
+      expect(loggedEvents(spy.mock.calls)).toEqual([
+        'metrics.token_too_short',
+        'metrics.token_too_short',
+      ]);
     } finally {
       // 元へ戻す。**環境変数も戻す** — `vitest.config.mts` は `unstubEnvs` を立てていないので
       // 差し替えたまま抜けると次のテストへ漏れる（このファイルの末尾にあるおかげで今は

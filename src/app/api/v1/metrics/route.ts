@@ -36,7 +36,10 @@ export const dynamic = 'force-dynamic';
 
 // GET /metrics: 現在の値を書き出す (getMetrics)。
 // **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**
-// （`route()` を通る経路と同じ 1 本。自分自身の 200 / 401 / 503 も数に入る）
+// （`route()` を通る経路と同じ 1 本。自分自身の 200 / 401 / 503 も数に入る —
+// **系列に経路のラベルは無いので、収集の 200 を PromQL で除くことはできない**。
+// 15 秒間隔なら 1 時間に 240 件が分母へ入るので、率ではなく 5xx の絶対数で警報を組む
+// 必要がある。この割り切りと理由は `docs/deploy.md` に書いてある）
 export const GET = withResponseCount(async (request: Request): Promise<Response> => {
   // 監視用トークンを照合する（未設定・短すぎは 503、合わなければ 401）
   assertMetricsToken(request);

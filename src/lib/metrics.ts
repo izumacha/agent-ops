@@ -151,6 +151,20 @@ function withoutKeySeparator(value: string): string {
  *
  * **絶対に例外を投げない** — 呼び出し元は `catch` の中やログの経路なので、ここで throw すると
  * 本来の失敗が別の失敗に化ける（`describeError` が throw しないのと同じ理由）。
+ *
+ * **その約束は型だけでなく try/catch で支える。** 以前は本体が素のままで、約束を支えていたのは
+ * `MetricLabels` の型と 2 つの呼び出し元（`methodLabel` / `statusLabel` / 語彙の `level`）が
+ * 文字列を渡すことだけだった。**姉妹の `describeError` / `formatLogLine` は同じ約束を
+ * try/catch で支えている**のに、ここだけ構造が違った。破れると困る場所が 2 つあり、どちらも
+ * 呼び出しは `try` の外にある: (a) `src/lib/api/response-count.ts` は組み立て済みの応答を
+ * 返す直前に呼ぶので、throw すると**応答ごと捨てられ**統一された 500 も
+ * `api.unexpected_error` のログも飛ぶ（この PR が `withPrivateCacheHeaders` を `try` の中へ
+ * 移して塞いだ形が戻る）、(b) `src/lib/log.ts` の `logEvent` は `console.error` より**前**に
+ * 呼ぶので、`src/lib/prisma-client.ts` の `onPoolError`（要求の外）から来た場合は
+ * **ログ行が 1 文字も出ないまま uncaught でプロセスが落ちる**。
+ *
+ * **失敗は黙って捨てず「捨てた系列」として数える**（§6 エラーを握り潰さない）。出力に
+ * `agentops_metrics_series_dropped_total` が立つので、数え損ないが外から見える。
  * @param name カウンタ名
  * @param labels ラベル（省略時はラベル無しの 1 系列）
  */
@@ -160,22 +174,28 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
     droppedSeries += 1;
     return;
   }
-  // 系列のキーを作る
-  const key = seriesKey(name, labels);
-  // 既に数えている系列なら、上限に関係なく増やせる
-  const current = COUNTS.get(key);
-  if (current !== undefined) {
-    COUNTS.set(key, current + 1);
-    return;
-  }
-  // 新しい系列は上限を見る。超えていたら捨てて、捨てたことを数える
-  // （数える先は `COUNTS` の外なので、ここで上限を 1 本超えることはない）
-  if (COUNTS.size >= MAX_METRIC_SERIES) {
+  try {
+    // 系列のキーを作る（ここだけが呼び出し側の値に触るので、失敗しうるのもここ）
+    const key = seriesKey(name, labels);
+    // 既に数えている系列なら、上限に関係なく増やせる
+    const current = COUNTS.get(key);
+    if (current !== undefined) {
+      COUNTS.set(key, current + 1);
+      return;
+    }
+    // 新しい系列は上限を見る。超えていたら捨てて、捨てたことを数える
+    // （数える先は `COUNTS` の外なので、ここで上限を 1 本超えることはない）
+    if (COUNTS.size >= MAX_METRIC_SERIES) {
+      droppedSeries += 1;
+      return;
+    }
+    // 上限内なら新しい系列として 1 から数え始める
+    COUNTS.set(key, 1);
+  } catch {
+    // 鍵を組み立てられなかった（型の外から文字列でないラベル値が来た等）。
+    // **投げ直さず、捨てた系列として数える** — 呼び出し元の 2 か所が throw を前提にしていない
     droppedSeries += 1;
-    return;
   }
-  // 上限内なら新しい系列として 1 から数え始める
-  COUNTS.set(key, 1);
 }
 
 /**

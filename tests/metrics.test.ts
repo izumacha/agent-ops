@@ -130,6 +130,18 @@ describe('メトリクスのカウンタ', () => {
     expect(valueOf(renderMetrics(new Date()), 'agentops_metrics_series_dropped_total')).toBe(0);
   });
 
+  it('ラベル値が文字列でなくても投げず、捨てた系列として数える', () => {
+    // 型の外から数値のラベル値を渡す（JS からの呼び出し・将来のラベル追加がこの形）
+    expect(() =>
+      incrementCounter('agentops_log_events_total', {
+        event: 'api.unexpected_error',
+        attempt: 2 as unknown as string,
+      }),
+    ).not.toThrow();
+    // 黙って消さず、捨てた系列として出力に現れる（§6 エラーを握り潰さない）
+    expect(valueOf(renderMetrics(new Date()), 'agentops_metrics_series_dropped_total')).toBe(1);
+  });
+
   it('系列が上限に達したら新しい系列を捨て、捨てた数を数える', () => {
     // **上限が無いと、ラベルに可変の値を渡す退行だけで 1 プロセスのメモリが無制限に伸びる**。
     // 上限ちょうどまで埋めてから 1 本足して、捨てたことが観測できることまで見る

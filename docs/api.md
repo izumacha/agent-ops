@@ -11,7 +11,7 @@
 | ---- | -- |
 | 基底パス | `/api/v1`（`openapi.yaml` の `servers.url`） |
 | 認証 | `Authorization: Bearer <トークン>`（4 系統 ＋ 署名付き Webhook。下記） |
-| 形式 | リクエスト・レスポンスともに `application/json` |
+| 形式 | リクエスト・レスポンスともに `application/json`（**例外は `GET /metrics` の 200 だけ** — Prometheus のテキスト形式 `text/plain; version=0.0.4`。`openapi.yaml` の宣言が正本） |
 | 金額 | マイクロ USD の整数を**文字列**で運ぶ（1 USD = 1,000,000。浮動小数誤差を避ける） |
 | 一覧 | `limit` と `cursor` のキーセットページング（`createdAt → id` 順） |
 | エラー | `{ "error": { "message": ..., "issues"?: ... } }`。文言は日本語 |

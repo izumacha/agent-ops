@@ -352,7 +352,11 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 - **運用の観測は 2 つの出口で行う**（[ADR-0014](./docs/adr/0014-observability.md)）。ログは **1 行 1 JSON** で、
   出来事は閉じた語彙（`ts` / `level` / `event` / `message` ＋ 診断）。**警報は文言ではなく `event` の等値で組む**
   （文言は推敲で変わる）。数字は `GET /api/v1/metrics`（**監視専用の読み取りトークン** `METRICS_TOKEN` のみ・Prometheus の
-  テキスト形式）で、**インスタンスごとの値**なので全インスタンスをスクレイプして足し合わせる。
+  テキスト形式）で、**インスタンスごとの値**なので常駐配備（1 台／固定台数のコンテナ）では
+  全インスタンスをスクレイプして足し合わせる。**サーバーレスでは引きに行く形の収集が成り立たない**
+  （スクレイプが読むのはその 1 回を処理したインスタンスの表だけなので、率の警報は全要求が 500 でも
+  鳴らない）。その配備では**警報をログの `event` で組む** — 条件と手順は
+  [docs/deploy.md](./docs/deploy.md) の監視の節が正本。
   耐久する事実（利用量・インシデント・監査ログ）はこの経路には出さない — `GET /usage/daily` と画面が持つ。
 - **画面のセッション Cookie は本番で HTTPS 必須**（`Secure` 属性が付くので http では保持されない。
   [ADR-0011](./docs/adr/0011-dashboard-session-and-aggregation.md)）。Cookie の値はユーザートークン

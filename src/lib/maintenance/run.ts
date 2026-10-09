@@ -159,6 +159,15 @@ export async function runMaintenance(
   input: MaintenanceRunInput,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<MaintenanceRunResult> {
+  // **予算は呼び出し側を信用しない（fail-closed）。** `0` を渡されると `while` の条件が入口で
+  // 偽になり、テナントを 1 件も読まずに「やることは残っているがカーソルは両方 `null`」で戻る
+  // ため、ティックは同じ要求を上限まで繰り返して永久に一巡を終えられない。この関数は
+  // export されていて CLI やベンチからも呼べるので、Zod の `.min(1)` だけに頼らない
+  // （`src/data/page.ts` の `fetchCount` が同じ理由で呼び出し側を信用しない形にしてある）
+  if (!Number.isInteger(input.agentBudget) || input.agentBudget < 1) {
+    throw new Error(`agentBudget は 1 以上の整数で渡してください: ${String(input.agentBudget)}`);
+  }
+
   // 一巡の開始か（テナントのカーソルが無ければ先頭から）
   const startsPass = input.tenantCursor === undefined && input.agentCursor === undefined;
   // レート制限の記録の回収（一巡の開始でだけ行う。理由は入力の `tenantCursor`）

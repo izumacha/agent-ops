@@ -27,6 +27,9 @@ import { fetchWithTimeout } from './lib/fetch-with-timeout.mjs';
 // 中断し**、しかも中断は例外なので下の報告を通さないと痕跡が残らない
 const REQUEST_TIMEOUT_MS = 120_000;
 
+// 2xx 以外のときに標準エラーへ出す本文の長さの上限（HTML のエラーページで埋もれないため）
+const MAX_ERROR_BODY_CHARS = 500;
+
 // 叩く先（アプリの入口。`/api/v1` までは付けない）
 const baseUrl = process.env.MAINTENANCE_BASE_URL;
 // プラットフォーム管理者トークン（この経路を叩ける唯一の資格情報）
@@ -151,13 +154,31 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
     console.error('[maintenance:tick]', '要求が失敗しました', error);
     process.exit(1);
   }
-  // 2xx 以外は続けられない（状態が分からないまま叩き続けない）
+  // 2xx 以外は続けられない（状態が分からないまま叩き続けない）。
+  // **本文も添える** — アプリ側の 422 は検証に失敗した項目を本文で名乗るので、ここで出すと
+  // 「どの設定が悪いか」が運用者に伝わる（`MAINTENANCE_AGENT_BUDGET` を上限より大きくした等。
+  // 上限そのものをこのスクリプトへ書き写すと、アプリ側を変えたとき写しだけが古くなる）。
+  // 長い本文（HTML のエラーページ）で埋もれないよう頭だけにする
   if (!response.ok) {
-    console.error('[maintenance:tick]', `HTTP ${response.status} が返りました`);
+    // 本文は読めないこともある（読めなければ空として扱う）
+    const detail = await response.text().catch(() => '');
+    console.error(
+      '[maintenance:tick]',
+      `HTTP ${response.status} が返りました`,
+      detail.slice(0, MAX_ERROR_BODY_CHARS),
+    );
     process.exit(1);
   }
-  // 進み具合を読む
-  const result = await response.json();
+  // 進み具合を読む。**ここも包む** — 200 なのに JSON でない応答（ログイン画面・中間装置の
+  // HTML）だと `json()` が投げ、素の `await` では理由が `SyntaxError` の stack trace だけに
+  // なって `[maintenance:tick]` の 1 行も合計の JSON も残らない（上の `fetch` と同じ事情）
+  let result;
+  try {
+    result = await response.json();
+  } catch (error) {
+    console.error('[maintenance:tick]', '応答が JSON として読めません', error);
+    process.exit(1);
+  }
   // **数として読めない応答はここで落とす（fail-closed）。** 200 を返す中間装置やログイン画面が
   // 別の JSON を返すと `total.failed += undefined` で NaN になり、`NaN > 0` は偽なので
   // **取りこぼしの唯一の出口が黙って 0 終了する**（しかも合計の JSON には `null` と出るので

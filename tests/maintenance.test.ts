@@ -355,6 +355,17 @@ describe('保守の定期実行', () => {
     });
   });
 
+  describe('入力の検証', () => {
+    it('予算が 1 以上の整数でなければ投げる（呼び出し側を信用しない）', async () => {
+      // `0` を通すと、テナントを 1 件も読まずに「やることは残っているがカーソルは両方 null」で
+      // 戻るため、ティックが同じ要求を上限まで繰り返して一巡を終えられない。
+      // この関数は export されていて CLI やベンチからも呼べるので、Zod の `.min(1)` に頼らない
+      await expect(run({ agentBudget: 0 })).rejects.toThrow(/agentBudget/);
+      await expect(run({ agentBudget: -1 })).rejects.toThrow(/agentBudget/);
+      await expect(run({ agentBudget: 1.5 })).rejects.toThrow(/agentBudget/);
+    });
+  });
+
   describe('続きの位置（カーソル）', () => {
     it('予算を使い切ったら次のテナントの先頭から続ける', async () => {
       // 2 テナント × 1 エージェント、予算は 1 件

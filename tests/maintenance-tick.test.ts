@@ -236,6 +236,37 @@ describe('保守の定期実行のティック', () => {
     expect(tick.stderr).toContain('failed');
   });
 
+  it('200 でも JSON でなければ理由を名乗って非 0 で終わる（stack trace だけにしない）', async () => {
+    // HTML を返すスタブ（ログイン画面・中間装置がこの形）
+    server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<html>sign in</html>');
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('ポートを取れません');
+    const tick = await runTick({
+      MAINTENANCE_BASE_URL: `http://127.0.0.1:${address.port}`,
+      PLATFORM_ADMIN_TOKEN: TOKEN,
+    });
+    expect(tick.status).not.toBe(0);
+    // **このスクリプトの名札が付いた理由が出る**（素の `await` では付かない）
+    expect(tick.stderr).toContain('[maintenance:tick]');
+    expect(tick.stderr).toContain('JSON');
+  });
+
+  it('2xx 以外のときは本文も出す（どの設定が悪いか伝わる）', async () => {
+    // アプリ側の 422 を模す（検証に失敗した項目を本文で名乗る）
+    const { baseUrl } = await startStub(
+      [{ status: 422, code: 'validation_error', message: 'agentBudget は 200 以下です' }],
+      422,
+    );
+    const tick = await runTick({ MAINTENANCE_BASE_URL: baseUrl, PLATFORM_ADMIN_TOKEN: TOKEN });
+    expect(tick.status).not.toBe(0);
+    // **上限そのものはスクリプトへ書き写さない**（アプリ側の文言をそのまま見せる）
+    expect(tick.stderr).toContain('agentBudget');
+  });
+
   it('予算の指定があれば本文に載せる', async () => {
     const { baseUrl, received } = await startStub([result()]);
     const tick = await runTick({

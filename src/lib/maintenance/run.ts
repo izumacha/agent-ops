@@ -61,7 +61,7 @@ export interface MaintenanceRunResult {
    * 打ち切った）。そのときは**テナントを 1 件も歩かずに**戻るので、`passComplete` も偽・
    * カーソルも両方 `null` になる（呼び出し側は同じ呼び方をもう一度するだけでよい）
    */
-  rateLimitSweepComplete: boolean;
+  rateLimitSweepComplete: boolean | null;
   /**
    * 歩いたテナントの件数。
    *
@@ -93,7 +93,9 @@ export interface MaintenanceRunResult {
    */
   failed: number;
   /**
-   * **やることが何も残っていないか。** 呼び出し側はこの旗が真になるまで繰り返す。
+   * **この一巡を続けるために呼び直す必要があるか**（真なら呼び直さない）。真になるのは
+   * 2 つの場合で、どちらも「もう呼ばないでよい」である: 全部片付いた場合と、**テナントの
+   * 一覧が読めずにこの一巡を打ち切った場合**（後者は `failed` が 0 でないので伝わる）。
    *
    * **カーソルの `null` では表せない。** 記録の回収が 1 要求のバッチ数の上限で打ち切られた
    * ときは、**テナントを 1 件も歩かずに**「続きは先頭から」（カーソルは両方 `null`）で戻る。
@@ -113,6 +115,9 @@ export interface MaintenanceRunResult {
  * **境目の時刻はここで作らない。** 渡すのは窓の長さだけで、`at` を書いたのと同じ時計
  * （記録側）が境目を決める — アプリの壁時計で決めると、DB より進んでいる配備で**窓の中の
  * 生きた記録を消して枠をリセットする**（理由は Port の `sweep`）。
+ * **「回収しきった」は「この要求ではもう消せる行が見えない」の意味**（別のトランザクションが
+ * 掴んでいる行は数えない。掴まれているのはいま使われているキーの行で、そちらは `consume` が
+ * 自分の操作の中で掃くので、この掃きが要る「二度と来ないキー」の行は掴まれない）。
  * @param repos データ層
  * @returns 消した件数と、回収しきったか
  */
@@ -129,8 +134,12 @@ async function sweepRateLimitHits(
     const removed = await repos.rateLimit.sweep(windowMs, MAINTENANCE_RATE_LIMIT_SWEEP_BATCH);
     // 合計へ足す
     deleted += removed;
-    // 上限未満しか返らなければ、もう消せる行は無い
-    if (removed < MAINTENANCE_RATE_LIMIT_SWEEP_BATCH) return { deleted, complete: true };
+    // **1 件も消えなければそこで終わり。** 「上限未満なら終わり」にはしない — 掃きは
+    // `FOR UPDATE SKIP LOCKED` で別のトランザクションが掴んでいる行を飛ばすので、
+    // **短く返る回は「もう無い」と「いま触れない行があった」の両方を意味する**。
+    // 前者だと読むと、飛ばした行を残したまま「回収しきった」と応答に出す（この掃きは
+    // 一巡の開始でだけ走るので、次の機会はティックの間隔ぶん後）
+    if (removed === 0) return { deleted, complete: true };
   }
   // 上限まで消してもまだ残っている（次の要求が続ける）
   return { deleted, complete: false };
@@ -177,7 +186,13 @@ export async function runMaintenance(
   // 一巡の開始か（テナントのカーソルが無ければ先頭から）
   const startsPass = input.tenantCursor === undefined && input.agentCursor === undefined;
   // レート制限の記録の回収（一巡の開始でだけ行う。理由は入力の `tenantCursor`）
-  const swept = startsPass ? await sweepRateLimitHits(repos) : { deleted: 0, complete: true };
+  // 回収は一巡の開始でだけ行う。**それ以外の要求では `complete` を `null` にする** —
+  // `true` を返すと「確かめて、残っていなかった」と読めてしまい、応答を眺めた運用者には
+  // ほとんどの要求が健全に見える（実際には 1 度も確かめていない）。`passComplete` を旗にした
+  // のと同じ理由で、「見ていない」を別の値にする
+  const swept: { deleted: number; complete: boolean | null } = startsPass
+    ? await sweepRateLimitHits(repos)
+    : { deleted: 0, complete: null };
   // 判定した件数の集計
   const progress: Progress = {
     tenantsVisited: 0,
@@ -205,7 +220,10 @@ export async function runMaintenance(
   // 「次の一巡の開始」まで待つことになり、その一巡の最後の応答は `passComplete: true` を
   // 返す（回収の残りが応答のどこにも現れないまま消える）。先に回収を片付けることで、
   // 「やることが残っている」が**カーソルを 1 つも進めない形**で必ず呼び出し側へ伝わる
-  if (!swept.complete) return build(false, null, null);
+  // **`=== false` で比べる。** `null` は「一巡の開始ではないので確かめていない」の意味なので、
+  // `!swept.complete` と書くと続きの要求すべてがここで戻り、**テナントを 1 件も歩かなくなる**
+  // （既存の「全エージェントをちょうど 1 回ずつ判定する」が実際にこれで落ちた）
+  if (swept.complete === false) return build(false, null, null);
 
   // いま読んでいる位置（テナントは 1 件ずつ進める）
   let tenantCursor = input.tenantCursor;
@@ -243,10 +261,18 @@ export async function runMaintenance(
     try {
       tenantPage = await repos.tenants.list({ limit: tenantLimit, cursor: tenantCursor });
     } catch (error) {
-      // 取りこぼしとして数え（ティックの終了コードに出る）、進めた分とカーソルを返して終える
+      // 取りこぼしとして数え（ティックの終了コードに出る）、**この一巡はここで終える**。
+      //
+      // **`passComplete` を偽で返してはいけない。** 一巡の最初の要求だとカーソルは両方
+      // `undefined` なので、偽で返すと応答は「回収が途中」のとき（両方 `null`・旗は偽）と
+      // **1 ビットも違わない** — ティックは同じ要求を上限まで送り直し、落ちている DB へ
+      // 何百回も叩きに行くうえ、`failed` が繰り返しのぶん積み上がって運用者には
+      // 「数百件取りこぼした」と見える（実際に失敗したのは 1 回）。真で返せばティックは
+      // そこで止まり、`failed > 0` で非 0 終了する。続きは次のスケジュール（＝自然な
+      // 再試行の間隔）が先頭から拾う
       logEvent('maintenance.tenant_scan_failed', describeError(error));
       progress.failed += 1;
-      return build(false, resumeAt(), agentCursor === undefined ? null : encodeCursor(agentCursor));
+      return build(true, null, null);
     }
     // 1 件も無ければ一巡が終わった
     if (tenantPage.items.length === 0) return build(true, null, null);

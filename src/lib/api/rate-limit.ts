@@ -187,10 +187,19 @@ export function sharedRateLimitFor(
  * （ベンダーへの課金・外部の応答時間・DB と CPU）なので、上位プランでも 1 要求の重さは同じ。
  */
 export function extraRateLimitFor(tier: RateLimitTier): number | null {
-  // 追加の枠を持たない種類。**素の添字では引かない** — 型の外から `constructor` のような値が
-  // 届くと `Object.prototype` 由来の関数が返り、以降の比較が意図しない経路へ落ちる
-  // （`src/domain/plan.ts` の `planLimitsFor` と `src/lib/log.ts` の `lookupLogEvent` と同じ引き方）
-  const limit = Object.hasOwn(EXTRA_FRAME_LIMIT, tier) ? EXTRA_FRAME_LIMIT[tier] : null;
+  // **素の添字では引かない** — 型の外から `constructor` のような値が届くと
+  // `Object.prototype` 由来の関数が返り、以降の比較が意図しない経路へ落ちる
+  // （`src/domain/plan.ts` の `planLimitsFor` と `src/lib/log.ts` の `lookupLogEvent` と同じ引き方）。
+  //
+  // **表に無い種類は拒否する（fail-closed）。** `null` へ倒すと「追加の枠を持たない種類」と
+  // 同じ意味になり、その経路は共有の枠だけで守られる＝**小さいほうの上限が黙って消える**
+  // （`planLimitsFor` が「いちばん厳しいプラン」へ倒して記録を残すのと向きをそろえる。
+  // こちらは倒れ先が「厳しい側」ではなく「緩い側」しか無いので、拒否が唯一の安全側）。
+  // 種類は経路の印（閉じた union）から来るので、正しい呼び出しでここへは来ない
+  if (!Object.hasOwn(EXTRA_FRAME_LIMIT, tier))
+    throw new RangeError(`レート制限の種類が表にありません: ${String(tier)}`);
+  // 追加の枠を持たない種類
+  const limit = EXTRA_FRAME_LIMIT[tier];
   if (limit === null) return null;
   // テスト専用の上書きがあればそれを使う
   return extraLimitOverrideForTesting ?? limit;

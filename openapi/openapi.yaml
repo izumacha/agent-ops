@@ -2432,11 +2432,13 @@ components:
           type: integer
           description: 消したレート制限の記録の件数 (回収は一巡の開始でだけ行うので、それ以外では 0)
         rateLimitSweepComplete:
-          type: boolean
+          type: [boolean, 'null']
           description: >-
             回収しきったか。false ならまだ消せる行が残っており、そのときは**テナントを 1 件も
             歩かずに**戻る (passComplete も偽・カーソルも両方 null になるので、呼び出し側は
-            同じ呼び方をもう一度するだけでよい)
+            同じ呼び方をもう一度するだけでよい)。**null は「この要求では確かめていない」** —
+            回収は一巡の開始でだけ行うので、続きの要求では常に null になる
+            (true を返すと「確かめて残っていなかった」と読めてしまう)
         tenantsVisited:
           type: integer
           description: >-

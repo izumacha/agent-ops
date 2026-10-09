@@ -143,6 +143,24 @@ describe('保守の定期実行', () => {
       expect(store.rateLimitHits.get('tenant:alive')?.length).toBe(1);
     });
 
+    it('上限未満でも 0 件でなければ掃きを続ける（掴まれた行を「もう無い」と読まない）', async () => {
+      // 1 回目は上限未満だが 0 件ではない（prisma 側は `FOR UPDATE SKIP LOCKED` で
+      // 別のトランザクションが掴んでいる行を飛ばすので、この形が実際に起きる）
+      const counts = [MAINTENANCE_RATE_LIMIT_SWEEP_BATCH - 60, 40, 0];
+      let call = 0;
+      vi.spyOn(repos.rateLimit, 'sweep').mockImplementation(() => {
+        const removed = counts[call] ?? 0;
+        call += 1;
+        return Promise.resolve(removed);
+      });
+      // 一巡を始める
+      const result = await run();
+      // **2 回目の 40 件も消えている**（1 回目で打ち切る実装だとここが足りない）
+      expect(result.rateLimitHitsDeleted).toBe(MAINTENANCE_RATE_LIMIT_SWEEP_BATCH - 60 + 40);
+      // 0 件が返った時点で「もう見えない」＝回収しきった
+      expect(result.rateLimitSweepComplete).toBe(true);
+    });
+
     it('一巡の途中（カーソルあり）では回収しない（同じ掃きを何十回も繰り返さない）', async () => {
       // 窓から外れる記録を 1 件入れる
       await recordRateLimitHit('tenant:gone');
@@ -377,16 +395,21 @@ describe('保守の定期実行', () => {
       expect(result.passComplete).toBe(true);
     });
 
-    it('テナントの一覧が読めなければ進めた分とカーソルを返す（進捗を捨てない）', async () => {
+    it('テナントの一覧が読めなければ取りこぼしとして数え、この一巡を打ち切る', async () => {
       // テナントを 1 件（読み出しを必ず失敗させるので中身は使わない）
       await makeTenant('a');
       // テナントの読み出しを失敗させる
       vi.spyOn(repos.tenants, 'list').mockRejectedValue(new Error('一覧の読み出しに失敗'));
       // 一巡を始める
       const result = await run();
-      // 取りこぼしとして数え、**やることは残っている**と伝える（500 にして進捗を捨てない）
+      // 取りこぼしとして数える（500 にして進捗を捨てない）
       expect(result.failed).toBe(1);
-      expect(result.passComplete).toBe(false);
+      // **旗は真**。偽で返すと、一巡の最初の要求では「回収が途中」の応答
+      // （両方 `null`・旗は偽）と 1 ビットも違わないので、呼び出し側が同じ要求を上限まで
+      // 送り直す（落ちている DB を何百回も叩き、`failed` も繰り返しのぶん積み上がる）
+      expect(result.passComplete).toBe(true);
+      expect(result.nextTenantCursor).toBeNull();
+      expect(result.nextAgentCursor).toBeNull();
       // 掃きは済んでいるので、その件数は応答に残る
       expect(result.rateLimitSweepComplete).toBe(true);
     });
@@ -434,6 +457,30 @@ describe('保守の定期実行', () => {
       // **1 件目のテナントなので「先頭から」= null、エージェントのカーソルは 2 件目を指す**
       expect(first.nextTenantCursor).toBeNull();
       expect(first.nextAgentCursor).not.toBeNull();
+    });
+
+    it('続きの要求では回収の旗が null になる（確かめていないことを true と区別する）', async () => {
+      // 2 テナント × 1 エージェント（1 件目で予算を使い切らせる）
+      const a = await makeTenant('a');
+      await makeAgent(a, 'a1');
+      const b = await makeTenant('b');
+      await makeAgent(b, 'b1');
+      // 一巡の開始（ここでは実際に回収する）
+      const first = await run({ agentBudget: 1 });
+      expect(first.rateLimitSweepComplete).toBe(true);
+      expect(first.passComplete).toBe(false);
+      // 続きの要求（回収はしないので「確かめていない」）
+      const { decodeCursor } = await import('@/data/page');
+      const next = await run({
+        agentBudget: 1,
+        tenantCursor:
+          first.nextTenantCursor === null
+            ? undefined
+            : (decodeCursor(first.nextTenantCursor) ?? undefined),
+      });
+      expect(next.rateLimitSweepComplete).toBeNull();
+      // **テナントは歩いている**（`null` を「途中」と読むと 1 件も歩かずに戻る）
+      expect(next.tenantsVisited).toBeGreaterThan(0);
     });
 
     it('`passComplete` が真になるまで繰り返すと、全エージェントをちょうど 1 回ずつ判定する', async () => {

@@ -311,6 +311,25 @@ describe('保守の定期実行のティック', () => {
     expect(tick.stderr).not.toContain('TypeError');
   });
 
+  it('旗が真偽値でなければ非 0 で終わる（truthy な文字列で「回し切った」にしない）', async () => {
+    // 数の欄はすべて正しいが、旗だけが文字列（`"no"` は truthy なので素朴に読むと成功になる）
+    const { baseUrl } = await startStub([{ ...result(), passComplete: 'no' }]);
+    const tick = await runTick({ MAINTENANCE_BASE_URL: baseUrl, PLATFORM_ADMIN_TOKEN: TOKEN });
+    expect(tick.status).not.toBe(0);
+    expect(tick.stderr).toContain('passComplete');
+  });
+
+  it('カーソルが文字列でも null でもなければ非 0 で終わる', async () => {
+    // 続きの位置を送り返せない形（数値）
+    const { baseUrl } = await startStub([
+      { ...result(), passComplete: false, nextTenantCursor: 7 },
+      result(),
+    ]);
+    const tick = await runTick({ MAINTENANCE_BASE_URL: baseUrl, PLATFORM_ADMIN_TOKEN: TOKEN });
+    expect(tick.status).not.toBe(0);
+    expect(tick.stderr).toContain('nextTenantCursor');
+  });
+
   it('予算の指定があれば本文に載せる', async () => {
     const { baseUrl, received } = await startStub([result()]);
     const tick = await runTick({

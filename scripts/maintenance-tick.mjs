@@ -24,8 +24,14 @@ import { fetchWithTimeout } from './lib/fetch-with-timeout.mjs';
 // 1 要求に許す時間。**共有モジュールの既定（デモの 1 件ずつの呼び出し向け）では短すぎる** —
 // この受け口は 1 要求でテナントを歩き、最大 `MAINTENANCE_AGENT_BUDGET_MAX` 件のエージェントを
 // 判定する一括処理なので、正常でも数十秒かかりうる。既定のまま使うと**健全な応答を待たずに
-// 中断し**、しかも中断は例外なので下の報告を通さないと痕跡が残らない
-const REQUEST_TIMEOUT_MS = 120_000;
+// 中断し**、しかも中断は例外なので下の報告を通さないと痕跡が残らない。
+//
+// **経路側が自分に許している時間（`maxDuration` = 300 秒）より長くする。** 短いと、サーバーが
+// 完了してよいと宣言している要求をこちら側が打ち切ることになり、**応答＝続きのカーソルを
+// 受け取れないまま**次のティックがまた先頭から始める（毎回同じ要求で落ちる）。
+// 値を写しているのは、このスクリプトが依存ゼロの素の node で動く前提で TypeScript の定数を
+// import できないため — 経路側の `maxDuration` を動かしたらここも見ること
+const REQUEST_TIMEOUT_MS = 330_000;
 
 // 2xx 以外のときに標準エラーへ出す本文の長さの上限（HTML のエラーページで埋もれないため）
 const MAX_ERROR_BODY_CHARS = 500;
@@ -230,6 +236,28 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   total.rulesEvaluated += result.rulesEvaluated;
   total.fired += result.fired;
   total.failed += result.failed;
+
+  // **旗も形を確かめる。** ここは「もう呼ばなくてよいか」を決める 1 つの欄なので、上の
+  // 数の検査と同じ扱いにする — 真偽値でない値（`"no"` / `1` / `{}` はどれも truthy）が来ると
+  // **1 度も掃いていないのに 0 終了で「一巡を回し切った」と報告する**（数の検査を足した
+  // 理由そのものが、それを使う側の欄で破れる）。カーソルも同じく形を確かめる
+  if (typeof result.passComplete !== 'boolean') {
+    console.error(
+      '[maintenance:tick]',
+      `応答の passComplete が真偽値ではありません（受け取った値: ${JSON.stringify(result.passComplete)}）`,
+    );
+    process.exit(1);
+  }
+  for (const field of ['nextTenantCursor', 'nextAgentCursor']) {
+    // 文字列か `null` のどちらかでなければ続きの位置を送り返せない
+    if (typeof result[field] !== 'string' && result[field] !== null) {
+      console.error(
+        '[maintenance:tick]',
+        `応答の ${field} が文字列でも null でもありません（受け取った値: ${JSON.stringify(result[field])}）`,
+      );
+      process.exit(1);
+    }
+  }
 
   // **旗が真になるまで続きの位置を引き継ぐだけでよい。** 記録の回収が途中のときは
   // アプリ側がカーソルを 1 つも進めずに戻すので（`null` のまま）、ここは同じ呼び方を

@@ -177,6 +177,19 @@ describe('プラットフォーム管理者トークン', () => {
     findByHash.mockRestore();
   });
 
+  // **設定値の前後の空白は落とす。**
+  //
+  // 落とさないと「設定漏れより見つけにくい壊れ方」になる — 長さの門番は通る一方
+  // `secretsEqual` はハッシュ同士の比較なので**完全な不一致**で、テナントの作成・列挙と
+  // プラン変更が永久に 401。しかもこの経路には記録が無いのでどの出口にも何も現れない。
+  // **この 1 本が無いと `.trim()` を外しても API のテスト 493 件すべてが緑だった**（実測）
+  it('環境変数に貼り付けの改行や空白が混ざっても通る', async () => {
+    // 秘密をファイルから流し込む配備で起きる形（前後に空白と改行）
+    process.env.PLATFORM_ADMIN_TOKEN = ` ${PLATFORM_TOKEN}\n`;
+    // 運用者が持っている正しい値で通ること
+    expect((await call(listTenants, { token: PLATFORM_TOKEN })).status).toBe(200);
+  });
+
   it('環境変数が未設定なら誰もプラットフォーム管理者になれない', async () => {
     // 未設定にする
     delete process.env.PLATFORM_ADMIN_TOKEN;

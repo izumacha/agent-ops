@@ -105,8 +105,11 @@ function extractBearerToken(request: Request): string {
 
 // 環境変数のプラットフォーム管理者トークンと照合する (未設定・短すぎは常に不一致 = fail-closed)
 function matchesPlatformAdminToken(token: string): boolean {
-  // 環境変数を読む
-  const configured = process.env.PLATFORM_ADMIN_TOKEN;
+  // 環境変数を読み、**前後の空白を落とす**（秘密を読む口はすべてこの形。落とさないと
+  // 貼り付けの改行 1 つで「長さの門番は通るのに `secretsEqual` は完全な不一致」になり、
+  // テナント作成とプラン変更が永久に 401。しかもこの経路には記録が無いので、どの出口にも
+  // 何も現れない — 設定漏れより見つけにくい壊れ方になる）
+  const configured = process.env.PLATFORM_ADMIN_TOKEN?.trim();
   // 未設定ならプラットフォーム管理者は存在しない
   if (!configured) return false;
   // 短すぎる値は設定ミスとみなし、使わない (弱いトークンで全テナントを作れる状態を作らない)

@@ -105,7 +105,7 @@ export const LOG_EVENTS = {
   'metrics.token_rejected': {
     level: 'warn',
     message:
-      '監視の読み取りトークンが一致しませんでした。続く増加は収集エージェントの設定ミス、または総当たりの可能性があります。',
+      '監視の読み取りトークンを受け付けませんでした (ヘッダが無い・Bearer でない・値が一致しない のいずれか)。続く増加は収集エージェントの設定ミス、または総当たりの可能性があります。',
   },
   'metrics.token_not_configured': {
     level: 'error',

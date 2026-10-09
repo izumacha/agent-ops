@@ -138,6 +138,8 @@ describe('GET /metrics', () => {
     } finally {
       outlet.restore();
       resetThrottledLogsForTesting();
+      // 差し替えた環境変数を戻す（`unstubEnvs` は立てていないので漏れる）
+      vi.unstubAllEnvs();
     }
   });
 
@@ -229,9 +231,12 @@ describe('GET /metrics', () => {
       // 警告は 1 件だけ（未認証の総当たりでエラーログを埋められないようにしている）
       expect(loggedEvents(spy.mock.calls)).toEqual(['metrics.token_too_short']);
     } finally {
-      // 元へ戻す
+      // 元へ戻す。**環境変数も戻す** — `vitest.config.mts` は `unstubEnvs` を立てていないので
+      // 差し替えたまま抜けると次のテストへ漏れる（このファイルの末尾にあるおかげで今は
+      // 表に出ていないだけで、後ろにテストを 1 本足すと主題と無関係な理由で落ちる）
       spy.mockRestore();
       resetThrottledLogsForTesting();
+      vi.unstubAllEnvs();
     }
   });
 
@@ -239,7 +244,12 @@ describe('GET /metrics', () => {
     // 下限と同じ長さの値を設定する
     const atLimit = 'b'.repeat(METRICS_TOKEN_MIN_LENGTH);
     vi.stubEnv('METRICS_TOKEN', atLimit);
-    // その値で読める
-    expect((await fetchMetrics(atLimit)).status).toBe(200);
+    try {
+      // その値で読める
+      expect((await fetchMetrics(atLimit)).status).toBe(200);
+    } finally {
+      // 差し替えた環境変数を戻す（上と同じ理由）
+      vi.unstubAllEnvs();
+    }
   });
 });

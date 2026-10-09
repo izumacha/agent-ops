@@ -448,8 +448,12 @@ describe('POST /billing/webhook', () => {
     const body = webhookBody({ plan: Plan.pro, eventId: 'evt_no_audit' });
     try {
       expect((await postWebhook(body)).status).toBe(503);
+      // 2 通目も 503（鍵が無いあいだは何も反映しない）
+      expect((await postWebhook(body)).status).toBe(503);
       // **鍵が無いことが 1 行残る** — 残さないと「人の操作と課金の反映が全部 503」という
-      // 状態がどの出口にも現れない（応答の系列には経路のラベルが無い）
+      // 状態がどの出口にも現れない（応答の系列には経路のラベルが無い）。
+      // **2 回叩いて 1 本**であることまで見る（1 回だけだと「毎回出す」形と見分けが付かず、
+      // 設定の通知を 1 度だけにしている決定が守られていない状態で緑になる）
       expect(loggedEvents(outlet.calls())).toEqual(['audit.secret_not_configured']);
     } finally {
       outlet.restore();

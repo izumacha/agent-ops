@@ -227,6 +227,32 @@ describe('整形が失敗しても投げない', () => {
     }
   });
 
+  // **壁時計が巻き戻っても沈黙しない。**
+  //
+  // 窓の判定を `経過 < 窓` だけで書くと、NTP の巻き戻し（ライブマイグレーションでも起きる）で
+  // 経過が負になり**ずっと「窓の中」**になる。通算件数は増えるが 2 の冪に当たるのは最初の
+  // わずかな回だけなので、**巻き戻した時間ぶん行が 1 本も出ない** — しかも画面側の出来事は
+  // 系列も `/metrics` から読めないので、運用者が原因を調べたいまさにその時間が沈黙する。
+  // **この 1 本が無いと `elapsed >= 0` を消しても全件緑だった**（実測）
+  it('時計が巻き戻っても次の 1 本が出る（窓を越えた扱いにする）', () => {
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 窓の中で 3 件出す（1, 2 件目が行になる）
+      for (let i = 0; i < 3; i += 1) logEventThrottled('metrics.token_rejected');
+      // 時計を 1 時間巻き戻す
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 3_600_000);
+      // 巻き戻したあとの 1 件目も行になる（新しい窓の 1 件目として扱う）
+      logEventThrottled('metrics.token_rejected');
+      const occurrences = outlet
+        .calls()
+        .map((args) => parseLoggedLine(args).occurrence as number | undefined);
+      expect(occurrences).toEqual([1, 2, 1]);
+    } finally {
+      outlet.restore();
+    }
+  });
+
   it('間引きの記憶を忘れると次の 1 本が出る', () => {
     const outlet = captureLogOutlet();
     try {

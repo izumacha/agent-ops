@@ -21,6 +21,12 @@
 // 上限付きの `fetch`（写しを持たない。理由は共有モジュール側のコメント）
 import { fetchWithTimeout } from './lib/fetch-with-timeout.mjs';
 
+// 1 要求に許す時間。**共有モジュールの既定（デモの 1 件ずつの呼び出し向け）では短すぎる** —
+// この受け口は 1 要求でテナントを歩き、最大 `MAINTENANCE_AGENT_BUDGET_MAX` 件のエージェントを
+// 判定する一括処理なので、正常でも数十秒かかりうる。既定のまま使うと**健全な応答を待たずに
+// 中断し**、しかも中断は例外なので下の報告を通さないと痕跡が残らない
+const REQUEST_TIMEOUT_MS = 120_000;
+
 // 叩く先（アプリの入口。`/api/v1` までは付けない）
 const baseUrl = process.env.MAINTENANCE_BASE_URL;
 // プラットフォーム管理者トークン（この経路を叩ける唯一の資格情報）
@@ -39,6 +45,32 @@ if (baseUrl === undefined || baseUrl === '') {
 }
 if (token === undefined || token === '') {
   console.error('[maintenance:tick]', 'PLATFORM_ADMIN_TOKEN が未設定です');
+  process.exit(1);
+}
+// 入口は **https** を要求する（ループバックだけ例外）。
+//
+// ここで送るのは配備でいちばん強い資格情報（プラットフォーム管理者トークン）を
+// `Authorization: Bearer` に載せた要求なので、`http://` を設定すると**平文で流れる**。
+// アプリ側の外向き通信は `src/lib/outbound-url.ts` が同じ理由で https を強制しているので、
+// 送り手側もそろえる（ループバックを許すのは手元とテストのため。同じ集合を使う）
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
+let entry;
+try {
+  // URL として読めることを先に確かめる（読めない値は下の `new URL(..., baseUrl)` で投げる）
+  entry = new URL(baseUrl);
+} catch {
+  console.error('[maintenance:tick]', `MAINTENANCE_BASE_URL が URL として読めません: ${baseUrl}`);
+  process.exit(1);
+}
+// ループバックか（`[::1]` は `URL` が角括弧を外すので両方の綴りで引く）
+const entryIsLoopback =
+  LOOPBACK_HOSTS.has(entry.hostname) || LOOPBACK_HOSTS.has(`[${entry.hostname}]`);
+// https でなく、ループバックの http でもなければ落とす（fail-closed）
+if (entry.protocol !== 'https:' && !(entry.protocol === 'http:' && entryIsLoopback)) {
+  console.error(
+    '[maintenance:tick]',
+    `MAINTENANCE_BASE_URL は https を使ってください（管理者トークンを平文で送らないため）: ${baseUrl}`,
+  );
   process.exit(1);
 }
 // 予算の指定があれば**正の整数であること**を先に確かめる。
@@ -60,11 +92,26 @@ if (agentBudget !== undefined && agentBudget !== '') {
   }
 }
 
-// 一巡の合計（ログに出す）
+// 応答から足し合わせる欄（**1 つでも数として読めなければ落とす**。下の検査が使う）
+const COUNTED_FIELDS = [
+  'rateLimitHitsDeleted',
+  'tenantsVisited',
+  'agentsEvaluated',
+  'rulesEvaluated',
+  'fired',
+  'failed',
+];
+
+// 一巡の合計（ログに出す）。
+//
+// **`tenantVisits` は「テナントの件数」ではない。** 同じテナントにエージェントが残っている
+// あいだアプリ側はテナントのカーソルを進めないので、そのテナントは続きの要求でもう一度
+// 歩いた件数に数えられる（1 テナント × 500 エージェント・予算 50 なら 10 と出る）。
+// 足し合わせて意味を持つのは「歩いた回数」なので、名前をそちらに合わせてある
 const total = {
   requests: 0,
   rateLimitHitsDeleted: 0,
-  tenantsVisited: 0,
+  tenantVisits: 0,
   agentsEvaluated: 0,
   rulesEvaluated: 0,
   fired: 0,
@@ -85,12 +132,25 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   if (agentCursor !== undefined && agentCursor !== null) body.agentCursor = agentCursor;
   if (budget !== undefined) body.agentBudget = budget;
 
-  // 1 要求送る
-  const response = await fetchWithTimeout(new URL('/api/v1/maintenance/run', baseUrl), {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  // 1 要求送る。**例外をそのまま外へ出さない** — 素の `await` で落とすと Node が未処理の
+  // reject として stack trace だけを出し、`[maintenance:tick]` の 1 行も下の合計の JSON も
+  // 残らない（他の失敗経路はすべて理由を名指ししているので、ここだけ扱いを変えない）
+  let response;
+  try {
+    response = await fetchWithTimeout(
+      new URL('/api/v1/maintenance/run', baseUrl),
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      REQUEST_TIMEOUT_MS,
+    );
+  } catch (error) {
+    // 理由を添えて落とす（中断・名前解決の失敗・接続断がここへ来る）
+    console.error('[maintenance:tick]', '要求が失敗しました', error);
+    process.exit(1);
+  }
   // 2xx 以外は続けられない（状態が分からないまま叩き続けない）
   if (!response.ok) {
     console.error('[maintenance:tick]', `HTTP ${response.status} が返りました`);
@@ -98,9 +158,22 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   }
   // 進み具合を読む
   const result = await response.json();
+  // **数として読めない応答はここで落とす（fail-closed）。** 200 を返す中間装置やログイン画面が
+  // 別の JSON を返すと `total.failed += undefined` で NaN になり、`NaN > 0` は偽なので
+  // **取りこぼしの唯一の出口が黙って 0 終了する**（しかも合計の JSON には `null` と出るので
+  // 「データなし」に見える）。予算の環境変数と同じく、叩く前後で数を確かめる扱いにそろえる
+  for (const field of COUNTED_FIELDS) {
+    if (!Number.isFinite(result[field])) {
+      console.error(
+        '[maintenance:tick]',
+        `応答の ${field} が数として読めません（受け取った値: ${JSON.stringify(result[field])}）`,
+      );
+      process.exit(1);
+    }
+  }
   total.requests += 1;
   total.rateLimitHitsDeleted += result.rateLimitHitsDeleted;
-  total.tenantsVisited += result.tenantsVisited;
+  total.tenantVisits += result.tenantsVisited;
   total.agentsEvaluated += result.agentsEvaluated;
   total.rulesEvaluated += result.rulesEvaluated;
   total.fired += result.fired;

@@ -197,54 +197,66 @@ export async function runMaintenance(
   // エージェントのカーソルは最初に読むテナントだけに効く（2 件目以降は先頭から）
   let agentCursor = input.agentCursor;
 
+  // 続きの位置を符号化する（`undefined` は「先頭から」なので `null` を返す）
+  const resumeAt = (): string | null =>
+    tenantCursor === undefined ? null : encodeCursor(tenantCursor);
+
   // **2 つの予算のどちらかを使い切るか、テナントが尽きるまで進む。**
-  // テナント側の上限を定数にしてあるのは、歩くだけのテナント 1 件は 2 クエリで安く、
+  // テナント側の上限を定数にしてあるのは、歩くだけのテナント 1 件は 1 クエリで安く、
   // 運用者が調整したいのは「判定するエージェント数」の側だから（入力の口を 2 つにすると
   // 検証も契約も倍になる）。足りない分は次の要求が続きから拾う
   while (
     progress.agentsEvaluated < input.agentBudget &&
     progress.tenantsVisited < MAINTENANCE_TENANT_SCAN_MAX
   ) {
-    // テナントを 1 件だけ読む（1 件ずつ進めるので、残りのカーソルがそのまま次の位置になる）
-    const tenants = await repos.tenants.list({ limit: 1, cursor: tenantCursor });
-    const tenant = tenants.items[0];
+    // **テナントは 1 ページまとめて読む。** 1 件ずつ読むとテナント数ぶんの往復が直列に積み上がり
+    // （§8 の「ループの中で 1 件ずつクエリを投げない」）、稼働中のエージェントを持たないテナントが
+    // 並ぶ配備では**その往復だけで実行時間上限に当たって応答そのものが返らない** — カーソルを
+    // 受け取れないので一巡が先へ進まず、この機能が塞ぐはずの fail-open に戻る。
+    // 読む件数はテナント側の残り予算で抑える（1 ページの上限は超えない）
+    const tenantPage = await repos.tenants.list({
+      limit: Math.min(MAINTENANCE_TENANT_SCAN_MAX - progress.tenantsVisited, PAGE_LIMIT_MAX),
+      cursor: tenantCursor,
+    });
     // 1 件も無ければ一巡が終わった
-    if (tenant === undefined) return build(true, null, null);
-    // 歩いた件数（エージェントが 0 件でも数える。これがテナント側の予算の根拠）
-    progress.tenantsVisited += 1;
+    if (tenantPage.items.length === 0) return build(true, null, null);
 
-    // このテナントの稼働中のエージェントを、残りの予算ぶんだけ読む
-    // （1 ページの上限は超えない。`list` は正規化済みの件数を期待する）
-    const remaining = input.agentBudget - progress.agentsEvaluated;
-    const agents = await repos.agents.list(
-      tenant.id,
-      { limit: Math.min(remaining, PAGE_LIMIT_MAX), cursor: agentCursor },
-      { status: AgentStatus.active },
-    );
-    // 1 件ずつ全種別を判定する
-    for (const agent of agents.items) {
-      await evaluateOneAgent(repos, tenant.id, agent.id, input.now, env, progress);
-    }
+    // ページの中を 1 件ずつ片付ける
+    for (const tenant of tenantPage.items) {
+      // エージェント側の予算を使い切っていれば、このテナントの手前で止める
+      // （`tenantCursor` は直前に片付けたテナントなので、次の要求がここから読み直す）
+      if (progress.agentsEvaluated >= input.agentBudget) return build(false, resumeAt(), null);
+      // 歩いた件数（エージェントが 0 件でも数える。これがテナント側の予算の根拠）
+      progress.tenantsVisited += 1;
 
-    // このテナントにまだエージェントが残っていれば、**テナントのカーソルは進めない**
-    // （進めると残りのエージェントがこの一巡では二度と判定されない＝取りこぼしが静かに起きる）
-    if (agents.nextCursor !== undefined) {
-      return build(
-        false,
-        tenantCursor === undefined ? null : encodeCursor(tenantCursor),
-        agents.nextCursor,
+      // このテナントの稼働中のエージェントを、残りの予算ぶんだけ読む
+      // （1 ページの上限は超えない。`list` は正規化済みの件数を期待する）
+      const remaining = input.agentBudget - progress.agentsEvaluated;
+      const agents = await repos.agents.list(
+        tenant.id,
+        { limit: Math.min(remaining, PAGE_LIMIT_MAX), cursor: agentCursor },
+        { status: AgentStatus.active },
       );
+      // 1 件ずつ全種別を判定する
+      for (const agent of agents.items) {
+        await evaluateOneAgent(repos, tenant.id, agent.id, input.now, env, progress);
+      }
+
+      // このテナントにまだエージェントが残っていれば、**テナントのカーソルは進めない**
+      // （進めると残りのエージェントがこの一巡では二度と判定されない＝取りこぼしが静かに起きる）
+      if (agents.nextCursor !== undefined) return build(false, resumeAt(), agents.nextCursor);
+
+      // このテナントは終わったので次へ（エージェントのカーソルは捨てる）
+      tenantCursor = { createdAt: tenant.createdAt, id: tenant.id };
+      agentCursor = undefined;
     }
 
-    // このテナントは終わったので次のテナントへ（エージェントのカーソルは捨てる）
-    tenantCursor = { createdAt: tenant.createdAt, id: tenant.id };
-    agentCursor = undefined;
     // テナントが尽きていれば一巡が終わった
-    if (tenants.nextCursor === undefined) return build(true, null, null);
+    if (tenantPage.nextCursor === undefined) return build(true, null, null);
   }
 
   // どちらかの予算を使い切った（次のテナントの先頭から続ける）
-  return build(false, tenantCursor === undefined ? null : encodeCursor(tenantCursor), null);
+  return build(false, resumeAt(), null);
 }
 
 /**

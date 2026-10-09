@@ -158,9 +158,13 @@ npm run maintenance:tick
 
 | 環境変数 | 必須 | 内容 |
 | ---- | ---- | ---- |
-| `MAINTENANCE_BASE_URL` | ○ | アプリの入口（`/api/v1` までは付けない） |
+| `MAINTENANCE_BASE_URL` | ○ | アプリの入口（`/api/v1` までは付けない）。**https が必須**（ループバックだけ例外） |
 | `PLATFORM_ADMIN_TOKEN` | ○ | この経路を叩ける唯一の資格情報（アプリへ渡しているものと同じ値） |
 | `MAINTENANCE_AGENT_BUDGET` | — | 1 要求で判定するエージェント数（省略するとアプリ側の既定。正の整数でないと**叩く前に**終了コード 1 で落ちる） |
+
+`http://` を設定すると**叩く前に**終了コード 1 で落ちる — ここで送るのは配備でいちばん強い
+資格情報（`PLATFORM_ADMIN_TOKEN` を `Authorization: Bearer` に載せる）なので、平文の経路を
+許さない（アプリの外向き通信を `src/lib/outbound-url.ts` が https に限っているのと同じ理由）。
 
 **これらはアプリの環境変数ではない**（スケジューラ側で設定する）。だから `.env.example` には
 載せていない — あちらは「アプリが読む設定」の雛形で、`docker-compose` の app へ素通しする

@@ -10,6 +10,8 @@
 //   3. **判定の取りこぼし（`failed > 0`）で非 0 終了**（アプリ側は 200 を返すので、
 //      運用者が気付ける唯一の出口がこの終了コード）
 //   4. **設定不足・HTTP エラーで非 0 終了**（「設定が無いから成功」に倒さない）
+//   5. **入口が https でなければ叩かない**（管理者トークンを平文で送らない）
+//   6. **数として読めない応答で非 0 終了**（NaN になると 3 の出口が黙って 0 終了する）
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
@@ -72,6 +74,7 @@ function result(overrides: Record<string, unknown> = {}): Record<string, unknown
   return {
     rateLimitHitsDeleted: 0,
     rateLimitSweepComplete: true,
+    tenantsVisited: 0,
     agentsEvaluated: 0,
     rulesEvaluated: 0,
     fired: 0,
@@ -205,6 +208,32 @@ describe('保守の定期実行のティック', () => {
     expect(noToken.status).not.toBe(0);
     // **1 件も叩いていない**
     expect(received.bodies.length, '設定不足なのに要求を送っている').toBe(0);
+  });
+
+  it('入口が https でなければ叩かずに非 0 で終わる（管理者トークンを平文で送らない）', async () => {
+    // **実在するスタブを立てたうえで、入口だけ別のホストの http を指す。** ここで送るのは
+    // 配備でいちばん強い資格情報なので、`http://` の設定は叩く前に落とす必要がある
+    const { received } = await startStub([result()]);
+    const tick = await runTick({
+      MAINTENANCE_BASE_URL: 'http://ops.example.com',
+      PLATFORM_ADMIN_TOKEN: TOKEN,
+    });
+    expect(tick.status).not.toBe(0);
+    expect(tick.stderr).toContain('https');
+    // **1 件も叩いていない**（スタブは別ポートだが、届いていないことを形で固定する）
+    expect(received.bodies.length).toBe(0);
+  });
+
+  it('数として読めない応答があれば非 0 で終わる（NaN で取りこぼしの出口が消える）', async () => {
+    // 200 だが `failed` が無い応答（200 を返す中間装置やログイン画面がこの形）。
+    // 素朴に足すと `NaN` になり、`NaN > 0` は偽なので**取りこぼしの唯一の出口が
+    // 黙って 0 終了する**（しかも合計の JSON には `null` と出る）
+    const broken = { ...result() };
+    delete broken.failed;
+    const { baseUrl } = await startStub([broken]);
+    const tick = await runTick({ MAINTENANCE_BASE_URL: baseUrl, PLATFORM_ADMIN_TOKEN: TOKEN });
+    expect(tick.status).not.toBe(0);
+    expect(tick.stderr).toContain('failed');
   });
 
   it('予算の指定があれば本文に載せる', async () => {

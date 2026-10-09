@@ -238,12 +238,19 @@ describe('窓から外れた記録の掃き出し (sweep)', () => {
     expect(repos.store.rateLimitHits.get(KEY)).toHaveLength(1);
   });
 
-  it('境目はアプリの時計ではなく表の時計が決める（生きている記録を消さない）', async () => {
-    // 1 件入れる（表の時計は T0）
-    await consume({ at: T0 });
-    // **アプリの壁時計が 10 分進んでいても**、表の時計は T0 のままなので窓の中
-    // （境目を呼び出し側の時計で決めていた頃は、この行が消えて枠がリセットされた）
-    expect(await repos.rateLimit.sweep(60_000, SWEEP_LIMIT)).toBe(0);
-    expect(repos.store.rateLimitHits.get(KEY)).toHaveLength(1);
+  it('境目はアプリの時計ではなく表の時計が決める（表が先を指していても消す）', async () => {
+    // **表の時計を実時刻より先へ置く。** ここが要点で、「生きている記録を消さない」側は
+    // すぐ上の「消すものが無ければ 0 を返す」が既に固定している（T0 は実時刻より前なので、
+    // 境目を実時刻から決める実装ではあの行が消えて落ちる）。こちらは**逆向き＝消し残し**を見る:
+    // 実時刻から決めると「まだ未来の行」は境目より新しいので**永久に消えない**（二度と来ない
+    // キーの行を回収するというこの掃きの目的そのものが果たせなくなる）
+    const ahead = new Date(Date.now() + 60 * 60_000);
+    // 先の時刻で 1 件入れる
+    await consume({ at: ahead });
+    // 表の時計だけを窓の長さの 2 倍進める（表から見れば窓の外、実時刻から見ればまだ未来）
+    clock = new Date(ahead.getTime() + WINDOW_MS * 2);
+    // 表の時計が決めるので消える
+    expect(await repos.rateLimit.sweep(WINDOW_MS, SWEEP_LIMIT)).toBe(1);
+    expect(repos.store.rateLimitHits.has(KEY)).toBe(false);
   });
 });

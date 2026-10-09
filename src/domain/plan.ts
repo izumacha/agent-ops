@@ -5,6 +5,14 @@
 // Step4 の `RULE_COMPARISON` で実測した失敗と同じ）。
 //
 // **DB・Next.js に依存しない**ので、プランの差はユニットテストで全パターン固定できる（§11）。
+//
+// **ただし純粋ではない: `@/lib/log` を取り込む**（未知のプランを黙って倒さないため。
+// `src/domain` から `src/lib` への唯一の依存で、許容した理由と代替案は ADR-0014 の「影響」。
+// 増やさないことは `tests/layering.test.ts` が理由付きの表から機械で見張る）。その結果
+// **このモジュールはサーバー専用**になる — 連鎖の先の `@/lib/metrics` がモジュール評価時に
+// `process.uptime()` を読むので、Client Component から取り込むとブラウザで評価時に壊れる。
+// 同じテストが「`'use client'` のモジュールからこの連鎖へ到達しないこと」も見張る
+// （`planAllows` は画面と同じ述語を読む用途なので、取り込まれやすい）。
 import { Plan } from '@/domain/types';
 import { logEvent } from '@/lib/log';
 

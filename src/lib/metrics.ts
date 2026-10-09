@@ -155,6 +155,45 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
 }
 
 /**
+ * `agentops_http_responses_total` が**数えない**応答の種類（既知の非可視）。
+ *
+ * 数えるのは `src/app/**` の `route.ts` が export する関数の応答だけで、そこは
+ * `withResponseCount` を通ること（`tests/route-wrapping.test.ts` が印から全数を要求）で
+ * 漏れが出ない。**それ以外に応答を返す経路が 3 種類ある。**
+ *
+ * 以前は入口の 404 だけを「数えられない経路が 1 つある」と書いており、画面の描画と
+ * Server Action が**1 件も数えられていないのに言及されていなかった** — 運用者が
+ * 「他の HTTP 通信はすべてこの系列に乗る」と読め、ダッシュボードのログイン総当たりや
+ * 描画中の 500 を警報の条件に書いても一度も発火しない（`src/app` 配下に `page.tsx` が
+ * 6 枚と `'use server'` のモジュールが 3 本ある）。
+ *
+ * **鍵はそのまま文書の目印。** `docs/deploy.md` と `docs/adr/0014-observability.md` が
+ * `<!--uncounted:<鍵>-->` を持つことを `tests/docs-gate.test.ts` がこの表から導いて要求する
+ * （散文だけに置くと、種類が増えたとき文書の側だけが古くなる。この穴がまさにそれだった）。
+ * 種類が増えていないことは `tests/route-wrapping.test.ts` が `src/app` 配下の分類から確かめる。
+ */
+export const UNCOUNTED_RESPONSE_SOURCES = {
+  // 入口（`src/proxy.ts`）が percent-decode できないパスへ返す 404。**数えようとしても
+  // 見えない** — 入口は Route Handler とは別のモジュール実体で評価されるため（本番ビルドで
+  // 実測: health の 200 は `/metrics` に現れるのに、入口の 404 は 2 件とも現れなかった）。
+  // 数えたように見えて見えない形は作らず、ログだけで非可視を解いてある
+  // （`entry.undecodable_path`。1 プロセスに 1 度だけ。**その行の数も同じ理由で
+  // `agentops_log_events_total` には現れない**）
+  entryProxy: '入口 (src/proxy.ts) の短絡（別モジュール実体なので数えようとしても見えない）',
+  // 画面の描画（`src/app` 配下の `.tsx`）。Next.js は描画の応答を Route Handler として
+  // 扱わないので、包む場所がそもそも無い（`error.tsx` の 500 も同じ）
+  pageRender: '画面の描画 (src/app 配下の .tsx)。包める入口が無い',
+  // Server Action（`'use server'` のモジュール）。POST で届くが Route Handler ではないので
+  // 同じく包めない。**ログイン失敗はログに出す**（`session.login_rejected` /
+  // `session.cross_origin_action`）ので、総当たりは警報の条件に書ける＝ただし条件は
+  // ログ側の `event` で、この系列ではない
+  serverAction: "Server Action ('use server' のモジュール)。包める入口が無い",
+} as const;
+
+/** 数えない応答の種類の名前（上の表の鍵） */
+export type UncountedResponseSource = keyof typeof UNCOUNTED_RESPONSE_SOURCES;
+
+/**
  * 応答 1 件を数える。
  *
  * **応答を数える唯一の入口**。`route()` が包む経路だけでなく、包まない経路
@@ -164,12 +203,9 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
  * 「どの Route Handler もこのラッパーを通っていること」は `tests/route-wrapping.test.ts` が
  * 印から導いて要求する。
  *
- * **数えられない経路が 1 つある: 入口（`src/proxy.ts`）が返す 404。** 入口は Route Handler とは
- * **別のモジュール実体**で評価されるので、そこで数えてもこのカウンタには入らない
- * （本番ビルドで実測: health の 200 は `/metrics` に現れるのに、入口の 404 は 2 件とも
- * 現れなかった）。数えたように見えて見えない形は作らず、**あちらはログだけで非可視を解いて
- * ある**（`proxy.undecodable_path`。1 プロセスに 1 度だけ）。この非可視は ADR-0014 と
- * `docs/deploy.md` にも書いてある。
+ * **数えないものは `UNCOUNTED_RESPONSE_SOURCES` が正本**（入口の短絡・画面の描画・
+ * Server Action の 3 種類）。この系列だけを見て「アプリの HTTP 通信はすべて覆われている」と
+ * 読まないこと。
  * @param method 要求のメソッド（閉じた集合へ写してからラベルにする）
  * @param status 応答のステータス（同じく閉じた集合へ写す）
  */
@@ -183,12 +219,22 @@ export function countHttpResponse(method: string, status: number): void {
 
 /**
  * Prometheus のラベル値の規則に合わせて逃がす（`\` `"` 改行）。
+ *
+ * **復帰（CR）も逃がす。** 規則が挙げているのは逆斜線・二重引用符・LF の 3 つだけだが、
+ * 生の CR が引用符の中に残ると**その 1 行が壊れる**（CRLF で行を割る収集側は値の途中で
+ * 切るか行ごと捨てる＝その系列が黙って落ちる）。いまラベルへ渡しているのはどれも閉じた
+ * 語彙の値なので実際には現れないが、逃がす目的は「将来うっかり可変の値を渡しても出力が
+ * 壊れない」ことなので、行を割りうる 2 文字を同じようには扱う。
  * @param value 逃がす前の値
  * @returns 逃がした後の値
  */
 function escapeLabelValue(value: string): string {
-  // 逆斜線・二重引用符・改行の 3 つだけが規則で定められた対象
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+  // 逆斜線・二重引用符・改行（LF / CR）を逃がす
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
 }
 
 /**

@@ -175,10 +175,22 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
 - **数えるのは `route()` を通る経路だけではない。** 未認証の受信 Webhook・`GET /health`・
   画面側の CSV・`/metrics` 自身も同じ系列に乗るので、`agentops_http_responses_total{status="401"}`
   の増加で署名鍵の設定ミスやなりすましの総当たりが分かる。
-- **数えられない経路が 1 つある**（既知の非可視）: 入口（`src/proxy.ts`）が percent-decode
-  できないパスへ返す 404。入口は Route Handler とは別のモジュール実体で評価されるため、
-  そこで数えてもこのカウンタには入らない（本番ビルドで実測）。代わりに
-  `proxy.undecodable_path` を **1 プロセスに 1 度だけ**ログへ出すので、起きたことは分かる。
-  同種の要求が続いているかは**前段のアクセスログ**で見る。
+- **ただし `agentops_http_responses_total` は「アプリが返す HTTP 応答のすべて」ではない。**
+  乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が 3 つある**
+  （正本は `src/lib/metrics.ts` の `UNCOUNTED_RESPONSE_SOURCES`）。この系列だけを見て
+  「他の通信はすべて覆われている」と読まないこと。
+  - 入口（`src/proxy.ts`）が percent-decode できないパスへ返す 404。<!--uncounted:entryProxy-->
+    入口は Route Handler とは**別のモジュール実体**で評価されるため、そこで数えてもこの
+    カウンタには入らない（本番ビルドで実測）。代わりに `entry.undecodable_path` を
+    **1 プロセスに 1 度だけ**ログへ出すので、起きたことは分かる（**同じ理由でその行数も
+    `agentops_log_events_total` には現れない**ので、警報の条件はログ側の `event` で書く）。
+    同種の要求が続いているかは**前段のアクセスログ**で見る。
+  - 画面の描画（`src/app` 配下の `.tsx`）。<!--uncounted:pageRender-->
+    Next.js は描画の応答を Route Handler として扱わないので、包める入口が無い。
+    画面の通信量・エラー率は**前段のアクセスログ**で見る。
+  - Server Action（`'use server'` のモジュール）。<!--uncounted:serverAction-->
+    同じく包める入口が無い。**ダッシュボードのログインの拒否はログに出る**ので、総当たりは
+    `session.login_rejected` の増加で警報にできる（別オリジンからの送信は
+    `session.cross_origin_action`）。`agentops_http_responses_total` では見えない。
 - **耐久する事実はここに出さない。** 利用量・コストは `GET /api/v1/usage/daily`、
   インシデントは画面と `GET /api/v1/incidents`、操作の記録は `GET /api/v1/audit-logs`。

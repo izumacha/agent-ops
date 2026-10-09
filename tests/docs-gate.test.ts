@@ -28,6 +28,8 @@ function trackedOnce(): string[] {
 import { METRICS_TOKEN_MIN_LENGTH, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 // ログの語彙の正本 (deploy.md の例が実在の出来事を指していることを突き合わせる)
 import { LOG_EVENTS } from '@/lib/log';
+// 「数えない応答の種類」の正本 (文書の目印をここから導く)
+import { UNCOUNTED_RESPONSE_SOURCES } from '@/lib/metrics';
 // 監査ログの連番の上限 (README が運用者向けに数値で書いているので突き合わせる)
 import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 // RBAC の許可表 (役割と操作の唯一の真実の源)
@@ -181,6 +183,42 @@ describe('Step0 の設計成果物', () => {
         line.includes(LOG_EVENTS[event as keyof typeof LOG_EVENTS].message),
         `${event} の文言を例へ写している（推敲すると古くなる）`,
       ).toBe(false);
+    }
+  });
+
+  // **「数えない応答の種類」は正本（コード）から導いて文書と突き合わせる**（ADR-0014）。
+  //
+  // 散文だけに置いていた版は実際に古くなった — 入口の 404 だけを「数えられない経路が 1 つ
+  // ある」と書き、画面の描画と Server Action が 1 件も数えられていないのに言及が無かった。
+  // 運用者は「他の HTTP 通信はすべて `agentops_http_responses_total` に乗る」と読め、
+  // ダッシュボードのログイン総当たりを条件に書いても一度も発火しない。
+  //
+  // **突き合わせるのは散文ではなく目印**（`<!--uncounted:<鍵>-->`）。文章は推敲してよく、
+  // 鍵はコード側の表の鍵そのものなので、種類を足した人が文書へ 1 行足すことになる。
+  it('数えない応答の種類は、どの鍵も文書の目印として現れている', () => {
+    // 正本の鍵（1 つも無ければ表が壊れている）
+    const sources = Object.keys(UNCOUNTED_RESPONSE_SOURCES);
+    expect(sources.length, 'UNCOUNTED_RESPONSE_SOURCES が空').toBeGreaterThan(0);
+    // 運用者と設計判断の読み手が見る 2 つの文書
+    for (const path of [join(DOCS, 'deploy.md'), join(DOCS, 'adr', '0014-observability.md')]) {
+      // 文書を読む
+      const text = readFileSync(path, 'utf8');
+      for (const source of sources) {
+        // 鍵ごとの目印があること
+        expect(text, `${path} に <!--uncounted:${source}--> が無い`).toContain(
+          `<!--uncounted:${source}-->`,
+        );
+      }
+      // **表に無い鍵の目印が残っていないこと**（種類を消したときの掃除漏れ）
+      const found = [...text.matchAll(/<!--uncounted:([A-Za-z]+)-->/g)].map((match) => match[1]);
+      for (const key of found) {
+        // 文書側の目印が正本の鍵であること
+        expect(sources, `${path} の <!--uncounted:${key}--> は正本に無い鍵`).toContain(key);
+      }
+      // 理由が空の宣言を許さない（登録するだけで黙らせる形にしない）
+      for (const reason of Object.values(UNCOUNTED_RESPONSE_SOURCES)) {
+        expect(reason.trim().length, '数えない種類の理由が空').toBeGreaterThan(0);
+      }
     }
   });
 

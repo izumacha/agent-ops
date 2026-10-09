@@ -14,12 +14,12 @@
 // 出来事の数）だけなので、スクレイプのたびに DB を触らない＝監視が本番の負荷にならない。
 //
 // **`route()` を通らない**（Bearer から `Principal` を決める仕組みに乗らないため）。代わりに
-// `tests/route-wrapping.test.ts` の理由付きの表へ登録し、(a) 監視用トークンの入口へ到達すること、
-// (b) `no-store` を宣言すること、(c) 応答を数える出口へ到達することを機械で要求している。
+// `tests/route-wrapping.test.ts` の理由付きの表へ登録し、**監視用トークンの入口へ到達すること**を
+// 機械で要求している（応答を数えることと `no-store` は `withResponseCount` を通ることで満たす。
+// 同テストが全 export にその印を要求し、実際のヘッダも応答を作って確かめる）。
 import { withResponseCount } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { assertMetricsToken } from '@/lib/api/metrics-auth';
-import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { PROMETHEUS_CONTENT_TYPE } from '@/lib/constants';
 import { renderMetrics } from '@/lib/metrics';
 
@@ -35,11 +35,11 @@ export const GET = withResponseCount(async (request: Request): Promise<Response>
   // いまの値をテキストへ書き出す（判定はしない。しきい値はスクレイプ側が決める）
   const body = renderMetrics(new Date());
   // JSON ではないので Response.json は使わず、形式を名乗って返す。
-  // **共有キャッシュへ載せない** — 認証付きの運用情報なので（`route()` が全ルートへ付けるのと同じ値）
-  return withPrivateCacheHeaders(
-    new Response(body, {
-      status: HTTP_STATUS.OK,
-      headers: { 'Content-Type': PROMETHEUS_CONTENT_TYPE },
-    }),
-  );
+  // **`no-store` は包む側（`withResponseCount`）が付ける** — 認証付きの運用情報なので
+  // 共有キャッシュへは載せないが、付ける場所は `route()` を通る経路と同じ 1 か所にそろえる
+  // （自分でも付けていた頃は `Vary` が二重に並んでいた）
+  return new Response(body, {
+    status: HTTP_STATUS.OK,
+    headers: { 'Content-Type': PROMETHEUS_CONTENT_TYPE },
+  });
 });

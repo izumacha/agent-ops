@@ -12,6 +12,7 @@ import { BILLING_SIGNATURE_HEADER } from '@/lib/billing/signature';
 import { BILLING_PRICE_LOOKUP_KEYS } from '@/lib/billing/events';
 import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 import { Plan } from '@/domain/types';
+import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 import { API_MESSAGES, PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
@@ -240,6 +241,10 @@ describe('POST /billing/webhook', () => {
     expect(renderMetrics(new Date())).toContain(
       'agentops_http_responses_total{method="POST",status="401"} 1',
     );
+    // **キャッシュ制御も包む側が 1 度だけ付ける** — このルートが自分でも付けていた頃は、
+    // `Vary: Authorization, Authorization` を返していた（実測）
+    expect(result.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
+    expect(result.headers.get('vary')).toBe('Authorization');
   });
 
   it('別の鍵で署名した本文は 401（鍵を知らない相手は通れない）', async () => {

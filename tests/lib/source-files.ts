@@ -172,3 +172,27 @@ export function reachesModule(
   // 辿り切っても着かなかった
   return false;
 }
+
+/**
+ * そのファイルがディレクティブ（`'use client'` / `'use server'`）を宣言しているか。
+ *
+ * **綴りを `grep` で探さない** — コメントや文言の中の同じ綴りまで拾って誤検知する
+ * （実際このリポジトリには `'use client'` に言及しているコメントが 3 か所ある）。
+ * ディレクティブは「ファイル先頭に並ぶ、式としての文字列リテラルの文」なので構文で見る。
+ * @param parsed 構文木つきのファイル
+ * @param directive 探すディレクティブ
+ * @returns 宣言していれば true
+ */
+export function declaresDirective(parsed: ParsedSourceFile, directive: string): boolean {
+  // 先頭から「式としての文字列リテラルの文」が続く範囲だけを見る
+  for (const statement of parsed.source.statements) {
+    // 式文でなければディレクティブの並びは終わり
+    if (!ts.isExpressionStatement(statement)) return false;
+    // 文字列リテラルでなければ同じく終わり
+    if (!ts.isStringLiteralLike(statement.expression)) return false;
+    // 目的のディレクティブなら見つかった
+    if (statement.expression.text === directive) return true;
+  }
+  // 1 つも無かった
+  return false;
+}

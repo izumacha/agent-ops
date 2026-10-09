@@ -60,7 +60,7 @@ export function proxy(request: NextRequest): Response {
       // **1 度だけ出す** — 未認証で誰でも叩ける経路なので、毎回出すとログを埋められる
       // (PLATFORM_ADMIN_TOKEN が短すぎる警告と同じ扱い)。続いているかは前段のログで見る
       warnedUndecodablePath = true;
-      logEvent('proxy.undecodable_path');
+      logEvent('entry.undecodable_path');
     }
     // キャッシュ制御も route() の応答と同じ規律に揃える (この 1 経路だけ外れていると、
     // 将来 proxy が分岐を増やしたときに気付けない)

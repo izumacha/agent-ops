@@ -11,6 +11,7 @@ import { canPerform } from '@/domain/rbac';
 import type { UserPrincipal } from '@/lib/api/auth';
 import { LOGIN_PATH } from '@/lib/constants';
 import { isSameOriginRequest } from '@/lib/csrf';
+import { logEvent } from '@/lib/log';
 import {
   SESSION_COOKIE_NAME,
   clearedSessionCookieOptions,
@@ -31,12 +32,21 @@ export interface DashboardSession {
  * ヘッダを読むのはこのファイルだけなので、判定の規則（`isSameOriginRequest`）を呼ぶ側も
  * ここに置く — 画面ごとに `headers()` を呼ぶ形にすると、`Origin` の読み方（ヘッダ名の綴りや
  * 無いときの扱い）が Server Action ごとに割れる。
+ *
+ * **断ったことはここで 1 行残す。** Server Action の応答は
+ * `agentops_http_responses_total` に乗らない（`src/lib/metrics.ts` の
+ * `UNCOUNTED_RESPONSE_SOURCES`）ので、ログが唯一の出口になる。**判定の呼び出し側ではなく
+ * ここで出す** — 画面ごとに書くと、Server Action を足した人が出し忘れたぶんだけ黙る。
  */
 export async function isSameOriginAction(): Promise<boolean> {
   // ヘッダを読む（Next.js 16 では非同期）
   const headerList = await headers();
   // Origin と Host を突き合わせる（判定の規則は csrf.ts の 1 か所）
-  return isSameOriginRequest(headerList.get('origin'), headerList.get('host'));
+  const sameOrigin = isSameOriginRequest(headerList.get('origin'), headerList.get('host'));
+  // 断ったときだけ 1 行残す（値そのものは出さない。出してよい形は定型文だけ）
+  if (!sameOrigin) logEvent('session.cross_origin_action');
+  // 判定をそのまま返す
+  return sameOrigin;
 }
 
 /** Cookie からセッショントークンを読む (無ければ undefined)。 */

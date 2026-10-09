@@ -14,7 +14,7 @@ import {
   HTTP_METHOD_EXPORTS,
   PAGE_EXTENSIONS,
 } from './lib/route-files';
-import { forEachNode, parseSourceFiles } from './lib/source-files';
+import { declaresDirective, forEachNode, parseSourceFiles } from './lib/source-files';
 import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
@@ -31,6 +31,7 @@ import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
 import { PLAN_FEATURES } from '@/domain/plan';
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
+import { UNCOUNTED_RESPONSE_SOURCES, type UncountedResponseSource } from '@/lib/metrics';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 
@@ -46,11 +47,12 @@ const UNAUTHENTICATED_ROUTES: Record<string, string> = {
 
 // **署名で認証する受信 Webhook**（Step6）。Bearer 認証を使わないので `route()` を通らないが、
 // REST の契約（openapi.yaml）には載る経路。**除外ではなく「別の認証」として扱う** —
-// `route()` を通らないことを許す代わりに、下の 2 つを必ず要求する:
-//   (a) 署名検証のモジュール（`@/lib/billing/signature`）へ到達すること
-//       （= 誰でも叩ける経路に認証がある。到達しなければ誰でもプランを書き換えられる）
-// キャッシュ制御と応答の数え上げは**包むラッパー（`withResponseCount`）が全応答へ行う**ので
-// ここでは要求しない（下の 2 つの検査が 1 か所で固定する）
+// `route()` を通らないことを許す代わりに、**署名検証のモジュール（`@/lib/billing/signature`）へ
+// 到達すること**をここで要求する（= 誰でも叩ける経路に認証がある。到達しなければ誰でも
+// プランを書き換えられる）。
+// **キャッシュ制御と応答の数え上げはここでは要求しない** — 包むラッパー
+// （`withResponseCount`）が全応答へ行うので、「全 export がその印を持つ」検査と
+// 「実際に応答を作ってヘッダを見る」検査の 2 本が全ルートまとめて固定する。
 // **`RouteOptions` に `auth: 'none'` を足す形は採らなかった** — 既定を 1 つ緩めると、
 // どのルートも宣言 1 行で未認証にできる口になる（理由は ADR-0012）。
 // **ここに増える差分は理由の妥当性をレビューで必ず確認する**
@@ -65,12 +67,10 @@ const SIGNED_WEBHOOK_ROUTES: Record<string, string> = {
 // 収集エージェントはそのどれでもない（テナントを持たず役割も持たない）。`Principal` の種類を
 // 1 つ増やすと RBAC の許可表・プランのゲート・テナント境界の検査がすべてその種類を扱わねばならず、
 // 「どこでも通る主体」を足すことになるので採らなかった。**除外ではなく「別の認証」として扱う** —
-// `route()` を通らないことを許す代わりに、下の 2 つを必ず要求する:
-//   (a) 監視用トークンの入口（`@/lib/api/metrics-auth`）へ到達すること
-//       （= 到達しなければ運用の数字が誰でも読める）
-// キャッシュ制御と応答の数え上げは**包むラッパー（`withResponseCount`）が全応答へ行う**ので
-// ここでは要求しない（下の 2 つの検査が 1 か所で固定する）
-// 応答を数える出口への到達は**全ルート共通の要求**なので別の検査が見る。
+// `route()` を通らないことを許す代わりに、**監視用トークンの入口（`@/lib/api/metrics-auth`）へ
+// 到達すること**をここで要求する（= 到達しなければ運用の数字が誰でも読める）。
+// **キャッシュ制御と応答の数え上げはここでは要求しない**（上の署名 Webhook と同じ理由で、
+// 全ルート共通の 2 本が固定する）。
 // **ここに増える差分は理由の妥当性をレビューで必ず確認する**
 const METRICS_TOKEN_ROUTES: Record<string, string> = {
   'api/v1/metrics/route.ts':
@@ -81,11 +81,11 @@ const METRICS_TOKEN_ROUTES: Record<string, string> = {
 
 // **画面側の Route Handler** (Step5)。セッション Cookie で認証し、JSON ではないものを返す経路で、
 // REST の契約 (openapi.yaml) には載らない。**除外ではなく「別の契約」として扱う** —
-// api/v1 の下に置かないこと・route() を通らないことを許す代わりに、下の 3 つを必ず要求する:
+// api/v1 の下に置かないこと・route() を通らないことを許す代わりに、下の 2 つを必ず要求する:
 //   (a) api/v1 の**外**にあること (契約の下に紛れ込ませない)
 //   (b) `@/lib/session-server` へ到達すること (= セッションを自分で確かめている)
-// キャッシュ制御と応答の数え上げは**包むラッパー（`withResponseCount`）が全応答へ行う**ので
-// ここでは要求しない（下の 2 つの検査が 1 か所で固定する）
+// **キャッシュ制御と応答の数え上げはここでは要求しない**（上の 2 つの表と同じ理由で、
+// 全ルート共通の 2 本が固定する）
 // **ここに増える差分は理由の妥当性をレビューで必ず確認する**。表に無い route.ts は
 // 従来どおり「api/v1 の下で route() を通る」ことを要求される
 const SESSION_PAGE_ROUTES: Record<string, string> = {
@@ -168,7 +168,6 @@ describe('Route Handler の結線', () => {
         reachesModule(importGraph, file!.full, sessionModule),
         `${key} がセッションの確認を通っていない`,
       ).toBe(true);
-      // (c) 共有キャッシュへ載らないことを宣言していること。
     }
   });
 
@@ -297,9 +296,118 @@ describe('Route Handler の結線', () => {
     const handler = withResponseCount(() => Promise.resolve(build()));
     // 呼ぶ（メソッドは要求から読まれる）
     const response = await handler(new Request('http://test.local/x'));
-    // 保存させない・資格情報ごとに分ける
+    // 保存させない
     expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
-    expect(response.headers.get('vary')).toContain('Authorization');
+    // 資格情報ごとに分ける。**ちょうど 1 回だけ並ぶこと** — `append` は冪等でないので、
+    // 包む側と包まれる側が両方これを呼んでいた頃は全 API 応答が
+    // `Vary: Authorization, Authorization` を返していた（実測）
+    expect(response.headers.get('vary')).toBe('Authorization');
+  });
+
+  // **Next.js の制御フローの例外は応答へ写さない。**
+  //
+  // `redirect()` / `notFound()` / `forbidden()` / `unauthorized()` は「応答を決める」ための
+  // 例外を投げて止まる仕組みなので、包む側が捕まえて 500 の JSON に写すと**遷移も 404 も
+  // 起きず、`api.unexpected_error` の警報まで鳴る**。画面の枝で使う `requireSession()` が
+  // まさにこの 2 つを投げるので、画面側の CSV を `currentSession()` から寄せる 1 行の整理で
+  // 踏みうる
+  it.each([
+    { label: 'redirect()', digest: 'NEXT_REDIRECT;replace;/login;303;' },
+    { label: 'notFound()', digest: 'NEXT_HTTP_ERROR_FALLBACK;404' },
+  ])('応答を数えるラッパーは $label の例外を応答へ写さず投げ直す', async ({ digest }) => {
+    // Next.js が投げるのと同じ形の例外（種類は digest で表される）
+    const control = Object.assign(new Error('control flow'), { digest });
+    // 本体がそれを投げる形で包む
+    const handler = withResponseCount(() => Promise.reject(control));
+    // 包んだ関数を呼ぶと、同じ例外がそのまま出てくること（500 の応答にならない）
+    await expect(handler(new Request('http://test.local/x'))).rejects.toBe(control);
+  });
+
+  // **`src/app` 配下で応答を返すものの種類を数え上げる。**
+  //
+  // 応答を数えるのは `route.ts` の export だけで、そこは上の印の検査が全数を押さえている。
+  // 問題は**それ以外に応答を返すもの**で、以前は文書も `metrics.ts` の docstring も
+  // 「数えられない経路は入口の 404 が 1 つだけ」と書いていた。実際には画面の描画
+  // （`page.tsx` 等）と Server Action が**1 件も数えられていない**まま言及されておらず、
+  // 運用者が「他の HTTP 通信はすべてこの系列に乗る」と読める状態だった（ダッシュボードの
+  // ログイン総当たりを警報の条件に書いても一度も発火しない）。
+  //
+  // **分類は導出で、除外表を持たない。** `src/app` 配下のファイルは必ず次のどれかになる:
+  //   - `route.ts`                → 数える（印の検査が押さえる）
+  //   - `.tsx`                    → 画面の描画（`pageRender`）
+  //   - `'use server'` のモジュール → Server Action（`serverAction`）
+  //   - それ以外の `.ts`          → 上のどれかから取り込まれる部品（自分では応答を返さない）
+  // どれにも当たらないものがあれば、**新しい種類の入口が生えた**か到達不能な死んだファイル。
+  // どちらも「数えない種類が増えたのに文書が古いまま」になる前に手を止める必要がある
+  it('src/app 配下で応答を返すものは、数える経路か宣言済みの「数えない種類」のどちらか', () => {
+    // src/app 配下の .ts / .tsx を構文木つきで集める
+    const appFiles = parseSourceFiles().filter((parsed) => parsed.path.startsWith(`${APP_DIR}/`));
+    // 1 つも拾えなければ走査が壊れている（fail-closed）
+    expect(appFiles.length, 'src/app 配下のファイルを拾えている').toBeGreaterThan(0);
+    // 数える入口（route.ts）と、数えない種類に当たるもの
+    const counted = appFiles.filter((parsed) => basename(parsed.path) === ALLOWED_ROUTE_FILE_NAME);
+    const rendered = appFiles.filter((parsed) => parsed.path.endsWith('.tsx'));
+    const actions = appFiles.filter((parsed) => declaresDirective(parsed, 'use server'));
+    // 分類できた種類ごとに、`metrics.ts` の表に宣言があること（文書の目印もそこから導く）
+    const declared: { source: UncountedResponseSource; files: string[] }[] = [
+      { source: 'pageRender', files: rendered.map((parsed) => parsed.path) },
+      { source: 'serverAction', files: actions.map((parsed) => parsed.path) },
+    ];
+    for (const { source, files } of declared) {
+      // その種類が実在することと、表に宣言があること
+      expect(files.length, `${source} に当たるファイルがある`).toBeGreaterThan(0);
+      expect(
+        UNCOUNTED_RESPONSE_SOURCES[source],
+        `${source} が UNCOUNTED_RESPONSE_SOURCES に宣言されている`,
+      ).toBeDefined();
+    }
+    // 分類済みの入口（ここから取り込まれる .ts は部品）
+    const entries = [...counted, ...rendered, ...actions].map((parsed) => parsed.path);
+    // 残り（どの入口でもない .ts）が、少なくとも 1 つの入口から辿れること
+    const orphans = appFiles
+      .filter((parsed) => !entries.includes(parsed.path))
+      .filter((parsed) => !entries.some((entry) => reachesModule(importGraph, entry, parsed.path)))
+      .map((parsed) => relative(APP_DIR, parsed.path));
+    // 辿れないものは「新しい種類の入口」か死んだファイル。どちらも手を止めて決める
+    expect(orphans).toEqual([]);
+  });
+
+  // 入口（`src/proxy.ts`）は「数えない種類」として宣言されていること。
+  //
+  // **「数えようとしても見えない」は本番ビルドでの実測**（入口は Route Handler とは別の
+  // モジュール実体で評価されるので、health の 200 は `/metrics` に現れるのに入口の 404 は
+  // 2 件とも現れなかった）。ここで固定できるのはその実測そのものではなく、
+  // **数える関数を持ち込んでいないこと** — 「呼べば見えるはず」と考えた人が足すと、
+  // 見えない数え上げが黙って残る。
+  //
+  // **モジュールへの到達では見られない** — 入口は `@/lib/log` を取り込み、その先が
+  // `@/lib/metrics` なので到達は必ず true になる（まさにそれが、入口から出した
+  // `entry.undecodable_path` の行数も `/metrics` に現れない理由）。見るのは
+  // **数える関数を名指しで取り込んでいるか**
+  it('入口は応答を数える関数を取り込まず、数えない種類として宣言されている', () => {
+    // 表に宣言があること
+    expect(UNCOUNTED_RESPONSE_SOURCES.entryProxy).toBeDefined();
+    // 入口の構文木（拾えなければ fail-closed）
+    const entry = parseSourceFiles().find((parsed) => parsed.path === join(SRC_DIR, 'proxy.ts'));
+    expect(entry, '入口を走査できていない').toBeDefined();
+    // 名前付き import の識別子を集める
+    const imported: string[] = [];
+    forEachNode(entry!.source, (node) => {
+      // import 宣言のうち、名前付きの束だけを見る
+      if (!ts.isImportDeclaration(node)) return;
+      const bindings = node.importClause?.namedBindings;
+      if (bindings === undefined || !ts.isNamedImports(bindings)) return;
+      // その束の各要素の名前（`as` で別名を付けていれば元の名前）
+      for (const element of bindings.elements) {
+        imported.push((element.propertyName ?? element.name).text);
+      }
+    });
+    // 1 つも拾えなければ走査が壊れている（入口は必ず何か取り込んでいる）
+    expect(imported.length, '入口の import を拾えている').toBeGreaterThan(0);
+    // 数える関数を取り込んでいないこと
+    expect(imported, '入口が応答を数える関数を取り込んでいる（数えても見えない）').not.toContain(
+      'countHttpResponse',
+    );
   });
 
   // 意図して置いている Next の入口と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。

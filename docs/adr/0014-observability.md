@@ -113,12 +113,35 @@ PII が、pg のプールエラー経由で接続文字列が載る）。
 - **キャッシュ制御もこのラッパーが付ける。** 例外の経路にだけ付けていた版では、本体が
   **返した**早期の 401 / 404 に付かなかった（画面側の CSV がそれで、認証付きの経路の
   401 / 404 が共有キャッシュへ載りうる状態だった）。
-- **数えられない経路が 1 つ残る（既知の非可視）**: 入口（`src/proxy.ts`）が percent-decode
-  できないパスへ返す 404。入口は Route Handler とは**別のモジュール実体**で評価されるので、
-  そこで `countHttpResponse` を呼んでも `/metrics` が読むカウンタには入らない（本番ビルドで
-  実測: health の 200 は現れるのに入口の 404 は 2 件とも現れなかった）。**数えたように見えて
-  見えない形は作らず**、ログだけで非可視を解いた（`proxy.undecodable_path`。未認証で叩ける
-  経路なのでプロセスに 1 度だけ出す。続いているかは前段のアクセスログで見る）。
+- **数えない種類は 3 つあり、一覧の正本はコード側**（`src/lib/metrics.ts` の
+  `UNCOUNTED_RESPONSE_SOURCES`）。文書は鍵を目印（`<!--uncounted:<鍵>-->`）として持ち、
+  `tests/docs-gate.test.ts` が表から導いて突き合わせる。**散文だけに置いていた版は実際に
+  古くなった** — 入口の 404 だけを「1 つある」と書き、画面の描画と Server Action が 1 件も
+  数えられていないのに言及が無かった（運用者が「他の HTTP 通信はすべてこの系列に乗る」と
+  読め、ログインの総当たりを条件に書いても一度も発火しない）。種類が増えていないことは
+  `tests/route-wrapping.test.ts` が `src/app` 配下の分類（`route.ts` / `.tsx` /
+  `'use server'` / そこから取り込まれる部品）から確かめる。
+  - 入口（`src/proxy.ts`）の短絡。<!--uncounted:entryProxy-->
+    入口は Route Handler とは**別のモジュール実体**で評価されるので、そこで
+    `countHttpResponse` を呼んでも `/metrics` が読むカウンタには入らない（本番ビルドで
+    実測: health の 200 は現れるのに入口の 404 は 2 件とも現れなかった）。**数えたように
+    見えて見えない形は作らず**、ログだけで非可視を解いた（`entry.undecodable_path`。
+    未認証で叩ける経路なのでプロセスに 1 度だけ出す。続いているかは前段のアクセスログで
+    見る）。**同じ分離なので `agentops_log_events_total` にもあの行は現れない** —
+    `logEvent` の「ログに出たのにメトリクスに出ない食い違いは起きない」は**同じモジュール
+    実体の中での話**で、docstring をそう書き直した。
+  - 画面の描画（`src/app` 配下の `.tsx`）。<!--uncounted:pageRender-->
+    Next.js は描画の応答を Route Handler として扱わないので、包める入口が無い。
+  - Server Action（`'use server'` のモジュール）。<!--uncounted:serverAction-->
+    同じく包める入口が無い。**代わりにログで見えるようにした** —
+    `session.login_rejected`（ログインの拒否。理由は区別しない）と
+    `session.cross_origin_action`（別オリジンからの送信を断った）。後者は
+    `isSameOriginAction` の中で出す（呼び出し側に書くと、Server Action を足した人が
+    出し忘れたぶんだけ黙る）。
+- **出来事の名前の接頭辞は 1 サブシステムに 1 つ。** 入口の出来事を `proxy.undecodable_path`
+  と名付けていたが、`proxy.*` は LLM の中継（`src/app/api/v1/proxy`）が既に使っており、
+  `proxy.*` の警報が 2 つの無関係な出来事を混ぜていた（上流の健康を見たいのに、壊れた URL の
+  走査で鳴る）。`entry.undecodable_path` へ改名した。
 - **プロセスの起動時刻は `Date.now()` ではなく `process.uptime()` から導く。** モジュールが
   評価されるのは最初の要求が届いたときなので、`Date.now()` だとサーバーレスのコールドスタート
   1 回分ずれる（実測: プロセスは 35 秒生きているのに稼働秒数が 29.774 を返した）。

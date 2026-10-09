@@ -54,9 +54,13 @@ describe('GET /metrics', () => {
   });
 
   it('保存を禁じている（認証付きの運用情報なので中間のキャッシュに残さない）', async () => {
-    // route() が包む応答と同じキャッシュ制御を自分で付けている
+    // 包むラッパーが route() を通る応答と同じキャッシュ制御を付けている
     const result = await fetchMetrics(METRICS_TOKEN);
     expect(result.headers.get('cache-control')).toContain(NO_STORE_CACHE_CONTROL);
+    // **Vary はちょうど 1 回だけ** — このルートが自分でも付けていた頃は、包む側と二重に
+    // 掛かって `Vary: Authorization, Authorization` を返していた（実測）。
+    // 付ける場所が 1 か所であることを、実際の応答で固定する
+    expect(result.headers.get('vary')).toBe('Authorization');
   });
 
   it('自分の応答も数える（結線が外れていれば増えない）', async () => {

@@ -14,12 +14,37 @@ export function withPrivateCacheHeaders(response: Response): Response {
   const headers = new Headers(response.headers);
   // 保存させない
   headers.set('Cache-Control', NO_STORE_CACHE_CONTROL);
-  // 万一保存されても資格情報ごとに分ける
-  headers.append('Vary', 'Authorization');
+  // 万一保存されても資格情報ごとに分ける。**既に並んでいれば足さない** — `append` は
+  // 冪等ではないので、同じ応答へ 2 度通すと `Vary: Authorization, Authorization` になる
+  // （実測。包む側と包まれる側が両方これを呼んでいた頃の `/metrics` が実際にそうだった）。
+  // 二重に並んでも意味は同じだが、ヘッダは応答の契約なので「同じ値を設定し直すだけ」が
+  // 本当にそうである形にしておく
+  if (!varyListsAuthorization(headers.get('Vary'))) {
+    headers.append('Vary', 'Authorization');
+  }
   // 本文・状態はそのままで作り直す (204 の null 本文もそのまま通る)
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers,
   });
+}
+
+/**
+ * `Vary` が既に `Authorization` を並べているか。
+ *
+ * **`*` も「すべてで分ける」なので足さない**（RFC 9110。`Vary: *` のある応答へ
+ * `Authorization` を足すと意味の無い項目が増える）。比較は大文字小文字を無視する
+ * （フィールド名は大文字小文字を区別しない）。
+ * @param vary いまの `Vary` の値（無ければ null）
+ * @returns 既に並んでいれば true
+ */
+function varyListsAuthorization(vary: string | null): boolean {
+  // ヘッダが無ければ並んでいない
+  if (vary === null) return false;
+  // カンマ区切りの項目に分け、前後の空白を落として突き合わせる
+  return vary
+    .split(',')
+    .map((field) => field.trim().toLowerCase())
+    .some((field) => field === 'authorization' || field === '*');
 }

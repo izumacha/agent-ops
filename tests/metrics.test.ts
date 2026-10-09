@@ -111,13 +111,24 @@ describe('メトリクスのカウンタ', () => {
     expect(valueOf(text, 'agentops_metrics_series_dropped_total')).toBe(0);
   });
 
-  it('ラベル値の逆斜線・二重引用符・改行を逃がす', () => {
-    // 規則で定められた 3 つの文字を含む値を渡す（閉じた語彙から外れた値が来ても壊れない）
-    incrementCounter('agentops_log_events_total', { event: 'a\\b"c\nd', level: 'error' });
+  it('ラベル値の逆斜線・二重引用符・改行（LF / CR）を逃がす', () => {
+    // 行や引用の境目を壊しうる 4 文字を含む値を渡す（閉じた語彙から外れた値が来ても壊れない）
+    incrementCounter('agentops_log_events_total', { event: 'a\\b"c\nd\re', level: 'error' });
     // 逃がした形で現れる（解析器が行や引用の境目を取り違えない）
     expect(renderMetrics(new Date())).toContain(
-      'agentops_log_events_total{event="a\\\\b\\"c\\nd",level="error"} 1',
+      'agentops_log_events_total{event="a\\\\b\\"c\\nd\\re",level="error"} 1',
     );
+  });
+
+  it('逃がさなければ行が割れる文字が、1 つも生のまま出ない', () => {
+    // **規則の 3 文字を数え上げるのではなく「行が割れないこと」を見る** — CR は規則の一覧に
+    // 無いので、綴りを数える検査では落ちない（CRLF で行を割る収集側は値の途中で切るか
+    // 行ごと捨てる＝その系列が黙って落ちる）
+    incrementCounter('agentops_log_events_total', { event: 'x\ry', level: 'error' });
+    // 書き出した本文の行数は、生の CR が残っていれば増える
+    const lines = renderMetrics(new Date()).split('\n');
+    // どの行にも生の CR が無いこと
+    expect(lines.some((line) => line.includes('\r'))).toBe(false);
   });
 
   it('宣言したゲージはすべて宣言と値を出す（名前は GAUGES から導く）', () => {

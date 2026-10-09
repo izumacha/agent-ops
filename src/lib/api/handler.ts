@@ -1,5 +1,8 @@
 // Route Handler の共通ラッパー: 認証 → ハンドラ本体 → 例外の HTTP 応答化 を 1 か所にまとめる。
 // 各ルートは route(async ({ principal, repos, params, request }) => Response) の形で書く
+// Next.js の制御フローの例外（redirect / notFound / forbidden / unauthorized・CSR への
+// フォールバックなど）を見分けて投げ直す関数。digest の綴りを写さず上流の判定を使う
+import { unstable_rethrow } from 'next/navigation';
 import { DuplicateError, getRepos, type Repositories } from '@/data';
 import { isResourceId } from '@/domain/resource-id';
 import { API_MESSAGES } from '@/lib/constants';
@@ -219,8 +222,9 @@ export function withResponseCount<A extends unknown[]>(
     // 応答を組み立てる（例外も応答へ写す）。**キャッシュ制御もここで付ける** —
     // 以前は例外の経路にだけ付けていたので、本体が**返した**早期の 401 / 404 には
     // 付かなかった（画面側の CSV がそれで、認証付きの経路の 401 / 404 が共有キャッシュへ
-    // 載りうる状態だった）。`route()` も Webhook も既に自分で付けているが、
-    // 同じ値を設定し直すだけなので二重でも問題にならない
+    // 載りうる状態だった）。**付けるのはここだけ** — `route()` も Webhook も自分で付けていた
+    // 頃は、`Vary` が `append` で冪等でないため全 API 応答が
+    // `Vary: Authorization, Authorization` を返していた（実測）
     const response = withPrivateCacheHeaders(await buildResponse(() => handler(request, ...rest)));
     // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）
     countHttpResponse(request.method, response.status);
@@ -235,6 +239,19 @@ export function withResponseCount<A extends unknown[]>(
 
 /**
  * 本体を呼び、例外を応答へ写す（キャッシュ制御も付ける）。
+ *
+ * **Next.js の制御フローの例外は写さずに投げ直す。** `redirect()` / `notFound()` /
+ * `forbidden()` / `unauthorized()` は「応答を決める」ための例外を投げて止まる仕組みなので、
+ * ここで捕まえて 500 の JSON に写すと**遷移も 404 も起きず、`api.unexpected_error` の警報まで
+ * 鳴る**（実測: `NEXT_REDIRECT;replace;/login;303;` の digest を持つ例外で 500 と 1 行の
+ * ログが出た）。画面の枝で使う `requireSession()`（`src/lib/session-server.ts`）がまさに
+ * この 2 つを投げるので、画面側の CSV を `currentSession()` から `requireSession()` へ
+ * 寄せる 1 行の整理が「ログイン画面への 303 が 500 に化ける」変更になりうる。
+ *
+ * **判定は自分で digest を読まず `unstable_rethrow` に任せる。** 綴り
+ * （`NEXT_REDIRECT` / `NEXT_HTTP_ERROR_FALLBACK`）は Next.js の内部仕様で、写すと上流が
+ * 増やした種類（CSR へのフォールバック・動的描画の中断など）を取り落とす。名前が変われば
+ * `npm run typecheck` が落ちるので、取り落としが無言にならない。
  * @param run 本体の呼び出し
  * @returns 応答
  */
@@ -243,6 +260,8 @@ async function buildResponse(run: () => Promise<Response>): Promise<Response> {
     // 本体を実行する
     return await run();
   } catch (error) {
+    // Next.js の制御フローの例外なら、ここで止めずに投げ直す（この呼び出しは該当しなければ戻る）
+    unstable_rethrow(error);
     // 例外を応答へ写す（401/403 等もテナント固有なのでキャッシュ禁止のヘッダを付ける）
     return withPrivateCacheHeaders(toErrorResponse(error));
   }
@@ -255,43 +274,39 @@ async function buildResponse(run: () => Promise<Response>): Promise<Response> {
 export function route<P = Record<string, never>>(handler: Handler<P>, options: RouteOptions = {}) {
   // このルートで使う認証関数を決める (指定が無ければユーザートークンの経路)
   const authenticateRequest = options.auth === 'apiKey' ? authenticateApiKey : authenticate;
-  // 応答を組み立てる本体（成功も失敗もここで Response になる）
+  // 応答を組み立てる本体（**例外はそのまま投げる**。応答へ写すのとキャッシュ制御を付けるのは
+  // 包む側 `withResponseCount` の 1 か所。ここでも写していた頃は、同じ判断が 2 か所にあり
+  // `Vary` が二重に並んでいた）
   const respond = async (request: Request, context: RouteContext<P>): Promise<Response> => {
-    // 例外はすべて HTTP 応答へ写す
-    try {
-      // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
-      const repos = await getRepos();
-      // 認証 (失敗は 401 の ApiError)
-      const principal = await authenticateRequest(request, repos);
-      // **レート制限は認証の後**に掛ける。キーを認証済みの id から作るので、
-      // 偽装できるヘッダ (X-Forwarded-For) に頼らずに数えられる。
-      // 認証より前に掛けると、未認証の総当たりで正規の利用者の枠を枯渇させられる
-      // **認可はレート制限より先に。** 権限の無い要求で枠を消費させない（理由は requiredAction）
-      if (options.requiredAction !== undefined) {
-        requireAction(principal, options.requiredAction);
-      }
-      // admin 限定のルートはロールそのものを確かめる（理由は requiredRole）
-      if (options.requiredRole === 'admin') {
-        requireAdminRole(principal);
-      }
-      // プランで可否が決まる機能はここで確かめる（枠を消費する前。理由は requiredPlanFeature）
-      if (options.requiredPlanFeature !== undefined) {
-        requirePlanFeature(principal, options.requiredPlanFeature);
-      }
-      // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
-      if (options.rateLimit !== undefined) {
-        enforceRateLimit(principal, options.rateLimit, Date.now());
-      }
-      // 動的セグメントを解決する
-      const params = await context.params;
-      // 資源 id の形でないセグメントは本体へ渡さず 404 にする (DB へ渡すと 500 になる値を入口で止める)
-      assertResourceIdParams(params);
-      // 本体を実行する (応答にはキャッシュ禁止のヘッダを付ける)
-      return withPrivateCacheHeaders(await handler({ request, params, principal, repos }));
-    } catch (error) {
-      // 応答に写す (401/403 等もテナント固有なので同じヘッダを付ける)
-      return withPrivateCacheHeaders(toErrorResponse(error));
+    // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
+    const repos = await getRepos();
+    // 認証 (失敗は 401 の ApiError)
+    const principal = await authenticateRequest(request, repos);
+    // **レート制限は認証の後**に掛ける。キーを認証済みの id から作るので、
+    // 偽装できるヘッダ (X-Forwarded-For) に頼らずに数えられる。
+    // 認証より前に掛けると、未認証の総当たりで正規の利用者の枠を枯渇させられる
+    // **認可はレート制限より先に。** 権限の無い要求で枠を消費させない（理由は requiredAction）
+    if (options.requiredAction !== undefined) {
+      requireAction(principal, options.requiredAction);
     }
+    // admin 限定のルートはロールそのものを確かめる（理由は requiredRole）
+    if (options.requiredRole === 'admin') {
+      requireAdminRole(principal);
+    }
+    // プランで可否が決まる機能はここで確かめる（枠を消費する前。理由は requiredPlanFeature）
+    if (options.requiredPlanFeature !== undefined) {
+      requirePlanFeature(principal, options.requiredPlanFeature);
+    }
+    // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
+    if (options.rateLimit !== undefined) {
+      enforceRateLimit(principal, options.rateLimit, Date.now());
+    }
+    // 動的セグメントを解決する
+    const params = await context.params;
+    // 資源 id の形でないセグメントは本体へ渡さず 404 にする (DB へ渡すと 500 になる値を入口で止める)
+    assertResourceIdParams(params);
+    // 本体を実行する（応答のヘッダと例外の写しは包む側が受け持つ）
+    return await handler({ request, params, principal, repos });
   };
   // Next.js が呼ぶ形の関数。**応答を数えるのは `withResponseCount` の 1 か所**
   // （`route()` を通らない経路も同じ関数を使うので、ラベルの写し方も try の有無も割れない）

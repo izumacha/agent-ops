@@ -4,6 +4,7 @@
 // 他人のセッションを張れる」「失敗の理由が漏れる」といった退行が全件緑のまま通る。
 // `next/headers` と `next/navigation` はテスト用に差し替える（DOM も Next のサーバも起こさない）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseLoggedLine } from './lib/log-lines';
 import { createMemoryRepos, MemoryStore } from '@/data/adapters/memory';
 import { setReposForTesting } from '@/data';
 import type { Repositories } from '@/data/ports';
@@ -82,15 +83,24 @@ async function redirectTarget(run: () => Promise<unknown>): Promise<string | nul
 }
 
 describe('ログインの Server Action', () => {
+  // ログの出口（`console.error`）を捕まえる。**Server Action の応答は
+  // `agentops_http_responses_total` に乗らない**（`src/lib/metrics.ts` の
+  // `UNCOUNTED_RESPONSE_SOURCES`）ので、拒否が外から見える唯一の出口がこの行
+  let logged: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     // 既定は自分自身からの要求
     requestHeaders = { origin: 'https://ops.example.com', host: 'ops.example.com' };
     cookieJar = new Map();
+    // 出口を差し替える（本文は出さない）
+    logged = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
     // 差し替えたデータ層を戻す
     setReposForTesting(undefined);
+    // 出口を戻す
+    logged.mockRestore();
   });
 
   it('有効なトークンならセッション Cookie を張ってダッシュボードへ送る', async () => {
@@ -131,6 +141,8 @@ describe('ログインの Server Action', () => {
     expect(state.error).toBe(UI_TEXT.loginFailed);
     // **Cookie は 1 つも張られていない**（張られると攻撃者のトークンで被害者がログインする）
     expect(cookieJar.size).toBe(0);
+    // **断ったことがログに出ていること**（この経路は応答が数えられないので、ログが唯一の出口）
+    expect(parseLoggedLine(logged.mock.calls[0]).event).toBe('session.cross_origin_action');
   });
 
   it('Origin が無い要求も断る（fail-closed）', async () => {
@@ -163,6 +175,30 @@ describe('ログインの Server Action', () => {
     expect(unknownToken.error).toBe(UI_TEXT.loginFailed);
     expect(malformed.error).toBe(UI_TEXT.loginFailed);
     expect(cookieJar.size).toBe(0);
+  });
+
+  it('拒否はサーバログに 1 行残る（トークンも理由も出さない）', async () => {
+    // 形は正しいが DB に無いトークンを送る
+    const { repos } = await setup();
+    setReposForTesting(repos);
+    const rejected = generateSecret('user');
+    await login({ error: null }, form(rejected));
+    // **1 行出ていること** — Server Action の応答は数えられないので、総当たりが見える唯一の出口
+    expect(logged.mock.calls.length, 'ログが 1 行も出ていない').toBe(1);
+    const line = parseLoggedLine(logged.mock.calls[0]);
+    // 出来事の識別子（警報の条件に使うのはこれ）
+    expect(line.event).toBe('session.login_rejected');
+    // **貼られたトークンそのものは出さない**（出すと秘密がログへ流れる）
+    expect(JSON.stringify(line)).not.toContain(rejected);
+  });
+
+  it('入力が空のときは拒否の行を出さない（利用者の打ち間違いで総当たりの警報を鳴らさない）', async () => {
+    // 空白だけを送る
+    const { repos } = await setup();
+    setReposForTesting(repos);
+    await login({ error: null }, form('   '));
+    // 1 行も出ていないこと（照合まで届いていないので「拒否」ではない）
+    expect(logged.mock.calls.length).toBe(0);
   });
 
   it('API キーではログインできない（資格情報の系統を混ぜない）', async () => {

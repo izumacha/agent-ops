@@ -65,8 +65,21 @@ export const LOG_EVENTS = {
   },
   // --- 健康確認 ---
   'health.db_unreachable': { level: 'error', message: 'DB 到達性チェックに失敗' },
-  // --- 入口（src/proxy.ts） ---
-  'proxy.undecodable_path': {
+  // --- 画面のセッション（Server Action。**応答は数えられないのでログが唯一の出口**。
+  // 理由は src/lib/metrics.ts の UNCOUNTED_RESPONSE_SOURCES） ---
+  'session.login_rejected': {
+    level: 'warn',
+    message:
+      'ダッシュボードのログインを拒否しました (理由は区別しません)。続く増加は総当たりの可能性があります。',
+  },
+  'session.cross_origin_action': {
+    level: 'warn',
+    message: '別オリジンからの Server Action の送信を断りました',
+  },
+  // --- 入口（src/proxy.ts）。**接頭辞を `proxy.` にしない** — あちらは LLM の中継
+  // （`src/app/api/v1/proxy`）で別のサブシステムなので、同じ接頭辞だと `proxy.*` の警報が
+  // 2 つの無関係な出来事を混ぜる（上流の健康を見たいのに、壊れた URL の走査で鳴る） ---
+  'entry.undecodable_path': {
     level: 'warn',
     message:
       'パスを percent-decode できない要求を 404 で返しました (以降は出しません)。同種の要求が続いているかは前段のアクセスログで確認してください。',
@@ -259,8 +272,15 @@ export function formatLogLine(
 /**
  * 出来事をログへ出し、同時に数える。
  *
- * **数えるのはここ 1 か所** — 出口とカウンタを同じ関数に置くので、「ログには出たのに
- * メトリクスには出ない」食い違いが構造的に起きない。
+ * **数えるのはここ 1 か所** — 出口とカウンタを同じ関数に置くので、同じモジュール実体の中では
+ * 「ログには出たのにメトリクスには出ない」食い違いが起きない。
+ *
+ * **ただし実体をまたぐと起きる（実測）。** 入口（`src/proxy.ts`）は Route Handler とは別の
+ * モジュール実体で評価されるので、そこから出した出来事の行は stderr に出るのに
+ * `agentops_log_events_total` には**永久に現れない**（`countHttpResponse` について本番ビルドで
+ * 実測したのと同じ分離）。だから `entry.undecodable_path` を系列の有無で警報に使わないこと
+ * （条件はログ側の `event` で書く）。種類の一覧は `src/lib/metrics.ts` の
+ * `UNCOUNTED_RESPONSE_SOURCES` が正本。
  * @param event 出来事の名前
  * @param described `describeError()` が作った診断（省略可）
  */

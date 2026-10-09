@@ -205,12 +205,17 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     ログの量＝保存の費用を好きなだけ増やせる）。対象は、断った側が
     `billing.signature_rejected` / `metrics.token_rejected` / `session.login_rejected` /
     `session.cross_origin_action` / `health.db_unreachable`、設定が使えない側が `audit.secret_not_configured` /
-    `audit.secret_too_short` / `auth.platform_token_too_short` /
+    `audit.secret_too_short` / `auth.platform_token_not_configured` /
+    `auth.platform_token_too_short` /
     `billing.secret_not_configured` / `billing.secret_too_short` /
     `metrics.token_not_configured` / `metrics.token_too_short` / `plan.unknown_plan`
     （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
     `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
     ここが古いままなら落ちる。件数とファイル名は書かない）。
+    - **`auth.platform_token_not_configured` は「どの資格情報としても読めない値が来たとき」
+      にだけ出る。** あの照合は成功する要求もすべて通るので、読んだ場所で出すと
+      `PLATFORM_ADMIN_TOKEN` を使わない配備が毎要求 1 件を数え、警報が鳴り続ける。
+      設定漏れのまま最初の手順（`POST /api/v1/tenants`）を叩けば必ず鳴る。
     - **「未設定」と「短すぎる」は別の出来事にしてある。** 直し方が違う（変数を足すのか、
       値を作り直すのか）ので、同じ `event` だとログからも
       `agentops_log_events_total` からも区別できない。

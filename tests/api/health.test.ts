@@ -1,5 +1,5 @@
 // /api/v1/health: 未認証で叩ける唯一の経路。DB 障害時に内部詳細を外へ出さないことを固定する
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // prisma の singleton を差し替える (実 DB へつながずに成功・失敗の両経路を通す)。
 // vi.mock の工場は巻き上げられるので、参照する関数は vi.hoisted で先に作る
@@ -11,6 +11,7 @@ import { GET } from '@/app/api/v1/health/route';
 import { captureLogOutlet, parseLoggedLine, renderLoggedLine } from '../lib/log-lines';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
+import { resetThrottledLogsForTesting } from '@/lib/log';
 
 /**
  * このルートへ渡す要求を作る。
@@ -22,6 +23,15 @@ function healthRequest(): Request {
   // URL はダミー（この経路はクエリを見ない）
   return new Request('http://test.local/api/v1/health');
 }
+
+// 各テストの前に間引きの記憶を忘れる。
+// **`health.db_unreachable` は間引く出口で出る**ので、窓の中の通算件数が 2 の冪
+// （1, 2, 4 …）の回だけ行になる。消さないと「このファイルで DB 障害を通す it が何本目か」に
+// 行数の検査が依存し、1 本足す・並べ替えるだけで**無関係な間引きの算術で落ちる**
+// （しかも失敗文言は「ログが出ていない」と言うので原因に気付きにくい）
+beforeEach(() => {
+  resetThrottledLogsForTesting();
+});
 
 // 各テストの後でモックの記録を消す
 afterEach(() => {

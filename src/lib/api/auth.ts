@@ -103,24 +103,34 @@ function extractBearerToken(request: Request): string {
   return token;
 }
 
+/**
+ * 環境変数のトークンと照合した結果。
+ *
+ * **`not_configured` を `mismatch` に畳まない** — 未設定は「プラットフォーム管理者が
+ * 1 人も居ない」という配備の状態で、`POST /tenants`（最初の手順）が永久に 401 になる。
+ * 記録の置き場所は `authenticate` 側（ここで出すと**成功するすべての要求が通る経路**なので、
+ * 繋いでいない配備の警報が鳴り続ける）。
+ */
+type PlatformTokenVerdict = 'match' | 'mismatch' | 'not_configured';
+
 // 環境変数のプラットフォーム管理者トークンと照合する (未設定・短すぎは常に不一致 = fail-closed)
-function matchesPlatformAdminToken(token: string): boolean {
+function matchPlatformAdminToken(token: string): PlatformTokenVerdict {
   // 環境変数を読み、**前後の空白を落とす**（秘密を読む口はすべてこの形。落とさないと
   // 貼り付けの改行 1 つで「長さの門番は通るのに `secretsEqual` は完全な不一致」になり、
   // テナント作成とプラン変更が永久に 401。しかもこの経路には記録が無いので、どの出口にも
   // 何も現れない — 設定漏れより見つけにくい壊れ方になる）
   const configured = process.env.PLATFORM_ADMIN_TOKEN?.trim();
-  // 未設定ならプラットフォーム管理者は存在しない
-  if (!configured) return false;
+  // 未設定ならプラットフォーム管理者は存在しない（記録するかは呼び出し側が決める）
+  if (!configured) return 'not_configured';
   // 短すぎる値は設定ミスとみなし、使わない (弱いトークンで全テナントを作れる状態を作らない)
   if (configured.length < PLATFORM_ADMIN_TOKEN_MIN_LENGTH) {
     // 設定ミスの警告は間引いて出す（1 要求 1 行にはしないが、直すまで続く状態なので
     // 1 度きりにもしない。理由は `logEventThrottled`）
     logEventThrottled('auth.platform_token_too_short');
-    return false;
+    return 'mismatch';
   }
   // 定数時間で比較する
-  return secretsEqual(token, configured);
+  return secretsEqual(token, configured) ? 'match' : 'mismatch';
 }
 
 // ユーザートークンを照合し、有効ならユーザー主体を返す。
@@ -204,10 +214,21 @@ export async function authenticate(
   const token = extractBearerToken(request);
   // まずプラットフォーム管理者トークンと照合する (DB を触らない定数時間比較なので先に置ける。
   // 後に置くと、運用者が aop_u_ で始まる値を設定したときユーザートークンの経路へ吸われて永遠に一致しない)
-  if (matchesPlatformAdminToken(token)) return { kind: 'platform' };
+  const platform = matchPlatformAdminToken(token);
+  if (platform === 'match') return { kind: 'platform' };
   // ユーザートークンの形なら DB のハッシュと照合する
   if (isUserToken(token)) return authenticateUserToken(token, repos, now);
   // どちらでもなければ無効。**API キー (aop_k_) もここへ落ちる** — プロキシ専用なので、
   // 有効なキーであっても v1 の API では無効として扱う (経路を混ぜない。ADR-0007)
+  //
+  // **「プラットフォーム管理者トークンが未設定」はここだけで記録する。** 他の 3 つの秘密
+  // （監査ログの鍵・課金の共有シークレット・監視用トークン）は専用の入口が 1 本ずつなので
+  // 読んだ場所で記録できるが、この照合は**成功する要求もすべて通る**ので、同じ場所で出すと
+  // 正常な配備が毎要求 1 件を数え、`agentops_log_events_total` が総要求数と同じ系列になる
+  // （round 25 で「走査がエラー率の警報を鳴らす」として深刻度を下げたのと同じ害が、
+  // 今度は成功経路で起きる）。ここまで来るのは**どの資格情報としても読めない値**だけなので、
+  // 正規の利用では鳴らず、設定漏れの配備では最初の手順（`POST /tenants`）で必ず鳴る。
+  // 一致・不一致では何も出さない（正規の 401 と区別できないため）
+  if (platform === 'not_configured') logEventThrottled('auth.platform_token_not_configured');
   throw invalidTokenError();
 }

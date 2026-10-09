@@ -161,6 +161,24 @@ describe('整形が失敗しても投げない', () => {
     },
   );
 
+  // **`symbol` は「投げない」ではなく「黙って消える」ので、別に固定する。**
+  //
+  // `JSON.stringify` はオブジェクトの `symbol` 値を**投げずに省く**ので、行の骨組みへ素で
+  // 載せると縮退の経路（catch 側）へ一度も届かないまま **`event` の無い行**が出る。
+  // 運用者が組む警報は `event` の等値が唯一の条件なので、識別子の無い行はどの条件にも
+  // 当たらない（型の上では起きないが、約束を別の検出網に依存させない）
+  it('symbol の出来事の名前でも event を落とさない (JSON.stringify は投げずに省く)', () => {
+    // 型の外から来た `symbol`
+    const line = formatLogLine(Symbol('不明な出来事') as never);
+    // JSON として読めること
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    // **識別子が残っていること**（素で載せると鍵ごと消えていた＝実測）
+    expect(parsed.event).toBe('Symbol(不明な出来事)');
+    // 深刻度は最も重い側へ倒れ、文言も定型文で埋まる
+    expect(parsed.level).toBe('error');
+    expect(typeof parsed.message).toBe('string');
+  });
+
   // **縮退の経路そのものも投げない。**
   //
   // `formatLogLine` は「絶対に投げない」ことを約束しており、`incrementCounter` の try/catch も

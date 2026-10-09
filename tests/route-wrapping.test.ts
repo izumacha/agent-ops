@@ -908,6 +908,10 @@ const PLATFORM_ADMIN_TOKEN_NAME = 'PLATFORM_ADMIN_TOKEN';
 
 // 認証のソース (秘密を実際に比べる唯一の場所)
 const AUTH_SOURCE_PATH = join(process.cwd(), 'src', 'lib', 'api', 'auth.ts');
+// 環境変数の秘密を読んでよい唯一の関数の名前。
+// **2 つの検査がこの名前で定義を探し、読めなければ fail-closed で落ちる**ので、
+// 改名したら 1 か所だけ直す（写しのままにすると、改名で片方だけが赤くなる）
+const PLATFORM_TOKEN_MATCHER = 'matchPlatformAdminToken';
 
 /**
  * 構文木の中で、秘密の名前に「コードとして」触れている位置を集める。
@@ -1006,9 +1010,9 @@ describe('秘密の生成と比較', () => {
     // 認証のファイルを構文木にする
     const authSource = ts.createSourceFile(AUTH_SOURCE_PATH, auth, ts.ScriptTarget.Latest, true);
     // 照合の関数がソース上で占める範囲
-    const range = functionRange(authSource, 'matchesPlatformAdminToken');
+    const range = functionRange(authSource, PLATFORM_TOKEN_MATCHER);
     // 読めなければ走査が壊れているので落とす (fail-closed)
-    expect(range, 'matchesPlatformAdminToken の定義が読めない').not.toBeNull();
+    expect(range, `${PLATFORM_TOKEN_MATCHER} の定義が読めない`).not.toBeNull();
     // 認証のファイルで秘密に触れている位置
     const offsets = secretNameOffsets(authSource);
     // 走査が壊れて 0 件になったら落とす (「違反ゼロ = 緑」で無力化されないように)
@@ -1059,18 +1063,23 @@ describe('秘密の生成と比較', () => {
   // 実装が定数時間でも、呼び出し側が === に戻れば同じこと (実測で全件緑のまま通った)
   it('プラットフォーム管理者トークンの照合は secretsEqual を通す', () => {
     // 照合関数の本体を切り出す
-    const body = /function matchesPlatformAdminToken\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(auth)?.[1];
+    const body = new RegExp(
+      `function ${PLATFORM_TOKEN_MATCHER}\\([^)]*\\)[^{]*\\{([\\s\\S]*?)\\n\\}`,
+    ).exec(auth)?.[1];
     // 本体が読めること
-    expect(body, 'matchesPlatformAdminToken の定義が読めない').toBeDefined();
+    expect(body, `${PLATFORM_TOKEN_MATCHER} の定義が読めない`).toBeDefined();
     // 定数時間比較のヘルパーを通していること
     expect(body && /secretsEqual\(/.test(body)).toBe(true);
     // 抜ける道 (return 文) が想定どおりの 3 つだけであること。禁止する綴りを並べる形では
     // 列挙の外側 (!= ・ charCodeAt のループ ・ 比較を別関数へ切り出す) がすべて素通りする (実測)。
     // 「増えた抜け道は必ず落ちる」側で見れば、安い比較を足す形は書き方によらず捕まる
     expect(returnsIn(body), '照合から抜ける道が増えている').toEqual([
-      'return false;',
-      'return false;',
-      'return secretsEqual(token, configured);',
+      // 未設定（**記録するのは呼び出し側**。理由は authenticate のコメント）
+      "return 'not_configured';",
+      // 短すぎる（記録してから不一致として扱う）
+      "return 'mismatch';",
+      // 一致・不一致は定数時間比較の結果だけで決まる
+      "return secretsEqual(token, configured) ? 'match' : 'mismatch';",
     ]);
   });
 });

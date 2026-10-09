@@ -45,6 +45,12 @@ export const LOG_EVENTS = {
   // --- API の入口 ---
   'api.unexpected_error': { level: 'error', message: '予期しないエラー' },
   // --- 認証 ---
+  'auth.platform_token_not_configured': {
+    // **`warn`**（繋がない配備もありうる任意設定なので、走査でエラー率の警報を鳴らさない）
+    level: 'warn',
+    message:
+      'PLATFORM_ADMIN_TOKEN が未設定のため、プラットフォーム管理者として認証できる要求はありません (テナント作成とプラン変更が使えません)。',
+  },
   'auth.platform_token_too_short': {
     level: 'error',
     message:
@@ -344,7 +350,11 @@ function buildLogLine(
     const line: Record<string, unknown> = {
       ts: now.toISOString(),
       level: spec?.level ?? FALLBACK_LOG_LEVEL,
-      event,
+      // **ここも `String(...)` で落とす**（下の catch と同じ理由だが、投げ方が違う）。
+      // `JSON.stringify` はオブジェクトの `symbol` 値を**投げずに黙って省く**ので、素で
+      // 載せると catch へ入らないまま **`event` の無い行**が出る（実測）。運用者が組む警報は
+      // `event` の等値が唯一の条件なので、識別子の無い行はどの条件にも当たらない
+      event: String(event),
       message: spec?.message ?? FALLBACK_LOG_MESSAGE,
     };
     // 診断があれば添える（無い出来事では鍵そのものを出さない）
@@ -427,8 +437,12 @@ export function formatLogLine(
  * @param event 出来事の名前
  */
 function countLogEvent(level: LogLevel, event: LogEventName): void {
-  // 閉じた語彙なので系列は増えない（引けなければ呼び出し側が最も重い側へ倒している）
-  incrementCounter('agentops_log_events_total', { event, level });
+  // 閉じた語彙なので系列は増えない（引けなければ呼び出し側が最も重い側へ倒している）。
+  // **ラベルも `String(...)` で落とす** — 型の外から来た `symbol` は系列の鍵を作る
+  // `withoutKeySeparator` が投げ（`.replaceAll` を持たない）、`incrementCounter` の
+  // try/catch が `droppedSeries` へ落とすので、**行とメトリクスの両方から識別子が
+  // 同時に消える**（行の側は上の `buildLogLine` が落としている）
+  incrementCounter('agentops_log_events_total', { event: String(event), level });
 }
 
 /**

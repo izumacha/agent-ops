@@ -5,6 +5,8 @@ import { GET as listTenants } from '@/app/api/v1/tenants/route';
 import { GET as getTenant } from '@/app/api/v1/tenants/[tenantId]/route';
 import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { generateSecret } from '@/lib/tokens';
+import { resetThrottledLogsForTesting } from '@/lib/log';
+import { captureLogOutlet, loggedEvents } from '../lib/log-lines';
 import { call, PLATFORM_TOKEN, seedApiKey, seedEachTest } from './helpers';
 
 // seed (各テストで作り直し、後始末も helpers が行う)
@@ -206,6 +208,55 @@ describe('プラットフォーム管理者トークン', () => {
     const atLimit = 'a'.repeat(PLATFORM_ADMIN_TOKEN_MIN_LENGTH);
     process.env.PLATFORM_ADMIN_TOKEN = atLimit;
     expect((await call(listTenants, { token: atLimit })).status).toBe(200);
+  });
+
+  // **未設定だけは記録する。** 他の 3 つの秘密（監査ログの鍵・課金の共有シークレット・
+  // 監視用トークン）は専用の入口が 1 本ずつなので読んだ場所で記録できるが、この照合は
+  // 成功する要求もすべて通るので、記録は「どの資格情報としても読めなかった」最後の分岐に置く。
+  // 置き場所が違うと害の向きが逆になる（成功経路で毎要求 1 件を数える）ので、
+  // **出る側と出ない側を対で**固定する
+  it('未設定のまま読めない値が来たら 1 行残す (最初の手順が永久に 401 になる配備の唯一の手掛かり)', async () => {
+    // 未設定にする
+    delete process.env.PLATFORM_ADMIN_TOKEN;
+    // 間引きの記憶を忘れる（窓の中の通算件数が 2 の冪の回だけ行になるため）
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // どの資格情報としても読めない値（接頭辞が違う）
+      expect((await call(listTenants, { token: 'not-a-token' })).status).toBe(401);
+      // 1 行出ていること
+      expect(loggedEvents(outlet.calls())).toEqual(['auth.platform_token_not_configured']);
+    } finally {
+      outlet.restore();
+    }
+  });
+
+  it('未設定でも正規のユーザートークンが通る要求では出さない (成功経路で警報を鳴らさない)', async () => {
+    // 未設定にする
+    delete process.env.PLATFORM_ADMIN_TOKEN;
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 正規のユーザートークン（照合は上の分岐で返るので、未設定の記録まで届かない）
+      expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(200);
+      // 1 行も出ていないこと
+      expect(loggedEvents(outlet.calls())).toEqual([]);
+    } finally {
+      outlet.restore();
+    }
+  });
+
+  it('設定済みなら一致しなくても出さない (正規の 401 と区別できないため)', async () => {
+    // 設定はある（既定の seed のまま）
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 末尾だけ違う値
+      expect((await call(listTenants, { token: `${PLATFORM_TOKEN}x` })).status).toBe(401);
+      expect(loggedEvents(outlet.calls())).toEqual([]);
+    } finally {
+      outlet.restore();
+    }
   });
 
   it('最小長そのものが 32 文字以上である (弱いトークンを許す方向へ動かさない)', () => {

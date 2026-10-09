@@ -125,19 +125,7 @@ export function verifyBillingSignature(
 
 // 設定が使えないときの例外（503）。何が足りないかは応答に出さない
 function notConfiguredError(): ApiError {
-  // **設定ミスを記録する。** `ApiError` は `withResponseCount` の中でログを通らない
-  // （応答へ写すだけ）ので、ここで出さないと**どの出口にも現れない** — 受信 Webhook は
-  // 未認証なので 503 を見た運用者がいるとは限らず、残る痕跡は
-  // `agentops_http_responses_total{status="503"}` だけだが、系列には経路のラベルが無く
-  // サーバーレスでは引きに行く収集そのものが成り立たない（`docs/deploy.md`）。
-  // 無言だと、鍵の設定漏れで**全配信が 503 → 事業者がバックオフののちエンドポイントを無効化**し、
-  // 解約の反映が止まって有料の権限が残り続ける（`metrics.token_not_configured` と同じ形）。
-  // **1 度だけにはしない。** 鍵の設定漏れは直すまで続き、続いていること自体が運用者の
-  // 知りたいこと（事業者はバックオフしてやがてエンドポイントを無効化する）。1 度きりだと
-  // その 1 行を取りこぼした配備では以降どの出口にも何も現れず、数える側も 1 で止まるので
-  // 率が残らない。`logEventThrottled` なら量は窓あたり対数に収まり、信号は生き続ける
-  logEventThrottled('billing.secret_not_configured');
-  // 503: 設定が無いので今はこの操作を行えない（監査ログの鍵と同じ扱い）
+  // 503: 設定が無いので今はこの操作を行えない（課金の鍵・監査ログの鍵と同じ扱い）
   return new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.billingNotConfigured);
 }
 
@@ -151,10 +139,25 @@ function notConfiguredError(): ApiError {
 export function billingWebhookSecret(env: NodeJS.ProcessEnv = process.env): string {
   // 環境変数を読み、前後の空白を落とす（貼り付けの改行で長さ判定が狂わないように）
   const configured = env[BILLING_WEBHOOK_SECRET_ENV]?.trim();
-  // 未設定・空文字は設定されていないのと同じ
-  if (configured === undefined || configured === '') throw notConfiguredError();
+  // 未設定・空文字は設定されていないのと同じ。**記録してから投げる** — `ApiError` は
+  // `withResponseCount` の中でログを通らない（応答へ写すだけ）ので、ここで出さないと
+  // **どの出口にも現れない**（受信 Webhook は未認証なので 503 を見た運用者がいるとは限らず、
+  // 残る痕跡の `{status="503"}` は系列に経路のラベルが無く、サーバーレスでは引きに行く収集
+  // そのものが成り立たない）。無言だと、鍵の設定漏れで**全配信が 503 → 事業者がバックオフの
+  // のちエンドポイントを無効化**し、解約の反映が止まって有料の権限が残り続ける。
+  // **1 度きりにはしない**（直すまで続く状態なので続いていることと規模を残す）。
+  // **記録はここで行い、例外を作る関数には置かない** — 名前と戻り値が「副作用の無い
+  // 組み立て」を約束しているので、投げずに組み立てる呼び出し元が身に覚えのない行を書いて
+  // しまう（`checkSameOriginAction` へ改名したのと同じ理由）
+  if (configured === undefined || configured === '') {
+    logEventThrottled('billing.secret_not_configured');
+    throw notConfiguredError();
+  }
   // 短すぎる鍵は総当たりで求められる（求められたら任意の本文を署名できる）
-  if (configured.length < BILLING_WEBHOOK_SECRET_MIN_LENGTH) throw notConfiguredError();
+  if (configured.length < BILLING_WEBHOOK_SECRET_MIN_LENGTH) {
+    logEventThrottled('billing.secret_not_configured');
+    throw notConfiguredError();
+  }
   // 使える鍵
   return configured;
 }

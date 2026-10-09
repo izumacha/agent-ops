@@ -57,8 +57,13 @@ export const LOG_EVENTS = {
       'AUDIT_HMAC_SECRET が設定されていません (または短すぎます)。人の操作と課金の反映を 503 で断ります。',
   },
   // --- 課金（受信 Webhook） ---
+  // **`level` は `warn`。** `STRIPE_WEBHOOK_SECRET` は「課金を繋ぐなら必須」の任意設定で、
+  // 繋いでいない配備では未設定が正常。この行も未認証の誰でも（署名の無い POST で）引けるので、
+  // `error` だと外からの走査でエラー率の警報が鳴る（`metrics.token_not_configured` と同じ）。
+  // **課金を繋いでいる配備ではこの行が「受信が全滅している」合図**なので、警報の条件は
+  // 深刻度ではなく `event` の等値で組む（`docs/deploy.md`）
   'billing.secret_not_configured': {
-    level: 'error',
+    level: 'warn',
     message:
       'STRIPE_WEBHOOK_SECRET が設定されていません (または短すぎます)。課金の受信 Webhook を 503 で断ります。',
   },
@@ -107,8 +112,13 @@ export const LOG_EVENTS = {
     message:
       '監視の読み取りトークンを受け付けませんでした (ヘッダが無い・Bearer でない・値が一致しない のいずれか)。続く増加は収集エージェントの設定ミス、または総当たりの可能性があります。',
   },
+  // **`level` は `warn`。** `METRICS_TOKEN` は「監視を繋ぐなら必須」の任意設定で、繋いで
+  // いない配備では**未設定が正常**。それでもこの行は未認証の誰でも（`/metrics` を叩くだけで）
+  // 引けるので、`error` にすると**外からの走査でプラットフォームのエラー率の警報が鳴る**
+  // （全部 `console.error` で出していた頃に踏んだのと同じ形）。設定したのに短すぎる側
+  // （`metrics.token_too_short`）は「値を入れたのに使えない」＝設定ミスが確定するので `error`
   'metrics.token_not_configured': {
-    level: 'error',
+    level: 'warn',
     message:
       '監視の読み取りトークンが設定されていないため GET /api/v1/metrics を閉じています。環境変数 METRICS_TOKEN を設定してください。',
   },
@@ -234,6 +244,8 @@ export const LOG_EVENTS = {
 export type LogEventName = keyof typeof LOG_EVENTS;
 
 // 語彙も引けなかったときの深刻度。**最も重い側へ倒す**（縮退した行を見落とさせない）
+// 出来事の名前さえ文字列にできなかったときの定型文（縮退の最後の受け皿）
+const FALLBACK_LOG_EVENT = 'log.unprintable_event';
 const FALLBACK_LOG_LEVEL: LogLevel = 'error';
 
 /**
@@ -284,11 +296,11 @@ const FALLBACK_LOG_MESSAGE = 'ログ 1 行の整形に失敗したため、出�
  * @param occurrence その窓の中での**通算件数**（`logEventThrottled` だけが渡す。0 なら載せない）
  * @returns 1 行の JSON
  */
-export function formatLogLine(
+function buildLogLine(
   event: LogEventName,
-  described?: Record<string, unknown>,
-  now: Date = new Date(),
-  occurrence = 0,
+  described: Record<string, unknown> | undefined,
+  now: Date,
+  occurrence: number,
 ): string {
   // **失敗しうる操作はすべて同じ try の中で行う**:
   //   - 時刻の整形（無効な `Date` の `toISOString()` は RangeError）
@@ -326,8 +338,48 @@ export function formatLogLine(
     return JSON.stringify({
       ts: new Date().toISOString(),
       level: spec?.level ?? FALLBACK_LOG_LEVEL,
+      // **文字列へ落とす** — 型の外から来た値（`BigInt` など）は `JSON.stringify` が投げる。
+      // `String(...)` 自体が投げる値（`toString` が例外を投げる）もありうるが、そこは
+      // **外側の `formatLogLine` が覆う**（ここで try を重ねても、語彙の引き直しが先に
+      // 投げるので意味が無い＝実測。守られない飾りは置かない）
       event: String(event),
       message: spec?.message ?? FALLBACK_LOG_MESSAGE,
+    });
+  }
+}
+
+/**
+ * 1 行の JSON を組み立てる（**絶対に投げない**）。
+ *
+ * 中の `buildLogLine` は縮退の経路でも語彙を引き直すが、`Object.hasOwn` は鍵を文字列へ
+ * 変換するので **`toString` が投げる値ではその受け皿の中で投げる**（実測）。だから
+ * **もう 1 段包み、いちばん内側は値を 1 つも読まない定型の行**にしてある — 何が渡されても
+ * 投げようがない形にすることで、「絶対に投げない」という約束を**別の検出網に依存させない**
+ * （いまは全呼び出し口が語彙のキーのリテラルで、`tests/error-logging.test.ts` がそれを構文で
+ * 要求するので到達しない）。投げると `onPoolError`（要求の外。`src/lib/prisma-client.ts`）
+ * から呼ばれた時に**ログを 1 行も残さずプロセスが落ちる**。
+ * @param event 出来事の名前（語彙のキー）
+ * @param described 添える診断（`describeError` の戻り値。無ければ省略）
+ * @param now 行に載せる時刻（既定はいま）
+ * @param occurrence その窓での通算件数（0 なら載せない）
+ * @returns 1 行の JSON
+ */
+export function formatLogLine(
+  event: LogEventName,
+  described?: Record<string, unknown>,
+  now: Date = new Date(),
+  occurrence = 0,
+): string {
+  try {
+    // 通常の組み立て（語彙の引きと縮退はこの中）
+    return buildLogLine(event, described, now, occurrence);
+  } catch {
+    // 出来事の名前にさえ触れない値（型の上では起きない）。**値を 1 つも読まない行**を返す
+    return JSON.stringify({
+      ts: new Date().toISOString(),
+      level: FALLBACK_LOG_LEVEL,
+      event: FALLBACK_LOG_EVENT,
+      message: FALLBACK_LOG_MESSAGE,
     });
   }
 }

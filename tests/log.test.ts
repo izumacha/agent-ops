@@ -180,6 +180,32 @@ describe('整形が失敗しても投げない', () => {
     expect(typeof parsed.message).toBe('string');
   });
 
+  // **縮退の受け皿の中でも投げない。**
+  //
+  // `String(x)` は `Symbol.toPrimitive` / `toString` を呼ぶので、それが投げる値では
+  // **最後の受け皿がその中で投げる**。約束（絶対に投げない）が別の検出網
+  // （`tests/error-logging.test.ts` の「第 1 引数は語彙のキーのリテラル」）に依存した
+  // 条件付きのものになってしまうので、無条件に成り立たせる
+  it('文字列にもできない出来事の名前でも投げず、1 行の JSON を返す', () => {
+    // `JSON.stringify` も `String()` も投げる値（型の上では起きない）
+    const hostile = {
+      toJSON(): never {
+        throw new Error('JSON にできない');
+      },
+      toString(): never {
+        throw new Error('文字列にもできない');
+      },
+    };
+    // 投げずに行を返すこと
+    const parsed = JSON.parse(formatLogLine(hostile as never)) as Record<string, unknown>;
+    // 出来事の名前は定型文で埋まる（行の形は保つ）
+    expect(typeof parsed.event).toBe('string');
+    expect((parsed.event as string).length).toBeGreaterThan(0);
+    // 深刻度と文言も付く
+    expect(parsed.level).toBe('error');
+    expect(typeof parsed.message).toBe('string');
+  });
+
   it('2 の冪の回だけ行にし、通算件数を載せる（規模が行から読める）', () => {
     // 記憶とカウンタを空にする
     resetThrottledLogsForTesting();

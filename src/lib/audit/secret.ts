@@ -11,12 +11,6 @@ export const AUDIT_HMAC_SECRET_ENV = 'AUDIT_HMAC_SECRET';
 
 // 設定が使えないときの例外 (503)。何が足りないかは応答に出さない
 function notConfiguredError(): ApiError {
-  // **設定ミスを記録する。** `ApiError` は応答へ写されるだけでログを通らないので、
-  // ここで出さないと「鍵が無いので人の操作（停止・復帰・解決・ルール登録）と課金の反映が
-  // すべて 503」という状態が**どの出口にも現れない**（系列には経路のラベルが無く、
-  // サーバーレスでは引きに行く収集そのものが成り立たない）。**1 度きりにはしない** —
-  // 鍵が無い状態は直すまで続くので、続いていることと規模を残す（理由は `logEventThrottled`）
-  logEventThrottled('audit.secret_not_configured');
   // 503: 設定が無いので今はこの操作を行えない (上流未設定と同じ扱い)
   return new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.auditNotConfigured);
 }
@@ -32,10 +26,24 @@ function notConfiguredError(): ApiError {
 export function auditHmacSecret(env: NodeJS.ProcessEnv = process.env): string {
   // 環境変数を読み、前後の空白を落とす (貼り付けの改行で長さ判定が狂わないように)
   const configured = env[AUDIT_HMAC_SECRET_ENV]?.trim();
-  // 未設定・空文字は設定されていないのと同じ
-  if (configured === undefined || configured === '') throw notConfiguredError();
+  // 未設定・空文字は設定されていないのと同じ。**記録してから投げる** —
+  // `ApiError` は応答へ写されるだけでログを通らないので、ここで出さないと「鍵が無いので
+  // 人の操作（停止・復帰・解決・ルール登録）と課金の反映がすべて 503」という状態が
+  // **どの出口にも現れない**（系列には経路のラベルが無く、サーバーレスでは引きに行く収集
+  // そのものが成り立たない）。**1 度きりにはしない**（直すまで続く状態なので、続いている
+  // ことと規模を残す。理由は `logEventThrottled`）。**記録はここで行い、例外を作る関数には
+  // 置かない** — 名前と戻り値が「副作用の無い組み立て」を約束しているので、投げずに組み立てる
+  // 呼び出し元（分岐で返す・`Promise.reject(...)` へ渡す・テストの補助）が身に覚えのない
+  // 「鍵が無い」の行を書いてしまう（`checkSameOriginAction` へ改名したのと同じ理由）
+  if (configured === undefined || configured === '') {
+    logEventThrottled('audit.secret_not_configured');
+    throw notConfiguredError();
+  }
   // 短すぎる鍵は総当たりで求められるので使わない (求められたら連鎖を作り直せる)
-  if (configured.length < AUDIT_HMAC_SECRET_MIN_LENGTH) throw notConfiguredError();
+  if (configured.length < AUDIT_HMAC_SECRET_MIN_LENGTH) {
+    logEventThrottled('audit.secret_not_configured');
+    throw notConfiguredError();
+  }
   // 使える鍵
   return configured;
 }

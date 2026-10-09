@@ -81,6 +81,10 @@ PII が、pg のプールエラー経由で接続文字列が載る）。
   `renderMetrics` の中へ直書きしていた版では、「名前の宣言は表だけ」という約束が実際には
   守られておらず、`Object.keys(COUNTERS)` から導いていた照合がその 2 本だけ素通りしていた
   （名前を書き換えても全件緑）。
+- **「捨てた数」のカウンタは系列の表（`COUNTS`）の外に持つ。** 中に入れていた版では、上限に
+  達してから**最初に**捨てるときにその系列を作るので `COUNTS.size` が上限を 1 本超えていた
+  （上限そのものが破れる）。しかも分岐のコメントは「捨てた数そのものは既存の系列なので、
+  この分岐へ再び入ることはない」と書いており、それが真になるのは 2 件目以降だけだった。
 
 ### 3-a. 応答を数える入口は 1 つだけにする
 
@@ -91,12 +95,23 @@ PII が、pg のプールエラー経由で接続文字列が載る）。
 1 件も現れなかった**。とくに受信 Webhook は未認証で誰でも叩ける経路なので、
 `STRIPE_WEBHOOK_SECRET` の設定ミスで全件 401 になっても、401 の山がどの出口にも出ない。
 
-- 到達は `tests/route-wrapping.test.ts` が **`src/app` の全 `route.ts` から導いて**要求する
-  （手書きの一覧にすると、`route()` を通らない経路を足した人が追記を忘れたぶんだけ網が狭まる）。
-- **その検査が見るのは「数える出口のモジュールへ到達しているか」までで、実際に呼んでいるかは
-  見ていない**（import の連鎖は呼び出しの有無を区別できない）。実際に数えていることは経路ごとの
+**包むのも 1 本に寄せる。** 最初の版は数える 3 行を 4 本のルートへ書き写していたので、
+包む側が毎回 2 つの判断を自分でしており、**どちらも実際に間違えた**:
+(a) 本体を `try` で包むか — 包み忘れた画面側の CSV は例外のとき何も数えず、その経路の 5xx が
+系列に一度も現れなかった。(b) メソッドを何で渡すか — 文字列を書いた 3 本は `HEAD` を `GET` として
+数え、`route()` 側は `other` として数えた（同じ要求が経路で違うラベルになる）。
+`withResponseCount(handler)`（`src/lib/api/handler.ts`）が両方を決めるので、次に `route()` を
+通らない経路を足す人は同じ判断をしない。`route()` 自身もこのラッパーを通る。
+
+- 検出網は `tests/route-wrapping.test.ts` が **`route()` の印を持たない export を持つファイル**を
+  実体から導き、そのファイルが**共通のラッパーを使っていること**を要求する（手書きの一覧にすると、
+  `route()` を通らない経路を足した人が追記を忘れたぶんだけ網が狭まる）。
+- **綴りを見るだけの弱い検査**（`no-store` の宣言と同じ扱い）。実際に数えていることは経路ごとの
   API テストが固定する（`tests/api/metrics.test.ts` / `tests/api/health.test.ts` /
   `tests/api/billing.test.ts` の「…も数える」）。
+- **`HEAD` と `OPTIONS` はラベルの閉じた集合に入れる。** Next.js の App Router は `HEAD` を
+  `GET` のハンドラで応え、`OPTIONS` は自分で実装するので、外していた版では死活監視の `HEAD` が
+  「未知・敵対的なメソッド」のまとめ先 `other` に積まれていた（警報に使える信号ではなくなる）。
 
 ### 3-b. `/metrics` は専用の読み取りトークンで守る
 
@@ -139,9 +154,11 @@ PII が、pg のプールエラー経由で接続文字列が載る）。
 - 環境変数が 1 つ増えた（`METRICS_TOKEN`）。`.env.example` と `docker-compose.yml`・
   `docs/deploy.md` の表に載せてある（素通し漏れは `tests/deployment-invariants.test.ts` が
   `.env.example` から導いて落とす）。
-- `src/lib/api/auth.ts` の `extractBearerToken` / `unauthorizedError` / `invalidTokenError` を
-  export した。監視用トークンの入口が同じ関数を使うので、Bearer の解析と
-  `WWW-Authenticate` の綴りが 2 か所に分かれない（§6 DRY）。
+- `src/lib/api/auth.ts` の `extractBearerToken` と `invalidTokenError` を export した。
+  監視用トークンの入口が同じ関数を使うので、Bearer の解析と `WWW-Authenticate` の綴りが
+  2 か所に分かれない（§6 DRY）。**`unauthorizedError` は export していない** — 資格情報が
+  無いときの 401 は `extractBearerToken` が自分で投げるので、呼び出し側から使う必要がない
+  （最初は 3 つとも export していたが、1 つはどこからも使われない公開面になっていた）。
 - `formatLogLine` の「例外を投げない」を実際にそうした。`now.toISOString()` が `try` の外に
   あったため、無効な `Date` を渡すと縮退の経路に入らず `RangeError` が出ていた（docstring だけが
   守備範囲を広く名乗っていた）。

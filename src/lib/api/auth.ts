@@ -54,7 +54,7 @@ const CHALLENGE_MISSING = 'Bearer realm="agent-ops"';
 const CHALLENGE_INVALID = 'Bearer realm="agent-ops", error="invalid_token"';
 
 // 401 (資格情報が無い) の例外
-export function unauthorizedError(): ApiError {
+function unauthorizedError(): ApiError {
   // 方式だけを示すチャレンジを付ける
   return new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized, undefined, {
     [WWW_AUTHENTICATE_HEADER]: CHALLENGE_MISSING,

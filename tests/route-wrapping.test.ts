@@ -8,12 +8,18 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
-import { ALLOWED_ROUTE_FILE_NAME, findRouteFiles, PAGE_EXTENSIONS } from './lib/route-files';
+import {
+  ALLOWED_ROUTE_FILE_NAME,
+  findRouteFiles,
+  HTTP_METHOD_EXPORTS,
+  PAGE_EXTENSIONS,
+} from './lib/route-files';
 import { forEachNode, parseSourceFiles } from './lib/source-files';
 import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import {
+  RESPONSE_COUNT_BRAND,
   ROUTE_HANDLER_BRAND,
   ROUTE_RATE_LIMIT_BRAND,
   ROUTE_REQUIRED_ACTION_BRAND,
@@ -28,8 +34,7 @@ import { PLAN_FEATURES } from '@/domain/plan';
 const APP_DIR = join(process.cwd(), 'src', 'app');
 // 契約が受け持つ API の入口 (OpenAPI の servers.url に対応)
 const API_DIR = join(APP_DIR, 'api', 'v1');
-// Next.js が Route Handler として呼ぶ export 名 (5 つに絞ると HEAD / OPTIONS が死角になる)
-const HTTP_METHOD_EXPORTS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
+
 // 認証を通さないことが正しい経路 (理由付きの唯一の除外。キーは src/app からの相対パス)
 const UNAUTHENTICATED_ROUTES: Record<string, string> = {
   'api/v1/health/route.ts': 'DB 到達性だけを返す公開エンドポイント (compose の healthcheck が使う)',
@@ -250,45 +255,21 @@ describe('Route Handler の結線', () => {
   // とくに受信 Webhook は未認証で誰でも叩ける経路なので、署名鍵の設定ミスで全件 401 に
   // なっても、401 の山がどの出口にも出ない（運用者は気付けない）。
   //
-  // **手書きの一覧にしない** — 一覧だと、`route()` を通らない経路を新しく足した人が
-  // 追記を忘れたぶんだけ検出網が静かに狭まる。`src/app` の全 route.ts から導く。
+  // **要求するのは「数える関数を呼ぶこと」ではなく「共通のラッパーを通ること」。**
+  // 数える 3 行を各ルートへ書き写していた版では、包む側が毎回 2 つの判断を自分でしており、
+  // どちらも実際に間違えた: (a) 本体を `try` で包むか（包み忘れた画面側の CSV は例外のとき
+  // 何も数えず、5xx が系列に現れなかった）、(b) メソッドを何で渡すか（文字列を書いた 3 本は
+  // `HEAD` を `GET` として数え、`route()` 側は `other` として数えた）。
   //
-  // **残る境界**: 見るのは「数える出口のモジュールへ到達しているか」までで、実際に
-  // 呼んでいるかは見ていない（import の連鎖は呼び出しの有無を区別できない）。しかも
-  // **`route()` を通らない経路でもこの検査は当たりにくい** — 例外を応答へ写すために
-  // `@/lib/api/handler` を取り込むと、そこから `metrics.ts` へ到達してしまう（実測: 受信
-  // Webhook から `countHttpResponse` の呼び出しと import を消しても、この検査は緑のまま通った）。
-  // そこで `route()` を通らない経路には**下の綴りの検査**を対にし、実際に数えていることは
-  // 経路ごとの API テストが固定する（`tests/api/metrics.test.ts` /
-  // `tests/api/health.test.ts` / `tests/api/billing.test.ts` の「…も数える」）。
-  it('すべての Route Handler は応答を数える出口へ到達している', () => {
-    // 数える出口 (走査できていなければ fail-closed で落とす)
-    const metricsModule = join(SRC_DIR, 'lib', 'metrics.ts');
-    expect(importGraph.has(metricsModule), '数える出口を走査できていない').toBe(true);
-    // 走査が空なら落とす (黙って「対象ゼロ＝緑」にしない)
-    expect(routeFiles.length, 'Route Handler を 1 本も見つけられない').toBeGreaterThan(0);
-    for (const { full, relativeToApp } of routeFiles) {
-      // route() を通る経路は handler.ts 経由で到達する (通らない経路は自分で import する)
-      expect(
-        reachesModule(importGraph, full, metricsModule),
-        `${relativeToApp} が応答を数える出口を通っていない`,
-      ).toBe(true);
-    }
-  });
-
-  // **`route()` を通らない経路は、数える関数を自分で呼ぶ。**
+  // **判定は印（`RESPONSE_COUNT_BRAND`）を実体から読む。** 綴りで照合していた版は
+  // **コメントに関数名が出ているだけで条件を満たした**（実測: 画面側の CSV を自前で数える形へ
+  // 戻しても、上に残った説明の綴りが検査を満たして全件緑で通った）。
   //
-  // 対象は**表ではなく実体から導く** — モジュールを読み込んで「印の無い HTTP export を
-  // 持つファイル」を集めるので、`route()` を通らない経路を新しく足した人が表への追記を
-  // 忘れても対象に入る。
-  //
-  // **綴りを見るだけの弱い検査**（`no-store` の宣言と同じ扱い）だが、上の到達の検査が
-  // `@/lib/api/handler` 経由の間接到達で当たらないぶんをここが受け持つ。
-  it('route() を通らない Route Handler は数える関数を自分で呼んでいる', async () => {
-    // 数える関数の名前（正本は src/lib/metrics.ts。ここでは綴りだけを見る）
-    const callee = 'countHttpResponse';
-    // 印の無い export を持つファイル
-    const unwrapped: string[] = [];
+  // **一覧は持たない** — `src/app` の全 `route.ts` の、Next.js が呼ぶ export すべてに要求する
+  // （`route()` が包んだ関数も内側でこのラッパーを通るので同じ印を持つ）。
+  it('Route Handler の export はすべて応答を数えるラッパーを通っている', async () => {
+    // 実際に印を確かめた数（0 件なら走査が壊れている）
+    let checked = 0;
     for (const { full, relativeToApp } of routeFiles) {
       // モジュールを実際に読み込む（綴りではなく値を見る）
       const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
@@ -296,25 +277,17 @@ describe('Route Handler の結線', () => {
         // その名前を export していなければ何もしない
         const exported = routeModule[method];
         if (exported === undefined) continue;
-        // route() が包んでいなければ対象へ入れる
-        const branded =
+        checked += 1;
+        // 数えるラッパーの印を持つこと
+        expect(
           typeof exported === 'function' &&
-          (exported as unknown as Record<symbol, unknown>)[ROUTE_HANDLER_BRAND] === true;
-        if (!branded) unwrapped.push(relativeToApp);
+            (exported as unknown as Record<symbol, unknown>)[RESPONSE_COUNT_BRAND] === true,
+          `${relativeToApp} の ${method} が応答を数えるラッパーを通っていない`,
+        ).toBe(true);
       }
     }
-    // 1 本も無ければ導出が壊れている（この repo には必ず 4 本ある。fail-closed）
-    expect(unwrapped.length, 'route() を通らない経路を 1 本も見つけられない').toBeGreaterThan(0);
-    for (const relativeToApp of new Set(unwrapped)) {
-      // 走査で見つけた実体を引く
-      const file = routeFiles.find((entry) => entry.relativeToApp === relativeToApp);
-      expect(file, `${relativeToApp} を走査できていない`).toBeDefined();
-      // 数える関数の綴りが本文に現れること
-      expect(
-        readFileSync(file!.full, 'utf8').includes(callee),
-        `${relativeToApp} が ${callee} を呼んでいない（route() を通らない経路は自分で数える）`,
-      ).toBe(true);
-    }
+    // 1 つも見ていなければ走査が壊れている (fail-closed)
+    expect(checked, 'Route Handler の export を 1 つも見つけられない').toBeGreaterThan(0);
   });
 
   // 意図して置いている Next の入口と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。

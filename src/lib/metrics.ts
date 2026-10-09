@@ -63,17 +63,30 @@ export type GaugeName = keyof typeof GAUGES;
  * **根拠**（いま数えている系列の見積もり。数えられる上限そのものは
  * `tests/metrics.test.ts` が 3 つの正本から導いて照合するので、ここに算術を書き写さない）:
  * (a) 応答 = `methodLabel` が返しうる値 × `statusLabel` が返しうる値（どちらも閉じた集合）、
- * (b) ログの出来事 = `LOG_EVENTS` の件数（`level` は `event` から定まるので倍にはならない）、
- * (c) 捨てた数 = 1。
+ * (b) ログの出来事 = `LOG_EVENTS` の件数（`level` は `event` から定まるので倍にはならない）。
+ * 捨てた数（`DROPPED_COUNTER`）はこの上限の外に持つので数えない。
  * 上限はその合計に 3 倍以上の余裕を持たせた値で、語彙を増やしても普通には届かない。
  */
-export const MAX_METRIC_SERIES = 512;
+export const MAX_METRIC_SERIES = 1_024;
 
 /** ラベル（名前 → 値）。値は**閉じた語彙から採る**（可変の値を渡すと系列が増える） */
 export type MetricLabels = Readonly<Record<string, string>>;
 
 // 系列（カウンタ名＋ラベル）ごとの現在値。**プロセス内だけ**に持つ
 const COUNTS = new Map<string, number>();
+
+/**
+ * 値を `COUNTS` ではなく専用の変数が持つカウンタ（ラベルを持たない 1 系列だけ）。
+ *
+ * **上限の外に置く理由**: 上限に達してから**最初に**捨てるとき、`COUNTS` の中へこの系列を
+ * 作ると `COUNTS.size` が上限を 1 本超える（上限そのものが破れる）。以前はそうなっており、
+ * しかも分岐のコメントは「捨てた数そのものは既存の系列なので、この分岐へ再び入ることはない」と
+ * 書いていた — それが真になるのは 2 件目以降だけだった。
+ */
+const DROPPED_COUNTER: CounterName = 'agentops_metrics_series_dropped_total';
+
+// 系列数の上限を超えて捨てた増加の数（`COUNTS` の外。理由は上）
+let droppedSeries = 0;
 
 // 1 秒のミリ秒数（ゲージを秒で出すのに使う）
 const MILLIS_PER_SECOND = 1_000;
@@ -109,6 +122,11 @@ function seriesKey(name: CounterName, labels: MetricLabels): string {
  * @param labels ラベル（省略時はラベル無しの 1 系列）
  */
 export function incrementCounter(name: CounterName, labels: MetricLabels = {}): void {
+  // 捨てた数は専用の変数が持つ（`COUNTS` の外。ラベルは取らない）
+  if (name === DROPPED_COUNTER) {
+    droppedSeries += 1;
+    return;
+  }
   // 系列のキーを作る
   const key = seriesKey(name, labels);
   // 既に数えている系列なら、上限に関係なく増やせる
@@ -118,10 +136,9 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
     return;
   }
   // 新しい系列は上限を見る。超えていたら捨てて、捨てたことを数える
+  // （数える先は `COUNTS` の外なので、ここで上限を 1 本超えることはない）
   if (COUNTS.size >= MAX_METRIC_SERIES) {
-    // 捨てた数そのものは既存の系列なので、この分岐へ再び入ることはない
-    const dropped = COUNTS.get(seriesKey('agentops_metrics_series_dropped_total', {})) ?? 0;
-    COUNTS.set(seriesKey('agentops_metrics_series_dropped_total', {}), dropped + 1);
+    droppedSeries += 1;
     return;
   }
   // 上限内なら新しい系列として 1 から数え始める
@@ -202,6 +219,11 @@ export function renderMetrics(now: Date): string {
     // 1 件も無いカウンタも宣言だけは出す（スクレイプ側が「まだ 0」と「名前が無い」を区別できる）
     lines.push(`# HELP ${name} ${COUNTERS[name]}`);
     lines.push(`# TYPE ${name} counter`);
+    // 捨てた数だけは `COUNTS` の外（上限の外）に持つので、ここは変数から出す
+    if (name === DROPPED_COUNTER) {
+      lines.push(`${name} ${droppedSeries}`);
+      continue;
+    }
     // この名前の系列
     const series = grouped.get(name) ?? [];
     // 系列が無ければラベル無しの 0 を出す
@@ -237,11 +259,17 @@ export function renderMetrics(now: Date): string {
 
 /**
  * ラベルに使える HTTP メソッド。
+ *
  * **閉じた集合にする** — `request.method` をそのまま入れると、未知のメソッドを送るだけで
- * 系列を増やせる（Next.js は export の無いメソッドを 405 で落とすので実際には届かないが、
- * ラベルの値を外から決められる形そのものを残さない）。
+ * 系列を増やせる（ラベルの値を外から決められる形そのものを残さない）。
+ *
+ * **`HEAD` と `OPTIONS` も入れる。** Next.js の App Router は `HEAD` を **`GET` の
+ * ハンドラを呼んで**応えるし、`OPTIONS` は自分で実装する（どちらも export は要らない）。
+ * つまり「export の無いメソッドは 405 で届かない」は成り立たず、外していた版では
+ * 死活監視の `HEAD` が**未知・敵対的なメソッド用のまとめ先 `other`** に積まれていた
+ * （警報に使える信号ではなくなる）。
  */
-export const KNOWN_METHODS = ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] as const;
+export const KNOWN_METHODS = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'] as const;
 
 // 閉じた集合に無い値を表すラベル値（系列が 1 本増えるだけで済ませる）
 export const OTHER_LABEL = 'other';
@@ -286,4 +314,6 @@ export function resetMetricsForTesting(): void {
   }
   // 系列をすべて消す
   COUNTS.clear();
+  // 捨てた数も戻す（`COUNTS` の外に持っているので別に消す）
+  droppedSeries = 0;
 }

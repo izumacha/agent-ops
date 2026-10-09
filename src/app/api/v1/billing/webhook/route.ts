@@ -23,10 +23,8 @@
 import { parseJsonText, readRawJsonText } from '@/lib/api/body';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { toErrorResponse } from '@/lib/api/handler';
+import { toErrorResponse, withResponseCount } from '@/lib/api/handler';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
-// 応答を数える唯一の入口 (route() を通らない経路もここを通す)
-import { countHttpResponse } from '@/lib/metrics';
 import { getRepos } from '@/data';
 import type { BillingPlanApplication } from '@/data/ports';
 import type { Plan } from '@/domain/types';
@@ -48,17 +46,12 @@ const PROVIDER = 'stripe';
 const MILLIS_PER_SECOND = 1_000;
 
 /** POST /billing/webhook (receiveBillingWebhook) */
-export async function POST(request: Request): Promise<Response> {
-  // 応答を組み立てる
-  const response = await respond(request);
-  // **この応答も 1 件数える**。未認証で誰でも叩ける経路なので、署名の不一致（401）が
-  // 増えたことはここでしか分からない（鍵の設定ミスや総当たりが無言にならないようにする）
-  countHttpResponse('POST', response.status);
-  // 組み立てた応答をそのまま返す
-  return response;
-}
+// **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**（`route()` を通る
+// 経路と同じ 1 本）。未認証で誰でも叩ける経路なので、署名の不一致（401）が増えたことは
+// この系列でしか分からない（鍵の設定ミスや総当たりが無言にならないようにする）
+export const POST = withResponseCount(respond);
 
-// 署名を確かめてプランへ反映する（応答を数えるのは上の 1 か所に寄せる）
+// 署名を確かめてプランへ反映する（包む側が数えるので、ここは応答を作るだけ）
 async function respond(request: Request): Promise<Response> {
   // 例外はすべて HTTP 応答へ写す（`route()` を通らないので、この 1 か所で受ける）
   try {

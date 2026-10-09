@@ -16,48 +16,30 @@
 // **`route()` を通らない**（Bearer から `Principal` を決める仕組みに乗らないため）。代わりに
 // `tests/route-wrapping.test.ts` の理由付きの表へ登録し、(a) 監視用トークンの入口へ到達すること、
 // (b) `no-store` を宣言すること、(c) 応答を数える出口へ到達することを機械で要求している。
-import { toErrorResponse } from '@/lib/api/handler';
+import { withResponseCount } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { assertMetricsToken } from '@/lib/api/metrics-auth';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { PROMETHEUS_CONTENT_TYPE } from '@/lib/constants';
-import { countHttpResponse, renderMetrics } from '@/lib/metrics';
+import { renderMetrics } from '@/lib/metrics';
 
 // 数字は毎回その場の値なので、Next.js の静的化を無効にして常に動的に応答する
 export const dynamic = 'force-dynamic';
 
-// GET /metrics: 現在の値を書き出す (getMetrics)
-export async function GET(request: Request): Promise<Response> {
-  // 応答を組み立てる（**数えるのは 1 か所**なので、成功・失敗のどちらの経路も下の 1 行を通る）
-  const response = await respond(request);
-  // この応答を 1 件数える（自分自身の 200 / 401 / 503 も数に入る）
-  countHttpResponse('GET', response.status);
-  // 組み立てた応答をそのまま返す
-  return response;
-}
-
-/**
- * 認証して本文を組み立てる（例外は `route()` と同じ関数で応答へ写す）。
- * @param request 受け取った要求
- * @returns 応答
- */
-async function respond(request: Request): Promise<Response> {
-  try {
-    // 監視用トークンを照合する（未設定・短すぎは 503、合わなければ 401）
-    assertMetricsToken(request);
-    // いまの値をテキストへ書き出す（判定はしない。しきい値はスクレイプ側が決める）
-    const body = renderMetrics(new Date());
-    // JSON ではないので Response.json は使わず、形式を名乗って返す。
-    // **共有キャッシュへ載せない** — 認証付きの運用情報なので（`route()` が全ルートへ付けるのと同じ値）
-    return withPrivateCacheHeaders(
-      new Response(body, {
-        status: HTTP_STATUS.OK,
-        headers: { 'Content-Type': PROMETHEUS_CONTENT_TYPE },
-      }),
-    );
-  } catch (error) {
-    // 応答へ写す（**`route()` と同じ関数**。500 のログもそこが残す）。
-    // 失敗の応答にも `no-store` を付ける（成功と同じ扱い）
-    return withPrivateCacheHeaders(toErrorResponse(error));
-  }
-}
+// GET /metrics: 現在の値を書き出す (getMetrics)。
+// **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**
+// （`route()` を通る経路と同じ 1 本。自分自身の 200 / 401 / 503 も数に入る）
+export const GET = withResponseCount(async (request: Request): Promise<Response> => {
+  // 監視用トークンを照合する（未設定・短すぎは 503、合わなければ 401）
+  assertMetricsToken(request);
+  // いまの値をテキストへ書き出す（判定はしない。しきい値はスクレイプ側が決める）
+  const body = renderMetrics(new Date());
+  // JSON ではないので Response.json は使わず、形式を名乗って返す。
+  // **共有キャッシュへ載せない** — 認証付きの運用情報なので（`route()` が全ルートへ付けるのと同じ値）
+  return withPrivateCacheHeaders(
+    new Response(body, {
+      status: HTTP_STATUS.OK,
+      headers: { 'Content-Type': PROMETHEUS_CONTENT_TYPE },
+    }),
+  );
+});

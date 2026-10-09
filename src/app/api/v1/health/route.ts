@@ -11,8 +11,8 @@ import { describeError } from '@/lib/describe-error';
 // 保存を禁じる Cache-Control の値 (route() が全ルートへ付けているのと同じ値。唯一の参照元は constants)
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 import { logEvent } from '@/lib/log';
-// 応答を数える唯一の入口 (route() を通らない経路もここを通す)
-import { countHttpResponse } from '@/lib/metrics';
+// 応答を数えて例外を応答へ写す共通のラッパー (route() を通らない経路もこれを使う)
+import { withResponseCount } from '@/lib/api/handler';
 
 // 応答に付けるキャッシュ制御 (成功・失敗のどちらにも同じものを付ける)
 const CACHE_HEADERS = { 'Cache-Control': NO_STORE_CACHE_CONTROL };
@@ -21,17 +21,11 @@ const CACHE_HEADERS = { 'Cache-Control': NO_STORE_CACHE_CONTROL };
 export const dynamic = 'force-dynamic';
 
 // GET /api/v1/health: アプリと DB の生存確認 (OpenAPI の servers.url=/api/v1 + /health と一致させる) (docker compose の healthcheck と Step7 の起動確認が使う)
-export async function GET(): Promise<NextResponse<HealthDto>> {
-  // 応答を組み立てる
-  const response = await probe();
-  // **この応答も 1 件数える** (route() を通らない経路なので、ここで数えないとメトリクスに現れない。
-  // compose の healthcheck が 10 秒ごとに叩くので、DB 障害の継続時間がこの系列から読める)
-  countHttpResponse('GET', response.status);
-  // 組み立てた応答をそのまま返す
-  return response;
-}
+// **応答を数えるのは `withResponseCount` が受け持つ** (route() を通らない経路でも同じ 1 本を使う。
+// compose の healthcheck が 10 秒ごとに叩くので、503 の系列は DB 障害の継続時間をそのまま表す)
+export const GET = withResponseCount(probe);
 
-// DB へ問い合わせて生存を確かめる (応答を数えるのは上の 1 か所に寄せる)
+// DB へ問い合わせて生存を確かめる (包む側が数えるので、ここは応答を作るだけ)
 async function probe(): Promise<NextResponse<HealthDto>> {
   // DB へ最小のクエリを投げて到達性を確かめる
   try {

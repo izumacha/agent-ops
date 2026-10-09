@@ -11,6 +11,18 @@ import { GET } from '@/app/api/v1/health/route';
 import { parseLoggedLine, renderLoggedLine } from '../lib/log-lines';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 
+/**
+ * このルートへ渡す要求を作る。
+ * **包む側 (`withResponseCount`) がメソッドを要求から読む**ので、ハンドラを直接呼ぶときも
+ * 要求を渡す必要がある（文字列を書かないので `HEAD` も正しいラベルで数えられる）。
+ * @param method HTTP メソッド（既定は GET）
+ * @returns 要求
+ */
+function healthRequest(method = 'GET'): Request {
+  // URL はダミー（この経路はクエリを見ない）
+  return new Request('http://test.local/api/v1/health', { method });
+}
+
 // 各テストの後でモックの記録を消す
 afterEach(() => {
   vi.restoreAllMocks();
@@ -22,7 +34,7 @@ describe('GET /health', () => {
     // SELECT 1 が成功する
     queryRaw.mockResolvedValue([{ '?column?': 1 }]);
     // ハンドラを直接呼ぶ
-    const response = await GET();
+    const response = await GET(healthRequest());
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true, db: 'up' });
     // route() を通らない唯一の経路なので、キャッシュ制御を自分で付けているか見る
@@ -37,7 +49,7 @@ describe('GET /health', () => {
     // ログは記録だけして端末へ出さない
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
     // ハンドラを直接呼ぶ
-    const response = await GET();
+    const response = await GET(healthRequest());
     expect(response.status).toBe(503);
     // 失敗側にも同じく付いていること
     expect(response.headers.get('cache-control')).toBe('no-store');
@@ -79,7 +91,7 @@ describe('GET /health', () => {
     // 失敗側はログを端末へ出さない
     vi.spyOn(console, 'error').mockImplementation(() => {});
     // 呼ぶ
-    expect((await GET()).status).toBe(status);
+    expect((await GET(healthRequest())).status).toBe(status);
     // その応答が系列に 1 件乗っている
     expect(renderMetrics(new Date())).toContain(
       `agentops_http_responses_total{method="GET",status="${status}"} 1`,

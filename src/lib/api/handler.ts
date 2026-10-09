@@ -109,6 +109,16 @@ export interface RouteOptions {
 export const ROUTE_HANDLER_BRAND = Symbol.for('agent-ops.routeHandler');
 
 /**
+ * `withResponseCount()` が包んだ関数に付ける印。
+ *
+ * **ソースの綴りを読む形にしない** — 綴りで照合していた版は、**コメントに関数名が出ているだけで
+ * 条件を満たした**（実測: 画面側の CSV を自前で数える形へ戻しても、上に残った説明の
+ * `withResponseCount` が綴り検査を満たして全件緑で通った）。印なら値を見るので、
+ * コメントも別名の import も関係ない。
+ */
+export const RESPONSE_COUNT_BRAND = Symbol.for('agent-ops.responseCount');
+
+/**
  * そのルートがどの枠でレート制限を掛けているかを外から読むための印
  * (掛けていなければ `null`、掛けていれば `RateLimitTier` の値)。
  *
@@ -186,6 +196,55 @@ export function toErrorResponse(error: unknown): Response {
 }
 
 /**
+ * Route Handler を包んで、**返した応答を 1 件数える**（ADR-0014）。
+ *
+ * **`route()` を通る経路も通らない経路もこの 1 本を使う。** 以前は数える 3 行を
+ * ルートごとに書き写していたので、包む側が毎回 2 つの判断を自分でしていた:
+ * (a) 本体を `try` で包むか（包み忘れた画面側の CSV は**例外のときに何も数えず**、
+ * その経路の 5xx が系列に一度も現れなかった）、(b) メソッドを何で渡すか
+ * （文字列を書いた 3 本は `HEAD` を `GET` として数え、`route()` 側は `other` として
+ * 数えていた＝同じ要求が経路で違うラベルになる）。**どちらもここが決めるので、
+ * 次に `route()` を通らない経路を足す人は同じ判断をしない。**
+ *
+ * - 例外は `toErrorResponse` で応答へ写してから数える（写さないと 5xx が現れない）。
+ * - メソッドは**要求から読む**（`request.method`。文字列を書かない）。
+ * @param handler 包む本体（第 1 引数が要求であること）
+ * @returns 同じ形の関数（応答を 1 件数えてから返す）
+ */
+export function withResponseCount<A extends unknown[]>(
+  handler: (request: Request, ...rest: A) => Promise<Response>,
+): (request: Request, ...rest: A) => Promise<Response> {
+  // Next.js が呼ぶ形の関数
+  const counted = async (request: Request, ...rest: A): Promise<Response> => {
+    // 応答を組み立てる（例外も応答へ写す）
+    const response = await buildResponse(() => handler(request, ...rest));
+    // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）
+    countHttpResponse(request.method, response.status);
+    // 組み立てた応答をそのまま返す
+    return response;
+  };
+  // 「数える経路を通っている」という印を付ける（列挙されない定義なので DTO や JSON には現れない）
+  Object.defineProperty(counted, RESPONSE_COUNT_BRAND, { value: true });
+  // 包んだ関数を返す
+  return counted;
+}
+
+/**
+ * 本体を呼び、例外を応答へ写す（キャッシュ制御も付ける）。
+ * @param run 本体の呼び出し
+ * @returns 応答
+ */
+async function buildResponse(run: () => Promise<Response>): Promise<Response> {
+  try {
+    // 本体を実行する
+    return await run();
+  } catch (error) {
+    // 例外を応答へ写す（401/403 等もテナント固有なのでキャッシュ禁止のヘッダを付ける）
+    return withPrivateCacheHeaders(toErrorResponse(error));
+  }
+}
+
+/**
  * 認証付き Route Handler を組み立てる。
  * 認証 (401) はどのルートでも本体より前に行い、認可 (403) は本体の先頭で guard.ts を呼ぶ
  */
@@ -230,20 +289,9 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
       return withPrivateCacheHeaders(toErrorResponse(error));
     }
   };
-  // Next.js が呼ぶ形の関数。**応答を数えるのはここ 1 か所**（成功・失敗・例外のどの経路も
-  // `respond` を通って戻るので、数え漏れが構造的に起きない）。ラベルは method と status だけで、
-  // どちらも閉じた集合へ写してから渡す（可変の値を入れると系列が無制限に増える。src/lib/metrics.ts）
-  const wrapped = async (request: Request, context: RouteContext<P>): Promise<Response> => {
-    // 応答を組み立てる
-    const response = await respond(request, context);
-    // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）。
-    // **数え方は `countHttpResponse` が唯一の参照元** — `route()` を通らない経路
-    // （health・受信 Webhook・画面側の CSV・/metrics 自身）も同じ関数を呼ぶので、
-    // ラベルの写し方が経路ごとに割れない
-    countHttpResponse(request.method, response.status);
-    // 組み立てた応答をそのまま返す
-    return response;
-  };
+  // Next.js が呼ぶ形の関数。**応答を数えるのは `withResponseCount` の 1 か所**
+  // （`route()` を通らない経路も同じ関数を使うので、ラベルの写し方も try の有無も割れない）
+  const wrapped = withResponseCount(respond);
   // 「route() が包んだ」という印を付ける (列挙されない定義なので DTO や JSON には現れない)
   Object.defineProperty(wrapped, ROUTE_HANDLER_BRAND, { value: true });
   // レート制限を掛けたかも同じ形で載せる (検出網が結線そのものを読めるようにする)

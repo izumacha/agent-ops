@@ -18,6 +18,8 @@ import {
 } from '@/lib/metrics';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { LOG_EVENTS } from '@/lib/log';
+// Next.js が Route Handler として呼ぶ export 名（閉じた集合の網羅を照合する独立な手掛かり）
+import { HTTP_METHOD_EXPORTS } from './lib/route-files';
 
 // 1 本ずつ独立に見る（カウンタはモジュールの状態なので前のテストを引きずる）
 beforeEach(() => {
@@ -149,15 +151,29 @@ describe('メトリクスのカウンタ', () => {
 });
 
 describe('ラベル値の閉じ込め', () => {
-  it.each(['GET', 'POST', 'PATCH', 'PUT', 'DELETE'])('%s はそのままラベルになる', (method) => {
+  // **一覧をここへ書き写さない**（閉じた集合の正本は `KNOWN_METHODS`）
+  it.each([...KNOWN_METHODS])('%s はそのままラベルになる', (method) => {
     expect(methodLabel(method)).toBe(method);
   });
 
-  it.each(['TRACE', 'OPTIONS', 'HEAD', '', 'GET ', 'get'])(
+  // **閉じた集合は「Next.js が届けうるメソッド」を全部含むこと。**
+  //
+  // 手掛かりを `KNOWN_METHODS` 自身から取ると、集合から外した分は上の `it.each` のケースからも
+  // 消えるので**外す変異が素通りする**（実測で `HEAD` / `OPTIONS` を外しても全件緑だった。
+  // この repo が繰り返し記録している「同じ判定でガードを書くと一緒に狭まる」形）。
+  // そこで**別の宣言**（`tests/lib/route-files.ts` の `HTTP_METHOD_EXPORTS`。Next.js が
+  // Route Handler として呼ぶ export 名を、ルートの結線を見る検査のために持っている）と
+  // 突き合わせる。Next.js は `HEAD` を `GET` のハンドラで応え、`OPTIONS` は自分で実装するので、
+  // 外すと死活監視の `HEAD` が「未知・敵対的なメソッド」のまとめ先に積まれる
+  it.each([...HTTP_METHOD_EXPORTS])('Next.js が届けうる %s は閉じた集合に入っている', (method) => {
+    expect(methodLabel(method)).toBe(method);
+  });
+
+  it.each(['TRACE', 'CONNECT', 'PROPFIND', '', 'GET ', 'get'])(
     '閉じた集合に無いメソッド (%s) は 1 つにまとめる',
     (method) => {
       // **系列を外から増やせる形を残さない**（まとめ先は 1 本だけ）
-      expect(methodLabel(method)).toBe('other');
+      expect(methodLabel(method)).toBe(OTHER_LABEL);
     },
   );
 
@@ -214,8 +230,8 @@ describe('系列数の上限', () => {
     const statuses = new Set(Object.values(HTTP_STATUS)).size + 1;
     // (b) ログの出来事 = 語彙の件数（level は event から定まるので倍にならない）
     const logEvents = Object.keys(LOG_EVENTS).length;
-    // (c) 捨てた数 = 1 系列
-    const upperBound = methods * statuses + logEvents + 1;
+    // 捨てた数は `COUNTS` の外（上限の外）に持つので数えない
+    const upperBound = methods * statuses + logEvents;
     // 上限は上界を超えていること（超えていないと正常な運用で系列を捨て始める）
     expect(MAX_METRIC_SERIES).toBeGreaterThan(upperBound);
     // **余裕も要求する** — 語彙を少し増やしただけで捨て始める値だと、上限の意味が

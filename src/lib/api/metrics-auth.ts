@@ -70,6 +70,10 @@ export function assertMetricsToken(request: Request): void {
  * **本番の経路からは呼ばない**（`resetMetricsForTesting` と同じ扱いで、テストの独立性のためだけにある）。
  */
 export function resetMetricsAuthForTesting(): void {
+  // 本番で呼べると、短すぎる設定の警告が毎リクエスト出せるようになる（1 度だけにした理由が崩れる）
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('resetMetricsAuthForTesting は本番では使えません。');
+  }
   // 次のテストでも 1 度目の警告が出るように戻す
   warnedShortToken = false;
 }

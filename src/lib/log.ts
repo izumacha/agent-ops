@@ -187,6 +187,11 @@ export const LOG_EVENTS = {
 /** ログに出せる出来事の名前 */
 export type LogEventName = keyof typeof LOG_EVENTS;
 
+// 語彙も引けなかったときの深刻度。**最も重い側へ倒す**（縮退した行を見落とさせない）
+const FALLBACK_LOG_LEVEL: LogLevel = 'error';
+// 語彙も引けなかったときの説明（表の文言が使えないので、何が起きたかだけを書く）
+const FALLBACK_LOG_MESSAGE = 'ログ 1 行の整形に失敗したため、出来事の識別子だけを残しました';
+
 /**
  * ログ 1 行を組み立てる（JSON 文字列）。
  *
@@ -195,12 +200,13 @@ export type LogEventName = keyof typeof LOG_EVENTS;
  * 第 1 引数は閉じた語彙のキー、第 2 引数は `describeError` が作った診断だけ。
  * つまりこの関数を通る値に、例外の `message` や利用者の入力が混ざる経路が無い。
  *
- * **例外を投げない。** 失敗しうる操作は 2 つあり、**どちらも `try` の中に入れる**:
- * 時刻の整形（無効な `Date` の `toISOString()` は `RangeError`）と `JSON.stringify`
- * （循環参照・BigInt）。失敗したら時刻を**その場で取り直し**、診断を落とした最小の行へ縮退する
- * （`describeError` が throw しないのと同じ理由 — ログの整形で落ちると、`catch` の中なら
- * 本来の失敗が別の失敗に化ける）。**時刻を組み立てを `try` の外に置かない** — 外に置くと
- * 無効な `Date` を渡された時点で投げ、この縮退の経路に一度も入らない。
+ * **例外を投げない。** 失敗しうる操作は 3 つあり、**どれも `try` の中に入れる**:
+ * 語彙の引き（型の外から呼ばれると `undefined` で `spec.level` が TypeError）・
+ * 時刻の整形（無効な `Date` の `toISOString()` は `RangeError`）・`JSON.stringify`
+ * （循環参照・BigInt）。失敗したら時刻を取り直し、**語彙にも `now` にも触らない**最小の行へ
+ * 縮退する（`describeError` が throw しないのと同じ理由 — ログの整形で落ちると、`catch` の
+ * 中なら本来の失敗が別の失敗に化ける）。**どれ 1 つでも `try` の外に置かない** — 外に置くと
+ * その失敗ではこの縮退の経路に一度も入らない（実際、時刻と語彙の 2 つで順に踏んだ）。
  * @param event 出来事の名前
  * @param described `describeError()` が作った診断（無い出来事もある）
  * @param now 行に入れる時刻
@@ -211,10 +217,13 @@ export function formatLogLine(
   described?: Record<string, unknown>,
   now: Date = new Date(),
 ): string {
-  // 語彙から深刻度と説明を引く（表に無いキーは型が拒むので既定値は要らない）
-  const spec = LOG_EVENTS[event];
-  // **時刻の整形も JSON 化も同じ try の中で行う**（前者は無効な Date で RangeError を投げる）
+  // **失敗しうる操作はすべて同じ try の中で行う**:
+  //   - 語彙の引き（型の外から呼ばれると `undefined` になり、`spec.level` で TypeError）
+  //   - 時刻の整形（無効な `Date` の `toISOString()` は RangeError）
+  //   - JSON 化（循環参照・BigInt）
   try {
+    // 語彙から深刻度と説明を引く（表に無いキーは型が拒むが、型の外からの呼び出しもありうる）
+    const spec = LOG_EVENTS[event];
     // 行の骨組み。順番を固定して、目で追うときに読みやすくする
     const line: Record<string, unknown> = {
       ts: now.toISOString(),
@@ -227,13 +236,16 @@ export function formatLogLine(
     // 1 行の JSON にして返す
     return JSON.stringify(line);
   } catch {
-    // 時刻は**その場で取り直す** — 渡された `now` が無効な Date だと読み直しても同じく失敗する。
-    // `new Date()` は必ず有効なので、この 4 項目（文字列だけ）は必ず JSON にできる
+    // **語彙は `?.` で引く。** 以前は `spec.level` を読み直していたので、語彙を引けなかった
+    // 場合は縮退の経路も投げていた（docstring の「例外を投げない」が成り立っていなかった）。
+    // 引けるなら表の文言を使う（診断が JSON にできなかっただけなら、文言は有用なまま）
+    const spec: LogEventSpec | undefined = LOG_EVENTS[event];
+    // 時刻はその場で取り直す（`new Date()` は必ず有効）。深刻度は引けなければ最も重い側へ倒す
     return JSON.stringify({
       ts: new Date().toISOString(),
-      level: spec.level,
+      level: spec?.level ?? FALLBACK_LOG_LEVEL,
       event,
-      message: spec.message,
+      message: spec?.message ?? FALLBACK_LOG_MESSAGE,
     });
   }
 }

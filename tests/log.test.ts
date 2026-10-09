@@ -118,12 +118,24 @@ describe('整形が失敗しても投げない', () => {
     const line = formatLogLine('api.unexpected_error', undefined, invalid);
     // JSON として読めること
     const parsed = JSON.parse(line) as Record<string, unknown>;
-    // 出来事の識別子と深刻度は残る（警報の条件はここを見る）
+    // 出来事の識別子は残る（警報の条件はここを見る）
     expect(parsed.event).toBe('api.unexpected_error');
-    expect(parsed.level).toBe(LOG_EVENTS['api.unexpected_error'].level);
+    // 深刻度は**最も重い側へ倒す**（縮退した行を見落とさせない。語彙には触らない）
+    expect(parsed.level).toBe('error');
     // 時刻はその場で取り直した有効な値（`Invalid Date` や欠落ではない）
     expect(typeof parsed.ts).toBe('string');
     expect(Number.isNaN(Date.parse(parsed.ts as string))).toBe(false);
+  });
+
+  it('語彙に無いキーを渡しても投げない（型の外からの呼び出しへの保険）', () => {
+    // **型は拒むが、型の外（JS からの呼び出し・`as never`）では起こりうる**。
+    // 以前は語彙の引きが `try` の外にあり、縮退側も同じ値を読み直していたので投げていた
+    const line = formatLogLine('typo.not_in_vocabulary' as never);
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    // 何が起きたかは識別子で残る（握り潰しではない）
+    expect(parsed.event).toBe('typo.not_in_vocabulary');
+    expect(parsed.level).toBe('error');
+    expect(typeof parsed.message).toBe('string');
   });
 
   it('JSON にできない診断は落として最小の行を返す', () => {

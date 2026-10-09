@@ -201,17 +201,22 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - **だから「署名鍵の設定ミス」「収集側の設定ミス」はログの `event` で見る**:
     `billing.signature_rejected` / `metrics.token_rejected`。`{status="401"}` の増加は
     「何かが 401 を積んでいる」までしか言わない。
-  - **未認証で誰でも叩ける経路の「断った」記録は 1 分あたり 1 本までに間引いてある**
-    （1 要求 1 行だと匿名の相手がログの量＝保存の費用を好きなだけ増やせる）。対象は
-    `billing.signature_rejected` / `metrics.token_rejected` / `session.login_rejected` /
-    `session.cross_origin_action`（**一覧の正本は `src/lib/log.ts` で `logEventThrottled` を
-    呼んでいる箇所**。ここに件数を書かない）。
-  - **間引いた件数は次に出る行の `suppressed` に載る。** だから**警報は「行が出たこと」で
-    組み、規模は `suppressed` で読む** — 行数をしきい値にすると、窓あたり 1 本なので
-    「毎分 1 件の打ち間違い」と「毎分 1 万件の総当たり」が同じ数になる。
-    `agentops_log_events_total{event="…"}` にも毎回積まれるが、**画面側（Server Action）の
-    出来事はその系列が `/metrics` から読めない**（上記の実体の違い）ので、そこでは
-    `suppressed` が唯一の規模の手掛かり。
+  - **未認証で誰でも叩ける経路の「断った」記録は間引いてある**（1 要求 1 行だと匿名の相手が
+    ログの量＝保存の費用を好きなだけ増やせる）。対象は `billing.signature_rejected` /
+    `metrics.token_rejected` / `session.login_rejected` / `session.cross_origin_action`
+    （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**。ここに件数も
+    ファイル名も書かない）。
+  - **間引きは「窓あたり 1 本」ではなく、窓の中の通算件数が 2 の冪のときだけ行にする**
+    （1 / 2 / 4 / 8 / … 件目）。行には**その時点の通算件数**が `occurrence` として載る。
+    だから**警報は「行が出たこと」で組み、規模は最後に出た行の `occurrence` で読む**。
+    - 窓あたり 1 本にして「次の行に間引いた件数を載せる」形は使えない。**止まった総当たり**
+      （1 万件叩いて去る）では次の行が永遠に来ないので、記録は 1 件目の 1 行だけになる。
+    - 2 の冪なら行数は件数の対数で収まり（1 万件でも 14 行）、**最後の行を見れば桁が分かる**。
+      行数そのものをしきい値にしないこと（対数なので「毎分 1 件」と「毎分 1 万件」で
+      行数は 1 対 14 しか違わない）。
+    - `agentops_log_events_total{event="…"}` には**毎回**積まれる。ただし**画面側
+      （Server Action）の出来事はその系列が `/metrics` から読めない**（上記の実体の違い）ので、
+      そこでは `occurrence` が唯一の規模の手掛かり。
 - **ただし `agentops_http_responses_total` は「アプリが返す HTTP 応答のすべて」ではない。**
   乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が別にある**
   （正本は `src/lib/uncounted-response-sources.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから
@@ -229,9 +234,9 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - Server Action（`'use server'` のモジュール）。<!--uncounted:serverAction-->
     同じく包める入口が無い。**ダッシュボードのログインの拒否はログに出る**ので、総当たりは
     `session.login_rejected` で警報にする（別オリジンからの送信は
-    `session.cross_origin_action`）。**行は 1 分あたり 1 本に間引いてあるので、行数ではなく
-    行の `suppressed`（間引いた件数）で規模を読む** — 行数をしきい値にすると、打ち間違いの
-    1 件と総当たりの 1 万件が同じ数になる（下の「間引き」の項）。**条件はログの `event` で組むこと** —
+    `session.cross_origin_action`）。**行は間引いてあるので、行数ではなく行の
+    `occurrence`（窓の中の通算件数）で規模を読む** — 行数は件数の対数なので、打ち間違いの
+    1 件と総当たりの 1 万件で 1 対 14 しか違わない（上の「間引き」の項）。**条件はログの `event` で組むこと** —
     `agentops_http_responses_total` にも `agentops_log_events_total` にも現れない
     （下の「ログの出来事の数は Route Handler の束の分だけ」を参照）。
   - Next.js がルートの代わりに組み立てる応答。<!--uncounted:frameworkSynthesized-->

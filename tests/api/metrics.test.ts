@@ -136,9 +136,12 @@ describe('GET /metrics', () => {
       // 違う値で 2 回叩く（どちらも 401）
       expect((await fetchMetrics('x'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
       expect((await fetchMetrics('y'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
-      // **行は窓あたり 1 本**（未認証で誰でも叩ける経路なので、1 要求 1 行にしない）。
-      // 率そのものは `agentops_log_events_total` に残る（下のテスト）
-      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
+      // **行は 2 の冪の回だけ**（1 件目と 2 件目は冪なのでどちらも出る）。
+      // 10 件なら 4 本、1 万件なら 14 本に収まり、最後の行の `occurrence` が規模を表す
+      expect(loggedEvents(outlet.calls())).toEqual([
+        'metrics.token_rejected',
+        'metrics.token_rejected',
+      ]);
     } finally {
       outlet.restore();
     }
@@ -181,8 +184,11 @@ describe('GET /metrics', () => {
       for (let i = 0; i < 3; i += 1) {
         expect((await fetchMetrics('z'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
       }
-      // 行は 1 本だけ
-      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
+      // 3 件なら行は 2 本（1 件目・2 件目。3 件目は冪でないので数えるだけ）
+      expect(loggedEvents(outlet.calls())).toEqual([
+        'metrics.token_rejected',
+        'metrics.token_rejected',
+      ]);
     } finally {
       outlet.restore();
     }

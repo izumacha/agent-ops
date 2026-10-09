@@ -160,69 +160,67 @@ describe('整形が失敗しても投げない', () => {
     },
   );
 
-  it('間引きは窓あたり 1 本に抑え、間引いた回も数える', () => {
+  it('2 の冪の回だけ行にし、通算件数を載せる（規模が行から読める）', () => {
     // 記憶とカウンタを空にする
     resetThrottledLogsForTesting();
     resetMetricsForTesting();
     const outlet = captureLogOutlet();
     try {
-      // 同じ出来事を 3 回出す
-      for (let i = 0; i < 3; i += 1) logEventThrottled('metrics.token_rejected');
-      // 行は 1 本だけ
-      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
-      // **1 本目には間引いた件数が無い**（その前に抑えた分は無いので鍵を出さない）
-      expect(parseLoggedLine(outlet.calls()[0])).not.toHaveProperty('suppressed');
+      // 同じ出来事を 10 回出す
+      for (let i = 0; i < 10; i += 1) logEventThrottled('metrics.token_rejected');
+      // 行は 1, 2, 4, 8 件目の 4 本だけ（**本数が log に収まる**）
+      const occurrences = outlet
+        .calls()
+        .map((args) => parseLoggedLine(args).occurrence as number | undefined);
+      expect(occurrences).toEqual([1, 2, 4, 8]);
     } finally {
       outlet.restore();
     }
-    // **数えるのは毎回**（間引きが率を消さないこと）
+    // **数えるのは毎回**（行にしなかった回も率に残る）
     expect(renderMetrics(new Date())).toContain(
-      'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 3',
+      'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 10',
     );
   });
 
-  it('次に出す行へ間引いた件数を載せる（率が行からも読めること）', () => {
+  it('burst が止まっても規模が残る（最後の行が通算件数を言う）', () => {
+    // **これが無いと、止まった burst は 1 件の打ち間違いと見分けが付かない**
+    // （窓あたり 1 本だった頃は 1 本目が必ず 0 件で、2 本目が永久に来なかった）
     resetThrottledLogsForTesting();
     const outlet = captureLogOutlet();
     try {
-      // 1 本目（ここで窓が始まる）
-      logEventThrottled('metrics.token_rejected');
-      // 窓の中で 9 件（行にならない）
-      for (let i = 0; i < 9; i += 1) logEventThrottled('metrics.token_rejected');
-      // 窓を越える
-      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
-      // 2 本目
-      logEventThrottled('metrics.token_rejected');
-      // 2 本目に**抑えた 9 件**が載る。これが無いと「毎分 1 件の打ち間違い」と
-      // 「毎分 1 万件の総当たり」が同じ 1 行になり、率がどの出口にも残らない
-      // （画面側の出来事は `/metrics` から読めないので、行が唯一の運び手）
-      expect(parseLoggedLine(outlet.calls()[1])).toMatchObject({
-        event: 'metrics.token_rejected',
-        suppressed: 9,
+      // 50 件起きて止まる
+      for (let i = 0; i < 50; i += 1) logEventThrottled('session.login_rejected');
+      // 最後の行は 32 件目（2 の冪）。規模がそのまま読める
+      const lines = outlet.calls().map((args) => parseLoggedLine(args));
+      expect(lines[lines.length - 1]).toMatchObject({
+        event: 'session.login_rejected',
+        occurrence: 32,
       });
-      // **3 本目は 0 件なので鍵を出さない**（間引いた分を二重に数えない）
-      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
-      logEventThrottled('metrics.token_rejected');
-      expect(parseLoggedLine(outlet.calls()[2])).not.toHaveProperty('suppressed');
+      // 1 件だけなら 1 本だけで、通算件数は 1
+      resetThrottledLogsForTesting();
+      const before = outlet.calls().length;
+      logEventThrottled('session.login_rejected');
+      expect(outlet.calls()).toHaveLength(before + 1);
+      expect(parseLoggedLine(outlet.calls()[before])).toMatchObject({ occurrence: 1 });
     } finally {
       outlet.restore();
     }
   });
 
-  it('時計が巻き戻っても間引きが居座らない（負の経過は窓を越えたとみなす）', () => {
-    // 1 本出してから**時計を巻き戻す**（NTP の補正・ライブマイグレーションで実際に起きる）
+  it('窓を越えると通算件数が 1 へ戻る（続いているあいだは窓ごとに 1 本出る）', () => {
     resetThrottledLogsForTesting();
     const outlet = captureLogOutlet();
     try {
-      // 1 本目（この時点の時刻を覚える）
+      // 窓の中で 3 件（1, 2 件目が行になる）
+      for (let i = 0; i < 3; i += 1) logEventThrottled('metrics.token_rejected');
+      // 窓を越える
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+      // 次の窓の 1 件目は必ず行になる
       logEventThrottled('metrics.token_rejected');
-      // 1 時間巻き戻す
-      vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 60 * 60 * 1000);
-      // 2 本目。**出ること** — 経過が負のときも窓の中と扱っていた頃は、
-      // 巻き戻した 1 時間ぶん行が 1 本も出なかった（しかもサーバーレスではこの行が
-      // 唯一の読める信号なので、原因を調べたいまさにその時間が沈黙する）
-      logEventThrottled('metrics.token_rejected');
-      expect(loggedEvents(outlet.calls())).toHaveLength(2);
+      const occurrences = outlet
+        .calls()
+        .map((args) => parseLoggedLine(args).occurrence as number | undefined);
+      expect(occurrences).toEqual([1, 2, 1]);
     } finally {
       outlet.restore();
     }

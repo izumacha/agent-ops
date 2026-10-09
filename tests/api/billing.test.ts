@@ -268,9 +268,12 @@ describe('POST /billing/webhook', () => {
         });
         expect(result.status).toBe(401);
       }
-      // **行は窓あたり 1 本**（未認証で誰でも叩ける経路なので 1 要求 1 行にしない）。
-      // 率そのものは `agentops_log_events_total` に残る
-      expect(loggedEvents(spy.mock.calls)).toEqual(['billing.signature_rejected']);
+      // **行は 2 の冪の回だけ**（2 件なのでどちらも冪＝2 本出る）。1 万件なら 14 本に収まり、
+      // 最後の行の `occurrence` が規模を表す（率は `agentops_log_events_total` にも残る）
+      expect(loggedEvents(spy.mock.calls)).toEqual([
+        'billing.signature_rejected',
+        'billing.signature_rejected',
+      ]);
     } finally {
       spy.mockRestore();
     }

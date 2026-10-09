@@ -125,21 +125,31 @@ describe('Step0 の設計成果物', () => {
     }
   });
 
-  // 監視用トークンの最小長も同じ扱い (運用者が読む 2 か所と実装の定数)。
+  // 監視用トークンの最小長も同じ扱い (運用者が読む 3 か所と実装の定数)。
   //
-  // **照合は「変数名と同じ段落」に限る。** 文書全体から「32 文字以上」を探す形にしていた版は、
+  // **照合は「変数名と同じ塊」に限る。** 文書全体から「32 文字以上」を探す形にしていた版は、
   // 他の秘密 (PLATFORM_ADMIN_TOKEN / AUDIT_HMAC_SECRET / NOTIFY_SIGNING_SECRET /
   // STRIPE_WEBHOOK_SECRET) の記述がその綴りを既に何度も持っているので、**METRICS_TOKEN の
   // 記述を両方の文書から丸ごと消しても緑のまま**通った (既存エントリの文が新しい項目を
-  // 黙って覆う形。CLAUDE.md が incident-insight の除外表について記録しているのと同じ)
+  // 黙って覆う形。CLAUDE.md が incident-insight の除外表について記録しているのと同じ)。
+  //
+  // **塊は空行だけで切らない。** 空行で切る版では README の箇条書き (空行を挟まない) が
+  // 1 つの塊になり、**前段のプロキシを説明する別の項目が言っている「32 文字以上」**で
+  // 条件が満たされた (実測: METRICS_TOKEN の項目から最小長を消しても緑)。表も同じで、
+  // `docs/deploy.md` の環境変数の表は PLATFORM_ADMIN_TOKEN の行が同じ綴りを持つ。
+  // だから**箇条書きの項目と表の行も塊の切れ目**として扱う (いちばん小さい単位で見る)
   it(`監視用トークンの最小長 ${METRICS_TOKEN_MIN_LENGTH} が文書と一致する`, () => {
     // 実装の値を文書の書き方 (「32 文字以上」) に合わせた文字列
     const expected = `${METRICS_TOKEN_MIN_LENGTH} 文字以上`;
-    // 運用者がこの値を読む 2 か所
-    for (const path of [join(DOCS, 'deploy.md'), join(ROOT, '.env.example')]) {
-      // 変数名を含む段落 (空行で区切られた塊) だけを取り出す
+    // 運用者がこの値を読む 3 か所
+    for (const path of [
+      join(DOCS, 'deploy.md'),
+      join(ROOT, '.env.example'),
+      join(ROOT, 'README.md'),
+    ]) {
+      // 変数名を含む塊 (空行・箇条書きの項目・表の行で区切る) だけを取り出す
       const blocks = readFileSync(path, 'utf8')
-        .split(/\n\s*\n/)
+        .split(/\n\s*\n|\n(?=- )|\n(?=\|)/)
         .filter((block) => block.includes('METRICS_TOKEN'));
       // 変数名に触れている段落が無ければ、記述そのものが消えている (fail-closed)
       expect(blocks.length, `${path} に METRICS_TOKEN の記述が無い`).toBeGreaterThan(0);

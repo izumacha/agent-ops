@@ -117,6 +117,20 @@ function toErrorResponse(error: unknown): Response {
 }
 
 /**
+ * その関数が既に応答を数えるラッパーを通っているか（印を読む）。
+ * **綴りではなく印を見る** — 検出網と同じ判定にそろえる（`tests/route-wrapping.test.ts`）。
+ * @param handler 調べる関数
+ * @returns 既に包まれていれば true
+ */
+function isResponseCounted(handler: unknown): boolean {
+  // 関数に付けた印（Symbol）が true かどうか
+  return (
+    typeof handler === 'function' &&
+    (handler as unknown as Record<symbol, unknown>)[RESPONSE_COUNT_BRAND] === true
+  );
+}
+
+/**
  * Route Handler を包んで、**返した応答を 1 件数える**（ADR-0014）。
  *
  * **`route()` を通る経路も通らない経路もこの 1 本を使う。** 以前は数える 3 行を
@@ -136,6 +150,12 @@ function toErrorResponse(error: unknown): Response {
 export function withResponseCount<A extends unknown[]>(
   handler: (request: Request, ...rest: A) => Promise<Response>,
 ): (request: Request, ...rest: A) => Promise<Response> {
+  // **二重掛けを素通りさせない。** `withResponseCount(route(handler))` は自然な書き間違い
+  // （この PR の 4 本は素の `withResponseCount(...)` を使うし、検出網は全 export に印を
+  // 要求する）なのに、内側と外側が同じ応答を 2 度数えて `agentops_http_responses_total` が
+  // **実際の 2 倍**を報告する。印は外側に付くので検出網は緑のままで、率の警報が 2 倍ずれる。
+  // 既に印の付いた関数が来たらそのまま返す（冪等。包み直す意味は無い）
+  if (isResponseCounted(handler)) return handler;
   // Next.js が呼ぶ形の関数
   const counted = async (request: Request, ...rest: A): Promise<Response> => {
     // 応答を組み立てる（例外も応答へ写し、**キャッシュ制御も中で付ける**） —

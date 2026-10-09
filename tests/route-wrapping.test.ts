@@ -19,6 +19,7 @@ import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { withResponseCount, RESPONSE_COUNT_BRAND } from '@/lib/api/response-count';
+import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import {
   ROUTE_HANDLER_BRAND,
   ROUTE_RATE_LIMIT_BRAND,
@@ -311,6 +312,33 @@ describe('Route Handler の結線', () => {
     // 包む側と包まれる側が両方これを呼んでいた頃は全 API 応答が
     // `Vary: Authorization, Authorization` を返していた（実測）
     expect(response.headers.get('vary')).toBe('Authorization, Cookie');
+  });
+
+  // **二重に包んでも 1 件しか数えない（冪等）。**
+  //
+  // `withResponseCount(route(handler))` は自然な書き間違いで（この PR の 4 本は素の
+  // `withResponseCount(...)` を使い、上の印の検査は「全 export に印がある」ことしか求めない）、
+  // 印は外側に付くので**検出網は緑のまま**。内側と外側が同じ応答を 2 度数えるので
+  // `agentops_http_responses_total` が**実際の 2 倍**を報告し、率の警報が 2 倍ずれる
+  it('応答を数えるラッパーは二重に包んでも 1 件しか数えない', async () => {
+    // 計数を空から始める
+    resetMetricsForTesting();
+    // 二重に包む（内側は既に印が付いている）
+    const inner = withResponseCount(() => Promise.resolve(new Response('x')));
+    const outer = withResponseCount(inner);
+    // 包み直されず同じ関数が返ること（冪等）
+    expect(outer).toBe(inner);
+    // 1 回呼ぶ
+    await outer(new Request('http://test.local/x'));
+    // 出力の中で該当する系列の値を読む（`agentops_http_responses_total{...} <値>` の行）
+    const line = renderMetrics(new Date())
+      .split('\n')
+      .find((row) => row.startsWith('agentops_http_responses_total{'));
+    // ちょうど 1 件（2 なら二重に数えている）
+    expect(line, '応答の系列が 1 本も出ていない').toBeDefined();
+    expect(line?.trim().split(' ').at(-1)).toBe('1');
+    // 後始末（他のテストへ計数を持ち越さない）
+    resetMetricsForTesting();
   });
 
   // **Next.js の制御フローの例外は応答へ写さない。**

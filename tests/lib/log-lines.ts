@@ -18,6 +18,8 @@ export interface LoggedLine {
   message: string;
   // `describeError` が作った診断（無い出来事もある）
   error?: Record<string, unknown>;
+  // その窓での通算件数（`logEventThrottled` が出した行だけが持つ。規模を読む鍵）
+  occurrence?: number;
 }
 
 /**

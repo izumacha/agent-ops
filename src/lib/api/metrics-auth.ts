@@ -22,8 +22,8 @@
 // （応答数とログの出来事数は、どの経路が叩かれているか・どの失敗が起きているかを外から読める）。
 import { API_MESSAGES, METRICS_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { secretsEqual } from '@/lib/tokens';
-import { logEvent } from '@/lib/log';
-import { extractBearerToken, invalidTokenError } from './auth';
+import { logEvent, logEventThrottled } from '@/lib/log';
+import { bearerTokenOrNull, invalidTokenError, unauthorizedError } from './auth';
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
 
@@ -63,18 +63,32 @@ export function assertMetricsToken(request: Request): void {
     // 設定が使えないので 503（「短い値でも通る」にはしない）
     throw notConfiguredError();
   }
-  // Authorization ヘッダから Bearer トークンを取り出す（無ければ 401。auth.ts と同じ関数＝綴りが割れない）
-  const token = extractBearerToken(request);
-  // 定数時間で比べる（一致しなければ 401。理由は区別しない）
-  if (!secretsEqual(token, configured)) {
+  // Authorization ヘッダから Bearer トークンを取り出す（無ければ null。auth.ts と同じ関数＝綴りが割れない）。
+  // **投げさせずに受け取る** — `extractBearerToken` が投げる形にしていた頃は、ヘッダが
+  // 無い／`Basic` などの非 Bearer のときに下のログへ一度も届かなかった（実測: ヘッダ無しと
+  // `Authorization: Basic …` はどちらも 401 なのにログは 0 行で、**いちばん起きやすい
+  // 収集側の設定ミス**（`bearer_token` を書き忘れた・基本認証にした）だけが無言だった）
+  const token = bearerTokenOrNull(request);
+  // 断る理由を先に決める（**401 のチャレンジは 2 種類ある** — 資格情報が無い場合は
+  // `error` を付けず、値が合わない場合は `invalid_token`。RFC 6750 の区別はそのまま保つ）。
+  // 比較は定数時間（一致しなければ 401。形・長さ・一致の理由は区別して返さない）
+  const failure =
+    token === null
+      ? unauthorizedError()
+      : secretsEqual(token, configured)
+        ? null
+        : invalidTokenError();
+  // 断るなら 1 行残してから投げる（**ログは 1 か所**。2 つの経路で書き写さない）
+  if (failure !== null) {
     // **1 行残す。** ApiError は `withResponseCount` の中でログを通らない（応答へ写すだけ）ので、
     // ここで出さないと**どの出口にも現れない**（応答の系列には出るが、経路を示すラベルが無いので
     // 期限切れトークンの 401 と区別できず、サーバーレスでは引きに行く収集そのものが
     // 成り立たない＝`docs/deploy.md`）。収集エージェントの設定ミスは無言にしない。
-    // **1 プロセスに 1 度にしない** — 率そのものが信号（`src/app/login/actions.ts` と同じ理由）。
-    // 量は前段で抑える（この経路のレート制限は前段の責務）
-    logEvent('metrics.token_rejected');
-    throw invalidTokenError();
+    // **行は窓あたり 1 本に間引く**（`logEventThrottled`）— 未認証で誰でも叩ける経路なので、
+    // 1 要求 1 行だと匿名の相手がログの量を好きなだけ増やせる。**数えるのは毎回**なので
+    // 率は `agentops_log_events_total` に残る（理由は `logEventThrottled` の説明）
+    logEventThrottled('metrics.token_rejected');
+    throw failure;
   }
 }
 

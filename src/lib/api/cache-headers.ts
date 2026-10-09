@@ -1,6 +1,9 @@
-// 応答に付ける「保存するな・Authorization で分けろ」のヘッダ。
-// route() が包む全応答と、入口の proxy (src/proxy.ts) が返す応答の両方が同じ 1 か所を使う
-// (片方だけに付けると、規律から外れた経路が 1 つ残る)
+// 応答に付ける「保存するな・資格情報で分けろ」のヘッダ。
+// **押印しているのは 2 か所だけ**: 応答を数えるラッパー (src/lib/api/response-count.ts。
+// route() を通る経路も通らない経路もここを通る) と、入口の proxy (src/proxy.ts) が返す応答。
+// **route() 自身はもう呼ばない** — 以前は route() とラッパーの両方が呼んでいて、
+// `Vary: Authorization, Authorization` を返していた (実測)。ここへ 3 つ目の押印を
+// 足さないこと (片方だけに付けると規律から外れた経路が残り、二重に付けると上の再発になる)
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 
 /**

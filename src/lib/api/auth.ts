@@ -54,7 +54,7 @@ const CHALLENGE_MISSING = 'Bearer realm="agent-ops"';
 const CHALLENGE_INVALID = 'Bearer realm="agent-ops", error="invalid_token"';
 
 // 401 (資格情報が無い) の例外
-function unauthorizedError(): ApiError {
+export function unauthorizedError(): ApiError {
   // 方式だけを示すチャレンジを付ける
   return new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized, undefined, {
     [WWW_AUTHENTICATE_HEADER]: CHALLENGE_MISSING,
@@ -72,19 +72,34 @@ export function invalidTokenError(): ApiError {
 // 毎リクエストで出すと、未認証の総当たりでエラーログを埋められる)
 let warnedShortPlatformToken = false;
 
-// Authorization ヘッダから Bearer トークンを取り出す (無ければ 401)
-export function extractBearerToken(request: Request): string {
+/**
+ * Authorization ヘッダから Bearer トークンを取り出す（取り出せなければ null）。
+ *
+ * **解析の規則はここが唯一の場所。** 投げる版（`extractBearerToken`）はこの薄い包みで、
+ * 投げてほしくない呼び出し側（`src/lib/api/metrics-auth.ts`。断ったことをログへ残してから
+ * 自分で応答を決める）はこちらを使う。規則を 2 か所に書くと、片方だけが方式名の
+ * 大文字小文字や余分な語の扱いを変えたときに**同じヘッダが経路によって通る／通らない**になる。
+ * @param request 受け取った要求
+ * @returns トークン本体（無ければ null）
+ */
+export function bearerTokenOrNull(request: Request): string | null {
   // ヘッダを読む
   const header = request.headers.get('authorization');
   // 無ければ認証情報無し
-  if (!header) throw unauthorizedError();
+  if (!header) return null;
   // 方式とトークンに分ける (方式名は大文字小文字を区別しない)
   const [scheme, token, ...rest] = header.trim().split(/\s+/);
-  // Bearer 以外・トークン無し・余分な語があれば 401
-  if (scheme?.toLowerCase() !== BEARER_SCHEME || !token || rest.length > 0) {
-    throw unauthorizedError();
-  }
+  // Bearer 以外・トークン無し・余分な語があれば取り出せない
+  if (scheme?.toLowerCase() !== BEARER_SCHEME || !token || rest.length > 0) return null;
   // トークン本体
+  return token;
+}
+
+// Authorization ヘッダから Bearer トークンを取り出す (無ければ 401)
+export function extractBearerToken(request: Request): string {
+  // 解析は 1 か所に寄せ、取り出せなければ 401 へ写す
+  const token = bearerTokenOrNull(request);
+  if (token === null) throw unauthorizedError();
   return token;
 }
 

@@ -39,7 +39,7 @@ import {
   verifyBillingSignature,
 } from '@/lib/billing/signature';
 import { billingWebhookEventSchema } from '@/lib/validations/billing';
-import { logEvent } from '@/lib/log';
+import { logEvent, logEventThrottled } from '@/lib/log';
 
 // 課金事業者の名前（受信記録のキーの一部。いまは stripe の 1 つだけ）
 const PROVIDER = 'stripe';
@@ -81,8 +81,11 @@ async function respond(request: Request): Promise<Response> {
     // 収集そのものが成り立たない（`docs/deploy.md`）。共有シークレットのローテーションを
     // し損ねて全配信が 401 になった状態を無言にしないため。**理由（`verified` の値）は出さない**
     // — 形・時刻・一致のどれで落ちたかは総当たりの手がかりになる。
-    // **1 プロセスに 1 度にしない**（率そのものが信号。`src/app/login/actions.ts` と同じ理由）
-    logEvent('billing.signature_rejected');
+    // **行は窓あたり 1 本に間引く**（`logEventThrottled`）— 未認証で誰でも叩ける経路なので、
+    // 1 要求 1 行だと匿名の相手がログの量（＝保存の費用）を好きなだけ増やせる。
+    // **数えるのは毎回**なので率は `agentops_log_events_total` に残り、鍵のローテーション
+    // 漏れが続いているあいだは窓ごとに 1 本出る（理由は `logEventThrottled` の説明）
+    logEventThrottled('billing.signature_rejected');
     throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.billingSignatureInvalid);
   }
   // 署名が合ってから解釈・検証する（400 → 422）
@@ -188,13 +191,33 @@ type SkipReason = (typeof SKIP_REASON)[keyof typeof SKIP_REASON];
 function logSkipped(reason: SkipReason, type: string): void {
   // 無関係な通知では鳴らさない
   if (!isPlanChangeEvent(type)) return;
-  // 理由ごとに固定の文を出す（値そのものは出さない）
-  if (reason === SKIP_REASON.tenantMissing) {
-    logEvent('billing.customer_unknown');
-  } else if (reason === SKIP_REASON.planUndecidable) {
-    logEvent('billing.plan_undecidable');
-  } else {
-    logEvent('billing.stale_cancellation');
+  // 理由ごとに固定の文を出す（値そのものは出さない）。
+  //
+  // **`switch` ＋ 到達不能な `default` にする。** 以前の `if / else if / else` は末尾が
+  // 受け皿だったので、4 つ目の理由を足した人がここを直し忘れると**その理由が
+  // 「別のサブスクリプションの解約」として運用者へ報告される**（違う runbook を引く）。
+  // typecheck も lint もテストも緑のまま通った。`default` で `never` へ代入すれば鍵の
+  // 足し忘れが typecheck で落ちる（`RULE_ACTION_SUSPENDS` 等と同じ流儀）。
+  //
+  // **表の添字（`TABLE[reason]`）にはしない** — `tests/error-logging.test.ts` は
+  // 「出口の第 1 引数は語彙のキーの**リテラル**」を要求しており、それが
+  // 「語彙に宣言した出来事はどれも実際に出している」の照合を成り立たせている。
+  // 添字にすると網羅性は型で守れるが、語彙の網羅の方が機械で見えなくなる。
+  switch (reason) {
+    case SKIP_REASON.tenantMissing:
+      logEvent('billing.customer_unknown');
+      return;
+    case SKIP_REASON.planUndecidable:
+      logEvent('billing.plan_undecidable');
+      return;
+    case SKIP_REASON.staleCancellation:
+      logEvent('billing.stale_cancellation');
+      return;
+    default: {
+      // 理由を足してここを直し忘れたら typecheck が落ちる（受け皿にしない）
+      const unhandled: never = reason;
+      return unhandled;
+    }
   }
 }
 

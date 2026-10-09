@@ -199,12 +199,16 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   ラベルは method と status だけなので、受信 Webhook の 401 と期限切れユーザートークンの 401 は
   見分けが付かない）。
   - **だから「署名鍵の設定ミス」「収集側の設定ミス」はログの `event` で見る**:
-    `billing.signature_rejected` / `metrics.token_rejected`（どちらも毎回 1 行出る。
-    率そのものが信号なので間引いていない）。`{status="401"}` の増加は「何かが 401 を
-    積んでいる」までしか言わない。
+    `billing.signature_rejected` / `metrics.token_rejected`。`{status="401"}` の増加は
+    「何かが 401 を積んでいる」までしか言わない。
+  - **この 2 つの行は 1 分あたり 1 本までに間引いてある**（未認証で誰でも叩ける経路なので、
+    1 要求 1 行だと匿名の相手がログの量＝保存の費用を好きなだけ増やせる）。**続いている
+    あいだは窓ごとに 1 本出る**ので「いま起きているか」は分かる。**数えるのは毎回**なので、
+    率は `agentops_log_events_total{event="…"}` に残る（常駐配備ならこちらで率が読める。
+    サーバーレスでは上記のとおり読めないので、窓ごとの 1 本が信号）。
 - **ただし `agentops_http_responses_total` は「アプリが返す HTTP 応答のすべて」ではない。**
   乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が別にある**
-  （正本は `src/lib/metrics.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから
+  （正本は `src/lib/uncounted-response-sources.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから
   導いた写しで、`tests/docs-gate.test.ts` が両向きに突き合わせる）。この系列だけを見て
   「他の通信はすべて覆われている」と読まないこと。
   - 入口（`src/proxy.ts`）が percent-decode できないパスへ返す 404。<!--uncounted:entryProxy-->

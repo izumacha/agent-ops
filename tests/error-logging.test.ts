@@ -47,6 +47,22 @@ const DESCRIBE_ERROR = 'describeError';
 const LOG_OWNER = join(process.cwd(), 'src', 'lib', 'log.ts');
 // 出口の関数の名前（呼び出し側が使う）
 const LOG_EVENT = 'logEvent';
+
+/**
+ * ログの出口の関数と、受け取れる実引数の最大数。
+ *
+ * **出口は 1 つではない。** `logEvent`（毎回 1 行）と `logEventThrottled`（窓あたり 1 本に
+ * 間引く。未認証で誰でも叩ける経路用）の 2 つで、**どちらも第 1 引数は語彙のキーのリテラル**。
+ * 名前を 1 つだけ決め打っていた頃は、間引く側へ変数や例外の `message` を渡しても
+ * **どの検査にも掛からなかった**（この表から導くので、出口を増やす人はここへ 1 行足す
+ * ことになり、足し忘れは下の「語彙を全部出している」側が先に落とす）。
+ */
+const LOG_OUTLETS: Readonly<Record<string, number>> = {
+  // 出来事 ＋ 診断（`describeError(...)`）
+  [LOG_EVENT]: 2,
+  // 間引く側は出来事だけ（診断を渡せる形にすると、間引かれた回の診断が黙って消える）
+  logEventThrottled: 1,
+};
 // 1 行を組み立てる関数の名前（`console` へ渡してよい形の 1 つ）
 const FORMAT_LOG_LINE = 'formatLogLine';
 
@@ -443,15 +459,25 @@ describe('エラーのログ出力', () => {
     ).toEqual([]);
   });
 
-  it(`${LOG_EVENT} の実引数は語彙のキーと ${DESCRIBE_ERROR}(...) だけ`, () => {
+  it(`ログの出口の実引数は語彙のキーと ${DESCRIBE_ERROR}(...) だけ`, () => {
     // 規約を破っている箇所
     const offenders: string[] = [];
     // 実際に見た呼び出しの件数（0 なら走査が空振りしている）
     let inspected = 0;
-    for (const { path, source } of SOURCES)
+    for (const { path, source } of SOURCES) {
+      // **出口を所有するモジュール自身は対象外。** あのファイルの中では間引く側が
+      // 毎回出す側へ転送するので、第 1 引数は必ず変数になる（`console` を呼べるのが
+      // あのファイルだけなのと同じ理由で、実装の内側は規約の対象にしない）。
+      // 呼び出し側（`src` の他のファイル）が変数を渡す形は引き続き落ちる
+      if (path === LOG_OWNER) continue;
       forEachNode(source, (node) => {
-        // `logEvent(...)` の呼び出しだけを見る（**包みを剥がしてから**。理由は namedCallArguments）
-        const args = namedCallArguments(node, LOG_EVENT);
+        // **出口の表から導いて**どれかの呼び出しを探す（名前を決め打つと 2 つ目が素通りする）
+        const outlet = Object.keys(LOG_OUTLETS).find(
+          (name) => namedCallArguments(node, name) !== null,
+        );
+        if (outlet === undefined) return;
+        // その出口の実引数（**包みを剥がしてから**。理由は namedCallArguments）
+        const args = namedCallArguments(node, outlet);
         if (args === null) return;
         inspected += 1;
         // 置き場所を失敗文言に出すための見出し
@@ -478,15 +504,15 @@ describe('エラーのログ出力', () => {
           )
         )
           offenders.push(`${where} (第 2 引数が ${DESCRIBE_ERROR}(...) でない)`);
-        // 3 つ目以降は受け取らない（型でも拒むが、署名を広げる変更を構文で止める）
-        if (args.length > 2) offenders.push(`${where} (実引数が多い)`);
+        // 出口ごとの上限を超えたら落とす（型でも拒むが、署名を広げる変更を構文で止める）
+        const maxArgs = LOG_OUTLETS[outlet] ?? 0;
+        if (args.length > maxArgs) offenders.push(`${where} (実引数が多い: ${outlet})`);
       });
+    }
     // 1 件も見ていなければ走査が壊れている (fail-closed)
-    expect(inspected, `${LOG_EVENT} の呼び出しを 1 つも見つけられない`).toBeGreaterThan(0);
+    expect(inspected, 'ログの出口の呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
     // 違反があれば落とす
-    expect(offenders, `${LOG_EVENT} に渡せるのは語彙のキーと ${DESCRIBE_ERROR}(...) だけ`).toEqual(
-      [],
-    );
+    expect(offenders, `ログの出口に渡せるのは語彙のキーと ${DESCRIBE_ERROR}(...) だけ`).toEqual([]);
   });
 
   it('語彙に宣言した出来事はどれも実際に出している', () => {
@@ -500,10 +526,14 @@ describe('エラーのログ出力', () => {
         // 同じファイルが実引数の形の検査のために剥がしている包み方（`(0, logEvent)(...)` /
         // `.call` / `Reflect.apply`）をここでは剥がしておらず、**同じ 1 つの網の片方だけが
         // 緩い写し**になっていた（倒れる向きは誤った赤だが、写しは必ずどちらかが古くなる）
-        const args = namedCallArguments(node, LOG_EVENT);
-        if (args === null) return;
-        const first = args[0];
-        if (first !== undefined && ts.isStringLiteralLike(first)) emitted.add(first.text);
+        // **出口の表から導く**（片方だけを見ると、その出口からしか出さない出来事が
+        // 「宣言だけで出していない」と誤って報告される）
+        for (const name of Object.keys(LOG_OUTLETS)) {
+          const args = namedCallArguments(node, name);
+          if (args === null) continue;
+          const first = args[0];
+          if (first !== undefined && ts.isStringLiteralLike(first)) emitted.add(first.text);
+        }
       });
     // 語彙が空なら走査が壊れている (fail-closed)
     expect(Object.keys(LOG_EVENTS).length, '語彙が空').toBeGreaterThan(0);

@@ -63,20 +63,16 @@ export const LOG_EVENTS = {
     level: 'error',
     message: 'いまの契約とは別のサブスクリプションの解約なので反映しません',
   },
-  // --- 健康確認 ---
-  'health.db_unreachable': { level: 'error', message: 'DB 到達性チェックに失敗' },
-  // --- 画面のセッション（Server Action。**応答は数えられないのでログが唯一の出口**。
-  // 理由は src/lib/uncounted-response-sources.ts） ---
   'billing.signature_rejected': {
     level: 'warn',
     message:
       '課金の受信 Webhook の署名を受け付けませんでした (形・時刻・一致のどれでも同じ扱い)。続く増加は共有シークレットの設定ミス、またはなりすましの可能性があります。',
   },
-  'metrics.token_rejected': {
-    level: 'warn',
-    message:
-      '監視の読み取りトークンが一致しませんでした。続く増加は収集エージェントの設定ミス、または総当たりの可能性があります。',
-  },
+  // --- 健康確認 ---
+  'health.db_unreachable': { level: 'error', message: 'DB 到達性チェックに失敗' },
+  // --- 画面のセッション（Server Action。**応答は数えられないのでログが唯一の出口**。
+  // 理由は src/lib/uncounted-response-sources.ts。**この説明はこの節の 2 件にだけ当てはまる** —
+  // Route Handler から出る出来事（課金の署名・監視トークン）の 401 は応答の系列に乗る） ---
   'session.login_rejected': {
     level: 'warn',
     message:
@@ -95,6 +91,11 @@ export const LOG_EVENTS = {
       'パスを percent-decode できない要求を 404 で返しました (以降は出しません)。同種の要求が続いているかは前段のアクセスログで確認してください。',
   },
   // --- 監視（/metrics） ---
+  'metrics.token_rejected': {
+    level: 'warn',
+    message:
+      '監視の読み取りトークンが一致しませんでした。続く増加は収集エージェントの設定ミス、または総当たりの可能性があります。',
+  },
   'metrics.token_too_short': {
     level: 'error',
     message:
@@ -354,4 +355,57 @@ export function logEvent(event: LogEventName, described?: Record<string, unknown
   // 割れる。**1 行 1 JSON という形は変えない**（環境で分けないという決定はそのまま）。
   if (level === 'warn') console.warn(formatLogLine(event, described));
   else console.error(formatLogLine(event, described));
+}
+
+// 間引くときの窓（ミリ秒）。1 分に 1 行までに抑える
+const THROTTLED_LOG_WINDOW_MS = 60_000;
+// 出来事ごとに「最後に行を出した時刻」（間引きのための状態。プロセス内）
+const lastThrottledAt = new Map<LogEventName, number>();
+
+/**
+ * 出来事を**数えつつ、行は窓あたり 1 本までに間引いて**出す。
+ *
+ * **未認証で誰でも叩ける経路の「断った」記録に使う。** 1 要求 1 行で出すと、匿名の相手が
+ * ログの量（＝保存の費用）を好きなだけ増やせる — この repo は同じ理由で
+ * `entry.undecodable_path` と「短すぎる `METRICS_TOKEN`」の警告を 1 プロセス 1 度にしている。
+ *
+ * **1 度だけにはしない。** あの 2 つは**設定の通知**で 2 件目以降に情報が無いが、こちらは
+ * 「いま続いているか」が運用者の知りたいことなので（共有シークレットのローテーション漏れは
+ * 直すまで続く）、窓ごとに 1 本出せば続いていることが分かる。
+ *
+ * **数える側は毎回**なので、率そのものは `agentops_log_events_total{event=…}` に残る
+ * （これらの出来事は Route Handler の束から出るので、`/metrics` が読む実体と同じ＝
+ * `logEvent` の説明にある (a)）。**ただしサーバーレスでは引きに行く収集が成り立たない**
+ * （`docs/deploy.md`）ので、そこで読めるのは「窓ごとに 1 本のログ行」だけになる。
+ * @param event 出来事の名前
+ */
+export function logEventThrottled(event: LogEventName): void {
+  // いまの時刻（単調増加でなくてよい。窓の粗い刻みにしか使わない）
+  const now = Date.now();
+  // 前回この出来事で行を出した時刻（初回は無い）
+  const last = lastThrottledAt.get(event);
+  // 窓の中ならもう行は出さない。**それでも数える**（率は失わない）
+  if (last !== undefined && now - last < THROTTLED_LOG_WINDOW_MS) {
+    // 深刻度は語彙から引く（出口と同じ引き方。引けなければ最も重い側へ倒す）
+    const level = lookupLogEvent(event)?.level ?? FALLBACK_LOG_LEVEL;
+    // 行は出さずに数えるだけ
+    incrementCounter('agentops_log_events_total', { event, level });
+    return;
+  }
+  // 窓を越えたので出した時刻を覚えてから、通常の出口へ渡す（数えるのもそこ 1 か所）
+  lastThrottledAt.set(event, now);
+  logEvent(event);
+}
+
+/**
+ * テスト用に間引きの記憶を忘れる。
+ * **本番の経路からは呼ばない**（`resetMetricsForTesting` と同じ扱い）。
+ */
+export function resetThrottledLogsForTesting(): void {
+  // 本番で呼べると、間引きを外して好きなだけ行を出せるようになる
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('resetThrottledLogsForTesting は本番では使えません。');
+  }
+  // 次のテストでも 1 本目が出るように空へ戻す
+  lastThrottledAt.clear();
 }

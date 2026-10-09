@@ -123,7 +123,7 @@ health は compose の healthcheck が 10 秒ごとに、`npm run bench:demo-rea
 - **キャッシュ制御もこのラッパーが付ける。** 例外の経路にだけ付けていた版では、本体が
   **返した**早期の 401 / 404 に付かなかった（画面側の CSV がそれで、認証付きの経路の
   401 / 404 が共有キャッシュへ載りうる状態だった）。
-- **数えない種類の一覧の正本はコード側**（`src/lib/metrics.ts` の
+- **数えない種類の一覧の正本はコード側**（`src/lib/uncounted-response-sources.ts` の
   `UNCOUNTED_RESPONSE_SOURCES`。**件数は書かない** — 種類を足すたびに数字だけが古くなる。
   実際この PR の中で 3 → 4 へ増え、散文の「3 つ」が 5 か所残った）。文書は鍵を目印（`<!--uncounted:<鍵>-->`）として持ち、
   `tests/docs-gate.test.ts` が表から導いて突き合わせる。**散文だけに置いていた版は実際に

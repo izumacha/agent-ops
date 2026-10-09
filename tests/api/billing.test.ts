@@ -20,6 +20,7 @@ import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { PLAN_CHANGE_LINK, PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
 import { loggedEvents } from '../lib/log-lines';
+import { resetThrottledLogsForTesting } from '@/lib/log';
 
 // seed（各テストの前に作り直す）
 const seed = seedEachTest();
@@ -253,7 +254,9 @@ describe('POST /billing/webhook', () => {
   // 成り立たない（`docs/deploy.md`）。共有シークレットのローテーションをし損ねて全配信が
   // 401 になった状態を無言にしないため、ここで 1 行出す
   it('署名が合わなかったことをログに残す（鍵の設定ミスを無言にしない）', async () => {
-    // ログを端末へ出さない
+    // 間引きの記憶を忘れる（前のテストが 1 本出していると窓の中になる）
+    resetThrottledLogsForTesting();
+    // ログを端末へ出さない（この出来事は warn なので `console.warn`）
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       // 署名を付けずに 2 回叩く
@@ -265,11 +268,9 @@ describe('POST /billing/webhook', () => {
         });
         expect(result.status).toBe(401);
       }
-      // **毎回出す**（率そのものが信号なので 1 プロセスに 1 度にしない）
-      expect(loggedEvents(spy.mock.calls)).toEqual([
-        'billing.signature_rejected',
-        'billing.signature_rejected',
-      ]);
+      // **行は窓あたり 1 本**（未認証で誰でも叩ける経路なので 1 要求 1 行にしない）。
+      // 率そのものは `agentops_log_events_total` に残る
+      expect(loggedEvents(spy.mock.calls)).toEqual(['billing.signature_rejected']);
     } finally {
       spy.mockRestore();
     }

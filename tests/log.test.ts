@@ -5,10 +5,17 @@
 // （守備範囲を移した先が無検証だと、検出網の中心が空洞になる。このリポジトリが
 // `assertApiVersionSupported` で踏んだのと同じ形）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LOG_EVENTS, formatLogLine, logEvent, type LogEventName } from '@/lib/log';
+import {
+  LOG_EVENTS,
+  formatLogLine,
+  logEvent,
+  type LogEventName,
+  logEventThrottled,
+  resetThrottledLogsForTesting,
+} from '@/lib/log';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { describeError } from '@/lib/describe-error';
-import { loggedEvents, parseLoggedLine } from './lib/log-lines';
+import { captureLogOutlet, loggedEvents, parseLoggedLine } from './lib/log-lines';
 
 // console へ出た行を集める
 let lines: string[] = [];
@@ -146,6 +153,52 @@ describe('整形が失敗しても投げない', () => {
       expect(line.event).toBe(event);
     },
   );
+
+  it('間引きは窓あたり 1 本に抑え、間引いた回も数える', () => {
+    // 記憶とカウンタを空にする
+    resetThrottledLogsForTesting();
+    resetMetricsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 同じ出来事を 3 回出す
+      for (let i = 0; i < 3; i += 1) logEventThrottled('metrics.token_rejected');
+      // 行は 1 本だけ
+      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
+    } finally {
+      outlet.restore();
+    }
+    // **数えるのは毎回**（間引きが率を消さないこと）
+    expect(renderMetrics(new Date())).toContain(
+      'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 3',
+    );
+  });
+
+  it('間引きの記憶を忘れると次の 1 本が出る', () => {
+    const outlet = captureLogOutlet();
+    try {
+      // 1 本出してから記憶を忘れ、もう 1 本出す
+      resetThrottledLogsForTesting();
+      logEventThrottled('metrics.token_rejected');
+      resetThrottledLogsForTesting();
+      logEventThrottled('metrics.token_rejected');
+      // 2 本出る（窓の判定が「常に出さない」へ退行していないこと）
+      expect(loggedEvents(outlet.calls())).toHaveLength(2);
+    } finally {
+      outlet.restore();
+    }
+  });
+
+  it('resetThrottledLogsForTesting は本番では呼べない（間引きを外させない）', () => {
+    // 本番のふりをする
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      // 呼ぶと投げる（`resetMetricsForTesting` と同じ扱い。この 1 本が無いと
+      // ガードの 3 行を消しても全件緑で通る＝姉妹の検査で実測済みの非対称）
+      expect(() => resetThrottledLogsForTesting()).toThrow(/本番/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it('`console` のメソッドは深刻度で選ぶ（語彙の level から導いて両方向を見る）', () => {
     // **語彙から代表を 1 つずつ採る** — 綴りを決め打つと、その出来事の `level` を変えた

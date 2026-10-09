@@ -1,4 +1,7 @@
-// API のエラー表現。Route Handler は ApiError を throw し、handler.ts が JSON 応答へ写す
+// API のエラー表現。Route Handler は ApiError を throw し、**応答を数えるラッパー**
+// (src/lib/api/response-count.ts の toErrorResponse) が JSON 応答へ写す。
+// **handler.ts ではない** — あちらは route() だけを持ち、例外はそのまま投げる。
+// 写す場所をもう 1 つ作らないこと (DuplicateError → 422 の翻訳と 500 のログが分かれる)
 import type { ApiErrorDto } from '@/lib/api-types';
 import { API_MESSAGES } from '@/lib/constants';
 import { HTTP_STATUS } from './http-status';

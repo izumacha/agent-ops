@@ -14,8 +14,9 @@ import {
   PROMETHEUS_CONTENT_TYPE,
 } from '@/lib/constants';
 import { Role } from '@/domain/types';
-import { COUNTERS, GAUGES } from '@/lib/metrics';
+import { COUNTERS, GAUGES, renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { resetMetricsAuthForTesting } from '@/lib/api/metrics-auth';
+import { resetThrottledLogsForTesting } from '@/lib/log';
 import { captureLogOutlet, loggedEvents } from '../lib/log-lines';
 import { METRICS_TOKEN, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 
@@ -112,20 +113,68 @@ describe('GET /metrics', () => {
   // **401 を読むのは系列ではなくログ**（経路を示すラベルが無いので他の 401 と区別できず、
   // サーバーレスでは引きに行く収集そのものが成り立たない＝`docs/deploy.md`）
   it('トークンが合わなかったことをログに残す（収集側の設定ミスを無言にしない）', async () => {
+    // 間引きの記憶を忘れる（前のテストが 1 本出していると窓の中になる）
+    resetThrottledLogsForTesting();
     // 出口を捕まえる（深刻度でメソッドが分かれるので両方）
     const outlet = captureLogOutlet();
     try {
       // 違う値で 2 回叩く（どちらも 401）
       expect((await fetchMetrics('x'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
       expect((await fetchMetrics('y'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
-      // **毎回出す**（率そのものが信号なので 1 プロセスに 1 度にしない）
-      expect(loggedEvents(outlet.calls())).toEqual([
-        'metrics.token_rejected',
-        'metrics.token_rejected',
-      ]);
+      // **行は窓あたり 1 本**（未認証で誰でも叩ける経路なので、1 要求 1 行にしない）。
+      // 率そのものは `agentops_log_events_total` に残る（下のテスト）
+      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
     } finally {
       outlet.restore();
     }
+  });
+
+  it.each([
+    ['ヘッダが無い', undefined],
+    ['Bearer でない方式', 'Basic abcdef'],
+  ])(
+    '%s 要求も 401 をログに残す（いちばん起きやすい設定ミスを無言にしない）',
+    async (_label, authorization) => {
+      // 間引きの記憶を忘れる
+      resetThrottledLogsForTesting();
+      const outlet = captureLogOutlet();
+      try {
+        // ヘッダを組み立てて直接呼ぶ（`fetchMetrics` は Bearer 形式しか作れない）
+        const headers = new Headers();
+        if (authorization !== undefined) headers.set('authorization', authorization);
+        const response = await getMetrics(
+          new Request('http://test.local/api/v1/metrics', { headers }),
+        );
+        // どちらも 401
+        expect(response.status).toBe(401);
+        // **1 行出る** — 以前はトークンを取り出す側が先に投げていたので、
+        // 収集側が `bearer_token` を書き忘れた／基本認証にした場合だけログが 0 行だった（実測）
+        expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
+      } finally {
+        outlet.restore();
+      }
+    },
+  );
+
+  it('間引いた回も数える（率は agentops_log_events_total に残る）', async () => {
+    // カウンタと間引きの記憶を空にする
+    resetMetricsForTesting();
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 3 回断られる
+      for (let i = 0; i < 3; i += 1) {
+        expect((await fetchMetrics('z'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
+      }
+      // 行は 1 本だけ
+      expect(loggedEvents(outlet.calls())).toEqual(['metrics.token_rejected']);
+    } finally {
+      outlet.restore();
+    }
+    // **数えるのは毎回**（間引きが率を消さないこと）
+    expect(renderMetrics(new Date())).toContain(
+      'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 3',
+    );
   });
 
   it('METRICS_TOKEN が短すぎれば 503 で、警告は 1 度だけ出す', async () => {

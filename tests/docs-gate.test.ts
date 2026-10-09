@@ -29,7 +29,7 @@ import { METRICS_TOKEN_MIN_LENGTH, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib
 // ログの語彙の正本 (deploy.md の例が実在の出来事を指していることを突き合わせる)
 import { LOG_EVENTS } from '@/lib/log';
 // 「数えない応答の種類」の正本 (文書の目印をここから導く)
-import { UNCOUNTED_RESPONSE_SOURCES } from '@/lib/metrics';
+import { UNCOUNTED_RESPONSE_SOURCES } from '@/lib/uncounted-response-sources';
 // 監査ログの連番の上限 (README が運用者向けに数値で書いているので突き合わせる)
 import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 // RBAC の許可表 (役割と操作の唯一の真実の源)

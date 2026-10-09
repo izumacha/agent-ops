@@ -19,6 +19,7 @@ import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { PLAN_CHANGE_LINK, PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
+import { loggedEvents } from '../lib/log-lines';
 
 // seed（各テストの前に作り直す）
 const seed = seedEachTest();
@@ -245,6 +246,33 @@ describe('POST /billing/webhook', () => {
     // `Vary: Authorization, Authorization` を返していた（実測）
     expect(result.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
     expect(result.headers.get('vary')).toBe('Authorization, Cookie');
+  });
+
+  // **401 を読むのは系列ではなくログ。** 系列には経路を示すラベルが無いので、期限切れ
+  // ユーザートークンの POST 401 と区別できない。しかもサーバーレスでは引きに行く収集が
+  // 成り立たない（`docs/deploy.md`）。共有シークレットのローテーションをし損ねて全配信が
+  // 401 になった状態を無言にしないため、ここで 1 行出す
+  it('署名が合わなかったことをログに残す（鍵の設定ミスを無言にしない）', async () => {
+    // ログを端末へ出さない
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // 署名を付けずに 2 回叩く
+      for (let i = 0; i < 2; i += 1) {
+        const result = await call(receiveBillingWebhook, {
+          method: 'POST',
+          rawBody: JSON.stringify(webhookBody({ plan: Plan.enterprise })),
+          headers: { 'content-type': 'application/json' },
+        });
+        expect(result.status).toBe(401);
+      }
+      // **毎回出す**（率そのものが信号なので 1 プロセスに 1 度にしない）
+      expect(loggedEvents(spy.mock.calls)).toEqual([
+        'billing.signature_rejected',
+        'billing.signature_rejected',
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('別の鍵で署名した本文は 401（鍵を知らない相手は通れない）', async () => {

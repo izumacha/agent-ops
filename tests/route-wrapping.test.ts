@@ -30,7 +30,10 @@ import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
 import { PLAN_FEATURES } from '@/domain/plan';
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
-import { UNCOUNTED_RESPONSE_SOURCES, type UncountedResponseSource } from '@/lib/metrics';
+import {
+  UNCOUNTED_RESPONSE_SOURCES,
+  type UncountedResponseSource,
+} from '@/lib/uncounted-response-sources';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 

@@ -4,7 +4,7 @@
 // 捕まえた側は「文字列を解析する」か「生のまま部分一致で見る」かのどちらかになる。
 // どちらも複数のテストが必要とするので、読み方をここ 1 か所に置く
 // （書き写すと、行の形を変えたときに片方だけが直る）。
-import { expect } from 'vitest';
+import { expect, vi } from 'vitest';
 
 /** ログ 1 行の中身（`src/lib/log.ts` の `formatLogLine` が作る形） */
 export interface LoggedLine {
@@ -74,4 +74,37 @@ export function parseLoggedLine(args: readonly unknown[] | undefined): LoggedLin
 export function loggedEvents(calls: readonly (readonly unknown[])[]): string[] {
   // 行ごとに解析して識別子を拾う
   return calls.map((args) => parseLoggedLine(args).event);
+}
+
+/**
+ * ログの出口（`console.warn` / `console.error` の両方）を捕まえる。
+ *
+ * **出口のメソッドは深刻度で分かれる**（`src/lib/log.ts` の `logEvent` が `level === 'warn'`
+ * なら `console.warn`、それ以外は `console.error`）。配備先のログ基盤が `console` の
+ * メソッドで深刻度を付けるためで、**行の形は変わらない**（1 行 1 JSON）。
+ *
+ * テスト側が「この出来事はどちらのメソッドか」を知る必要は無い（深刻度の正本は `LOG_EVENTS`
+ * なので、知る形にすると語彙の `level` を変えた瞬間にテストが無言で何も見なくなる）。
+ * だから両方を捕まえて、**出た順**に 1 本の履歴として返す。
+ * @returns `calls()` で履歴を読み、`restore()` で元へ戻す
+ */
+export function captureLogOutlet(): {
+  calls: () => readonly (readonly unknown[])[];
+  restore: () => void;
+} {
+  // 出た順を保つために 1 本の配列へ集める
+  const collected: unknown[][] = [];
+  // `warn` と `error` の両方を同じ配列へ向ける
+  const spies = (['warn', 'error'] as const).map((method) =>
+    vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+      collected.push(args);
+    }),
+  );
+  // 読み口と後始末を返す
+  return {
+    calls: () => collected,
+    restore: () => {
+      for (const spy of spies) spy.mockRestore();
+    },
+  };
 }

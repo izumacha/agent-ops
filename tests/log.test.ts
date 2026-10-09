@@ -5,10 +5,10 @@
 // （守備範囲を移した先が無検証だと、検出網の中心が空洞になる。このリポジトリが
 // `assertApiVersionSupported` で踏んだのと同じ形）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LOG_EVENTS, formatLogLine, logEvent } from '@/lib/log';
+import { LOG_EVENTS, formatLogLine, logEvent, type LogEventName } from '@/lib/log';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { describeError } from '@/lib/describe-error';
-import { parseLoggedLine } from './lib/log-lines';
+import { loggedEvents, parseLoggedLine } from './lib/log-lines';
 
 // console へ出た行を集める
 let lines: string[] = [];
@@ -146,6 +146,33 @@ describe('整形が失敗しても投げない', () => {
       expect(line.event).toBe(event);
     },
   );
+
+  it('`console` のメソッドは深刻度で選ぶ（語彙の level から導いて両方向を見る）', () => {
+    // **語彙から代表を 1 つずつ採る** — 綴りを決め打つと、その出来事の `level` を変えた
+    // 瞬間にこの検査が片側しか見なくなる（正本は `LOG_EVENTS`）
+    const names = Object.keys(LOG_EVENTS) as LogEventName[];
+    const warnEvent = names.find((name) => LOG_EVENTS[name].level === 'warn');
+    const errorEvent = names.find((name) => LOG_EVENTS[name].level === 'error');
+    // 両方の深刻度が語彙に実在すること（片方しか無いと検査が半分になる＝fail-closed）
+    expect(warnEvent, '語彙に warn の出来事が無い').toBeDefined();
+    expect(errorEvent, '語彙に error の出来事が無い').toBeDefined();
+    // 2 つのメソッドを別々に捕まえる
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // warn の出来事は `console.warn` だけに出る
+      logEvent(warnEvent as LogEventName);
+      expect(loggedEvents(warnSpy.mock.calls)).toEqual([warnEvent]);
+      expect(errorSpy.mock.calls).toHaveLength(0);
+      // error の出来事は `console.error` だけに出る
+      logEvent(errorEvent as LogEventName);
+      expect(loggedEvents(errorSpy.mock.calls)).toEqual([errorEvent]);
+      expect(warnSpy.mock.calls).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
 
   it('Object.prototype のキーでも、ログとメトリクスの深刻度がそろう', () => {
     // ログを端末へ出さない

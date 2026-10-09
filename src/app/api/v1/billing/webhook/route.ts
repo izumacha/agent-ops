@@ -48,8 +48,9 @@ const MILLIS_PER_SECOND = 1_000;
 
 /** POST /billing/webhook (receiveBillingWebhook) */
 // **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**（`route()` を通る
-// 経路と同じ 1 本）。未認証で誰でも叩ける経路なので、署名の不一致（401）が増えたことは
-// この系列でしか分からない（鍵の設定ミスや総当たりが無言にならないようにする）
+// 経路と同じ 1 本）。ただし**署名の不一致が増えたことを読むのは応答の系列ではなくログ**
+// （`billing.signature_rejected`）— 系列には経路を示すラベルが無いので他の 401 と区別できず、
+// サーバーレスでは引きに行く収集そのものが成り立たない（`docs/deploy.md`）
 export const POST = withResponseCount(respond);
 
 // 署名を確かめてプランへ反映する（**例外はそのまま投げる**。応答へ写すのも `no-store` を
@@ -74,6 +75,14 @@ async function respond(request: Request): Promise<Response> {
     Math.floor(Date.now() / MILLIS_PER_SECOND),
   );
   if (verified !== 'ok') {
+    // **1 行残す。** `ApiError` は `withResponseCount` の中でログを通らない（応答へ写すだけ）ので、
+    // ここで出さないと**どの出口にも現れない** — 応答の系列には 401 が出るが、経路を示す
+    // ラベルが無いので期限切れユーザートークンの 401 と区別できず、サーバーレスでは引きに行く
+    // 収集そのものが成り立たない（`docs/deploy.md`）。共有シークレットのローテーションを
+    // し損ねて全配信が 401 になった状態を無言にしないため。**理由（`verified` の値）は出さない**
+    // — 形・時刻・一致のどれで落ちたかは総当たりの手がかりになる。
+    // **1 プロセスに 1 度にしない**（率そのものが信号。`src/app/login/actions.ts` と同じ理由）
+    logEvent('billing.signature_rejected');
     throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.billingSignatureInvalid);
   }
   // 署名が合ってから解釈・検証する（400 → 422）

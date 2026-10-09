@@ -130,6 +130,31 @@ describe('メトリクスのカウンタ', () => {
     expect(valueOf(renderMetrics(new Date()), 'agentops_metrics_series_dropped_total')).toBe(0);
   });
 
+  it.each([
+    ['引用符を含む名前', 'q"uote'],
+    ['区切りの NUL を含む名前', 'a\u0000b'],
+    ['数字で始まる名前', '1st'],
+    ['ハイフンを含む名前', 'a-b'],
+    ['空の名前', ''],
+  ])('%s は出さずに捨てた系列として数える（出力を構文違反にしない）', (_label, name) => {
+    // 出せない形のラベル名で数える
+    incrementCounter('agentops_log_events_total', { [name]: 'v', level: 'error' });
+    const text = renderMetrics(new Date());
+    // その系列は 1 行も出ない（`agentops_log_events_total` の標本が無い）
+    expect(text).not.toContain('agentops_log_events_total{');
+    // 捨てたことは観測できる（黙って落とさない）
+    expect(valueOf(text, 'agentops_metrics_series_dropped_total')).toBe(1);
+  });
+
+  it('出せる形のラベル名（下線始まり・数字入り）はそのまま出す（境界）', () => {
+    // 仕様の文字集合に収まる名前
+    incrementCounter('agentops_log_events_total', { _a1: 'v', level: 'error' });
+    // 出力に現れる（名前の検査が広すぎて正しい名前を落としていないこと）
+    expect(renderMetrics(new Date())).toContain(
+      'agentops_log_events_total{_a1="v",level="error"} 1',
+    );
+  });
+
   it('ラベル値が文字列でなくても投げず、捨てた系列として数える', () => {
     // 型の外から数値のラベル値を渡す（JS からの呼び出し・将来のラベル追加がこの形）
     expect(() =>

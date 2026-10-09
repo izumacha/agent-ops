@@ -41,7 +41,7 @@ export async function login(_previous: LoginState, formData: FormData): Promise<
   const principal = await resolveSessionPrincipal(token, repos);
   // 通らなければ理由を区別せず同じ文言を返す。**サーバログには 1 行残す** —
   // Server Action の応答は `agentops_http_responses_total` に乗らないので
-  // （`src/lib/metrics.ts` の `UNCOUNTED_RESPONSE_SOURCES`）、ログが唯一の出口になる。
+  // （`src/lib/uncounted-response-sources.ts`）、ログが唯一の出口になる。
   // 残さないと、貼り付けトークンへの総当たりがどの出口にも現れない。
   //
   // **1 プロセスに 1 度ではなく毎回出す。** `src/proxy.ts` の `entry.undecodable_path` と

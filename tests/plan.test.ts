@@ -5,7 +5,7 @@
 //   2. fail-closed（未知のプラン・未知の機能は最も厳しい側へ倒れる）
 //   3. **`FALLBACK_PLAN` が本当に最も厳しいか** — 倒れ先が最も厳しくないと、未知の値が来たときに
 //      上限が緩む側へ倒れる（fail-closed の向きが逆になる）。プランを足したときに気付く唯一の経路
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   FALLBACK_PLAN,
   GUARDRAIL_RULE_ROWS_FACTOR,
@@ -17,6 +17,7 @@ import {
   type PlanFeature,
 } from '@/domain/plan';
 import { Plan } from '@/domain/types';
+import { captureLogOutlet } from './lib/log-lines';
 
 // enum の全プラン（正準は src/domain/types.ts）
 const ALL_PLANS = Object.values(Plan);
@@ -76,24 +77,25 @@ describe('上限の引き方', () => {
   });
 
   it('未知のプランは最も厳しいプランの上限へ倒れ、ログに残る', () => {
-    // ログを捕まえる（黙って倒れると運用者が気付けないので、1 行出ることまで見る）
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // ログを捕まえる（黙って倒れると運用者が気付けないので、1 行出ることまで見る）。
+    // **出口のメソッドは深刻度で決まる**ので両方を捕まえる（正本は `LOG_EVENTS`）
+    const outlet = captureLogOutlet();
     // DB の enum 外の値が来た状況を作る（型は Plan だが実行時は任意の文字列になりうる）
     const limits = planLimitsFor('platinum' as Plan);
     // 倒れ先の上限が返る
     expect(limits).toBe(PLAN_LIMITS[FALLBACK_PLAN]);
     // ログが 1 行出ている
-    expect(logged).toHaveBeenCalledTimes(1);
+    expect(outlet.calls()).toHaveLength(1);
     // 後片付け
-    logged.mockRestore();
+    outlet.restore();
   });
 
   it('プロトタイプ由来の名前でも倒れる（素の添字にしていないこと）', () => {
     // `constructor` は Object.prototype 経由で引けてしまう名前。素の添字だと関数が返り、
     // 上限の比較が TypeError になる（`canPerform` が同じ理由で Object.hasOwn を使っている）
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const outlet = captureLogOutlet();
     expect(planLimitsFor('constructor' as Plan)).toBe(PLAN_LIMITS[FALLBACK_PLAN]);
-    logged.mockRestore();
+    outlet.restore();
   });
 });
 

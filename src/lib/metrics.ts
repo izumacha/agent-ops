@@ -146,6 +146,30 @@ function withoutKeySeparator(value: string): string {
   return value.replaceAll(KEY_SEPARATOR, '\uFFFD');
 }
 
+// Prometheus のラベル名として許される形（テキスト形式の仕様。`[a-zA-Z_][a-zA-Z0-9_]*`）
+const LABEL_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+/**
+ * ラベル「名」が Prometheus のラベル名として出せる形か。
+ *
+ * **値の側だけ無害化していたのが非対称だった。** `withoutKeySeparator` は値から区切りを除き、
+ * `escapeLabelValue` は値の `\` / `"` / 改行を逃がすが、**名前はどちらも通っていなかった**
+ * （実測: 名前に `"` を入れると `…{level="error",q"uote="v"} 1` という構文違反の行が出て、
+ * Prometheus はその系列ではなく**そのターゲットのスクレイプ全体を捨てる**。名前に区切りの
+ * NUL を入れると断片が増え、`=` を持たない断片から**架空のラベルが捏造された**）。
+ *
+ * **名前は「逃がす」ことができない**（仕様が文字集合を決めているので、エスケープという概念が
+ * 無い）。だから値と違って置換はせず、**形が違えばその計数ごと捨てて「捨てた系列」として
+ * 数える**（§9 fail-closed。黙って名前を潰すと、別の名前が同じ系列へ合流しうる）。
+ * いまの呼び出し側はどれも閉じた語彙の名前を渡すので、ここに掛かるのは呼び出し側の不具合。
+ * @param name ラベル名
+ * @returns 出せる形なら true
+ */
+function isRenderableLabelName(name: string): boolean {
+  // 仕様の文字集合に一致するかだけを見る
+  return LABEL_NAME_PATTERN.test(name);
+}
+
 /**
  * カウンタを 1 つ増やす。
  *
@@ -175,6 +199,12 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
     return;
   }
   try {
+    // **ラベル名の形を先に確かめる** — 出せない名前が 1 つでもあれば出力が構文違反になり、
+    // スクレイプ全体が捨てられる。捨てた系列として数え、その計数は行わない（fail-closed）
+    if (!Object.keys(labels).every(isRenderableLabelName)) {
+      droppedSeries += 1;
+      return;
+    }
     // 系列のキーを作る（ここだけが呼び出し側の値に触るので、失敗しうるのもここ）
     const key = seriesKey(name, labels);
     // 既に数えている系列なら、上限に関係なく増やせる
@@ -198,60 +228,9 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
   }
 }
 
-/**
- * `agentops_http_responses_total` が**数えない**応答の種類（既知の非可視）。
- *
- * 数えるのは `src/app/**` の `route.ts` が export する関数の応答だけで、そこは
- * `withResponseCount` を通ること（`tests/route-wrapping.test.ts` が印から全数を要求）で
- * 漏れが出ない。**それ以外にも応答を返す経路がある**（下の鍵がその一覧で、ここが正本）。
- *
- * 以前は入口の 404 だけを「数えられない経路が 1 つある」と書いており、画面の描画と
- * Server Action が**1 件も数えられていないのに言及されていなかった** — 運用者が
- * 「他の HTTP 通信はすべてこの系列に乗る」と読め、ダッシュボードのログイン総当たりや
- * 描画中の 500 を警報の条件に書いても一度も発火しない（**件数は書かない** — 画面を 1 枚
- * 足すたびに数字だけが古くなる。実在することは下の検査が導出で確かめる）。
- *
- * **鍵はそのまま文書の目印。** `docs/deploy.md` と `docs/adr/0014-observability.md` が
- * `<!--uncounted:<鍵>-->` を持つことを `tests/docs-gate.test.ts` がこの表から導いて要求する
- * （散文だけに置くと、種類が増えたとき文書の側だけが古くなる。この穴がまさにそれだった）。
- * 種類が増えていないことは `tests/route-wrapping.test.ts` が `src/app` 配下の分類から確かめる。
- */
-export const UNCOUNTED_RESPONSE_SOURCES = {
-  // 入口（`src/proxy.ts`）が percent-decode できないパスへ返す 404。**数えようとしても
-  // 見えない** — 入口は Route Handler とは別のモジュール実体で評価されるため（本番ビルドで
-  // 実測: health の 200 は `/metrics` に現れるのに、入口の 404 は 2 件とも現れなかった）。
-  // 数えたように見えて見えない形は作らず、ログだけで非可視を解いてある
-  // （`entry.undecodable_path`。1 プロセスに 1 度だけ。**その行の数も同じ理由で
-  // `agentops_log_events_total` には現れない**）
-  entryProxy: '入口 (src/proxy.ts) の短絡（別モジュール実体なので数えようとしても見えない）',
-  // 画面の描画（`src/app` 配下の `.tsx`）。Next.js は描画の応答を Route Handler として
-  // 扱わないので、包む場所がそもそも無い（`error.tsx` の 500 も同じ）
-  pageRender: '画面の描画 (src/app 配下の .tsx)。包める入口が無い',
-  // Server Action（`'use server'` のモジュール）。POST で届くが Route Handler ではないので
-  // 同じく包めない。**ログイン失敗はログに出す**（`session.login_rejected` /
-  // `session.cross_origin_action`）ので、総当たりは警報の条件に書ける＝ただし条件は
-  // ログ側の `event` で、この系列ではない
-  serverAction: "Server Action ('use server' のモジュール)。包める入口が無い",
-  // **包む側が投げ直した Next.js の制御フローの例外から Next.js が組み立てる応答。**
-  // `redirect()` / `notFound()` / `forbidden()` / `unauthorized()` は Route Handler の中から
-  // でも投げられ、`withResponseCount` はそれを**応答へ写さず投げ直す**（写すと遷移も 404 も
-  // 起きず 500 の JSON になる）。応答を作るのは Next.js なので、こちらには数える場所が無い。
-  // いま投げている経路は 1 本も無いが、画面側の CSV を `currentSession()` から
-  // `requireSession()` へ寄せる 1 行の整理で生まれる（`response-count.ts` がその例を挙げている）
-  nextControlFlow: 'Route Handler から投げた Next.js の制御フローの例外（応答は Next.js が作る）',
-  // **Next.js がルートの代わりに組み立てる応答**（実測）。export の無いメソッドへの 405 と、
-  // 自動実装される `OPTIONS` の 204 がこれ。本番ビルドで `PUT /api/v1/health` → 405・
-  // `DELETE /api/v1/metrics` → 405・`OPTIONS /api/v1/metrics` → 204 を叩いてから `/metrics` を
-  // 読むと、3 件とも系列に 1 つも現れなかった（`auto-implement-methods` が応答を作るので
-  // ラッパーを通らない。同じ理由で `no-store` も `Vary` も付かない — ただし 405 は本文が無く、
-  // `OPTIONS` は `allow` だけなので、テナント固有の内容は漏れない）。
-  // **メソッド総当たりの 405 の急増は、この系列では見えない**（前段のアクセスログで見る）
-  frameworkSynthesized:
-    'Next.js がルートの代わりに組み立てる応答（export の無いメソッドの 405・自動実装の OPTIONS）',
-} as const;
-
-/** 数えない応答の種類の名前（上の表の鍵） */
-export type UncountedResponseSource = keyof typeof UNCOUNTED_RESPONSE_SOURCES;
+// 数えない応答の種類（既知の非可視）の一覧は **`src/lib/uncounted-response-sources.ts`** が正本。
+// **ここから import しない** — この表を読むのはテストと文書だけなのに、このモジュールは
+// 全 Route Handler・入口の proxy・seed へ入るので、同梱すると説明文がすべてのバンドルへ載る。
 
 /**
  * 応答 1 件を数える。
@@ -373,7 +352,14 @@ export function renderMetrics(now: Date): string {
     for (const { labels, value } of series.sort((a, b) =>
       a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
     )) {
-      // `名前=値` を Prometheus の `名前="値"` へ直す（値に `=` が入っても最初の 1 つだけで割る）
+      // `名前=値` を Prometheus の `名前="値"` へ直す（値に `=` が入っても最初の 1 つだけで割る）。
+      // **断片が必ず `=` を 1 つ持つことは入口が保証している** — `incrementCounter` が
+      // ラベル名を仕様の文字集合（`=` も区切りも含まれない）に限り、値からは区切りを除くので、
+      // 区切りで割った断片は必ず結合時の `=` を持つ。以前は名前が素通しで、`=` を持たない
+      // 断片に `slice(0, -1)` / `slice(0)` が当たって**架空のラベルを捏造していた**（実測）。
+      // **ここに `at === -1` の門番は置かない** — 入口を直した今は到達せず、外しても全件緑に
+      // なる（実測）。どのテストにも守られない門番は「守られている」と誤解させるだけなので、
+      // 不変条件は入口の `isRenderableLabelName` が持ち、その検査が 5 件で固定されている
       const rendered = labels.map((pair) => {
         const at = pair.indexOf('=');
         return `${pair.slice(0, at)}="${escapeLabelValue(pair.slice(at + 1))}"`;

@@ -16,7 +16,7 @@ import {
 import { Role } from '@/domain/types';
 import { COUNTERS, GAUGES } from '@/lib/metrics';
 import { resetMetricsAuthForTesting } from '@/lib/api/metrics-auth';
-import { loggedEvents } from '../lib/log-lines';
+import { captureLogOutlet, loggedEvents } from '../lib/log-lines';
 import { METRICS_TOKEN, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 
 // 2 テナント × 3 役割を seed する（役割ごとの 401 を見るため）
@@ -107,6 +107,25 @@ describe('GET /metrics', () => {
     expect((await fetchMetrics(METRICS_TOKEN)).status).toBe(503);
     // 未認証でも同じ（設定済みかどうかを応答の違いから読ませない）
     expect((await fetchMetrics()).status).toBe(503);
+  });
+
+  // **401 を読むのは系列ではなくログ**（経路を示すラベルが無いので他の 401 と区別できず、
+  // サーバーレスでは引きに行く収集そのものが成り立たない＝`docs/deploy.md`）
+  it('トークンが合わなかったことをログに残す（収集側の設定ミスを無言にしない）', async () => {
+    // 出口を捕まえる（深刻度でメソッドが分かれるので両方）
+    const outlet = captureLogOutlet();
+    try {
+      // 違う値で 2 回叩く（どちらも 401）
+      expect((await fetchMetrics('x'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
+      expect((await fetchMetrics('y'.repeat(METRICS_TOKEN_MIN_LENGTH))).status).toBe(401);
+      // **毎回出す**（率そのものが信号なので 1 プロセスに 1 度にしない）
+      expect(loggedEvents(outlet.calls())).toEqual([
+        'metrics.token_rejected',
+        'metrics.token_rejected',
+      ]);
+    } finally {
+      outlet.restore();
+    }
   });
 
   it('METRICS_TOKEN が短すぎれば 503 で、警告は 1 度だけ出す', async () => {

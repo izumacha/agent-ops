@@ -148,6 +148,13 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 **警報は `event` の等値で組む**（文言は推敲で変わる）。語彙の一覧は
 `src/lib/log.ts` の `LOG_EVENTS` が正本で、`level` は `error` / `warn` の 2 値。
 `error` は「運用者が対処すべき」、`warn` は「縮退して続けた」の意味。
+
+**`console` のメソッドも深刻度に合わせる**（`warn` は `console.warn`、それ以外は
+`console.error`。どちらも `stderr` で、行の形は同じ）。配備側のログ基盤はメソッドで
+深刻度を付けるので、全部 `error` で出すと**利用者がログイン用トークンを 1 回打ち間違えた
+だけで ERROR のレコードが立ち**、プラットフォーム側のエラー率の警報が鳴る（行の中の
+`level` は `warn` なので、基盤の深刻度で見る運用者と文書どおり `level` で見る運用者で
+答えが割れる）。**基盤側で絞るときも、アプリ側の条件は `event` で書く。**
 上の例で `message` を伏せてあるのは**意図したもの**で、文言は正本の側で推敲してよい
 （ここに実際の文を写すと、推敲するたびにこの例だけが古くなる。`event` と `level` は
 警報の条件そのものなので写してある。この 2 つが語彙と一致することは
@@ -188,8 +195,13 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - 常駐のプロセス（1 台／固定台数のコンテナ）へ配備するなら、引きに行く形がそのまま成り立つ。
   - 押す形（スクレイプを待たずに送る）は入れていない。理由と代替案は ADR-0014 の宿題。
 - **数えるのは `route()` を通る経路だけではない。** 未認証の受信 Webhook・`GET /health`・
-  画面側の CSV・`/metrics` 自身も同じ系列に乗るので、`agentops_http_responses_total{status="401"}`
-  の増加で署名鍵の設定ミスやなりすましの総当たりが分かる。
+  画面側の CSV・`/metrics` 自身も同じ系列に乗る（**この系列が「どの経路の応答か」は分からない** —
+  ラベルは method と status だけなので、受信 Webhook の 401 と期限切れユーザートークンの 401 は
+  見分けが付かない）。
+  - **だから「署名鍵の設定ミス」「収集側の設定ミス」はログの `event` で見る**:
+    `billing.signature_rejected` / `metrics.token_rejected`（どちらも毎回 1 行出る。
+    率そのものが信号なので間引いていない）。`{status="401"}` の増加は「何かが 401 を
+    積んでいる」までしか言わない。
 - **ただし `agentops_http_responses_total` は「アプリが返す HTTP 応答のすべて」ではない。**
   乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が別にある**
   （正本は `src/lib/metrics.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから

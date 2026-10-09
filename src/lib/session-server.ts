@@ -34,8 +34,8 @@ export interface DashboardSession {
  * 無いときの扱い）が Server Action ごとに割れる。
  *
  * **断ったことはここで 1 行残す。** Server Action の応答は
- * `agentops_http_responses_total` に乗らない（`src/lib/metrics.ts` の
- * `UNCOUNTED_RESPONSE_SOURCES`）ので、ログが唯一の出口になる。**判定の呼び出し側ではなく
+ * `agentops_http_responses_total` に乗らない
+ * （`src/lib/uncounted-response-sources.ts`）ので、ログが唯一の出口になる。**判定の呼び出し側ではなく
  * ここで出す** — 画面ごとに書くと、Server Action を足した人が出し忘れたぶんだけ黙る。
  *
  * **毎回出す**（1 プロセスに 1 度にしない）。設定の通知と違い、率そのものが信号なので

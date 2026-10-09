@@ -66,7 +66,17 @@ export const LOG_EVENTS = {
   // --- 健康確認 ---
   'health.db_unreachable': { level: 'error', message: 'DB 到達性チェックに失敗' },
   // --- 画面のセッション（Server Action。**応答は数えられないのでログが唯一の出口**。
-  // 理由は src/lib/metrics.ts の UNCOUNTED_RESPONSE_SOURCES） ---
+  // 理由は src/lib/uncounted-response-sources.ts） ---
+  'billing.signature_rejected': {
+    level: 'warn',
+    message:
+      '課金の受信 Webhook の署名を受け付けませんでした (形・時刻・一致のどれでも同じ扱い)。続く増加は共有シークレットの設定ミス、またはなりすましの可能性があります。',
+  },
+  'metrics.token_rejected': {
+    level: 'warn',
+    message:
+      '監視の読み取りトークンが一致しませんでした。続く増加は収集エージェントの設定ミス、または総当たりの可能性があります。',
+  },
   'session.login_rejected': {
     level: 'warn',
     message:
@@ -314,8 +324,7 @@ export function formatLogLine(
  *
  * **だから `event` の警報はログの行で組む。** メトリクスの系列を条件にすると、(b) や (c) の
  * 出来事では一度も発火しない（`docs/deploy.md` の「監視を繋ぐ」にも同じことを書いてある）。
- * 応答の側で数えない種類の一覧は `src/lib/metrics.ts` の
- * `UNCOUNTED_RESPONSE_SOURCES` が正本。
+ * 応答の側で数えない種類の一覧は `src/lib/uncounted-response-sources.ts` が正本。
  * @param event 出来事の名前
  * @param described `describeError()` が作った診断（省略可）
  */
@@ -330,11 +339,19 @@ export function logEvent(event: LogEventName, described?: Record<string, unknown
   // ※ 正確には `Object.prototype` のキー（`constructor` / `valueOf` 等）では TypeError にも
   // ならず、深刻度も文言も無い行が出ていた。だから引きは `lookupLogEvent`（`Object.hasOwn`）に
   // 寄せてある。
+  // 深刻度を 1 度だけ決める（**ラベルと出口の両方が同じ値を読む**。別に引くと、片方だけを
+  // 差し替える変異が通る＝実測で `tests/log.test.ts` の一致の検査がそれを固定している）
+  const level = spec?.level ?? FALLBACK_LOG_LEVEL;
   // 深刻度をラベルに使う（語彙が閉じているので系列は増えない。引けなければ最も重い側へ倒す）
-  incrementCounter('agentops_log_events_total', {
-    event,
-    level: spec?.level ?? FALLBACK_LOG_LEVEL,
-  });
-  // 1 行の JSON を stderr へ出す。**`console` を呼ぶのは src 全体でこの 1 行だけ**
-  console.error(formatLogLine(event, described));
+  incrementCounter('agentops_log_events_total', { event, level });
+  // 1 行の JSON を出す。**`console` を呼ぶのは src 全体でこの 2 行だけ**（どちらも stderr）。
+  //
+  // **深刻度で `console` のメソッドを選ぶ。** 行の JSON には `level` が入っているが、
+  // **配備先のログ基盤は `console` のメソッドで深刻度を付ける**（Vercel の runtime logs が
+  // そう）。全部 `console.error` で出していた頃は、利用者がダッシュボードのトークンを 1 回
+  // 打ち間違えただけで ERROR のレコードが立ち、プラットフォーム側のエラー率の警報が鳴った
+  // — 「文書どおり `level` で見ている運用者」と「基盤の深刻度で見ている運用者」で答えが
+  // 割れる。**1 行 1 JSON という形は変えない**（環境で分けないという決定はそのまま）。
+  if (level === 'warn') console.warn(formatLogLine(event, described));
+  else console.error(formatLogLine(event, described));
 }

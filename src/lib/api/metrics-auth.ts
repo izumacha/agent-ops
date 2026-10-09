@@ -66,7 +66,16 @@ export function assertMetricsToken(request: Request): void {
   // Authorization ヘッダから Bearer トークンを取り出す（無ければ 401。auth.ts と同じ関数＝綴りが割れない）
   const token = extractBearerToken(request);
   // 定数時間で比べる（一致しなければ 401。理由は区別しない）
-  if (!secretsEqual(token, configured)) throw invalidTokenError();
+  if (!secretsEqual(token, configured)) {
+    // **1 行残す。** ApiError は `withResponseCount` の中でログを通らない（応答へ写すだけ）ので、
+    // ここで出さないと**どの出口にも現れない**（応答の系列には出るが、経路を示すラベルが無いので
+    // 期限切れトークンの 401 と区別できず、サーバーレスでは引きに行く収集そのものが
+    // 成り立たない＝`docs/deploy.md`）。収集エージェントの設定ミスは無言にしない。
+    // **1 プロセスに 1 度にしない** — 率そのものが信号（`src/app/login/actions.ts` と同じ理由）。
+    // 量は前段で抑える（この経路のレート制限は前段の責務）
+    logEvent('metrics.token_rejected');
+    throw invalidTokenError();
+  }
 }
 
 /**

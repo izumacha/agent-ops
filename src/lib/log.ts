@@ -233,6 +233,13 @@ export const LOG_EVENTS = {
     level: 'error',
     message: 'NOTIFY_MAIL_WEBHOOK_URL の受け手へ通知が届きませんでした',
   },
+  // --- レート制限（ADR-0015） ---
+  'rate_limit.store_unavailable': {
+    // **`error`**: 枠を数えられないので全要求が 500 になる（運用者が今すぐ知るべき状態）
+    level: 'error',
+    message:
+      'レート制限の記録を読み書きできないため、要求を通していません (枠を数えられないまま通すと制限が丸ごと無効になります)',
+  },
   // --- プラン（Step6） ---
   'plan.unknown_plan': {
     level: 'warn',

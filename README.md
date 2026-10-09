@@ -320,7 +320,7 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 | `docs/` | 文書一式。**どの文書が何を持っているかは [`docs/index.md`](./docs/index.md) が唯一のカタログ**（初見なら [`docs/overview.md`](./docs/overview.md)、正本は `spec.md` と `roadmap.md`）。ここに一覧を写さないのは、写した側が黙って古くなるため（載せ忘れは `tests/docs-gate.test.ts` が `git ls-files` と突き合わせて落とす） |
 | `vercel.json` | Vercel のビルドの結線（生成物をコミットしないのでビルド前に `gen` / `db:generate` を流す） |
 | `openapi/openapi.yaml` | REST API 定義（OpenAPI 3.1、契約の正本） |
-| `prisma/schema.prisma` | DB スキーマ（テナントに属する資源は `tenantId` を持つ。**例外は 2 つ**で、正本は [`docs/spec.md`](./docs/spec.md) §3） |
+| `prisma/schema.prisma` | DB スキーマ（テナントに属する資源は `tenantId` を持つ。**例外は 3 つ**で、正本は [`docs/spec.md`](./docs/spec.md) §3） |
 | `src/domain/` | フレームワーク非依存の純粋ロジック（RBAC 許可表・金額） |
 | `src/data/` | Ports & Adapters（`ports/` 契約、`adapters/prisma/` 本番、`adapters/memory/` テスト） |
 | `src/lib/` | 横断インフラ（Prisma 結線・定数・トークン・API 基盤 `api/`・Zod スキーマ `validations/`） |
@@ -340,9 +340,11 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
 - **上流の使いすぎは Step4 で絞ったが、ベンダー側の上限は別に要る**（ADR-0007「残る宿題」→
   [ADR-0010](./docs/adr/0010-guardrails-and-audit-chain.md)）。上流へ費用を発生させる経路（中継・評価の
   実行）にはレート制限が掛かり、`Agent.budgetMicroUsd` を設定すれば当月の累計超過で中継を断る。
-  枠の値は契約プランごとだが、**レート制限はインプロセスの Map のままなので、水平スケールすると
-  インスタンス数ぶん上限が緩む**（共有ストアは [ADR-0012](./docs/adr/0012-plans-and-billing.md) の宿題。
-  単一インスタンス前提で運用する）。**公開前に、ベンダー側の月次利用上限（spend limit）は必ず設定すること。**
+  枠の値は契約プランごとで、**記録は DB の共有ストア**なので水平スケールしても枠は配備全体で 1 つ
+  （[ADR-0015](./docs/adr/0015-shared-rate-limit-store.md)。同じキーの「数える文」は助言ロックで
+  直列化するので、同時に届いた要求でも上限を超えない）。**公開前に、ベンダー側の月次利用上限
+  （spend limit）は必ず設定すること**（アプリ側の枠は毎分の回数しか見ないので、単価の高い
+  モデルへの切り替えや長い本文による費用の増加は止められない）。
 - **前段にリバースプロキシを置く前提**（ADR-0005「残る宿題」）。未対応メソッド（`TRACE` 等）の遮断、
   本文サイズとタイムアウトの上限、`/api/v1/health` と **`/api/v1/metrics`** を内部からだけ見せることは
   前段の責務にしてある。**認証経路と `POST /billing/webhook`、`GET /api/v1/metrics` のレート制限は

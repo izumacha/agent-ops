@@ -18,7 +18,7 @@ Step6 でマルチテナント・課金を入れるが、テナント分離を�
 **1. 行スコープ**を採る。
 
 - テナントに属する資源が `tenantId String` を持ち、`@@index([tenantId, ...])` を張る（`prisma/schema.prisma`）。
-- **例外は 2 つで、現在の一覧は `docs/spec.md` §3 が正本**（導出との一致は `tests/docs-gate.test.ts` が `prisma/schema.prisma` から見る）: (1) 親経由でしか到達しない子テーブル（`EvaluationCase`）は列を持たないので、親を `tenantId` で絞ってから辿る。(2) 受信した課金イベント（`BillingEvent`、Step6/ADR-0012 で追加）の `tenantId` は **nullable** — 顧客 ID からテナントを引けなかったときは `null` のまま残す（受け取った事実を捨てないため）。**後者は型が通るので、`where: { tenantId }` を差し込んでも引けなかった行が黙って落ちる。集計で非 null を前提にしない。**
+- **例外は 3 つで、現在の一覧は `docs/spec.md` §3 が正本**（導出との一致は `tests/docs-gate.test.ts` が `prisma/schema.prisma` から見る）: (1) 親経由でしか到達しない子テーブル（`EvaluationCase`）は列を持たないので、親を `tenantId` で絞ってから辿る。(2) 受信した課金イベント（`BillingEvent`、Step6/ADR-0012 で追加）の `tenantId` は **nullable** — 顧客 ID からテナントを引けなかったときは `null` のまま残す（受け取った事実を捨てないため）。**これは型が通るので、`where: { tenantId }` を差し込んでも引けなかった行が黙って落ちる。集計で非 null を前提にしない。** (3) レート制限の記録（`RateLimitHit`、ADR-0015 で追加）は**テナントに属さない枠（プラットフォーム管理者トークンの `platform`）も数える**ので列ごと持たない — 数える単位は `key` が持ち、テナントの枠は `tenant:<id>` という綴りで表す。**業務データではない**ので、テナント解約時に消す必要も無い（窓から外れた行は掃かれる）。
 - Server Action / Route Handler は冒頭で認証情報から `tenantId` を取り出し、`where` に必ず差し込む。
 - 他テナントの資源は「存在しない」扱いで 404 を返す（403 だと存在が漏れる）。
 - Step6 でテナント越境アクセステスト（全パターンで拒否）と、本番 Prisma アダプタの契約テスト（別 DB）を CI に入れる。

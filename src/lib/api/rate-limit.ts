@@ -3,11 +3,13 @@
 //
 // **数えるキーは認証済みの資格情報の id にする。** IP ベースにしないのが要点で、送信元 IP は
 // `X-Forwarded-For` 由来なので偽装でき、per-IP の枠は使い捨てのヘッダで迂回できる。
-// API キーの id は認証を通ったあとに決まる値なので偽装できない。
+// テナントの id は認証を通ったあとに決まる値なので偽装できない。
 //
-// **インプロセスの Map なので、プロセスをまたいだ合計にはならない。** 水平スケールすると
-// 「プロセス数 × 上限」まで通る。共有ストア（Redis 等）へ移すのは Step6 の課題として
-// ADR-0010 に記録する。それでも「無制限」ではなくなるので、置かないより明確に良い。
+// **このモジュールが持つのは「方針」だけ**（ADR-0015）。窓の中の件数を数えて 1 行足すのは
+// data 層（`repos.rateLimit`）で、記録は**配備全体で 1 つの DB** に置く。以前はこのファイルが
+// インプロセスの `Map` を持っていたので、同じテナントの要求が別のインスタンスへ振られると
+// 枠が別々に数えられ、水平スケールすると「インスタンス数 × 上限」まで通った（ADR-0010 の宿題）。
+// 費用を払う単位はテナントなので、枠も配備全体で 1 つでなければ意味を持たない。
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
 import {
@@ -19,32 +21,13 @@ import {
   RATE_LIMIT_WINDOW_MS,
 } from '@/lib/constants';
 import { FALLBACK_PLAN, planLimitsFor } from '@/domain/plan';
+import { describeError } from '@/lib/describe-error';
+import { logEventThrottled } from '@/lib/log';
+import type { RateLimitConsumeResult, Repositories } from '@/data/ports';
 import type { Principal } from './auth';
 
-/** 1 回の判定の結果 */
-export interface RateLimitDecision {
-  // 通してよいか
-  allowed: boolean;
-  // 次に試してよいまでの秒数（`allowed` が false のときだけ意味を持つ）
-  retryAfterSeconds: number;
-}
-
 /**
- * 制限器の設定。
- *
- * **上限は持たない（Step6）。** 窓の中で許す回数は契約プランごとに違うので、`check` / `inspect`
- * の引数で 1 回ごとに渡す。制限器が覚えるのは「キーごとの呼び出し時刻」だけで、上限は判定の
- * 時点の方針として外から与える形にしてある — 制限器を上限ごとに分けると、プランを変えた
- * テナントの記録が別の制限器へ移って**窓の途中で数え直し**になる（上げた直後は得をし、
- * 下げた直後は上限を超えて通る）。
- */
-export interface RateLimiterOptions {
-  // 窓の長さ（ミリ秒）
-  windowMs: number;
-}
-
-/**
- * テスト専用の上限の上書き（`resetSharedRateLimiterForTesting` が受け取る形）。
+ * テスト専用の上限の上書き（`setRateLimitOverridesForTesting` が受け取る形）。
  *
  * 本番の上限はプラン（と環境変数）から決まるが、テストは「上限を超える」挙動を数回の呼び出しで
  * 確かめたい（既定の毎分 600 回を実際に叩くのは遅い）。**本番では設定できない**ので、
@@ -59,149 +42,9 @@ export interface RateLimitOverrideForTesting {
 
 // 1 秒のミリ秒数（`Retry-After` を秒へ直すのに使う）
 const MILLIS_PER_SECOND = 1_000;
-// 掃除を走らせる間隔を窓の長さから導く割り算の分母。
-// **「表が満杯のとき」を条件にしてはいけない** — 山を越えて件数が減った時点で掃除が二度と
-// 走らず、期限切れの記録をプロセスが生きているあいだ抱え続ける（回収したいのはまさにその状態）。
-// **「1 窓に 1 回」でもいけない** — 窓の早い時点（まだ何も期限切れでない時点）で使い切ると、
-// その後に期限切れになっても次の窓まで回収されない。間隔で絞れば遅れは常に 1 間隔以内
-const SWEEP_INTERVALS_PER_WINDOW = 60;
-
-/**
- * 送信元ごとのスライディングウィンドウ制限器。
- *
- * **時刻を引数で受け取る純粋な形**に保つ（`Date.now()` を内部で読まない）ので、境界値を
- * ユニットテストで決定的に固定できる（§11）。
- */
-export class SlidingWindowRateLimiter {
-  // 窓の長さ（ミリ秒）
-  private readonly windowMs: number;
-  // 掃除を走らせる間隔（ミリ秒）
-  private readonly sweepIntervalMs: number;
-  // キーごとの「窓の中の呼び出し時刻」
-  private readonly hits = new Map<string, number[]>();
-  // 最後に掃除した時刻（まだ掃除していないことを表すため null から始める）
-  private lastSweptAt: number | null = null;
-  // 掃除を走らせた回数。**判定の結果には現れない**ので、観測できるように公開する
-  // （間隔で絞れていることをテストで確かめるため。リクエスト数に比例して走ると
-  //  使い捨てキーで表を膨らませたうえで全リクエストに走査の費用を負わせられる）
-  private sweeps = 0;
-
-  // 窓の長さを受け取る。**正の整数でなければ落とす**
-  constructor(options: RateLimiterOptions) {
-    // 窓が 0 以下だと記録が常に空になり、レート制限が丸ごと無効になる（fail-closed で落とす）
-    if (!Number.isInteger(options.windowMs) || options.windowMs <= 0) {
-      throw new RangeError('レート制限の窓の長さは正の整数でなければなりません');
-    }
-    // 設定を覚える
-    this.windowMs = options.windowMs;
-    // 掃除の間隔は窓の長さから導く（数値を 2 か所に書かない）
-    this.sweepIntervalMs = Math.max(1, Math.floor(options.windowMs / SWEEP_INTERVALS_PER_WINDOW));
-  }
-
-  /** 掃除を走らせた回数（テストが「リクエスト数に比例していない」ことを確かめる） */
-  get sweepCount(): number {
-    // 観測用の読み取り専用プロパティ
-    return this.sweeps;
-  }
-
-  /** いま覚えているキーの数（テストが回収されていることを確かめる） */
-  get trackedKeys(): number {
-    // 表の件数
-    return this.hits.size;
-  }
-
-  /**
-   * 1 回の呼び出しを数えて、通してよいかを返す。
-   *
-   * @param key 送信元を表すキー（認証済みの id。偽装できる値を渡さない）
-   * @param now 現在時刻（ミリ秒）。呼び出し側が渡すので、テストが時刻を決められる
-   * @param limit 窓の中で許す回数（プランごとに違うので呼び出しごとに渡す）
-   */
-  check(key: string, now: number, limit: number): RateLimitDecision {
-    // 数えながら判定する
-    return this.evaluate(key, now, limit, true);
-  }
-
-  /**
-   * 数えずに「いま通せるか」だけを返す。
-   *
-   * **2 つ以上の枠を同時に見る経路のために要る**（`enforceRateLimit`）。`check` を順に呼ぶと、
-   * 1 つ目が通って 2 つ目が断ったときに 1 つ目だけが呼び出しを数えてしまう。断った要求を
-   * 数えないのはこの制限器の約束（数えると断られ続けるあいだ窓が延びて永久に通れない）なので、
-   * 「全部の枠が通ると分かってから数える」ために覗き見だけの形を用意する。
-   */
-  inspect(key: string, now: number, limit: number): RateLimitDecision {
-    // 数えずに判定する
-    return this.evaluate(key, now, limit, false);
-  }
-
-  // 判定の本体。`record` が true のときだけ今回の呼び出しを覚える
-  private evaluate(key: string, now: number, limit: number, record: boolean): RateLimitDecision {
-    // **上限が壊れていたら落とす（fail-closed）** — 0 や NaN を通すと「上限に達することが無い」
-    // か「全部断る」のどちらかになり、前者は保護が黙って消える。渡す側のバグを隠さない
-    if (!Number.isInteger(limit) || limit <= 0) {
-      throw new RangeError('レート制限の上限は正の整数でなければなりません');
-    }
-    // まず期限切れの記録を間隔ごとに回収する（表が膨らみ続けないように）
-    this.sweepIfDue(now);
-    // 窓の開始時刻（これ以前の記録は数えない）
-    const windowStart = now - this.windowMs;
-    // そのキーの記録のうち窓の中に残っているもの
-    const recent = (this.hits.get(key) ?? []).filter((at) => at > windowStart);
-    // 上限に達していれば通さない
-    if (recent.length >= limit) {
-      // 窓から最も古い記録が外れるまでの時間（それより前に試しても必ず断られる）。
-      // **先頭ではなく最小値を取る** — 配列は push 順なので「昇順に並んでいる」は
-      // `now` が単調増加することに依存する。呼び出し側は `Date.now()` を渡すので NTP の
-      // 時刻合わせで巻き戻りうる。先頭を信じると、巻き戻った幅のぶん Retry-After を
-      // 長く返し、素直に従うクライアントが必要以上に待つ
-      const oldest = recent.reduce((min, at) => (at < min ? at : min), now);
-      // 秒へ切り上げる。**RFC 9110 の delay-seconds は整数**で、小数を送るとヘッダが
-      // 無いのと同じ扱いになる。0 秒は「すぐ試してよい」に見えるので最低 1 秒にする
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((oldest + this.windowMs - now) / MILLIS_PER_SECOND),
-      );
-      // 絞り込んだ記録を書き戻す（断った呼び出しは数えない — 断られ続けると窓が延びてしまう）
-      this.hits.set(key, recent);
-      // 断る
-      return { allowed: false, retryAfterSeconds };
-    }
-    // 通すので今回の時刻を足して覚える。**覗き見のときは表に触らない** —
-    // 空の配列でも書き戻すとキーが表に残り、覗き見だけで表を膨らませられる
-    // （断る側の書き戻しは既にあるキーの絞り込みなので、新しいキーは作らない）
-    if (record) {
-      recent.push(now);
-      this.hits.set(key, recent);
-    }
-    // 通す（`retryAfterSeconds` は使われない）
-    return { allowed: true, retryAfterSeconds: 0 };
-  }
-
-  // 期限切れの記録を回収する。**間隔が来ていなければ何もしない**
-  private sweepIfDue(now: number): void {
-    // 初回は必ず走らせず、最初の呼び出し時刻を基準にする（起動直後に全走査しない）
-    if (this.lastSweptAt === null) {
-      this.lastSweptAt = now;
-      return;
-    }
-    // 間隔が来ていなければ帰る
-    if (now - this.lastSweptAt < this.sweepIntervalMs) return;
-    // 基準を更新して回数を数える
-    this.lastSweptAt = now;
-    this.sweeps += 1;
-    // 窓の開始時刻
-    const windowStart = now - this.windowMs;
-    // すべてのキーを見て、窓の中に 1 件も残らないものは表から消す
-    for (const [key, times] of this.hits) {
-      // 窓の中に残る記録
-      const recent = times.filter((at) => at > windowStart);
-      // 1 件も残らなければキーごと消す（残れば絞り込んだ配列へ差し替える）
-      if (recent.length === 0) this.hits.delete(key);
-      else this.hits.set(key, recent);
-    }
-  }
-}
+// `Retry-After` の最小値（秒）。**0 を返さない** — delay-seconds は整数なので 0 は
+// 「いますぐ再試行」になり、同じ要求が即座に 429 で跳ね返る輪ができる
+const MIN_RETRY_AFTER_SECONDS = 1;
 
 /**
  * 認証済みの主体からレート制限のキーを作る。**偽装できる値（IP・ヘッダ）は使わない。**
@@ -270,16 +113,12 @@ export function rateLimitOverrideFromEnv(env: NodeJS.ProcessEnv = process.env): 
   return parsed;
 }
 
-// ── プロセス共有の制限器 ──────────────────────────────
-// **1 つのインスタンスをすべてのルートで共有する。** ルートごとに持つと、同じ API キーが
-// 別のルートを交互に叩くだけで合計が上限の 2 倍まで通る（枠は「送信元ごと」で、
-// 「送信元とルートの組ごと」ではない）
-let shared = new SlidingWindowRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS });
-
-// テスト専用: 共有の枠・追加の枠の上限の上書き（`null` なら本番と同じ決め方）。
+// ── テスト専用の上書き ──────────────────────────────
+// 共有の枠・追加の枠の上限と窓の長さの上書き（`null` なら本番と同じ決め方）。
 // **本番では設定できない** — 設定する関数が `NODE_ENV=production` で throw する
 let sharedLimitOverrideForTesting: number | null = null;
 let extraLimitOverrideForTesting: number | null = null;
+let windowMsOverrideForTesting: number | null = null;
 
 /**
  * そのルートに掛ける枠の種類。
@@ -316,36 +155,6 @@ const EXTRA_FRAME_LIMIT: Readonly<Record<RateLimitTier, number | null>> = {
   outbound: OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE,
   heavyRead: HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE,
 };
-
-// 種類ごとの追加の枠を作る（上の表から導くので、種類を足したら自動で増える）。
-// **上限は制限器が持たない**ので、作るのは「追加の枠を持つ種類ぶんの記録表」だけ
-function buildExtraFrames(windowMs: number): Map<RateLimitTier, SlidingWindowRateLimiter> {
-  // 表の各項目から制限器を 1 つずつ作る
-  return new Map(
-    Object.entries(EXTRA_FRAME_LIMIT).flatMap(([tier, limit]) =>
-      // 追加の枠を持たない種類は作らない
-      limit === null
-        ? []
-        : [[tier as RateLimitTier, new SlidingWindowRateLimiter({ windowMs })] as const],
-    ),
-  );
-}
-
-// **種類ごとに追加で消費する枠.** 共有の枠と置き換えるのではなく両方を消費する
-// （置き換えだと重い経路と中継を交互に叩くだけで合計が共有の上限を超える）
-let extraFrames = buildExtraFrames(RATE_LIMIT_WINDOW_MS);
-
-/** プロセス共有の制限器を返す（テストが表の状態を覗くのに使う） */
-export function sharedRateLimiter(): SlidingWindowRateLimiter {
-  // 共有インスタンス
-  return shared;
-}
-
-/** 種類ごとの追加の枠を返す（持たない種類なら undefined。テストが表の状態を覗くのに使う） */
-export function extraRateLimiter(tier: RateLimitTier): SlidingWindowRateLimiter | undefined {
-  // その種類のインスタンス
-  return extraFrames.get(tier);
-}
 
 /**
  * その主体が共有の枠で窓の中に出せる回数（Step6 でプラン別になった）。
@@ -386,61 +195,149 @@ export function extraRateLimitFor(tier: RateLimitTier): number | null {
 }
 
 /**
+ * 窓の長さ（ミリ秒）。テストの上書きがあればそれを使う。
+ * @returns 窓の長さ
+ */
+function rateLimitWindowMs(): number {
+  // 上書きが無ければ既定（毎分）
+  return windowMsOverrideForTesting ?? RATE_LIMIT_WINDOW_MS;
+}
+
+/**
+ * 断ったときの待ち時間（秒）を決める**純粋関数**。
+ *
+ * **上限に達している枠だけを見る。** その枠で最も古い記録が窓から外れた瞬間に 1 回ぶんの空きが
+ * できるので、`最も古い記録 + 窓の長さ - いま` が待つべき時間。両方の枠が埋まっていれば
+ * **長いほうを返す**（短いほうを返すと、その時刻に再試行しても必ず断られる）。
+ *
+ * **「最も古い記録」は記録側が最小値として返す**（配列の先頭ではない）。時刻は壁時計なので
+ * NTP の時刻合わせで巻き戻りうる — 先頭を信じると巻き戻った幅のぶん長く待たせる。
+ *
+ * @param result 記録側が返した件数と最古の時刻
+ * @param windowMs 窓の長さ（ミリ秒）
+ * @param now いまの時刻
+ * @param sharedLimit 共有の枠の上限
+ * @param extraLimit 追加の枠の上限（持たない種類は null）
+ * @returns 待つべき秒数（1 以上の整数）
+ */
+export function retryAfterSecondsFor(
+  result: RateLimitConsumeResult,
+  windowMs: number,
+  now: Date,
+  sharedLimit: number,
+  extraLimit: number | null,
+): number {
+  // 上限に達している枠の「最も古い記録」を集める
+  const blocking: Date[] = [];
+  // 共有の枠（種類を問わない合計）
+  if (result.sharedCount >= sharedLimit && result.sharedOldest !== null) {
+    blocking.push(result.sharedOldest);
+  }
+  // 追加の枠（その種類だけの合計）
+  if (extraLimit !== null && result.extraCount >= extraLimit && result.extraOldest !== null) {
+    blocking.push(result.extraOldest);
+  }
+  // どの枠も「最も古い記録」を持たないなら最低値で答える（上限が壊れている場合の保険）
+  if (blocking.length === 0) return MIN_RETRY_AFTER_SECONDS;
+  // 空きができるまでのミリ秒（複数あれば長いほう）
+  const waitMs = Math.max(...blocking.map((oldest) => oldest.getTime() + windowMs - now.getTime()));
+  // 秒へ切り上げ、最低 1 秒にする（RFC 9110 の delay-seconds は整数）
+  return Math.max(MIN_RETRY_AFTER_SECONDS, Math.ceil(waitMs / MILLIS_PER_SECOND));
+}
+
+/**
  * その主体の 1 回の呼び出しを数え、上限を超えていれば 429 を投げる。
  *
- * **判定の順序をここ 1 か所に閉じ込める**（`route()` から枠の組み合わせを追い出す）。
- * すべての枠を**先に覗き見して**から数えるので、片方だけが消費された状態にならない。
- * 断るときは待ち時間の**長いほう**を返す（短いほうを返すと、その時刻に再試行しても必ず断られる）。
+ * **判定も記録も data 層の 1 回の操作で行う**（ADR-0015）。読んでから書く形に分けると、
+ * 同時に届いた 2 本がどちらも「上限未満」を読んで両方が通る。共有の枠と追加の枠の
+ * **両方**が上限未満のときだけ 1 行足すので、片方だけが消費された状態にもならない。
+ *
+ * **ストアが落ちたら断る（fail-closed）。** 数えられないまま通すと、DB 障害のあいだだけ
+ * レート制限が丸ごと無効になる（しかも上流への課金は止まらない）。例外はそのまま投げて
+ * 500 にし、**上流への呼び出しは 1 度も起こさない**。
+ *
+ * @param repos リポジトリの束（`rateLimit` を使う）
+ * @param principal 認証済みの主体
+ * @param tier 枠の種類
+ * @param now いまの時刻
  */
-export function enforceRateLimit(principal: Principal, tier: RateLimitTier, now: number): void {
+export async function enforceRateLimit(
+  repos: Repositories,
+  principal: Principal,
+  tier: RateLimitTier,
+  now: Date,
+): Promise<void> {
   // 数える単位（認証済みの id。偽装できる値は使わない）
   const key = rateLimitKeyFor(principal);
   // 共有の枠の上限（プラン別）
   const sharedLimit = sharedRateLimitFor(principal);
-  // その種類の追加の枠（持たない種類もある）
-  const extra = extraFrames.get(tier);
-  // 追加の枠の上限（枠が無ければ null）
+  // 追加の枠の上限（持たない種類は null）
   const extraLimit = extraRateLimitFor(tier);
-  // 見るべき「枠と上限」の組。**共有の枠は必ず消費する**ので先に 1 つだけ書き、
-  // 追加の枠を持つ種類はその後ろへ足す（両方の分岐に書くと、組み方を直したときに片方だけ直る）
-  const frames: [SlidingWindowRateLimiter, number][] = [[shared, sharedLimit]];
-  // 追加の枠を持つ種類だけ 2 つ目を足す（置き換えではなく「加えて」消費する）
-  if (extra !== undefined && extraLimit !== null) frames.push([extra, extraLimit]);
-  // まず全部を覗き見して、断るものがあるか調べる
-  const denials = frames
-    .map(([limiter, limit]) => limiter.inspect(key, now, limit))
-    .filter((decision) => !decision.allowed);
-  // 1 つでも断るなら、待ち時間の長いほうで 429 にする（どの枠も数えない）
-  if (denials.length > 0) {
-    throw rateLimitedError(Math.max(...denials.map((decision) => decision.retryAfterSeconds)));
-  }
-  // 全部通るので、ここで初めて数える
-  for (const [limiter, limit] of frames) limiter.check(key, now, limit);
+  // 窓の長さと下端（**半開区間**。下端より後の記録だけを数える）
+  const windowMs = rateLimitWindowMs();
+  const windowStart = new Date(now.getTime() - windowMs);
+  // 数えて、通せるなら 1 行足す（1 回の操作）
+  const result = await consumeOrFail({
+    repos,
+    input: { key, tier, windowStart, now, sharedLimit, extraLimit },
+  });
+  // 通るならここで終わり（記録はもう足されている）
+  if (result.allowed) return;
+  // 断るので待ち時間を決めて 429 にする
+  throw rateLimitedError(retryAfterSecondsFor(result, windowMs, now, sharedLimit, extraLimit));
 }
 
 /**
- * テスト専用: 共有の制限器を作り直す。本番では呼べない（fail-closed）。
+ * 記録側を呼び、落ちたら**専用の出来事を残してから**投げ直す。
  *
- * 表はプロセスの寿命いっぱい残るので、これが無いとテストの実行順によって
- * 「前のテストが使った枠」が次のテストへ漏れる（`setReposForTesting` と同じ扱い）。
- *
- * `limit` を渡すと**上限の上書き**になる（本番はプランから決まるので、数回の呼び出しで
- * 「上限を超える」挙動を確かめたいテストのための逃げ道）。省略すれば本番と同じ決め方に戻る。
+ * ストア障害を汎用の 500（`api.unexpected_error`）に埋もれさせない — 運用者が知りたいのは
+ * 「断っているのが上限超過なのか、枠を数えられていないのか」。**行は間引く**
+ * （DB が落ちている間は全要求で起きる＝直るまで続く条件。`health.db_unreachable` と同じ判断）。
+ * @param args リポジトリと入力
+ * @returns 記録側の結果
  */
-export function resetSharedRateLimiterForTesting(
+async function consumeOrFail(args: {
+  repos: Repositories;
+  input: Parameters<Repositories['rateLimit']['consume']>[0];
+}): Promise<RateLimitConsumeResult> {
+  // 記録側へ渡す（1 回の操作で数えて足す）
+  try {
+    return await args.repos.rateLimit.consume(args.input);
+  } catch (error) {
+    // 枠を数えられなかったことを残す（通す側へ倒さないので、応答は 500 になる）
+    logEventThrottled('rate_limit.store_unavailable', describeError(error));
+    // 原因を隠さずそのまま投げる（§6 エラーを握り潰さない）
+    throw error;
+  }
+}
+
+/**
+ * テスト専用: 上限・窓の長さの上書きを設定する。本番では呼べない（fail-closed）。
+ *
+ * **記録は DB にあるので「作り直す」ものは無い**（以前のインプロセスの表と違う）。
+ * テストごとの隔離は memory アダプタを作り直すこと（`createMemoryRepos`）か、
+ * 契約テストの `TRUNCATE` が行う。ここで設定するのは**方針の値だけ**。
+ *
+ * `limit` を渡すと上限の上書きになる（本番はプランから決まるので、数回の呼び出しで
+ * 「上限を超える」挙動を確かめたいテストのための逃げ道）。省略すれば本番と同じ決め方に戻る。
+ *
+ * @param options 共有の枠の上書き（`windowMs` は両方の枠に効く）
+ * @param extraOptions 追加の枠の上限の上書き
+ */
+export function setRateLimitOverridesForTesting(
   options?: RateLimitOverrideForTesting,
   extraOptions?: RateLimitOverrideForTesting,
 ): void {
-  // 本番で作り直せると、呼ぶだけで全員の枠が空になる
+  // 本番で上書きできると、呼ぶだけで上限を外せる
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('resetSharedRateLimiterForTesting は本番では使えません。');
+    throw new Error('setRateLimitOverridesForTesting は本番では使えません。');
   }
   // 上限の上書き（省略なら本番と同じ決め方へ戻す）
   sharedLimitOverrideForTesting = options?.limit ?? null;
   extraLimitOverrideForTesting = extraOptions?.limit ?? null;
-  // 記録表を作り直す（窓の長さは指定があればそれを使う）
-  shared = new SlidingWindowRateLimiter({ windowMs: options?.windowMs ?? RATE_LIMIT_WINDOW_MS });
-  // **追加の枠も必ず全部作り直す** — 片方だけ空にすると、前のテストが使った枠が
-  // 次のテストへ漏れる（しかも漏れるのは小さいほうの枠なので、無関係なテストが 429 で落ちる）
-  extraFrames = buildExtraFrames(extraOptions?.windowMs ?? RATE_LIMIT_WINDOW_MS);
+  // **窓の長さは 1 つしかない**（共有の枠と追加の枠で別々にはできない） —
+  // 記録が 1 つの表なので、同じ行を 2 つの窓で数えることになる。
+  // 以前は枠ごとにインスタンスを持てたので別々に指定できたが、その形は
+  // 「同じ呼び出しが別の窓に属する」という表現できない状態を許していた
+  windowMsOverrideForTesting = options?.windowMs ?? extraOptions?.windowMs ?? null;
 }

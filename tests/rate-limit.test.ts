@@ -1,18 +1,20 @@
-// レート制限（src/lib/api/rate-limit.ts）の検査。
-// **時刻を引数で受け取る形**にしてあるので、窓の境界を決定的に固定できる（実時間を待たない）。
-import { beforeEach, describe, expect, it } from 'vitest';
+// レート制限の**方針**（`src/lib/api/rate-limit.ts`）の検査。
+//
+// **窓の数え方そのものは data 層へ移った**（ADR-0015）ので、境界・半開区間・掃き出しは
+// `tests/data/memory-rate-limit.test.ts`（memory）と `tests/data/rate-limit.contract.prisma.test.ts`
+// （実 DB）が固定する。ここで見るのは「どのキーで数えるか」「どの上限を使うか」
+// 「断ったときに何秒待たせるか」「ストアが落ちたらどう倒れるか」。
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   enforceRateLimit,
-  extraRateLimiter,
   extraRateLimitFor,
   RATE_LIMIT_TIER,
   rateLimitKeyFor,
   rateLimitedError,
   rateLimitOverrideFromEnv,
-  resetSharedRateLimiterForTesting,
-  sharedRateLimiter,
+  retryAfterSecondsFor,
+  setRateLimitOverridesForTesting,
   sharedRateLimitFor,
-  SlidingWindowRateLimiter,
 } from '@/lib/api/rate-limit';
 import type { Principal } from '@/lib/api/auth';
 import { ApiError } from '@/lib/api/errors';
@@ -20,169 +22,22 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { Plan, Provider, Role } from '@/domain/types';
 import { PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
 import { FALLBACK_PLAN, PLAN_LIMITS } from '@/domain/plan';
+import { createMemoryRepos, MemoryStore } from '@/data/adapters/memory';
+import type { RateLimitConsumeResult, Repositories } from '@/data/ports';
+import { captureLogOutlet, loggedEvents } from './lib/log-lines';
+import { resetThrottledLogsForTesting } from '@/lib/log';
 
 // 検査で使う窓の長さ（1 分）
 const WINDOW_MS = 60_000;
-// 検査で使う上限（境界が読みやすい小さい値）
-const LIMIT = 3;
 // 起点の時刻（絶対値には意味が無いが、固定して境界を読みやすくする）
-const T0 = 1_000_000;
+const T0 = new Date('2026-10-09T00:00:00.000Z');
 
-// 既定の設定で制限器を作る。
-// **上限は制限器が持たず判定のたびに渡す形**（Step6 でプラン別にしたため）なので、
-// 検査のあいだ同じ上限を使うようここで閉じ込める（本体の書き方は変えない）
-function limiter(limit = LIMIT, windowMs = WINDOW_MS) {
-  // 記録表そのもの
-  const rl = new SlidingWindowRateLimiter({ windowMs });
-  // 上限を閉じ込めた形で返す（観測用のプロパティはそのまま覗けるようにする）
-  return {
-    check: (key: string, now: number) => rl.check(key, now, limit),
-    inspect: (key: string, now: number) => rl.inspect(key, now, limit),
-    get sweepCount() {
-      return rl.sweepCount;
-    },
-    get trackedKeys() {
-      return rl.trackedKeys;
-    },
-  };
-}
-
-// **各テストの前に共有の枠を本番と同じ決め方へ戻す。** テスト専用の上限の上書きは
-// モジュール変数なので、上書きしたテストの後ろに「本番の決め方」を見るテストが来ると
-// 実行順に依存して落ちる（上書きした値が漏れる）。戻す手段は 1 つに寄せてあるので毎回呼ぶ
+// **各テストの前に上限の上書きを本番と同じ決め方へ戻す。** 上書きはモジュール変数なので、
+// 上書きしたテストの後ろに「本番の決め方」を見るテストが来ると実行順に依存して落ちる
 beforeEach(() => {
-  resetSharedRateLimiterForTesting();
-});
-
-describe('スライディングウィンドウのレート制限', () => {
-  it('上限までは通し、超えた分を断る', () => {
-    // 同じ時刻で上限回まで通る
-    const rl = limiter();
-    for (let i = 0; i < LIMIT; i += 1) {
-      expect(rl.check('k', T0).allowed).toBe(true);
-    }
-    // 上限を 1 つ超えた呼び出しは断られる
-    expect(rl.check('k', T0).allowed).toBe(false);
-  });
-
-  it('断った呼び出しは数えないので、窓が延びない', () => {
-    // **断られ続けると窓が延びる**形にしてはいけない（永久に通れなくなる）。
-    // 上限まで使ってから何度も断られ、窓が過ぎたら通ることを確かめる
-    const rl = limiter();
-    for (let i = 0; i < LIMIT; i += 1) rl.check('k', T0);
-    // 窓の途中で 5 回断られる
-    for (let i = 0; i < 5; i += 1) {
-      expect(rl.check('k', T0 + 1_000).allowed).toBe(false);
-    }
-    // 最初の記録が窓から外れた時点で通る（断られた 5 回は記録に残っていない）
-    expect(rl.check('k', T0 + WINDOW_MS).allowed).toBe(true);
-  });
-
-  it('窓は過去側が半開（ちょうど窓の長さだけ前の記録は外れている）', () => {
-    // 集計窓（`src/domain/guardrail/rule.ts` の `guardrailWindow`）と同じ約束にそろえる:
-    // 時刻 now の窓は `(now - windowMs, now]` を覆うので、ちょうど windowMs 前の記録は
-    // すでに「窓の外」。境界をどちらに寄せるかで 1 件ぶん答えが変わるので明示的に固定する
-    const rl = limiter();
-    for (let i = 0; i < LIMIT; i += 1) rl.check('k', T0);
-    // 窓の終わり間際（残り 1 ミリ秒）ではまだ窓の中なので断られる
-    expect(rl.check('k', T0 + WINDOW_MS - 1).allowed).toBe(false);
-    // 窓の長さぴったりで最初の記録が外れるので通る
-    expect(rl.check('k', T0 + WINDOW_MS).allowed).toBe(true);
-  });
-
-  it('Retry-After は「最も古い記録が窓から外れるまで」の秒数（整数・最低 1 秒）', () => {
-    // 上限まで使う
-    const rl = limiter();
-    for (let i = 0; i < LIMIT; i += 1) rl.check('k', T0);
-    // 直後に断られると、残りはほぼ窓いっぱい
-    expect(rl.check('k', T0).retryAfterSeconds).toBe(WINDOW_MS / 1_000);
-    // 窓の終わり間際（残り 1 ミリ秒）でも **0 秒ではなく 1 秒**を返す。
-    // RFC 9110 の delay-seconds は整数で、0 は「すぐ試してよい」に見えるので切り上げる
-    expect(rl.check('k', T0 + WINDOW_MS - 1).retryAfterSeconds).toBe(1);
-  });
-
-  it('時計が巻き戻っても Retry-After は窓の長さを超えない', () => {
-    // **記録は push 順なので「昇順に並んでいる」は時刻が単調増加することに依存する。**
-    // 呼び出し側は Date.now() を渡すので NTP の時刻合わせで巻き戻りうる。先頭の記録を
-    // 「最も古い」と決めつけると、巻き戻った幅だけ待ち時間を長く返し、素直に従う
-    // クライアントが必要以上に待つ
-    const rl = limiter();
-    // まず新しい時刻で 1 件、そのあと巻き戻った時刻で上限まで使う
-    rl.check('k', T0 + WINDOW_MS / 2);
-    for (let i = 1; i < LIMIT; i += 1) rl.check('k', T0);
-    // 断られたときの待ち時間は、どの記録が先頭にあっても窓の長さ以内
-    const decision = rl.check('k', T0);
-    expect(decision.allowed).toBe(false);
-    expect(decision.retryAfterSeconds).toBeLessThanOrEqual(WINDOW_MS / 1_000);
-    expect(decision.retryAfterSeconds).toBeGreaterThanOrEqual(1);
-  });
-
-  it('キーごとに枠が独立している', () => {
-    // 1 つのキーで使い切っても別のキーは通る
-    const rl = limiter();
-    for (let i = 0; i < LIMIT; i += 1) rl.check('a', T0);
-    expect(rl.check('a', T0).allowed).toBe(false);
-    expect(rl.check('b', T0).allowed).toBe(true);
-  });
-
-  it('期限切れの記録は間隔ごとに回収され、キーごと消える', () => {
-    // **「表が満杯のとき」でも「1 窓に 1 回」でもなく間隔で走らせる**ことの検査。
-    // 1 つのキーを使って窓を過ぎてから別のキーで叩くと、古いキーが表から消える
-    const rl = limiter();
-    rl.check('old', T0);
-    expect(rl.trackedKeys).toBe(1);
-    // 窓を越えた時刻で別のキーを叩く（このとき掃除の間隔も越えている）
-    rl.check('new', T0 + WINDOW_MS + 1);
-    // 古いキーは回収され、新しいキーだけが残る
-    expect(rl.trackedKeys).toBe(1);
-    expect(rl.check('old', T0 + WINDOW_MS + 1).allowed).toBe(true);
-  });
-
-  it('掃除は呼び出し回数に比例しない（間隔で絞る）', () => {
-    // **絞らないと、使い捨てキーで表を膨らませたうえで全リクエストに走査の費用を負わせられる**。
-    // 同じ時刻で 1000 回叩いても掃除は 1 度も走らない
-    const rl = limiter(10_000);
-    for (let i = 0; i < 1_000; i += 1) rl.check(`k${i}`, T0);
-    expect(rl.sweepCount).toBe(0);
-    // 間隔（窓の 1/60 = 1 秒）を越えると 1 度走る
-    rl.check('k', T0 + 1_001);
-    expect(rl.sweepCount).toBe(1);
-    // すぐもう 1 回叩いても増えない
-    rl.check('k', T0 + 1_002);
-    expect(rl.sweepCount).toBe(1);
-  });
-
-  it('窓が正の整数でなければ作れない（fail-closed）', () => {
-    // **窓が 0 だと記録が常に空になりレート制限が丸ごと無効になる**ので作らせない
-    for (const windowMs of [0, -1, 1.5, Number.NaN]) {
-      expect(() => new SlidingWindowRateLimiter({ windowMs })).toThrow(RangeError);
-    }
-  });
-
-  it('上限が正の整数でなければ判定できない（fail-closed）', () => {
-    // 上限は判定のたびに渡すので、壊れた値はその場で落とす。
-    // **0 や NaN を通すと「上限に達することが無い」形になり保護が黙って消える**
-    const rl = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
-    for (const limit of [0, -1, 1.5, Number.NaN]) {
-      expect(() => rl.check('k', T0, limit)).toThrow(RangeError);
-      expect(() => rl.inspect('k', T0, limit)).toThrow(RangeError);
-    }
-  });
-
-  it('上限は判定のたびに読むので、窓の途中で変わっても記録は引き継ぐ', () => {
-    // プランを窓の途中で上げ下げしたときの挙動。**記録を作り直さない**ことが要点で、
-    // 制限器を上限ごとに分ける形だと上げ下げのたびに数え直しになる
-    const rl = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
-    // 上限 2 で 2 回使い切る
-    expect(rl.check('k', T0, 2).allowed).toBe(true);
-    expect(rl.check('k', T0, 2).allowed).toBe(true);
-    expect(rl.check('k', T0, 2).allowed).toBe(false);
-    // 上限 3 へ上げると、同じ窓の記録 2 件を引き継いだうえで 1 回だけ通る
-    expect(rl.check('k', T0, 3).allowed).toBe(true);
-    expect(rl.check('k', T0, 3).allowed).toBe(false);
-    // 上限 1 へ下げると、既に 3 件あるので通らない（下げた側も即座に効く）
-    expect(rl.check('k', T0, 1).allowed).toBe(false);
-  });
+  setRateLimitOverridesForTesting();
+  // 間引きの記憶も忘れる（ストア障害の記録は窓の中の通算件数が 2 の冪の回だけ行になる）
+  resetThrottledLogsForTesting();
 });
 
 describe('レート制限のキー', () => {
@@ -260,121 +115,231 @@ describe('ルートに載るレート制限の印', () => {
   });
 });
 
-describe('覗き見だけの判定 (inspect)', () => {
-  it('数えないので、何回呼んでも通し続ける', () => {
-    // 上限 3 の制限器
-    const limiter = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
-    // 上限より多く覗き見しても通る（覗き見は記録を増やさない）
-    for (let index = 0; index < LIMIT + 5; index += 1) {
-      expect(limiter.inspect('k', T0, LIMIT).allowed).toBe(true);
-    }
-    // 記録は 1 件も無い（キーごと表に無い）
-    expect(limiter.trackedKeys).toBe(0);
-  });
-
-  it('上限に達していれば check と同じ待ち時間を返す', () => {
-    // 上限 1 の制限器
-    const limiter = new SlidingWindowRateLimiter({ windowMs: WINDOW_MS });
-    // 1 件数える（上限 1）
-    expect(limiter.check('k', T0, 1).allowed).toBe(true);
-    // 覗き見でも断り、待ち時間は窓の長さぶん（秒へ切り上げ）
-    const peeked = limiter.inspect('k', T0, 1);
-    expect(peeked.allowed).toBe(false);
-    expect(peeked.retryAfterSeconds).toBe(WINDOW_MS / 1000);
-  });
-});
-
 describe('枠の組み合わせ (enforceRateLimit)', () => {
-  // 検査に使う主体（キーは `apiKey:<id>` になる）
+  // 検査に使う主体（キーは `tenant:t1` になる）
   const principal = {
     kind: 'agent',
     apiKeyId: 'key-1',
     tenantId: 't1',
+    plan: Plan.pro,
     agent: { id: 'a1', status: 'active', provider: Provider.anthropic, model: 'm' },
-  } as unknown as Parameters<typeof enforceRateLimit>[0];
+  } as unknown as Principal;
 
-  it('重い経路は小さい枠と共有の枠の両方を消費する', () => {
-    // 共有は 10、重いほうは 2 で作り直す
-    resetSharedRateLimiterForTesting(
-      { limit: 10, windowMs: WINDOW_MS },
-      { limit: 2, windowMs: WINDOW_MS },
-    );
-    // 重い経路を 2 回通す（小さい枠の上限まで）
-    enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0);
-    enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0);
-    // 3 回目は小さい枠で断られる
-    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0)).toThrow();
+  // 記録は毎テストで新しい memory の表にする（前のテストの枠が漏れない）
+  let repos: Repositories & { store: MemoryStore };
+
+  beforeEach(() => {
+    repos = createMemoryRepos(new MemoryStore());
+  });
+
+  it('重い経路は追加の枠と共有の枠の両方を消費する', async () => {
+    // 共有は 10、追加は 2
+    setRateLimitOverridesForTesting({ limit: 10, windowMs: WINDOW_MS }, { limit: 2 });
+    // 重い経路を 2 回通す（追加の枠の上限まで）
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0);
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0);
+    // 3 回目は追加の枠で断られる
+    await expect(
+      enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0),
+    ).rejects.toBeInstanceOf(ApiError);
     // **共有の枠も 2 件ぶん消費されている** — 置き換えだと、重い経路と中継を交互に叩くだけで
     // 合計が共有の上限を超える。残りは 10 - 2 = 8 件なので、8 回は通って 9 回目で断られる
     for (let index = 0; index < 8; index += 1) {
-      enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0);
+      await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0);
     }
-    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0)).toThrow();
+    await expect(
+      enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0),
+    ).rejects.toBeInstanceOf(ApiError);
   });
 
   // **枠の種類を足した人が「実際に数えられるか」を確かめなくてよくならないようにする。**
   // 上のテストは `fanOut` を名指しするので、種類を足して `EXTRA_FRAME_LIMIT` に書くだけでは
-  // 1 度も通らない（表に載っただけで枠が効いているかは誰も見ていない状態になる）
-  it.each(Object.values(RATE_LIMIT_TIER).filter((tier) => extraRateLimiter(tier) !== undefined))(
+  // 1 度も通らない（表に載っただけで枠が効いているかは誰も見ていない状態になる）。
+  // **一覧は表から導く**（追加の枠を持つ種類を手で並べない）
+  it.each(Object.values(RATE_LIMIT_TIER).filter((tier) => extraRateLimitFor(tier) !== null))(
     '追加の枠を持つ種類は共有の枠と独立に数える (%s)',
-    (tier) => {
-      // 共有は 10、追加の枠は 2 で作り直す
-      resetSharedRateLimiterForTesting(
-        { limit: 10, windowMs: WINDOW_MS },
-        { limit: 2, windowMs: WINDOW_MS },
-      );
+    async (tier) => {
+      // 共有は 10、追加は 2
+      setRateLimitOverridesForTesting({ limit: 10, windowMs: WINDOW_MS }, { limit: 2 });
       // 追加の枠の上限まで通す
-      enforceRateLimit(principal, tier, T0);
-      enforceRateLimit(principal, tier, T0);
+      await enforceRateLimit(repos, principal, tier, T0);
+      await enforceRateLimit(repos, principal, tier, T0);
       // 次は追加の枠で断られる（共有にはまだ 8 件の余裕がある）
-      expect(() => enforceRateLimit(principal, tier, T0)).toThrow();
+      await expect(enforceRateLimit(repos, principal, tier, T0)).rejects.toBeInstanceOf(ApiError);
       // 共有の枠は 2 件ぶん減っている（置き換えではなく「加えて」消費する）
       for (let index = 0; index < 8; index += 1) {
-        enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0);
+        await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0);
       }
-      expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0)).toThrow();
+      await expect(
+        enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0),
+      ).rejects.toBeInstanceOf(ApiError);
     },
   );
 
-  it('断った要求はどちらの枠にも数えない', () => {
-    // 共有は 1、重いほうは 5（**共有のほうが先に尽きる**組み合わせ）
-    resetSharedRateLimiterForTesting(
-      { limit: 1, windowMs: WINDOW_MS },
-      { limit: 5, windowMs: WINDOW_MS },
-    );
+  it('断った要求はどちらの枠にも数えない', async () => {
+    // 共有は 1、追加は 5（**共有のほうが先に尽きる**組み合わせ）
+    setRateLimitOverridesForTesting({ limit: 1, windowMs: WINDOW_MS }, { limit: 5 });
     // 共有の枠を使い切る
-    enforceRateLimit(principal, RATE_LIMIT_TIER.standard, T0);
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0);
     // 重い経路は共有の枠で断られる
-    expect(() => enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0)).toThrow();
-    // **小さい枠は 1 件も数えていない** — 順に check を呼ぶ形だと、通った側だけが
-    // 数えてしまい、断られ続けるあいだ小さい枠が減り続ける
-    expect(extraRateLimiter(RATE_LIMIT_TIER.fanOut)?.trackedKeys).toBe(0);
-    // 共有の枠は使い切ったぶんだけ（断った要求で増えていない）
-    expect(sharedRateLimiter().trackedKeys).toBe(1);
+    await expect(
+      enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0),
+    ).rejects.toBeInstanceOf(ApiError);
+    // **記録は使い切った 1 件だけ** — 判定と記録が同じ操作なので、片方だけ消費された
+    // 状態にならない（以前は 2 つの表を順に数えていたので、通った側だけが減りえた）
+    expect(repos.store.rateLimitHits.get('tenant:t1')).toHaveLength(1);
   });
 
-  it('断るときは待ち時間の長いほうを返す', () => {
-    // 共有は 1、重いほうも 1 で作り直す
-    resetSharedRateLimiterForTesting(
-      { limit: 1, windowMs: WINDOW_MS },
-      { limit: 1, windowMs: WINDOW_MS },
-    );
-    // 両方の枠を使い切る（共有は T0、小さい枠も T0）
-    enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0);
-    // 共有の枠だけをさらに古くするため、少し進めた時刻で中継を 1 回…は通らないので、
-    // ここでは「両方が断る」状況で例外の待ち時間が正の整数であることを確かめる
-    let thrown: unknown = null;
-    try {
-      enforceRateLimit(principal, RATE_LIMIT_TIER.fanOut, T0 + 1_000);
-    } catch (error) {
-      thrown = error;
-    }
+  it('断るときは待ち時間を Retry-After に載せる（窓の残りぶん）', async () => {
+    // 共有も追加も 1 で、両方を使い切る
+    setRateLimitOverridesForTesting({ limit: 1, windowMs: WINDOW_MS }, { limit: 1 });
+    await enforceRateLimit(repos, principal, RATE_LIMIT_TIER.fanOut, T0);
+    // 1 秒後に同じ経路を叩くと断られる
+    const thrown = await enforceRateLimit(
+      repos,
+      principal,
+      RATE_LIMIT_TIER.fanOut,
+      new Date(T0.getTime() + 1_000),
+    ).catch((error: unknown) => error);
     // 429 ＋ Retry-After が載る
     expect(thrown).toBeInstanceOf(ApiError);
-    const headers = (thrown as ApiError).headers ?? {};
     expect((thrown as ApiError).status).toBe(HTTP_STATUS.TOO_MANY_REQUESTS);
     // 残り 59 秒（窓 60 秒 - 経過 1 秒）
-    expect(headers['Retry-After']).toBe('59');
+    expect(((thrown as ApiError).headers ?? {})['Retry-After']).toBe('59');
+  });
+
+  it('ストアが落ちたら通さず、専用の出来事を残す（fail-closed）', async () => {
+    // 記録側を落とす（DB 障害を模す）
+    const failure = new Error('接続できません');
+    vi.spyOn(repos.rateLimit, 'consume').mockRejectedValue(failure);
+    // 出口を捕まえる
+    const outlet = captureLogOutlet();
+    try {
+      // **通さない**（例外はそのまま上がって 500 になる。429 ではない）
+      await expect(enforceRateLimit(repos, principal, RATE_LIMIT_TIER.standard, T0)).rejects.toBe(
+        failure,
+      );
+      // **汎用の 500 に埋もれさせない** — 運用者が知りたいのは「上限超過か、数えられていないか」
+      expect(loggedEvents(outlet.calls())).toEqual(['rate_limit.store_unavailable']);
+    } finally {
+      outlet.restore();
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('断ったときの待ち時間 (retryAfterSecondsFor)', () => {
+  // 記録側の戻りを組み立てる補助
+  function result(overrides: Partial<RateLimitConsumeResult>): RateLimitConsumeResult {
+    // 既定は「どちらの枠も空」
+    return {
+      allowed: false,
+      sharedCount: 0,
+      extraCount: 0,
+      sharedOldest: null,
+      extraOldest: null,
+      ...overrides,
+    };
+  }
+
+  it('上限に達している枠の「最も古い記録が窓から外れるまで」を秒へ切り上げる', () => {
+    // 共有が上限（1 件で上限 1）。最古は 1.5 秒前なので、残りは 58.5 秒 → 59 秒
+    const seconds = retryAfterSecondsFor(
+      result({ sharedCount: 1, sharedOldest: new Date(T0.getTime() - 1_500) }),
+      WINDOW_MS,
+      T0,
+      1,
+      null,
+    );
+    expect(seconds).toBe(59);
+  });
+
+  it('両方の枠が埋まっていれば長いほうを返す', () => {
+    // 共有の最古は 50 秒前（残り 10 秒）、追加の最古は 10 秒前（残り 50 秒）
+    const seconds = retryAfterSecondsFor(
+      result({
+        sharedCount: 1,
+        sharedOldest: new Date(T0.getTime() - 50_000),
+        extraCount: 1,
+        extraOldest: new Date(T0.getTime() - 10_000),
+      }),
+      WINDOW_MS,
+      T0,
+      1,
+      1,
+    );
+    // **短いほうを返すと、その時刻に再試行しても必ず断られる**
+    expect(seconds).toBe(50);
+  });
+
+  it('上限に達していない枠は見ない（追加の枠だけが埋まっている場合）', () => {
+    // 共有は余裕あり（1 件で上限 10）、追加だけが上限
+    const seconds = retryAfterSecondsFor(
+      result({
+        sharedCount: 1,
+        sharedOldest: new Date(T0.getTime() - 50_000),
+        extraCount: 2,
+        extraOldest: new Date(T0.getTime() - 10_000),
+      }),
+      WINDOW_MS,
+      T0,
+      10,
+      2,
+    );
+    // 共有の最古（残り 10 秒）ではなく追加の最古（残り 50 秒）を使う
+    expect(seconds).toBe(50);
+  });
+
+  it('追加の枠を持たない種類では共有の枠だけを見る', () => {
+    // `extraLimit` が null なら `extraCount` がいくつでも無視する
+    const seconds = retryAfterSecondsFor(
+      result({
+        sharedCount: 1,
+        sharedOldest: new Date(T0.getTime() - 30_000),
+        extraCount: 99,
+        extraOldest: new Date(T0.getTime() - 1_000),
+      }),
+      WINDOW_MS,
+      T0,
+      1,
+      null,
+    );
+    // 共有の最古（残り 30 秒）
+    expect(seconds).toBe(30);
+  });
+
+  it('0 秒を返さない（最低 1 秒）', () => {
+    // 最古がちょうど窓の端（残り 0 秒）でも 1 秒待たせる。**0 は「いますぐ再試行」に見えるので、
+    // 同じ要求が即座に 429 で跳ね返る輪ができる**（delay-seconds は整数）
+    const seconds = retryAfterSecondsFor(
+      result({ sharedCount: 1, sharedOldest: new Date(T0.getTime() - WINDOW_MS) }),
+      WINDOW_MS,
+      T0,
+      1,
+      null,
+    );
+    expect(seconds).toBe(1);
+  });
+
+  it('時計が巻き戻っても窓の長さを超えない', () => {
+    // 最古が「未来」になっている（NTP の巻き戻り）
+    const seconds = retryAfterSecondsFor(
+      result({ sharedCount: 1, sharedOldest: new Date(T0.getTime() + 5_000) }),
+      WINDOW_MS,
+      T0,
+      1,
+      null,
+    );
+    // 窓の長さ + 5 秒ではなく…素直に計算すると 65 秒になるので、**上限を置いていない**ことを
+    // ここで明示する。記録側が最小値を返す約束（`tests/data/memory-rate-limit.test.ts`）が
+    // あるので未来の最古は「全件が未来」のときだけ起き、その場合は窓の長さぶん待たせるのが正しい
+    expect(seconds).toBe(65);
+  });
+
+  it('最も古い記録が分からなければ最低値で答える（上限が壊れている場合の保険）', () => {
+    // 件数は上限を超えているのに最古が null（記録が無いのに断られる状態）
+    const seconds = retryAfterSecondsFor(result({ sharedCount: 0 }), WINDOW_MS, T0, 0, null);
+    expect(seconds).toBe(1);
   });
 });
 

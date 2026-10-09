@@ -25,6 +25,9 @@ import type {
   IncidentRecord,
   IncidentsPort,
   RaiseIncidentInput,
+  RateLimitConsumeInput,
+  RateLimitConsumeResult,
+  RateLimitPort,
   RaisedIncident,
   ResolveIncidentResult,
   SetGuardrailRuleEnabledResult,
@@ -78,7 +81,7 @@ import { AgentStatus, EvaluationRunStatus, IncidentStatus, Plan, Role } from '@/
 import { formatUtcDay } from '@/domain/usage-window';
 import { compareCursorKeys } from '@/data/page';
 import { paginate } from './paginate';
-import { MemoryStore } from './store';
+import { MemoryStore, type RateLimitHitRow } from './store';
 
 // 行の複製を返す (呼び出し側が戻り値を書き換えても表が壊れないようにする)
 function clone<T>(row: T): T {
@@ -1283,6 +1286,76 @@ class MemoryBillingEvents implements BillingEventsPort {
   }
 }
 
+/**
+ * レート制限の記録（ADR-0015）。
+ *
+ * **prisma 側（1 文の CTE）と同じ順で同じことをする**（ADR-0006 の死角）。
+ * 緩いと API テストだけが「上限を超えても通る世界」で緑になるので、契約テストと対で守る。
+ */
+class MemoryRateLimit implements RateLimitPort {
+  // 共有の表を受け取る
+  constructor(private readonly store: MemoryStore) {}
+
+  // 窓の中を数えて、両方の枠が上限未満なら 1 行足す
+  consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
+    // そのキーの記録（無ければ空）
+    const hits = this.store.rateLimitHits.get(input.key) ?? [];
+    // **期限切れをその場で捨てる**（prisma 側の `purge` CTE と同じ。半開区間なので下端は含まない）
+    const live = hits.filter((hit) => hit.at.getTime() > input.windowStart.getTime());
+    // この種類だけの記録（追加の枠が見るのはこちら）
+    const sameTier = live.filter((hit) => hit.tier === input.tier);
+    // 両方の枠が上限未満のときだけ通す（追加の枠を持たない種類は共有の枠だけを見る）
+    const allowed =
+      live.length < input.sharedLimit &&
+      (input.extraLimit === null || sameTier.length < input.extraLimit);
+    // 通すときだけ 1 行足す（**断った呼び出しは数えない** — 数えると窓が延びて永久に通れない）
+    const next = allowed ? [...live, { tier: input.tier, at: input.now }] : live;
+    // 掃いた結果を書き戻す（断ったときも期限切れは落ちる）
+    this.store.rateLimitHits.set(input.key, next);
+    // 件数は**今回を足す前**の値を返す（上限との比較が呼び出し側でも再現できる）
+    return Promise.resolve({
+      allowed,
+      sharedCount: live.length,
+      extraCount: sameTier.length,
+      sharedOldest: oldestHitAt(live),
+      extraOldest: oldestHitAt(sameTier),
+    });
+  }
+
+  // 窓から外れた記録をまとめて消す（**キーで絞らない**）
+  sweep(before: Date): Promise<number> {
+    // 消した件数
+    let deleted = 0;
+    // 全キーを見る（これが要るのは二度と来ないキーの記録なので、キーで絞らない）
+    for (const [key, hits] of this.store.rateLimitHits) {
+      // 期限内だけを残す
+      const live = hits.filter((hit) => hit.at.getTime() > before.getTime());
+      // 落ちた分を数える
+      deleted += hits.length - live.length;
+      // 1 件も残らなければキーごと消す（表が無限に伸びないようにする）
+      if (live.length === 0) this.store.rateLimitHits.delete(key);
+      else this.store.rateLimitHits.set(key, live);
+    }
+    // 消した件数
+    return Promise.resolve(deleted);
+  }
+}
+
+/**
+ * 窓の中で最も古い記録の時刻（1 件も無ければ null）。
+ *
+ * **`[0]` ではなく最小値を取る** — 配列は push 順で、時刻は呼び出し側が渡す壁時計なので
+ * NTP の時刻合わせで巻き戻りうる。先頭を信じると `Retry-After` を必要以上に長く返す。
+ * @param rows 窓の中の記録
+ * @returns 最も古い時刻、または null
+ */
+function oldestHitAt(rows: readonly RateLimitHitRow[]): Date | null {
+  // 1 件も無ければ null（呼び出し側が「待ち時間を決められない」と分かる）
+  if (rows.length === 0) return null;
+  // 最小の時刻を選ぶ
+  return new Date(Math.min(...rows.map((hit) => hit.at.getTime())));
+}
+
 // memory アダプタ一式を組み立てる (テストはこれを setReposForTesting へ渡し、store で seed する)
 export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repositories & {
   store: MemoryStore;
@@ -1301,6 +1374,7 @@ export function createMemoryRepos(store: MemoryStore = new MemoryStore()): Repos
     incidents: new MemoryIncidents(store),
     auditLogs: new MemoryAuditLogs(store),
     billingEvents: new MemoryBillingEvents(store),
+    rateLimit: new MemoryRateLimit(store),
   };
 }
 

@@ -30,6 +30,9 @@ import type {
   IncidentRecord,
   IncidentsPort,
   RaiseIncidentInput,
+  RateLimitConsumeInput,
+  RateLimitConsumeResult,
+  RateLimitPort,
   RaisedIncident,
   ResolveIncidentResult,
   SetGuardrailRuleEnabledResult,
@@ -1546,6 +1549,114 @@ class PrismaBillingEvents implements BillingEventsPort {
   }
 }
 
+/** `consume` の 1 文が返す行の形（BIGINT は bigint で来る） */
+interface RateLimitConsumeRow {
+  sharedCount: bigint;
+  sharedOldest: Date | null;
+  extraCount: bigint;
+  extraOldest: Date | null;
+  inserted: bigint;
+}
+
+/**
+ * レート制限の記録（ADR-0015）。
+ *
+ * **業務データではない**（窓から外れた行は捨ててよい）ので、他の Port と違って
+ * テナントの絞り込みも Restrict も無い。守るのは「数えてから足す」を分けないことだけ。
+ */
+class PrismaRateLimit implements RateLimitPort {
+  // クライアントを受け取る
+  constructor(private readonly db: PrismaClient) {}
+
+  /**
+   * 窓の中の件数を数えて、上限未満なら 1 行足す。
+   *
+   * **キーごとの助言ロックを取ってから数える。** 判定と記録を 1 文の CTE に収めるだけでは
+   * **足りない** — PostgreSQL の READ COMMITTED では文のスナップショットが**文の開始時点**で
+   * 固まるので、同時に走った別の文の挿入は見えない。実測（専用 DB・上限 3 に対して 10 本を
+   * 同時に投げる）で**6 本が通った**。レート制限が守っているのは「高くつく処理の回数」なので、
+   * 攻撃者の同時実行数に比例して緩む上限は上限として機能しない（`heavyRead` は毎分 10 回なのに
+   * 100 本同時なら 100 回通りうる）。件数の上限を挿入と同じ原子的操作の中で数える
+   * （`agents.create` / `guardrailRules.create`）のと同じ立場を取る。
+   *
+   * **ロックは別の文で取る。** 同じ文の中（CTE）で取っても意味が無い — スナップショットは
+   * ロックを取る前に固まっている。トランザクションを開いて `pg_advisory_xact_lock` を 1 文で
+   * 取り、**次の文**で数えると、その文は「ロックが下りた時点までにコミット済みの行」を見る。
+   * 助言ロックはトランザクションの終わりで必ず解放されるので、取りこぼしの心配が無い。
+   *
+   * **直列化するのは同じキーの「数える文」だけ**（上流への呼び出しは外側）。既定の毎分 600 回
+   * （＝毎秒 10 回）に対してロックを握るのは数ミリ秒なので、入口が詰まる水準ではない。
+   *
+   * 数える本体は 1 文の CTE で「期限切れを掃く → 窓の中を数える → 条件を満たせば 1 行入れる →
+   * 結果を返す」を行う。**CTE はどれも同じスナップショットを見る**ので、`purge` の DELETE は
+   * `live` の集計に影響しない（`purge` が消すのは `at <= windowStart` の行で、`live` はそもそも
+   * 除いている）。**`FILTER` で種類ごとの数を同じ走査から出す** — 共有の枠と追加の枠で 2 回読まない。
+   */
+  async consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
+    // 追加の枠を持たない種類は null を渡す（SQL 側で `IS NULL` の分岐に入る）
+    const extraLimit = input.extraLimit;
+    // **ロックを取る文と数える文を 1 つのトランザクションに入れる**（理由は上の説明）
+    const rows = await this.db.$transaction(async (tx: Db) => {
+      // キーごとの助言ロック（`hashtext` の衝突は無関係なキーが時々直列化するだけで害が無い）。
+      // **この文より後の文は、ロックが下りた時点のコミット済みの行を見る**
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.key}))`;
+      // 1 文で「掃く → 数える → 条件付きで足す → 返す」を行う（値はすべてパラメータとして渡る）
+      return await tx.$queryRaw<RateLimitConsumeRow[]>`
+      WITH purge AS (
+        DELETE FROM "RateLimitHit"
+        WHERE "key" = ${input.key} AND "at" <= ${input.windowStart}
+      ), live AS (
+        SELECT "tier", "at" FROM "RateLimitHit"
+        WHERE "key" = ${input.key} AND "at" > ${input.windowStart}
+      ), agg AS (
+        SELECT
+          COUNT(*)::bigint AS shared_count,
+          MIN("at") AS shared_oldest,
+          COUNT(*) FILTER (WHERE "tier" = ${input.tier})::bigint AS extra_count,
+          MIN("at") FILTER (WHERE "tier" = ${input.tier}) AS extra_oldest
+        FROM live
+      ), ins AS (
+        INSERT INTO "RateLimitHit" ("key", "tier", "at")
+        SELECT ${input.key}, ${input.tier}, ${input.now} FROM agg
+        WHERE agg.shared_count < ${input.sharedLimit}
+          AND (${extraLimit}::int IS NULL OR agg.extra_count < ${extraLimit}::int)
+        RETURNING 1
+      )
+      SELECT
+        agg.shared_count AS "sharedCount",
+        agg.shared_oldest AS "sharedOldest",
+        agg.extra_count AS "extraCount",
+        agg.extra_oldest AS "extraOldest",
+        (SELECT COUNT(*) FROM ins)::bigint AS "inserted"
+      FROM agg
+    `;
+    });
+    // 集約なので記録が 0 件でも必ず 1 行返る
+    const row = rows[0];
+    // 読めなければ落とす（**黙って「通す」側へ倒さない**。§9 fail-closed）
+    if (row === undefined) throw new Error('レート制限の記録を読めませんでした。');
+    // 1 行入ったかどうかが「通したか」（判定と記録が同じ文なので食い違わない）
+    return {
+      allowed: row.inserted > 0n,
+      sharedCount: toSafeCount(row.sharedCount, 'レート制限の件数'),
+      extraCount: toSafeCount(row.extraCount, 'レート制限の件数 (種類ごと)'),
+      sharedOldest: row.sharedOldest,
+      extraOldest: row.extraOldest,
+    };
+  }
+
+  /**
+   * 窓から外れた記録をまとめて消す。
+   * **キーで絞らない**（これが要るのは二度と来ないキーの記録なので、全キーを対象にする）。
+   */
+  async sweep(before: Date): Promise<number> {
+    // 期限切れを一括で消す（`at` の索引が効く）
+    const deleted = await this.db.rateLimitHit.deleteMany({ where: { at: { lte: before } } });
+    // 消した件数
+    return deleted.count;
+  }
+}
+
 // prisma アダプタ一式を組み立てる (Composition Root と契約テストが呼ぶ)
 export function createPrismaRepos(db: PrismaClient): Repositories {
   // 各 Port を同じクライアントで結線して返す
@@ -1561,5 +1672,6 @@ export function createPrismaRepos(db: PrismaClient): Repositories {
     incidents: new PrismaIncidents(db),
     auditLogs: new PrismaAuditLogs(db),
     billingEvents: new PrismaBillingEvents(db),
+    rateLimit: new PrismaRateLimit(db),
   };
 }

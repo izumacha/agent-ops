@@ -18,6 +18,8 @@
 // 判定の失敗（`failed`）を 0 以外で終わらせるのは、**掃きが取りこぼしている状態を
 // スケジューラの失敗として見えるようにする**ため（アプリ側は 200 を返して一巡を続ける）。
 
+// 同期の書き出し（理由は `writeSummary`）
+import { writeSync } from 'node:fs';
 // 上限付きの `fetch`（写しを持たない。理由は共有モジュール側のコメント）
 import { fetchWithTimeout } from './lib/fetch-with-timeout.mjs';
 
@@ -36,12 +38,15 @@ const REQUEST_TIMEOUT_MS = 330_000;
 // 2xx 以外のときに標準エラーへ出す本文の長さの上限（HTML のエラーページで埋もれないため）
 const MAX_ERROR_BODY_CHARS = 500;
 
-// 叩く先（アプリの入口。`/api/v1` までは付けない）
-const baseUrl = process.env.MAINTENANCE_BASE_URL;
+// **前後の空白を落として読む。** 秘密の受け渡し（`export $(cat .env | xargs)`・シークレット
+// ストアの改行つきの値）で末尾に `\n` が残るのはごく普通で、そのままヘッダーへ載せると
+// undici が `TypeError: Invalid header value` を投げ、理由が「要求が失敗しました」に埋もれる。
+// アプリ側も設定値を `trim()` して読む（`src/lib/api/auth.ts`）ので、送り手側もそろえる
+const baseUrl = process.env.MAINTENANCE_BASE_URL?.trim();
 // プラットフォーム管理者トークン（この経路を叩ける唯一の資格情報）
-const token = process.env.PLATFORM_ADMIN_TOKEN;
+const token = process.env.PLATFORM_ADMIN_TOKEN?.trim();
 // 1 要求で判定するエージェント数（省略するとアプリ側の既定）
-const agentBudget = process.env.MAINTENANCE_AGENT_BUDGET;
+const agentBudget = process.env.MAINTENANCE_AGENT_BUDGET?.trim();
 
 // 一巡で許す要求の回数の上限。**無制限に回さない** — アプリ側のカーソルが進まない不具合に
 // 当たったとき、無限に叩き続けてしまう（しかも気付くのが遅れる）
@@ -138,9 +143,17 @@ function die(message, cause) {
   process.exit(1);
 }
 
-/** ここまでの合計を 1 行 1 JSON で出す（アプリのログと同じ形） */
+/**
+ * ここまでの合計を 1 行 1 JSON で出す（アプリのログと同じ形）。
+ *
+ * **`process.stdout.write` ではなく同期の書き出しを使う。** 標準出力がパイプ（`tee` や
+ * ログ収集）のときの書き込みは非同期で、`process.exit()` は**未完了の書き込みを捨てる** —
+ * つまり `die()` が合計を出そうとしても、読み手が遅ければその行だけ消える
+ * （この関数を足した理由＝「数えた取りこぼしを捨てない」が、まさにそこで破れる）。
+ */
 function writeSummary() {
-  process.stdout.write(`${JSON.stringify({ event: 'maintenance.tick', ...total })}\n`);
+  // ファイル記述子 1（標準出力）へ同期で書く
+  writeSync(1, `${JSON.stringify({ event: 'maintenance.tick', ...total })}\n`);
 }
 
 // 一巡の合計（ログに出す）。

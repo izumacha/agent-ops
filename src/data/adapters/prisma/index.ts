@@ -1778,10 +1778,13 @@ class PrismaRateLimit implements RateLimitPort {
     //
     // **`FOR UPDATE SKIP LOCKED` で、別のトランザクションが掴んでいる行は飛ばす。**
     // この掃きはキーで絞らないので `consume` の per-key の掃き出しと対象が重なる
-    // （どちらも最も古い行を狙う）。待つ形にすると `consume` 側が `lock_timeout` の中で
-    // 待たされて 429 になり、しかも理由は「枠の混雑」として記録される — 原因は定期掃きなので
-    // 運用者は上限を調べて空振りする。飛ばした行は次のバッチか次の一巡で消えるので
-    // 取りこぼしにはならない（呼び出し側は「上限未満が返るまで」繰り返す）
+    // （どちらも最も古い行を狙う）。飛ばした行は次のバッチか次の一巡で消えるので
+    // 取りこぼしにはならない（呼び出し側は**0 件が返るまで**繰り返す）。
+    //
+    // **守る向きは片方だけ。** これが防ぐのは「掃きが `consume` を待つ」側で、逆向き
+    // （`consume` の `purge` がこの `DELETE` の行ロックを待ち、`lock_timeout` に当たって
+    // 429 `contended` になる）は塞げていない — あちらは `SKIP LOCKED` を書けない形の
+    // `DELETE ... WHERE key = ...` だから。`docs/known-issues.md` に記録してある
     const deleted = await this.db.$executeRaw`
       DELETE FROM "RateLimitHit"
       WHERE "id" IN (

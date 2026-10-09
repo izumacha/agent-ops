@@ -166,7 +166,10 @@ npm run maintenance:tick
 資格情報（`PLATFORM_ADMIN_TOKEN` を `Authorization: Bearer` に載せる）なので、平文の経路を
 許さない（アプリの外向き通信を `src/lib/outbound-url.ts` が https に限っているのと同じ理由）。
 
-**これらはアプリの環境変数ではない**（スケジューラ側で設定する）。だから `.env.example` には
+**これらはアプリの環境変数ではない**（スケジューラ側で設定する）。**ティックは `.env` を読まない**
+ので（依存ゼロの素の node で動かすため）、**起こす側が必ず渡すこと** — cron は環境変数をほとんど
+引き継がないので、何も渡さないと毎回「`MAINTENANCE_BASE_URL` が未設定です」で終了コード 1 に
+なる（下の例はすべて渡す形で書いてある）。だから `.env.example` には
 載せていない — あちらは「アプリが読む設定」の雛形で、`docker-compose` の app へ素通しする
 対象でもある。
 
@@ -185,7 +188,24 @@ npm run maintenance:tick
 （いちばん重い定期処理の負荷がちょうど重い規模で倍になる）。cron なら `flock` で囲む:
 
 ```bash
-0 * * * * flock -n /tmp/agent-ops-maintenance.lock -c 'cd /srv/agent-ops && npm run maintenance:tick'
+# /etc/cron.d/agent-ops-maintenance（環境変数は必ずここで渡す。cron は引き継がない）
+MAINTENANCE_BASE_URL=https://ops.example.com
+PLATFORM_ADMIN_TOKEN=...
+0 * * * * deploy flock -n /tmp/agent-ops-maintenance.lock -c 'cd /srv/agent-ops && npm run maintenance:tick'
+```
+
+秘密をファイルに置きたくなければ、ラッパー 1 本に寄せる（`set -a` で読み込んだ値を渡す）:
+
+```bash
+0 * * * * deploy flock -n /tmp/agent-ops-maintenance.lock /srv/agent-ops/bin/maintenance-tick.sh
+```
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd /srv/agent-ops
+set -a; . /etc/agent-ops/maintenance.env; set +a   # 600 で置く
+npm run maintenance:tick
 ```
 
 GitHub Actions なら `concurrency` を、systemd なら 1 本のユニットで（タイマーは多重起動しない）。
@@ -198,8 +218,9 @@ GitHub Actions なら `concurrency` を、systemd なら 1 本のユニットで
 
 ### 繋ぎ先の例
 
-- **host の cron**（`docker compose` 配備）: `0 * * * * cd /srv/agent-ops && npm run maintenance:tick`
+- **host の cron**（`docker compose` 配備）: 上の `flock` の例をそのまま使う（**環境変数を渡すこと**）
 - **systemd timer**: `OnCalendar=hourly` のユニットから同じコマンドを起こす
+  （`EnvironmentFile=/etc/agent-ops/maintenance.env` を付ける。タイマーは多重起動しない）
 - **GitHub Actions**: `on.schedule` のワークフローから `npm ci && npm run maintenance:tick`
   （`MAINTENANCE_BASE_URL` / `PLATFORM_ADMIN_TOKEN` をリポジトリの secrets に置く）
 - **Vercel**: **Vercel Cron は使えない** — あちらは GET しか発行せず、この経路は副作用がある

@@ -276,12 +276,17 @@ export function countHttpResponse(method: string, status: number): void {
  * @returns 逃がした後の値
  */
 function escapeLabelValue(value: string): string {
-  // 逆斜線・二重引用符・改行（LF / CR）を逃がす
+  // **逃がし方は 3 つしか無い。** テキスト形式が引用符の中で定義しているのは `\\` / `\"` /
+  // `\n` だけで、**`\r` は定義が無い**。出すと解析器（`prometheus/common/expfmt` の
+  // TextParser）が `invalid escape sequence` で**そのスクレイプ全体を捨てる** — 系列 1 本が
+  // 壊れるのではなく、ターゲットの数字がまるごと消える（区切りの NUL と不正なラベル名で
+  // 塞いだのとまったく同じ壊れ方。この関数が存在する理由がそれなので、ここで作ってはいけない）。
+  // だから **CR も LF と同じ `\n` へ畳む**（どちらも行を割る文字で、ここは「本来入らない値」の
+  // 受け皿なので区別する意味が無い）
   return value
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
+    .replace(/[\n\r]/g, '\\n');
 }
 
 /**
@@ -295,8 +300,9 @@ function escapeLabelValue(value: string): string {
  * @returns 逃がした後の説明文
  */
 function escapeHelpText(text: string): string {
-  // 逆斜線と改行（LF / CR）だけを逃がす
-  return text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+  // 逆斜線と改行だけを逃がす（`# HELP` の行も `\\` と `\n` しか定義が無い。
+  // **CR は LF と同じ `\n` へ畳む** — 理由は `escapeLabelValue` と同じ）
+  return text.replace(/\\/g, '\\\\').replace(/[\n\r]/g, '\\n');
 }
 
 /**

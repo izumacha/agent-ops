@@ -206,13 +206,22 @@ describe('メトリクスのカウンタ', () => {
     expect(valueOf(text, 'agentops_metrics_series_dropped_total')).toBe(0);
   });
 
-  it('ラベル値の逆斜線・二重引用符・改行（LF / CR）を逃がす', () => {
+  // **逃がし方はテキスト形式が定義している 3 つだけ**（`\\` / `\"` / `\n`）。
+  //
+  // `\r` には定義が無く、出すと解析器が `invalid escape sequence` で**そのスクレイプ全体を
+  // 捨てる** — 系列 1 本ではなくターゲットの数字がまるごと消える（区切りの NUL・不正な
+  // ラベル名で塞いだのと同じ壊れ方を、塞ぐための関数が自分で作ってしまう形）。
+  // だから **CR は LF と同じ `\n` へ畳む**
+  it('ラベル値の逆斜線・二重引用符・改行を逃がす（CR も LF と同じ形へ畳む）', () => {
     // 行や引用の境目を壊しうる 4 文字を含む値を渡す（閉じた語彙から外れた値が来ても壊れない）
     incrementCounter('agentops_log_events_total', { event: 'a\\b"c\nd\re', level: 'error' });
     // 逃がした形で現れる（解析器が行や引用の境目を取り違えない）
-    expect(renderMetrics(new Date())).toContain(
-      'agentops_log_events_total{event="a\\\\b\\"c\\nd\\re",level="error"} 1',
-    );
+    const text = renderMetrics(new Date());
+    expect(text).toContain('agentops_log_events_total{event="a\\\\b\\"c\\nd\\ne",level="error"} 1');
+    // **定義の無い逃がし方を 1 つも出さないこと** — 綴りで照合するだけでは「`\r` を足した」
+    // 変異に気付かないので、出力全体から定義済みの 3 つを取り除いたうえで逆斜線が残らないことを見る
+    const withoutDefined = text.replace(/\\[\\"n]/g, '');
+    expect(withoutDefined.includes('\\\\'), '定義の無いエスケープが出ている').toBe(false);
   });
 
   it('ラベル値の NUL で出力が壊れない（キーの区切りと衝突させない）', () => {

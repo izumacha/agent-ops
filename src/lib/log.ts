@@ -329,6 +329,22 @@ export function formatLogLine(
 }
 
 /**
+ * 出来事を 1 件数える（**カウンタ名とラベルの形をここ 1 か所に置く**）。
+ *
+ * **写しを 2 か所に持たない。** `logEvent` と `logEventThrottled` が各自で
+ * `incrementCounter('agentops_log_events_total', { event, level })` を書いていたので、
+ * ラベルを 1 つ足す・名前を変えるといった変更を片方だけ直すと、**間引く側だけが別の系列へ
+ * 黙って落ちる**（運用者が警報に使えと案内されているのはまさにその系列）。出口の選び分けを
+ * `writeLogLine` に寄せたのと対の整理。
+ * @param level 深刻度（語彙から引いた値。行と同じものを渡す）
+ * @param event 出来事の名前
+ */
+function countLogEvent(level: LogLevel, event: LogEventName): void {
+  // 閉じた語彙なので系列は増えない（引けなければ呼び出し側が最も重い側へ倒している）
+  incrementCounter('agentops_log_events_total', { event, level });
+}
+
+/**
  * 1 行を組み立てて `console` へ出す（**出口はこの関数だけ**）。
  *
  * **深刻度で `console` のメソッドを選ぶ。** 行の JSON には `level` が入っているが、
@@ -399,8 +415,8 @@ export function logEvent(event: LogEventName, described?: Record<string, unknown
   // 深刻度を 1 度だけ決める（**ラベルと出口の両方が同じ値を読む**。別に引くと、片方だけを
   // 差し替える変異が通る＝実測で `tests/log.test.ts` の一致の検査がそれを固定している）
   const level = spec?.level ?? FALLBACK_LOG_LEVEL;
-  // 深刻度をラベルに使う（語彙が閉じているので系列は増えない。引けなければ最も重い側へ倒す）
-  incrementCounter('agentops_log_events_total', { event, level });
+  // 1 件数える（カウンタ名とラベルの形は `countLogEvent` が持つ）
+  countLogEvent(level, event);
   // 1 行の JSON を出す（出口の選び分けは `writeLogLine` が持つ。通算件数は無いので 0）
   writeLogLine(level, event, described, new Date(), 0);
 }
@@ -482,8 +498,8 @@ export function logEventThrottled(event: LogEventName): void {
   throttleStates.set(event, { at: inWindow && state !== undefined ? state.at : now, count });
   // 深刻度は語彙から引く（出口と同じ引き方。引けなければ最も重い側へ倒す）
   const level = lookupLogEvent(event)?.level ?? FALLBACK_LOG_LEVEL;
-  // **数えるのは毎回**（行にしなかった回も率に残す）
-  incrementCounter('agentops_log_events_total', { event, level });
+  // **数えるのは毎回**（行にしなかった回も率に残す。名前とラベルは `countLogEvent` が持つ）
+  countLogEvent(level, event);
   // 2 の冪の回だけ行にする（それ以外は数えるだけで戻る）
   if (!isReportableOccurrence(count)) return;
   // 1 行出す。**通算件数（`occurrence`）を添える**ので、最後の行がそのまま規模を表す。

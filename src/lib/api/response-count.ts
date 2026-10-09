@@ -117,6 +117,22 @@ function toErrorResponse(error: unknown): Response {
 }
 
 /**
+ * 要求からメソッドを読む（**読めなければ空文字**）。
+ * 空文字は `methodLabel` が閉じた集合の外として `other` に寄せるので、ラベルは増えない。
+ * @param request 受け取った要求
+ * @returns メソッド（読めなければ空文字）
+ */
+function methodOf(request: Request): string {
+  try {
+    // 通常はここで読める
+    return request.method;
+  } catch {
+    // 要求でない値が渡された形（本番では起きないが、例外をラッパーの外へ出さない）
+    return '';
+  }
+}
+
+/**
  * その関数が既に応答を数えるラッパーを通っているか（印を読む）。
  * **綴りではなく印を見る** — 検出網と同じ判定にそろえる（`tests/route-wrapping.test.ts`）。
  * @param handler 調べる関数
@@ -165,8 +181,14 @@ export function withResponseCount<A extends unknown[]>(
     // 頃は、`Vary` が `append` で冪等でないため全 API 応答が
     // `Vary: Authorization, Authorization` を返していた（実測）
     const response = await buildResponse(() => handler(request, ...rest));
-    // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）
-    countHttpResponse(request.method, response.status);
+    // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）。
+    // **メソッドの読み取りも投げない形にする** — 第 1 引数が要求でない形で呼ばれると
+    // `undefined.method` の TypeError が**組み立てを終えたあとに**飛び、500 の契約・
+    // `api.unexpected_error` のログ・計数がまとめて飛んで素の例外がラッパーの外へ出る
+    // （`withPrivateCacheHeaders` を `try` の中へ移して塞いだのと同じ形が、兄弟の 1 行に
+    // 残っていた）。本番では Next.js が必ず要求を渡すが、ここが最後の受け皿なので倒れ方を
+    // 安全側にそろえる（読めなければ `other` に寄る）
+    countHttpResponse(methodOf(request), response.status);
     // 組み立てた応答をそのまま返す
     return response;
   };

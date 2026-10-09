@@ -314,6 +314,28 @@ describe('Route Handler の結線', () => {
     expect(response.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
+  // **要求でない値で呼ばれても、例外をラッパーの外へ出さない。**
+  //
+  // メソッドの読み取りだけが組み立ての `try` の外にあったので、第 1 引数が要求でない形で
+  // 呼ばれると `undefined.method` の TypeError が**応答を組み立てたあとに**飛び、500 の契約・
+  // `api.unexpected_error` のログ・計数がまとめて飛んでいた（`withPrivateCacheHeaders` を
+  // `try` の中へ移して塞いだのと同じ形が、兄弟の 1 行に残っていた）。本番では Next.js が必ず
+  // 要求を渡すが、ここが最後の受け皿なので倒れ方をそろえる
+  it('応答を数えるラッパーは要求が無い形で呼ばれても例外を外へ出さない', async () => {
+    // 計数を空から始める
+    resetMetricsForTesting();
+    // 本体は要求を使わない（health の `probe()` と同じ形）
+    const handler = withResponseCount(() => Promise.resolve(new Response('x')));
+    // 要求を渡さずに呼ぶ（型の上では起きないが、実行時には起こりうる）
+    const response = await (handler as unknown as () => Promise<Response>)();
+    // 応答が返ること（例外が漏れない）
+    expect(response.status).toBe(200);
+    // メソッドが読めないので閉じた集合の外として `other` に寄る（ラベルは増えない）
+    expect(renderMetrics(new Date())).toContain('agentops_http_responses_total{method="other"');
+    // 後始末
+    resetMetricsForTesting();
+  });
+
   // **二重に包んでも 1 件しか数えない（冪等）。**
   //
   // `withResponseCount(route(handler))` は自然な書き間違いで（この PR の 4 本は素の

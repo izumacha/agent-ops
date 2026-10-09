@@ -169,6 +169,13 @@ export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;
 export const USER_TOKEN_MAX_TTL_DAYS = 365;
 // プラットフォーム管理者トークン (環境変数) に要求する最小長。短い値は設定ミスとみなして使わない (fail-closed)
 export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
+// 監視用トークン (環境変数 METRICS_TOKEN) に要求する最小長。
+// **プラットフォーム管理者トークンとは別の資格情報にする** — あちらはテナント作成
+// (応答に新しいテナントの admin トークンの平文が載る) とプラン・課金の変更も通るので、
+// 数字を読むだけの収集エージェントへ配ると、収集側の設定ファイルや収集サーバの侵害が
+// そのままテナント作成・プラン変更の権限になる (§9 最小権限)。
+// 長さの要求は他の環境変数由来の秘密と同じ 32 文字以上 (別の値にする理由が無い)
+export const METRICS_TOKEN_MIN_LENGTH = 32;
 // ガードレールの集計窓の下限 (分)。0 や負の窓は「期間が無い」ので判定できない
 export const GUARDRAIL_WINDOW_MIN_MINUTES = 1;
 // ガードレールの集計窓の上限 (分 = 7 日)。**無制限の窓を許さない** (§8 / §9) —
@@ -394,6 +401,9 @@ export const API_MESSAGES = {
   billingSignatureInvalid: 'Webhook の署名が確認できません。',
   // 受信 Webhook の共有シークレットが未設定・短すぎる (503)。何が足りないかは応答に出さない
   billingNotConfigured: '課金の設定が完了していないため、この操作は現在実行できません。',
+  // 監視用トークンが未設定・短すぎる (503)。何が足りないかは応答に出さない
+  // (設定済みか未設定かを未認証の相手に教えない)
+  metricsNotConfigured: '監視の設定が完了していないため、この操作は現在実行できません。',
   budgetExceeded:
     'このエージェントの予算 (当月) を超えました。予算を見直すか、翌月まで待ってから呼び出してください。',
   unsupportedModel:

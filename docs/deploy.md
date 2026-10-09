@@ -77,6 +77,7 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 | `PLATFORM_ADMIN_TOKEN` | テナントを作るなら必須 | 32 文字以上の乱数（`openssl rand -base64 48`） |
 | `AUDIT_HMAC_SECRET` | **必須** | 32 文字以上の乱数。**未設定だと人の操作（停止・復帰・解決・ルール登録）が 503 になる** |
 | `STRIPE_WEBHOOK_SECRET` | 課金を繋ぐなら必須 | 事業者が発行する `whsec_…`。未設定だと受信を 503 で断る |
+| `METRICS_TOKEN` | 監視を繋ぐなら必須 | 32 文字以上の乱数。**収集エージェント専用の読み取り用**（`PLATFORM_ADMIN_TOKEN` を使い回さない）。未設定だと `/metrics` は 503 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | 中継・評価を使うなら | 上流の資格情報。**クライアントからは受け取らない** |
 | `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` | 任意 | 省略すると公式のエンドポイント |
 | `PROXY_RATE_LIMIT_PER_MINUTE` | 任意 | 省略すると定数の既定値 |
@@ -141,23 +142,38 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 コンテナのログドライバ）に任せる — アプリから外へ送る経路は持たない。
 
 ```json
-{"ts":"2026-10-09T01:02:03.000Z","level":"error","event":"proxy.upstream_call_failed","message":"上流の呼び出しに失敗しました","error":{"name":"TypeError","cause":{"code":"ECONNREFUSED"}}}
+{"ts":"2026-10-09T01:02:03.000Z","level":"error","event":"proxy.upstream_call_failed","message":"<LOG_EVENTS が持つ文言>","error":{"name":"TypeError","cause":{"code":"ECONNREFUSED"}}}
 ```
 
 **警報は `event` の等値で組む**（文言は推敲で変わる）。語彙の一覧は
 `src/lib/log.ts` の `LOG_EVENTS` が正本で、`level` は `error` / `warn` の 2 値。
 `error` は「運用者が対処すべき」、`warn` は「縮退して続けた」の意味。
+上の例で `message` を伏せてあるのは**意図したもの**で、文言は正本の側で推敲してよい
+（ここに実際の文を写すと、推敲するたびにこの例だけが古くなる。`event` と `level` は
+警報の条件そのものなので写してある。この 2 つが語彙と一致することは
+`tests/docs-gate.test.ts` が `LOG_EVENTS` から導いて照合する）。
 
 ### 2. メトリクス（Prometheus のテキスト形式）
 
 ```bash
-curl -sS -H "Authorization: Bearer $PLATFORM_ADMIN_TOKEN" https://<配備先>/api/v1/metrics
+curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/metrics
 ```
 
-- **プラットフォーム管理者トークンだけ**が読める（値はテナントごとに分かれていないので、
-  テナントの利用者には見せない）。スクレイプする側に同じトークンを渡す。
+- **専用の読み取りトークン（`METRICS_TOKEN`）だけ**が読める。32 文字以上の乱数を
+  `.env` へ置き（生成例 `openssl rand -base64 48`）、同じ値をスクレイプする側へ渡す。
+  **未設定・短すぎなら 503 で誰も読めない**（fail-closed）。
+- **`PLATFORM_ADMIN_TOKEN` を代わりに使わないこと。** あちらは `POST /api/v1/tenants`
+  （応答に**新しいテナントの admin トークンの平文**が載る）と `PATCH /api/v1/tenants/{id}`
+  （プラン・課金の紐付けの変更）も通る。収集エージェントがするのは数字を読むことだけなので、
+  同じ値を配ると収集側の設定ファイルや収集サーバの侵害がそのままテナント作成・プラン変更の
+  権限になる（§15 の「このトークンは配らない」と同じ理由）。
+- **テナントの利用者には見せない**（値はテナントごとに分かれていないので、他テナントの
+  活動量が読める）。テナントが見るべき数字は画面と `GET /api/v1/usage/daily`。
 - **値はインスタンスごと。** 足し合わせるのはスクレイプ側で、サーバーレスではインスタンスが
   短命なので `agentops_process_start_time_seconds` / `..._uptime_seconds` を見て
   「カウンタが 0 へ戻った」ことを判別する。
+- **数えるのは `route()` を通る経路だけではない。** 未認証の受信 Webhook・`GET /health`・
+  画面側の CSV・`/metrics` 自身も同じ系列に乗るので、`agentops_http_responses_total{status="401"}`
+  の増加で署名鍵の設定ミスやなりすましの総当たりが分かる。
 - **耐久する事実はここに出さない。** 利用量・コストは `GET /api/v1/usage/daily`、
   インシデントは画面と `GET /api/v1/incidents`、操作の記録は `GET /api/v1/audit-logs`。

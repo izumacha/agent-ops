@@ -2,10 +2,14 @@
 //
 // **ここが無いと、出口が壊れても誰も気付かない** — 本番の経路では「数えた値が正しいか」を
 // 誰も照合しないので（スクレイプ側が読むだけ）、整形を潰しても API テストは緑のまま通る。
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   COUNTERS,
+  GAUGES,
+  KNOWN_METHODS,
   MAX_METRIC_SERIES,
+  OTHER_LABEL,
+  countHttpResponse,
   incrementCounter,
   methodLabel,
   renderMetrics,
@@ -13,10 +17,16 @@ import {
   statusLabel,
 } from '@/lib/metrics';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { LOG_EVENTS } from '@/lib/log';
 
 // 1 本ずつ独立に見る（カウンタはモジュールの状態なので前のテストを引きずる）
 beforeEach(() => {
   resetMetricsForTesting();
+});
+
+// 環境変数の差し替えを毎回戻す（本番のふりをしたまま次のテストへ漏らさない）
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 /**
@@ -100,14 +110,37 @@ describe('メトリクスのカウンタ', () => {
     );
   });
 
-  it('起動時刻と稼働秒数を出す（再起動でカウンタが 0 へ戻ったことが分かる）', () => {
+  it('宣言したゲージはすべて宣言と値を出す（名前は GAUGES から導く）', () => {
     // 現在時刻を渡して書き出す
     const text = renderMetrics(new Date());
-    // 2 つの gauge が宣言と値を持つ
-    expect(text).toContain('# TYPE agentops_process_start_time_seconds gauge');
-    expect(text).toContain('# TYPE agentops_process_uptime_seconds gauge');
+    // **名前をここへ書き写さない** — 本体へ直書きしていた頃は、名前を書き換えても
+    // どの検査も落ちなかった（表に移したので導出で照合できる）
+    expect(Object.keys(GAUGES).length).toBeGreaterThan(0);
+    for (const name of Object.keys(GAUGES)) {
+      // 宣言（HELP / TYPE）と値の 3 行が出ていること
+      expect(text).toContain(`# HELP ${name} `);
+      expect(text).toContain(`# TYPE ${name} gauge`);
+      expect(valueOf(text, name)).not.toBeNull();
+    }
+    // 起動時刻は正の UNIX 秒、稼働秒数は 0 以上（意味のある値であること）
     expect(valueOf(text, 'agentops_process_start_time_seconds')).toBeGreaterThan(0);
     expect(valueOf(text, 'agentops_process_uptime_seconds')).toBeGreaterThanOrEqual(0);
+  });
+
+  it('稼働秒数は渡した時刻から求める（引数を無視していれば増えない）', () => {
+    // 起動時刻を読む
+    const start = valueOf(renderMetrics(new Date()), 'agentops_process_start_time_seconds');
+    expect(start).not.toBeNull();
+    // 起動から 1 時間後の時刻で書き出す
+    const later = new Date((start! + 3_600) * 1_000);
+    // 稼働秒数が約 1 時間になる（固定値を返していれば落ちる）
+    expect(valueOf(renderMetrics(later), 'agentops_process_uptime_seconds')).toBeCloseTo(3_600, 1);
+  });
+
+  it('ゲージはカウンタと混ざらない（型の宣言が counter にならない）', () => {
+    // 同じ名前が counter として宣言されていないこと
+    const text = renderMetrics(new Date());
+    for (const name of Object.keys(GAUGES)) expect(text).not.toContain(`# TYPE ${name} counter`);
   });
 
   it('末尾は改行で終わる（行指向の形式なので最後の行も区切る）', () => {
@@ -136,5 +169,74 @@ describe('ラベル値の閉じ込め', () => {
 
   it.each([418, 999, 0, -1])('HTTP_STATUS に無い番号 (%i) は 1 つにまとめる', (status) => {
     expect(statusLabel(status)).toBe('other');
+  });
+});
+
+describe('応答を数える入口', () => {
+  it('メソッドとステータスを閉じた集合へ写してから数える', () => {
+    // 既知のメソッド・既知のステータス
+    countHttpResponse('POST', HTTP_STATUS.CREATED);
+    // 未知のメソッド・未知のステータス（どちらもまとめ先へ入る）
+    countHttpResponse('TRACE', 418);
+    // 書き出して確かめる
+    const text = renderMetrics(new Date());
+    expect(
+      valueOf(text, `agentops_http_responses_total{method="POST",status="${HTTP_STATUS.CREATED}"}`),
+    ).toBe(1);
+    expect(
+      valueOf(
+        text,
+        `agentops_http_responses_total{method="${OTHER_LABEL}",status="${OTHER_LABEL}"}`,
+      ),
+    ).toBe(1);
+  });
+
+  it('同じ組み合わせは足される', () => {
+    // 3 回数える
+    for (let i = 0; i < 3; i += 1) countHttpResponse('GET', HTTP_STATUS.OK);
+    // 1 系列に 3 が乗る
+    expect(
+      valueOf(
+        renderMetrics(new Date()),
+        `agentops_http_responses_total{method="GET",status="${HTTP_STATUS.OK}"}`,
+      ),
+    ).toBe(3);
+  });
+});
+
+describe('系列数の上限', () => {
+  // **上限の根拠を正本から導く**（metrics.ts の docstring に算術を書き写すと、語彙を増やした
+  // ときにそこだけが古くなる。以前は「メソッド 5 種 × ステータス約 15 種 = 75」と書いてあり、
+  // まとめ先の `other` を数えておらず実際の上界と合っていなかった）
+  it('いま数えうる系列の上界より十分に大きい', () => {
+    // (a) 応答 = メソッドの値（既知 + まとめ先）× ステータスの値（既知 + まとめ先）
+    const methods = KNOWN_METHODS.length + 1;
+    const statuses = new Set(Object.values(HTTP_STATUS)).size + 1;
+    // (b) ログの出来事 = 語彙の件数（level は event から定まるので倍にならない）
+    const logEvents = Object.keys(LOG_EVENTS).length;
+    // (c) 捨てた数 = 1 系列
+    const upperBound = methods * statuses + logEvents + 1;
+    // 上限は上界を超えていること（超えていないと正常な運用で系列を捨て始める）
+    expect(MAX_METRIC_SERIES).toBeGreaterThan(upperBound);
+    // **余裕も要求する** — 語彙を少し増やしただけで捨て始める値だと、上限の意味が
+    // 「設計の誤りを知らせる」から「普通に効く制限」へ変わる
+    expect(MAX_METRIC_SERIES).toBeGreaterThanOrEqual(upperBound * 3);
+  });
+});
+
+describe('テスト専用の初期化', () => {
+  it('本番では呼べない（運用の数字が黙って 0 へ戻るのを防ぐ）', () => {
+    // 本番のふりをする（vitest が後始末まで面倒を見る）
+    vi.stubEnv('NODE_ENV', 'production');
+    // 呼ぶと投げる（`setReposForTesting` と同じ扱い）
+    expect(() => resetMetricsForTesting()).toThrow(/本番/);
+  });
+
+  it('本番以外では空へ戻す', () => {
+    // 1 件数えてから
+    countHttpResponse('GET', HTTP_STATUS.OK);
+    // 戻すと系列が消える（`renderMetrics` はラベル無しの 0 だけを出す）
+    resetMetricsForTesting();
+    expect(valueOf(renderMetrics(new Date()), 'agentops_http_responses_total')).toBe(0);
   });
 });

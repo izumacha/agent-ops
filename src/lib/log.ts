@@ -65,6 +65,12 @@ export const LOG_EVENTS = {
   },
   // --- 健康確認 ---
   'health.db_unreachable': { level: 'error', message: 'DB 到達性チェックに失敗' },
+  // --- 監視（/metrics） ---
+  'metrics.token_too_short': {
+    level: 'error',
+    message:
+      'METRICS_TOKEN が短すぎます (必要な長さは src/lib/constants.ts の METRICS_TOKEN_MIN_LENGTH)。監視の入口を閉じます。',
+  },
   // --- 評価（Step3） ---
   'evaluation.agent_status_not_2xx': {
     level: 'error',
@@ -189,9 +195,12 @@ export type LogEventName = keyof typeof LOG_EVENTS;
  * 第 1 引数は閉じた語彙のキー、第 2 引数は `describeError` が作った診断だけ。
  * つまりこの関数を通る値に、例外の `message` や利用者の入力が混ざる経路が無い。
  *
- * **絶対に例外を投げない。** `JSON.stringify` は循環参照や BigInt で throw しうるので、
- * 失敗したら診断を落とした最小の行へ縮退する（`describeError` が throw しないのと同じ理由 —
- * ログの整形で落ちると、`catch` の中なら本来の失敗が別の失敗に化ける）。
+ * **例外を投げない。** 失敗しうる操作は 2 つあり、**どちらも `try` の中に入れる**:
+ * 時刻の整形（無効な `Date` の `toISOString()` は `RangeError`）と `JSON.stringify`
+ * （循環参照・BigInt）。失敗したら時刻を**その場で取り直し**、診断を落とした最小の行へ縮退する
+ * （`describeError` が throw しないのと同じ理由 — ログの整形で落ちると、`catch` の中なら
+ * 本来の失敗が別の失敗に化ける）。**時刻を組み立てを `try` の外に置かない** — 外に置くと
+ * 無効な `Date` を渡された時点で投げ、この縮退の経路に一度も入らない。
  * @param event 出来事の名前
  * @param described `describeError()` が作った診断（無い出来事もある）
  * @param now 行に入れる時刻
@@ -204,21 +213,28 @@ export function formatLogLine(
 ): string {
   // 語彙から深刻度と説明を引く（表に無いキーは型が拒むので既定値は要らない）
   const spec = LOG_EVENTS[event];
-  // 行の骨組み。順番を固定して、目で追うときに読みやすくする
-  const line: Record<string, unknown> = {
-    ts: now.toISOString(),
-    level: spec.level,
-    event,
-    message: spec.message,
-  };
-  // 診断があれば添える（無い出来事では鍵そのものを出さない）
-  if (described !== undefined) line.error = described;
-  // JSON にする。失敗したら診断を落として最小の行を返す
+  // **時刻の整形も JSON 化も同じ try の中で行う**（前者は無効な Date で RangeError を投げる）
   try {
+    // 行の骨組み。順番を固定して、目で追うときに読みやすくする
+    const line: Record<string, unknown> = {
+      ts: now.toISOString(),
+      level: spec.level,
+      event,
+      message: spec.message,
+    };
+    // 診断があれば添える（無い出来事では鍵そのものを出さない）
+    if (described !== undefined) line.error = described;
+    // 1 行の JSON にして返す
     return JSON.stringify(line);
   } catch {
-    // 診断なしなら必ず成功する（文字列だけの 4 項目）
-    return JSON.stringify({ ts: line.ts, level: spec.level, event, message: spec.message });
+    // 時刻は**その場で取り直す** — 渡された `now` が無効な Date だと読み直しても同じく失敗する。
+    // `new Date()` は必ず有効なので、この 4 項目（文字列だけ）は必ず JSON にできる
+    return JSON.stringify({
+      ts: new Date().toISOString(),
+      level: spec.level,
+      event,
+      message: spec.message,
+    });
   }
 }
 

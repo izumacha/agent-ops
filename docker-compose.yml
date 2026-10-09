@@ -71,6 +71,9 @@ services:
       NOTIFY_MAIL_WEBHOOK_URL: ${NOTIFY_MAIL_WEBHOOK_URL:-}
       NOTIFY_SIGNING_SECRET: ${NOTIFY_SIGNING_SECRET:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      # 監視の収集エージェント専用の読み取りトークン (ADR-0014)。
+      # 空なら GET /api/v1/metrics は 503 で誰も読めない (fail-closed)
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     # db のヘルスチェックが green になってから起動する
     depends_on:
       db:

@@ -30,6 +30,15 @@ export const AUDIT_SECRET = 'test-audit-hmac-secret-0123456789abcdef';
  * 未設定の側の挙動は、その経路を主題にしたテストが `vi.stubEnv` で明示的に消して確かめる
  */
 export const BILLING_SECRET = 'test-billing-webhook-secret-0123456789';
+
+/**
+ * 監視用トークン（`METRICS_TOKEN`）。
+ *
+ * **API テスト全体で設定する**（監査ログの鍵・受信 Webhook の鍵と同じ理由）。未設定だと
+ * `GET /metrics` が 503 で何も返さないので、設定しないと「本番では通る経路」をテストから
+ * 一度も通せない。未設定・短すぎの側の挙動は、その経路を主題にしたテストが明示的に消して確かめる
+ */
+export const METRICS_TOKEN = 'test-metrics-read-token-0123456789abcdef';
 // seed するトークンの有効期間 (日)
 const SEED_TOKEN_TTL_DAYS = 30;
 
@@ -133,6 +142,8 @@ let platformTokenBefore: string | undefined;
 let auditSecretBefore: string | undefined;
 // 受信 Webhook の共有シークレットの元の値（後始末で戻す）
 let billingSecretBefore: string | undefined;
+// 監視用トークンの元の値 (後始末で戻す)
+let metricsTokenBefore: string | undefined;
 // 空にした設定の退避（キーごとに元の値を覚える）
 const notifyBefore = new Map<string, string | undefined>();
 
@@ -184,6 +195,9 @@ function setupSeed(): Seed {
   // 受信 Webhook の共有シークレットを設定する (無いと受信が 503 になる。理由は BILLING_SECRET)
   billingSecretBefore = process.env.STRIPE_WEBHOOK_SECRET;
   process.env.STRIPE_WEBHOOK_SECRET = BILLING_SECRET;
+  // 監視用トークンを設定する (無いと GET /metrics が 503 になる。理由は METRICS_TOKEN)
+  metricsTokenBefore = process.env.METRICS_TOKEN;
+  process.env.METRICS_TOKEN = METRICS_TOKEN;
   // 通知とレート制限の設定を空にする (理由は各一覧のコメント)
   for (const name of BLANKED_ENV_NAMES) {
     notifyBefore.set(name, process.env[name]);
@@ -212,6 +226,8 @@ function teardownSeed(): void {
   // 環境変数を元の値へ (元が未設定なら消す)
   if (platformTokenBefore === undefined) delete process.env.PLATFORM_ADMIN_TOKEN;
   else process.env.PLATFORM_ADMIN_TOKEN = platformTokenBefore;
+  if (metricsTokenBefore === undefined) delete process.env.METRICS_TOKEN;
+  else process.env.METRICS_TOKEN = metricsTokenBefore;
   if (auditSecretBefore === undefined) delete process.env.AUDIT_HMAC_SECRET;
   else process.env.AUDIT_HMAC_SECRET = auditSecretBefore;
   if (billingSecretBefore === undefined) delete process.env.STRIPE_WEBHOOK_SECRET;

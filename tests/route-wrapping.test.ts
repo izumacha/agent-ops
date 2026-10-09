@@ -50,6 +50,24 @@ const SIGNED_WEBHOOK_ROUTES: Record<string, string> = {
     '使えず、Stripe-Signature ヘッダの HMAC-SHA256 署名で認証する',
 };
 
+// **監視専用トークンで認証する経路**。`route()` の認証は Bearer トークンから `Principal`
+// （テナント内のユーザー／プラットフォーム管理者／エージェント）を決める仕組みで、監視の
+// 収集エージェントはそのどれでもない（テナントを持たず役割も持たない）。`Principal` の種類を
+// 1 つ増やすと RBAC の許可表・プランのゲート・テナント境界の検査がすべてその種類を扱わねばならず、
+// 「どこでも通る主体」を足すことになるので採らなかった。**除外ではなく「別の認証」として扱う** —
+// `route()` を通らないことを許す代わりに、下の 2 つを必ず要求する:
+//   (a) 監視用トークンの入口（`@/lib/api/metrics-auth`）へ到達すること
+//       （= 到達しなければ運用の数字が誰でも読める）
+//   (b) `no-store` を宣言すること（`route()` が包む応答と同じ扱い）
+// 応答を数える出口への到達は**全ルート共通の要求**なので別の検査が見る。
+// **ここに増える差分は理由の妥当性をレビューで必ず確認する**
+const METRICS_TOKEN_ROUTES: Record<string, string> = {
+  'api/v1/metrics/route.ts':
+    'Prometheus の収集エージェントが読む運用の数字。テナントを持たない読み取り専用の' +
+    '資格情報 (環境変数 METRICS_TOKEN) で認証し、プラットフォーム管理者トークンでは読めない' +
+    '(あちらはテナント作成とプラン変更も通るので、収集エージェントへ配らない)',
+};
+
 // **画面側の Route Handler** (Step5)。セッション Cookie で認証し、JSON ではないものを返す経路で、
 // REST の契約 (openapi.yaml) には載らない。**除外ではなく「別の契約」として扱う** —
 // api/v1 の下に置かないこと・route() を通らないことを許す代わりに、下の 3 つを必ず要求する:
@@ -187,6 +205,118 @@ describe('Route Handler の結線', () => {
     }
   });
 
+  it('監視専用トークンの表に載っているファイルは実在し、理由が書かれている', () => {
+    // 走査で見つかった route.ts の一覧 (src/app からの相対パス)
+    const found = new Set(routeFiles.map(({ relativeToApp }) => relativeToApp));
+    // 表が空なら走査が空振りしている (fail-closed)
+    expect(Object.keys(METRICS_TOKEN_ROUTES).length).toBeGreaterThan(0);
+    for (const [key, reason] of Object.entries(METRICS_TOKEN_ROUTES)) {
+      // 消えたファイルの登録が残っていないこと
+      expect(found.has(key), `${key} は実在しない (表の登録が古い)`).toBe(true);
+      // 理由が空・空白でないこと
+      expect(reason.trim().length, `${key} の理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  it('監視専用トークンの経路は専用の入口で認証し、キャッシュを禁止している', () => {
+    // 監視用トークンの入口 (走査できていなければ fail-closed で落とす)
+    const authModule = join(SRC_DIR, 'lib', 'api', 'metrics-auth.ts');
+    expect(importGraph.has(authModule), '監視用トークンの入口を走査できていない').toBe(true);
+    // 表に載っている経路を 1 本ずつ見る
+    const entries = Object.keys(METRICS_TOKEN_ROUTES);
+    expect(entries.length, '監視専用トークンの経路が 1 本も無い').toBeGreaterThan(0);
+    for (const key of entries) {
+      // 走査で見つけた実体を引く
+      const file = routeFiles.find(({ relativeToApp }) => relativeToApp === key);
+      expect(file, `${key} を走査できていない`).toBeDefined();
+      // (a) 監視用トークンの入口へ到達していること (= 誰でも読める状態になっていない)
+      expect(
+        reachesModule(importGraph, file!.full, authModule),
+        `${key} が監視用トークンの確認を通っていない`,
+      ).toBe(true);
+      // (b) 共有キャッシュへ載らないことを宣言していること (画面側ルート・署名 Webhook と同じ扱い)
+      const source = readFileSync(file!.full, 'utf8');
+      expect(
+        source.includes('no-store') || source.includes('withPrivateCacheHeaders'),
+        `${key} が Cache-Control の禁止を宣言していない`,
+      ).toBe(true);
+    }
+  });
+
+  // **応答を数えるのは全ルート共通の要求**（ADR-0014）。
+  //
+  // `route()` の中だけで数えていた頃は、`route()` を通らない 4 本（health・受信 Webhook・
+  // 画面側の CSV・/metrics 自身）が**メトリクスにもログにも 1 件も現れなかった**。
+  // とくに受信 Webhook は未認証で誰でも叩ける経路なので、署名鍵の設定ミスで全件 401 に
+  // なっても、401 の山がどの出口にも出ない（運用者は気付けない）。
+  //
+  // **手書きの一覧にしない** — 一覧だと、`route()` を通らない経路を新しく足した人が
+  // 追記を忘れたぶんだけ検出網が静かに狭まる。`src/app` の全 route.ts から導く。
+  //
+  // **残る境界**: 見るのは「数える出口のモジュールへ到達しているか」までで、実際に
+  // 呼んでいるかは見ていない（import の連鎖は呼び出しの有無を区別できない）。しかも
+  // **`route()` を通らない経路でもこの検査は当たりにくい** — 例外を応答へ写すために
+  // `@/lib/api/handler` を取り込むと、そこから `metrics.ts` へ到達してしまう（実測: 受信
+  // Webhook から `countHttpResponse` の呼び出しと import を消しても、この検査は緑のまま通った）。
+  // そこで `route()` を通らない経路には**下の綴りの検査**を対にし、実際に数えていることは
+  // 経路ごとの API テストが固定する（`tests/api/metrics.test.ts` /
+  // `tests/api/health.test.ts` / `tests/api/billing.test.ts` の「…も数える」）。
+  it('すべての Route Handler は応答を数える出口へ到達している', () => {
+    // 数える出口 (走査できていなければ fail-closed で落とす)
+    const metricsModule = join(SRC_DIR, 'lib', 'metrics.ts');
+    expect(importGraph.has(metricsModule), '数える出口を走査できていない').toBe(true);
+    // 走査が空なら落とす (黙って「対象ゼロ＝緑」にしない)
+    expect(routeFiles.length, 'Route Handler を 1 本も見つけられない').toBeGreaterThan(0);
+    for (const { full, relativeToApp } of routeFiles) {
+      // route() を通る経路は handler.ts 経由で到達する (通らない経路は自分で import する)
+      expect(
+        reachesModule(importGraph, full, metricsModule),
+        `${relativeToApp} が応答を数える出口を通っていない`,
+      ).toBe(true);
+    }
+  });
+
+  // **`route()` を通らない経路は、数える関数を自分で呼ぶ。**
+  //
+  // 対象は**表ではなく実体から導く** — モジュールを読み込んで「印の無い HTTP export を
+  // 持つファイル」を集めるので、`route()` を通らない経路を新しく足した人が表への追記を
+  // 忘れても対象に入る。
+  //
+  // **綴りを見るだけの弱い検査**（`no-store` の宣言と同じ扱い）だが、上の到達の検査が
+  // `@/lib/api/handler` 経由の間接到達で当たらないぶんをここが受け持つ。
+  it('route() を通らない Route Handler は数える関数を自分で呼んでいる', async () => {
+    // 数える関数の名前（正本は src/lib/metrics.ts。ここでは綴りだけを見る）
+    const callee = 'countHttpResponse';
+    // 印の無い export を持つファイル
+    const unwrapped: string[] = [];
+    for (const { full, relativeToApp } of routeFiles) {
+      // モジュールを実際に読み込む（綴りではなく値を見る）
+      const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
+      for (const method of HTTP_METHOD_EXPORTS) {
+        // その名前を export していなければ何もしない
+        const exported = routeModule[method];
+        if (exported === undefined) continue;
+        // route() が包んでいなければ対象へ入れる
+        const branded =
+          typeof exported === 'function' &&
+          (exported as unknown as Record<symbol, unknown>)[ROUTE_HANDLER_BRAND] === true;
+        if (!branded) unwrapped.push(relativeToApp);
+      }
+    }
+    // 1 本も無ければ導出が壊れている（この repo には必ず 4 本ある。fail-closed）
+    expect(unwrapped.length, 'route() を通らない経路を 1 本も見つけられない').toBeGreaterThan(0);
+    for (const relativeToApp of new Set(unwrapped)) {
+      // 走査で見つけた実体を引く
+      const file = routeFiles.find((entry) => entry.relativeToApp === relativeToApp);
+      expect(file, `${relativeToApp} を走査できていない`).toBeDefined();
+      // 数える関数の綴りが本文に現れること
+      expect(
+        readFileSync(file!.full, 'utf8').includes(callee),
+        `${relativeToApp} が ${callee} を呼んでいない（route() を通らない経路は自分で数える）`,
+      ).toBe(true);
+    }
+  });
+
   // 意図して置いている Next の入口と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。
   // キーはリポジトリ相対のパス。表に無い綴り・場所はすべて「無いこと」を要求する
   const ALLOWED_NEXT_ENTRIES: Record<string, string> = {
@@ -268,6 +398,8 @@ describe('Route Handler の結線', () => {
       if (Object.hasOwn(SESSION_PAGE_ROUTES, relativeToApp)) continue;
       // 署名で認証する受信 Webhook も同じ扱い (理由は表に書く。要求は下の専用テスト)
       if (Object.hasOwn(SIGNED_WEBHOOK_ROUTES, relativeToApp)) continue;
+      // 監視専用トークンで認証する経路も同じ扱い (理由は表に書く。要求は下の専用テスト)
+      if (Object.hasOwn(METRICS_TOKEN_ROUTES, relativeToApp)) continue;
       // モジュールを実際に読み込む (綴りではなく値を見る)
       const routeModule: Record<string, unknown> = await import(pathToFileURL(full).href);
       for (const method of HTTP_METHOD_EXPORTS) {

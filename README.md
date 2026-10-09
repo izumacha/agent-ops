@@ -349,7 +349,7 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
   アプリ側の枠のキーが無い）。
 - **運用の観測は 2 つの出口で行う**（[ADR-0014](./docs/adr/0014-observability.md)）。ログは **1 行 1 JSON** で、
   出来事は閉じた語彙（`ts` / `level` / `event` / `message` ＋ 診断）。**警報は文言ではなく `event` の等値で組む**
-  （文言は推敲で変わる）。数字は `GET /api/v1/metrics`（プラットフォーム管理者トークンのみ・Prometheus の
+  （文言は推敲で変わる）。数字は `GET /api/v1/metrics`（**監視専用の読み取りトークン** `METRICS_TOKEN` のみ・Prometheus の
   テキスト形式）で、**インスタンスごとの値**なので全インスタンスをスクレイプして足し合わせる。
   耐久する事実（利用量・インシデント・監査ログ）はこの経路には出さない — `GET /usage/daily` と画面が持つ。
 - **画面のセッション Cookie は本番で HTTPS 必須**（`Secure` 属性が付くので http では保持されない。

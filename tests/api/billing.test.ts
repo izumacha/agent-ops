@@ -13,6 +13,7 @@ import { BILLING_PRICE_LOOKUP_KEYS } from '@/lib/billing/events';
 import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 import { Plan } from '@/domain/types';
 import { API_MESSAGES, PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
+import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
@@ -220,6 +221,25 @@ describe('POST /billing/webhook', () => {
     expect(result.json).toMatchObject({ message: API_MESSAGES.billingSignatureInvalid });
     // プランは変わっていない
     expect(await planOfA()).toBe(Plan.free);
+  });
+
+  // **この経路も応答を数える**（ADR-0014）。`route()` を通らないので、数える結線が外れると
+  // メトリクスにもログにも 1 件も現れない。未認証で誰でも叩ける経路なので、署名鍵の設定ミスや
+  // なりすましの総当たりで 401 が積まれても運用者が気付けなくなる
+  it('署名が合わなかった応答も数える（401 の山が外から読める）', async () => {
+    // カウンタを空にしてから 1 回だけ叩く
+    resetMetricsForTesting();
+    // 署名を付けずに呼ぶ（401）
+    const result = await call(receiveBillingWebhook, {
+      method: 'POST',
+      rawBody: JSON.stringify(webhookBody({ plan: Plan.enterprise })),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(result.status).toBe(401);
+    // その応答が系列に 1 件乗っている
+    expect(renderMetrics(new Date())).toContain(
+      'agentops_http_responses_total{method="POST",status="401"} 1',
+    );
   });
 
   it('別の鍵で署名した本文は 401（鍵を知らない相手は通れない）', async () => {

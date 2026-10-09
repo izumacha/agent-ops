@@ -25,7 +25,9 @@ function trackedOnce(): string[] {
   return trackedCache;
 }
 // 定数の正本 (文書に書かれた数値と突き合わせる)
-import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
+import { METRICS_TOKEN_MIN_LENGTH, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
+// ログの語彙の正本 (deploy.md の例が実在の出来事を指していることを突き合わせる)
+import { LOG_EVENTS } from '@/lib/log';
 // 監査ログの連番の上限 (README が運用者向けに数値で書いているので突き合わせる)
 import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 // RBAC の許可表 (役割と操作の唯一の真実の源)
@@ -118,6 +120,51 @@ describe('Step0 の設計成果物', () => {
     ]) {
       // その数値が本文に現れること
       expect(readFileSync(path, 'utf8'), `${path} の最小長が実装とずれている`).toContain(expected);
+    }
+  });
+
+  // 監視用トークンの最小長も同じ扱い (運用者が読む 2 か所と実装の定数)
+  it(`監視用トークンの最小長 ${METRICS_TOKEN_MIN_LENGTH} が文書と一致する`, () => {
+    // 実装の値を文書の書き方 (「32 文字以上」) に合わせた文字列
+    const expected = `${METRICS_TOKEN_MIN_LENGTH} 文字以上`;
+    // 運用者がこの値を読む 2 か所
+    for (const path of [join(DOCS, 'deploy.md'), join(ROOT, '.env.example')]) {
+      expect(readFileSync(path, 'utf8'), `${path} の最小長が実装とずれている`).toContain(expected);
+    }
+  });
+
+  // **`docs/deploy.md` のログの例は実在の出来事を指していること**（ADR-0014）。
+  //
+  // 運用者はこの例を見て警報の条件を組むので、`event` が語彙に無い綴りだと「その条件は
+  // 一度も当たらない」警報を作ることになる。**例に書いてよいのは `event` と `level` だけ**で、
+  // `message` は正本の側で推敲してよい（だから例では伏せてある。写すと推敲のたびに古くなる）。
+  //
+  // **残る境界**: 文言の検査は「正本と一字一句同じ綴りが例に入っていないこと」しか見ないので、
+  // 言い換えて書いた例は捕まらない（それは写しではないので、この検査の対象でもない）。
+  // 例の文章そのものが妥当かはレビューで見る。
+  it('deploy.md のログの例は LOG_EVENTS に実在する出来事を指している', () => {
+    // 文書を読む
+    const deploy = readFileSync(join(DOCS, 'deploy.md'), 'utf8');
+    // 例の行（JSON のコードブロック内で `"event":"..."` を含む行）
+    const lines = deploy.split('\n').filter((line) => line.includes('"event":"'));
+    // 1 件も無ければ走査が壊れている（fail-closed。例を消したときもここで気付く）
+    expect(lines.length, 'deploy.md にログの例が無い').toBeGreaterThan(0);
+    for (const line of lines) {
+      // `event` と `level` を取り出す
+      const event = /"event":"([^"]+)"/.exec(line)?.[1];
+      const level = /"level":"([^"]+)"/.exec(line)?.[1];
+      // 語彙に実在すること
+      expect(event, `${line} から event を読めない`).toBeDefined();
+      expect(Object.hasOwn(LOG_EVENTS, event!), `${event} は LOG_EVENTS に無い`).toBe(true);
+      // 深刻度も語彙の宣言と一致すること（例だけが別の深刻度を言っていると警報の重み付けが狂う）
+      expect(level, `${line} から level を読めない`).toBe(
+        LOG_EVENTS[event as keyof typeof LOG_EVENTS].level,
+      );
+      // **文言は写していないこと**（正本の側で推敲してよいので、写すとこの例だけが古くなる）
+      expect(
+        line.includes(LOG_EVENTS[event as keyof typeof LOG_EVENTS].message),
+        `${event} の文言を例へ写している（推敲すると古くなる）`,
+      ).toBe(false);
     }
   });
 

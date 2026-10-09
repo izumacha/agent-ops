@@ -64,7 +64,14 @@ paths:
     get:
       tags: [metrics]
       operationId: getMetrics
-      summary: プロセス内のカウンタ (プラットフォーム管理者のみ)。Prometheus のテキスト形式で返す
+      summary: プロセス内のカウンタ (監視専用トークンのみ)。Prometheus のテキスト形式で返す
+      description: >-
+        Prometheus の収集エージェントが読む運用の数字。**認証は専用の読み取りトークン**
+        (環境変数 METRICS_TOKEN) で、ユーザートークンもプラットフォーム管理者トークンも受け付けない
+        (あちらはテナント作成とプラン変更も通るため。§9 最小権限)。値はこのインスタンスの分だけで、
+        足し合わせるのはスクレイプ側。DB を引かないのでスクレイプが本番の負荷にならない。
+      security:
+        - metricsToken: []
       responses:
         '200':
           description: 1 行 1 系列のテキスト (値はこのインスタンスの分だけ。足し合わせるのはスクレイプ側)
@@ -72,10 +79,14 @@ paths:
             text/plain:
               schema:
                 type: string
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 監視用トークンが未設定・短すぎる (設定が無いので誰も通れない = fail-closed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /tenants:
@@ -1391,6 +1402,14 @@ components:
       type: http
       scheme: bearer
       description: ユーザーのログイントークン (aop_u_...)、またはテナント作成・列挙専用のプラットフォーム管理者トークン (環境変数 PLATFORM_ADMIN_TOKEN)。API キー (aop_k_...) は Step2 のプロキシ専用でこの API では使えない
+    metricsToken:
+      type: http
+      scheme: bearer
+      description: >-
+        監視の収集エージェント専用の読み取りトークン (環境変数 METRICS_TOKEN)。
+        テナントを持たず役割も持たないので RBAC の対象外で、403 ではなく 401 で弾く。
+        **プラットフォーム管理者トークンでは読めない** (あちらはテナント作成 —
+        応答に新しいテナントの admin トークンの平文が載る — とプラン変更も通るため)
   parameters:
     Limit:
       name: limit

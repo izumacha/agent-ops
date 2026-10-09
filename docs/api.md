@@ -10,13 +10,13 @@
 | 項目 | 値 |
 | ---- | -- |
 | 基底パス | `/api/v1`（`openapi.yaml` の `servers.url`） |
-| 認証 | `Authorization: Bearer <トークン>`（3 系統 ＋ 署名付き Webhook。下記） |
+| 認証 | `Authorization: Bearer <トークン>`（4 系統 ＋ 署名付き Webhook。下記） |
 | 形式 | リクエスト・レスポンスともに `application/json` |
 | 金額 | マイクロ USD の整数を**文字列**で運ぶ（1 USD = 1,000,000。浮動小数誤差を避ける） |
 | 一覧 | `limit` と `cursor` のキーセットページング（`createdAt → id` 順） |
 | エラー | `{ "error": { "message": ..., "issues"?: ... } }`。文言は日本語 |
 
-### 認証の 3 系統
+### 認証の 4 系統
 
 1. **ユーザートークン**（`aop_u_…`）— 人の操作。テナント内の資源すべてに使う。
    役割は `viewer` / `operator` / `admin`、操作は `view` / `execute` / `stop`（許可表は
@@ -25,6 +25,11 @@
    （系統を混ぜない。ADR-0005）。
 3. **プラットフォーム管理者トークン**（環境変数 `PLATFORM_ADMIN_TOKEN`）—
    `GET/POST /tenants` と `PATCH /tenants/{tenantId}` 専用。テナント内の資源には閲覧も含め 403。
+4. **監視用トークン**（環境変数 `METRICS_TOKEN`）— **`GET /metrics` だけ**に使う読み取り専用。
+   テナントも役割も持たないので RBAC の対象外で、合わなければ 403 ではなく 401。
+   **3 のトークンでは読めない**（あちらはテナント作成 — 応答に新しいテナントの admin トークンの
+   平文が載る — とプラン変更も通るので、監視の収集エージェントへ配らない。§9 最小権限）。
+   未設定・短すぎは 503（fail-closed）。
 
 **`POST /billing/webhook` だけは Bearer 認証を使わない** — 呼ぶのは事業者（Stripe）なので、
 `Stripe-Signature` の HMAC-SHA256 を共有シークレット（`STRIPE_WEBHOOK_SECRET`）で検証する。

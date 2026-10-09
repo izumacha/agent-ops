@@ -7,12 +7,16 @@
 // **系列の数に上限を置く（fail-safe）。** ラベルの値は閉じた語彙から採るので本来は増えないが、
 // 呼び出し側が将来うっかり可変の値を渡すと、1 プロセスの Map が無制限に伸びる（メモリ枯渇）。
 // 上限を超えた増加は捨てて、捨てたことを専用のカウンタで数える（黙って落とさない）。
+//
+// **このファイルは `src/lib/log.ts` を import しない。** あちらがこちらを呼ぶので、
+// 逆向きの依存を足すと循環する（系列の上限の根拠に出てくる `LOG_EVENTS` の件数も、
+// だからここでは数えずテスト側で突き合わせる）。
 import { HTTP_STATUS } from './api/http-status';
 
-/** カウンタの名前と説明（`# HELP` に出る）。**ここが名前の唯一の宣言** */
+/** カウンタの名前と説明（`# HELP` に出る）。**カウンタの名前はここが唯一の宣言** */
 export const COUNTERS = {
   // 応答の数。method と status で分ける（どちらも閉じた集合なので系列は増えない）
-  agentops_http_responses_total: 'route() が返した応答の数 (method / status 別)',
+  agentops_http_responses_total: 'HTTP で返した応答の数 (method / status 別)',
   // ログに出した出来事の数。event と level で分ける（語彙は LOG_EVENTS が閉じている）
   agentops_log_events_total: 'ログに出した出来事の数 (event / level 別)',
   // 系列の上限を超えて捨てた増加の数（0 でないときはラベルの設計を間違えている）
@@ -22,12 +26,46 @@ export const COUNTERS = {
 /** カウンタの名前 */
 export type CounterName = keyof typeof COUNTERS;
 
+/** ゲージ 1 本の宣言（カウンタと違って積み上げず、読んだ瞬間の値を出す） */
+interface GaugeSpec {
+  // `# HELP` に出る説明
+  readonly help: string;
+  // 出す値（`renderMetrics` に渡された時刻から求める）
+  readonly value: (now: Date) => number;
+}
+
+/**
+ * ゲージの名前と値の作り方。**ゲージの名前もここが唯一の宣言**。
+ *
+ * **カウンタと同じ表の形にしてある理由。** 以前は `renderMetrics` の中に名前を直書きしていたので、
+ * 「名前の宣言は `COUNTERS` だけ」という約束が実際には守られておらず、`Object.keys(COUNTERS)` から
+ * 導いていた API テストの照合がこの 2 本だけ素通りしていた（名前を書き換えても全件緑）。
+ */
+export const GAUGES = {
+  // プロセスの起動時刻（秒）。再起動でカウンタが 0 へ戻ったことがスクレイプ側から分かる
+  agentops_process_start_time_seconds: {
+    help: 'プロセスが起動した時刻 (UNIX 秒)',
+    value: () => STARTED_AT_MS / MILLIS_PER_SECOND,
+  },
+  // 現在時刻から求めた稼働秒数。スクレイプの間隔より短い再起動を見落とさないために添える
+  agentops_process_uptime_seconds: {
+    help: 'プロセスの稼働秒数',
+    value: (now: Date) => (now.getTime() - STARTED_AT_MS) / MILLIS_PER_SECOND,
+  },
+} as const satisfies Record<string, GaugeSpec>;
+
+/** ゲージの名前 */
+export type GaugeName = keyof typeof GAUGES;
+
 /**
  * 系列数の上限。
  *
- * **根拠**: いま数えている系列は (a) 応答 = メソッド 5 種 × ステータス約 15 種 = 75 以内、
- * (b) ログの出来事 = `LOG_EVENTS` の件数（40 前後）× level 2 種 = 80 以内、(c) 捨てた数 = 1。
- * 合計の 2 倍を上限にして、語彙を増やしても普通には届かない余裕を取ってある。
+ * **根拠**（いま数えている系列の見積もり。数えられる上限そのものは
+ * `tests/metrics.test.ts` が 3 つの正本から導いて照合するので、ここに算術を書き写さない）:
+ * (a) 応答 = `methodLabel` が返しうる値 × `statusLabel` が返しうる値（どちらも閉じた集合）、
+ * (b) ログの出来事 = `LOG_EVENTS` の件数（`level` は `event` から定まるので倍にはならない）、
+ * (c) 捨てた数 = 1。
+ * 上限はその合計に 3 倍以上の余裕を持たせた値で、語彙を増やしても普通には届かない。
  */
 export const MAX_METRIC_SERIES = 512;
 
@@ -37,8 +75,14 @@ export type MetricLabels = Readonly<Record<string, string>>;
 // 系列（カウンタ名＋ラベル）ごとの現在値。**プロセス内だけ**に持つ
 const COUNTS = new Map<string, number>();
 
+// 1 秒のミリ秒数（ゲージを秒で出すのに使う）
+const MILLIS_PER_SECOND = 1_000;
+
 // プロセスが始まった時刻（ミリ秒）。再起動の検出に使うので固定値ではなく実時刻
 const STARTED_AT_MS = Date.now();
+
+// 系列のキーの区切り（ラベルの値に現れない制御文字にして衝突を避ける）
+const KEY_SEPARATOR = '\u0000';
 
 /**
  * 系列のキーを組み立てる。
@@ -52,8 +96,8 @@ function seriesKey(name: CounterName, labels: MetricLabels): string {
   const pairs = Object.keys(labels)
     .sort()
     .map((label) => `${label}=${labels[label] ?? ''}`);
-  // カウンタ名と連結する（区切りは値に現れない制御文字にして衝突を避ける）
-  return [name, ...pairs].join('\u0000');
+  // カウンタ名と連結する
+  return [name, ...pairs].join(KEY_SEPARATOR);
 }
 
 /**
@@ -85,6 +129,26 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
 }
 
 /**
+ * 応答 1 件を数える。
+ *
+ * **応答を数える唯一の入口**。`route()` が包む経路だけでなく、包まない経路
+ * （`GET /health`・受信 Webhook・画面側の CSV・`GET /metrics` 自身）もここを通す。
+ * 以前は `route()` の中でだけ数えていたので、**未認証で誰でも叩ける受信 Webhook の
+ * 401 の山がメトリクスにもログにも 1 件も現れなかった**（署名鍵の設定ミスが無言になる）。
+ * 「どの `route.ts` もこの出口へ到達していること」は `tests/route-wrapping.test.ts` が
+ * 走査で導いて要求する。
+ * @param method 要求のメソッド（閉じた集合へ写してからラベルにする）
+ * @param status 応答のステータス（同じく閉じた集合へ写す）
+ */
+export function countHttpResponse(method: string, status: number): void {
+  // ラベルは 2 つだけ。どちらも閉じた集合なので系列は増えない
+  incrementCounter('agentops_http_responses_total', {
+    method: methodLabel(method),
+    status: statusLabel(status),
+  });
+}
+
+/**
  * Prometheus のラベル値の規則に合わせて逃がす（`\` `"` 改行）。
  * @param value 逃がす前の値
  * @returns 逃がした後の値
@@ -92,6 +156,32 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
 function escapeLabelValue(value: string): string {
   // 逆斜線・二重引用符・改行の 3 つだけが規則で定められた対象
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+}
+
+/**
+ * 系列のキーをカウンタ名で束ねる（走査は 1 度だけ）。
+ *
+ * **カウンタ名ごとに `COUNTS` を読み直さない** — 以前は名前ごとに全系列を `filter` して
+ * さらにキーを `split` していたので、走査がカウンタの本数だけ重なっていた。
+ * @returns カウンタ名 → その名前の系列（キーと値）の一覧
+ */
+function groupSeriesByName(): Map<string, { key: string; labels: string[]; value: number }[]> {
+  // 束ねた結果
+  const grouped = new Map<string, { key: string; labels: string[]; value: number }[]>();
+  // 系列を 1 度だけ走査する
+  for (const [key, value] of COUNTS) {
+    // 区切りの位置（ラベルが無い系列はキーがカウンタ名そのもの）
+    const at = key.indexOf(KEY_SEPARATOR);
+    // カウンタ名と `名前=値` の列に割る
+    const name = at === -1 ? key : key.slice(0, at);
+    const labels = at === -1 ? [] : key.slice(at + 1).split(KEY_SEPARATOR);
+    // その名前の一覧へ足す
+    const bucket = grouped.get(name);
+    if (bucket === undefined) grouped.set(name, [{ key, labels, value }]);
+    else bucket.push({ key, labels, value });
+  }
+  // 束ねた結果を返す
+  return grouped;
 }
 
 /**
@@ -105,45 +195,42 @@ function escapeLabelValue(value: string): string {
 export function renderMetrics(now: Date): string {
   // 出力する行
   const lines: string[] = [];
+  // 系列を 1 度だけ走査してカウンタ名で束ねる
+  const grouped = groupSeriesByName();
   // カウンタごとに HELP / TYPE と系列を並べる（名前順で安定させる）
   for (const name of Object.keys(COUNTERS).sort() as CounterName[]) {
-    // この名前の系列だけを集める
-    const series = [...COUNTS.entries()].filter(([key]) => key.split('\u0000')[0] === name);
     // 1 件も無いカウンタも宣言だけは出す（スクレイプ側が「まだ 0」と「名前が無い」を区別できる）
     lines.push(`# HELP ${name} ${COUNTERS[name]}`);
     lines.push(`# TYPE ${name} counter`);
+    // この名前の系列
+    const series = grouped.get(name) ?? [];
     // 系列が無ければラベル無しの 0 を出す
     if (series.length === 0) {
       lines.push(`${name} 0`);
       continue;
     }
     // 系列をキー順に並べて出す（同じ状態なら同じ出力になるようにする）
-    for (const [key, value] of series.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-      // キーからラベルの部分を取り出す（先頭はカウンタ名）
-      const labels = key
-        .split('\u0000')
-        .slice(1)
-        .map((pair) => {
-          // `名前=値` を名前と値に割る（値に `=` が入っても最初の 1 つだけで割る）
-          const at = pair.indexOf('=');
-          return `${pair.slice(0, at)}="${escapeLabelValue(pair.slice(at + 1))}"`;
-        });
+    for (const { labels, value } of series.sort((a, b) =>
+      a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
+    )) {
+      // `名前=値` を Prometheus の `名前="値"` へ直す（値に `=` が入っても最初の 1 つだけで割る）
+      const rendered = labels.map((pair) => {
+        const at = pair.indexOf('=');
+        return `${pair.slice(0, at)}="${escapeLabelValue(pair.slice(at + 1))}"`;
+      });
       // ラベルが無ければ波括弧も出さない
       lines.push(
-        labels.length === 0 ? `${name} ${value}` : `${name}{${labels.join(',')}} ${value}`,
+        rendered.length === 0 ? `${name} ${value}` : `${name}{${rendered.join(',')}} ${value}`,
       );
     }
   }
-  // プロセスの起動時刻（秒）。再起動でカウンタが 0 へ戻ったことがスクレイプ側から分かる
-  lines.push('# HELP agentops_process_start_time_seconds プロセスが起動した時刻 (UNIX 秒)');
-  lines.push('# TYPE agentops_process_start_time_seconds gauge');
-  lines.push(`agentops_process_start_time_seconds ${(STARTED_AT_MS / 1000).toFixed(3)}`);
-  // 現在時刻から求めた稼働秒数。スクレイプの間隔より短い再起動を見落とさないために添える
-  lines.push('# HELP agentops_process_uptime_seconds プロセスの稼働秒数');
-  lines.push('# TYPE agentops_process_uptime_seconds gauge');
-  lines.push(
-    `agentops_process_uptime_seconds ${((now.getTime() - STARTED_AT_MS) / 1000).toFixed(3)}`,
-  );
+  // ゲージも同じ表から出す（名前を直書きしない）
+  for (const name of Object.keys(GAUGES).sort() as GaugeName[]) {
+    // 宣言と値を並べる（小数 3 桁まで。ミリ秒の分解能をそのまま表す）
+    lines.push(`# HELP ${name} ${GAUGES[name].help}`);
+    lines.push(`# TYPE ${name} gauge`);
+    lines.push(`${name} ${GAUGES[name].value(now).toFixed(3)}`);
+  }
   // 末尾の改行まで含めて返す（テキスト形式は行指向）
   return `${lines.join('\n')}\n`;
 }
@@ -154,10 +241,13 @@ export function renderMetrics(now: Date): string {
  * 系列を増やせる（Next.js は export の無いメソッドを 405 で落とすので実際には届かないが、
  * ラベルの値を外から決められる形そのものを残さない）。
  */
-const KNOWN_METHODS = new Set(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']);
+export const KNOWN_METHODS = ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] as const;
 
 // 閉じた集合に無い値を表すラベル値（系列が 1 本増えるだけで済ませる）
-const OTHER_LABEL = 'other';
+export const OTHER_LABEL = 'other';
+
+// 照合用の集合（配列は系列数の見積もりをテストから導くために公開している）
+const KNOWN_METHOD_SET: ReadonlySet<string> = new Set(KNOWN_METHODS);
 
 /**
  * HTTP メソッドをラベル値へ写す（知らない綴りは 1 つにまとめる）。
@@ -166,11 +256,13 @@ const OTHER_LABEL = 'other';
  */
 export function methodLabel(method: string): string {
   // 閉じた集合にあればそのまま、無ければまとめる
-  return KNOWN_METHODS.has(method) ? method : OTHER_LABEL;
+  return KNOWN_METHOD_SET.has(method) ? method : OTHER_LABEL;
 }
 
 // 応答に使うステータスの集合（`HTTP_STATUS` が唯一の参照元）
-const KNOWN_STATUSES = new Set(Object.values(HTTP_STATUS).map((status) => String(status)));
+const KNOWN_STATUSES: ReadonlySet<string> = new Set(
+  Object.values(HTTP_STATUS).map((status) => String(status)),
+);
 
 /**
  * ステータスをラベル値へ写す（`HTTP_STATUS` に無い番号は 1 つにまとめる）。
@@ -184,10 +276,14 @@ export function statusLabel(status: number): string {
 }
 
 /**
- * テスト用にカウンタを空へ戻す。
- * **本番の経路からは呼ばない**（`setReposForTesting` と同じ扱いで、テストの独立性のためだけにある）。
+ * テスト用にカウンタを空へ戻す。**本番では呼べない（fail-closed）** —
+ * `setReposForTesting` と同じ扱いで、テストの独立性のためだけにある。
  */
 export function resetMetricsForTesting(): void {
+  // 本番ビルドで消されると運用の数字が黙って 0 へ戻るので拒否する
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('resetMetricsForTesting は本番では使えません。');
+  }
   // 系列をすべて消す
   COUNTS.clear();
 }

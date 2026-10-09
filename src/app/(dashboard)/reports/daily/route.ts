@@ -9,9 +9,20 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { buildDailyReportCsv, dailyReportFileName } from '@/lib/dashboard/csv';
 import { resolveDashboardRange } from '@/lib/dashboard/range';
 import { loadDashboardSummary } from '@/lib/dashboard/summary';
+import { countHttpResponse } from '@/lib/metrics';
 import { currentSession } from '@/lib/session-server';
 
 export async function GET(request: Request): Promise<Response> {
+  // 応答を組み立てる
+  const response = await respond(request);
+  // **この応答も 1 件数える**（route() を通らない経路なので、ここで数えないとメトリクスに現れない）
+  countHttpResponse('GET', response.status);
+  // 組み立てた応答をそのまま返す
+  return response;
+}
+
+// セッションを確かめて CSV を組み立てる（応答を数えるのは上の 1 か所に寄せる）
+async function respond(request: Request): Promise<Response> {
   // **認証はここでも自分で確かめる**（レイアウトの認証は画面の枝で、このルートは通らない。§9）
   const session = await currentSession();
   // 未ログインなら 401（画面と違いリダイレクトしない。ファイルの取得なので遷移先が無い）

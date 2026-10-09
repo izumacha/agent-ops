@@ -1,27 +1,63 @@
-// /api/v1/metrics: プロセス内のカウンタを Prometheus のテキスト形式で返す（プラットフォーム管理者のみ）
+// /api/v1/metrics: プロセス内のカウンタを Prometheus のテキスト形式で返す（監視専用トークン）。
 //
-// **なぜプラットフォーム管理者だけか。** 値はインスタンス全体の合計で、テナントごとに分かれていない
+// **なぜ専用の資格情報か（§9 最小権限）。** 以前はプラットフォーム管理者トークンで守っていたが、
+// あれは `POST /tenants`（**応答に新しいテナントの admin トークンの平文が載る**）と
+// `PATCH /tenants/{tenantId}`（プランと課金の紐付けの変更）も通る。監視の収集エージェントへ
+// 配る値にそこまでの権限を持たせない（理由と代替案は `src/lib/api/metrics-auth.ts`）。
+//
+// **なぜテナントの利用者に見せないか。** 値はインスタンス全体の合計で、テナントごとに分かれていない
 // （ラベルにテナント id を入れると系列がテナント数だけ増え、しかも他テナントの活動量が読める）。
 // テナントの利用者が見るべき数字は `GET /usage/daily` と画面が持つ。
 //
 // **なぜ DB を引かないか。** 耐久する事実（利用量・インシデント・監査ログ）は DB にあり、
 // それを返す経路は既にある。ここで数えるのは**DB に残らないもの**（応答の数と、ログに出した
 // 出来事の数）だけなので、スクレイプのたびに DB を触らない＝監視が本番の負荷にならない。
-import { requirePlatformAdmin } from '@/lib/api/guard';
-import { route } from '@/lib/api/handler';
+//
+// **`route()` を通らない**（Bearer から `Principal` を決める仕組みに乗らないため）。代わりに
+// `tests/route-wrapping.test.ts` の理由付きの表へ登録し、(a) 監視用トークンの入口へ到達すること、
+// (b) `no-store` を宣言すること、(c) 応答を数える出口へ到達することを機械で要求している。
+import { toErrorResponse } from '@/lib/api/handler';
 import { HTTP_STATUS } from '@/lib/api/http-status';
+import { assertMetricsToken } from '@/lib/api/metrics-auth';
+import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
 import { PROMETHEUS_CONTENT_TYPE } from '@/lib/constants';
-import { renderMetrics } from '@/lib/metrics';
+import { countHttpResponse, renderMetrics } from '@/lib/metrics';
+
+// 数字は毎回その場の値なので、Next.js の静的化を無効にして常に動的に応答する
+export const dynamic = 'force-dynamic';
 
 // GET /metrics: 現在の値を書き出す (getMetrics)
-export const GET = route(async ({ principal }) => {
-  // プラットフォーム管理者だけ（テナント境界の外側の数字なので）
-  requirePlatformAdmin(principal);
-  // いまの値をテキストへ書き出す（判定はしない。しきい値はスクレイプ側が決める）
-  const body = renderMetrics(new Date());
-  // JSON ではないので Response.json は使わず、形式を名乗って返す
-  return new Response(body, {
-    status: HTTP_STATUS.OK,
-    headers: { 'Content-Type': PROMETHEUS_CONTENT_TYPE },
-  });
-});
+export async function GET(request: Request): Promise<Response> {
+  // 応答を組み立てる（**数えるのは 1 か所**なので、成功・失敗のどちらの経路も下の 1 行を通る）
+  const response = await respond(request);
+  // この応答を 1 件数える（自分自身の 200 / 401 / 503 も数に入る）
+  countHttpResponse('GET', response.status);
+  // 組み立てた応答をそのまま返す
+  return response;
+}
+
+/**
+ * 認証して本文を組み立てる（例外は `route()` と同じ関数で応答へ写す）。
+ * @param request 受け取った要求
+ * @returns 応答
+ */
+async function respond(request: Request): Promise<Response> {
+  try {
+    // 監視用トークンを照合する（未設定・短すぎは 503、合わなければ 401）
+    assertMetricsToken(request);
+    // いまの値をテキストへ書き出す（判定はしない。しきい値はスクレイプ側が決める）
+    const body = renderMetrics(new Date());
+    // JSON ではないので Response.json は使わず、形式を名乗って返す。
+    // **共有キャッシュへ載せない** — 認証付きの運用情報なので（`route()` が全ルートへ付けるのと同じ値）
+    return withPrivateCacheHeaders(
+      new Response(body, {
+        status: HTTP_STATUS.OK,
+        headers: { 'Content-Type': PROMETHEUS_CONTENT_TYPE },
+      }),
+    );
+  } catch (error) {
+    // 応答へ写す（**`route()` と同じ関数**。500 のログもそこが残す）。
+    // 失敗の応答にも `no-store` を付ける（成功と同じ扱い）
+    return withPrivateCacheHeaders(toErrorResponse(error));
+  }
+}

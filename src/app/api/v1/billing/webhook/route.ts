@@ -25,6 +25,8 @@ import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { toErrorResponse } from '@/lib/api/handler';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
+// 応答を数える唯一の入口 (route() を通らない経路もここを通す)
+import { countHttpResponse } from '@/lib/metrics';
 import { getRepos } from '@/data';
 import type { BillingPlanApplication } from '@/data/ports';
 import type { Plan } from '@/domain/types';
@@ -47,6 +49,17 @@ const MILLIS_PER_SECOND = 1_000;
 
 /** POST /billing/webhook (receiveBillingWebhook) */
 export async function POST(request: Request): Promise<Response> {
+  // 応答を組み立てる
+  const response = await respond(request);
+  // **この応答も 1 件数える**。未認証で誰でも叩ける経路なので、署名の不一致（401）が
+  // 増えたことはここでしか分からない（鍵の設定ミスや総当たりが無言にならないようにする）
+  countHttpResponse('POST', response.status);
+  // 組み立てた応答をそのまま返す
+  return response;
+}
+
+// 署名を確かめてプランへ反映する（応答を数えるのは上の 1 か所に寄せる）
+async function respond(request: Request): Promise<Response> {
   // 例外はすべて HTTP 応答へ写す（`route()` を通らないので、この 1 か所で受ける）
   try {
     // 共有シークレット（未設定・短すぎは 503。検証を飛ばして受け入れることはしない）。

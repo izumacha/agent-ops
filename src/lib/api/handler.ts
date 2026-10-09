@@ -13,7 +13,7 @@ import type { PlanFeature } from '@/domain/plan';
 import { HTTP_STATUS } from './http-status';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
-import { incrementCounter, methodLabel, statusLabel } from '@/lib/metrics';
+import { countHttpResponse } from '@/lib/metrics';
 import { logEvent } from '@/lib/log';
 
 // Next.js 16 の Route Handler が受け取る第 2 引数 (動的セグメントは Promise で届く)
@@ -236,11 +236,11 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
   const wrapped = async (request: Request, context: RouteContext<P>): Promise<Response> => {
     // 応答を組み立てる
     const response = await respond(request, context);
-    // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）
-    incrementCounter('agentops_http_responses_total', {
-      method: methodLabel(request.method),
-      status: statusLabel(response.status),
-    });
+    // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）。
+    // **数え方は `countHttpResponse` が唯一の参照元** — `route()` を通らない経路
+    // （health・受信 Webhook・画面側の CSV・/metrics 自身）も同じ関数を呼ぶので、
+    // ラベルの写し方が経路ごとに割れない
+    countHttpResponse(request.method, response.status);
     // 組み立てた応答をそのまま返す
     return response;
   };

@@ -53,7 +53,8 @@ type Operation = {
   tags?: string[];
   responses?: Record<string, unknown>;
   parameters?: ParameterRef[];
-  security?: unknown[];
+  // 認証要件は `{ 方式名: スコープの配列 }` の配列（OpenAPI 3.1）。**鍵だけを読む**
+  security?: Record<string, unknown>[];
   requestBody?: {
     content?: Record<
       string,
@@ -92,10 +93,14 @@ type Spec = {
   openapi: string;
   paths: Record<string, PathItem>;
   tags?: { name: string }[];
+  // 定義全体の既定の認証方式（オペレーションが宣言しなければこれが効く）
+  security?: Record<string, unknown>[];
   components: {
     parameters: Record<string, { name?: string; in?: string; schema: Record<string, unknown> }>;
     schemas: Record<string, SchemaObject>;
     responses?: Record<string, unknown>;
+    // 宣言されている認証方式（名前だけを使う）
+    securitySchemes?: Record<string, unknown>;
   };
 };
 const spec = parse(readFileSync(OPENAPI_PATH, 'utf8')) as Spec;
@@ -324,17 +329,80 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     }
   });
 
-  // 認証が要る操作はすべて 403 を契約に持つ (書き込み系は RBAC 違反、読み取り系もプラットフォーム管理者トークンで
-  // テナント内の資源を読もうとすると 403 になる。テナント境界そのものは 404 で隠すが、主体の種類違いは 403)
-  it('認証が必要なオペレーションは 401 (認証失敗) と 403 (権限違反) の応答を宣言している', () => {
+  // **403 を要求しない認証方式の理由付きの表。**
+  //
+  // 403 は「認証はできたが、その主体の役割・種類では許されない」を表す。テナント内の役割を持つ
+  // `bearerAuth` の経路はそれが起こりうるが、**役割を持たない資格情報では起こりえない**
+  // （合えば通る・合わなければ 401 の 2 択）。宣言に 403 を書くと、契約が「起こりうる」と
+  // 言っているのに実装からは一度も返らない状態になる。
+  //
+  // **ここに載せない方式は 403 を要求される（fail-closed）** — こうしておかないと、
+  // 新しい認証方式を 1 つ宣言するだけで 403 の要求から静かに抜けられる。
+  // **エントリが増える差分は理由の妥当性をレビューで必ず確認する**
+  const SCHEMES_WITHOUT_ROLES: Record<string, string> = {
+    metricsToken:
+      '監視の収集エージェント専用の読み取りトークン。テナントも役割も持たないので RBAC の' +
+      '対象にならず、合わなければ 401 で弾く（403 になる経路が無い）',
+  };
+
+  /**
+   * そのオペレーションに効く認証方式の名前を導く。
+   * **オペレーションの宣言が無ければ定義全体の既定**（`security:` のトップレベル）を見る。
+   * @param op オペレーション
+   * @returns 方式の名前の集合（空なら公開エンドポイント）
+   */
+  function securitySchemesFor(op: Operation): Set<string> {
+    // 宣言が無ければ定義全体の既定が効く
+    const declared = Array.isArray(op.security) ? op.security : (spec.security ?? []);
+    // `- 方式名: []` の鍵を集める
+    return new Set(declared.flatMap((requirement) => Object.keys(requirement)));
+  }
+
+  // 認証方式の名前が宣言されていること（typo で検査から静かに外れるのを防ぐ）
+  it('オペレーションが使う認証方式は components.securitySchemes に宣言されている', () => {
+    // 宣言済みの方式
+    const declared = new Set(Object.keys(spec.components.securitySchemes ?? {}));
+    // 1 つも読めなければ走査が壊れている (fail-closed)
+    expect(declared.size, '認証方式を 1 つも読めない').toBeGreaterThan(0);
+    for (const { path, method, op } of operations) {
+      for (const scheme of securitySchemesFor(op)) {
+        expect(declared.has(scheme), `${method.toUpperCase()} ${path} の ${scheme} は未宣言`).toBe(
+          true,
+        );
+      }
+    }
+  });
+
+  // 403 を免除する方式の表が実在と理由を保っていること（消えた方式の登録が残らないようにする）
+  it('403 を要求しない方式の表は実在し、理由が書かれている', () => {
+    // 宣言済みの方式
+    const declared = new Set(Object.keys(spec.components.securitySchemes ?? {}));
+    for (const [scheme, reason] of Object.entries(SCHEMES_WITHOUT_ROLES)) {
+      // 消えた方式の登録が残っていないこと
+      expect(declared.has(scheme), `${scheme} は宣言されていない (表の登録が古い)`).toBe(true);
+      // 理由が空・空白でないこと
+      expect(reason.trim().length, `${scheme} の理由が空`).toBeGreaterThan(0);
+    }
+  });
+
+  // 認証が要る操作はすべて 401 と 500 を契約に持ち、**役割を持つ方式**はさらに 403 を持つ
+  // (書き込み系は RBAC 違反、読み取り系もプラットフォーム管理者トークンでテナント内の資源を
+  // 読もうとすると 403 になる。テナント境界そのものは 404 で隠すが、主体の種類違いは 403)
+  it('認証が必要なオペレーションは 401 と 500 を宣言し、役割を持つ方式は 403 も宣言している', () => {
     // 定義側が `security: []` で公開と宣言したオペレーションは対象外 (パス名の決め打ちで写しを持たない)
     for (const { path, method, op } of operations) {
-      if (Array.isArray(op.security) && op.security.length === 0) continue;
+      // 効く方式（空なら公開）
+      const schemes = securitySchemesFor(op);
+      if (schemes.size === 0) continue;
       const codes = Object.keys(op.responses ?? {});
       expect(codes, `${method.toUpperCase()} ${path}`).toContain('401');
-      expect(codes, `${method.toUpperCase()} ${path}`).toContain('403');
       // 500 はどのルートでも起こりうる (route() が予期しない例外をここへ落とす) ので契約にも載せる
       expect(codes, `${method.toUpperCase()} ${path}`).toContain('500');
+      // **役割を持つ方式が 1 つでも効くなら 403 を要求する**（免除は理由付きの表だけ）
+      const withRoles = [...schemes].filter(
+        (scheme) => !Object.hasOwn(SCHEMES_WITHOUT_ROLES, scheme),
+      );
+      if (withRoles.length > 0) expect(codes, `${method.toUpperCase()} ${path}`).toContain('403');
     }
   });
 

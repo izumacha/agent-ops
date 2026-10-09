@@ -9,6 +9,7 @@ vi.mock('@/lib/prisma', () => ({ prisma: { $queryRaw: queryRaw } }));
 // 差し替えた後で読む (静的 import でも vi.mock が先に効く)
 import { GET } from '@/app/api/v1/health/route';
 import { parseLoggedLine, renderLoggedLine } from '../lib/log-lines';
+import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 
 // 各テストの後でモックの記録を消す
 afterEach(() => {
@@ -62,5 +63,26 @@ describe('GET /health', () => {
     const line = parseLoggedLine(errorLog.mock.calls[0]);
     expect(line.event).toBe('health.db_unreachable');
     expect(line.error).toMatchObject({ name: 'Error' });
+  });
+
+  // **この経路も応答を数える**（ADR-0014）。`route()` を通らないので、数える結線が外れると
+  // メトリクスに 1 件も現れない。compose の healthcheck が 10 秒ごとに叩くため、
+  // 503 の系列は「DB 障害がどれだけ続いたか」をそのまま表す
+  it.each([
+    { label: '成功', ready: true, status: 200 },
+    { label: '失敗', ready: false, status: 503 },
+  ])('$label した応答も数える', async ({ ready, status }) => {
+    // カウンタを空にしてから 1 回だけ叩く
+    resetMetricsForTesting();
+    if (ready) queryRaw.mockResolvedValue([{ '?column?': 1 }]);
+    else queryRaw.mockRejectedValue(new Error('boom'));
+    // 失敗側はログを端末へ出さない
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // 呼ぶ
+    expect((await GET()).status).toBe(status);
+    // その応答が系列に 1 件乗っている
+    expect(renderMetrics(new Date())).toContain(
+      `agentops_http_responses_total{method="GET",status="${status}"} 1`,
+    );
   });
 });

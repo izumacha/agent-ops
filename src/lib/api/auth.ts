@@ -54,7 +54,7 @@ const CHALLENGE_MISSING = 'Bearer realm="agent-ops"';
 const CHALLENGE_INVALID = 'Bearer realm="agent-ops", error="invalid_token"';
 
 // 401 (資格情報が無い) の例外
-function unauthorizedError(): ApiError {
+export function unauthorizedError(): ApiError {
   // 方式だけを示すチャレンジを付ける
   return new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.unauthorized, undefined, {
     [WWW_AUTHENTICATE_HEADER]: CHALLENGE_MISSING,
@@ -62,7 +62,7 @@ function unauthorizedError(): ApiError {
 }
 
 // 401 (資格情報が無効) の例外。無効の理由 (失効・期限切れ・無効化) は区別しない
-function invalidTokenError(): ApiError {
+export function invalidTokenError(): ApiError {
   // invalid_token のチャレンジを付ける
   return new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.invalidToken, undefined, {
     [WWW_AUTHENTICATE_HEADER]: CHALLENGE_INVALID,
@@ -73,7 +73,7 @@ function invalidTokenError(): ApiError {
 let warnedShortPlatformToken = false;
 
 // Authorization ヘッダから Bearer トークンを取り出す (無ければ 401)
-function extractBearerToken(request: Request): string {
+export function extractBearerToken(request: Request): string {
   // ヘッダを読む
   const header = request.headers.get('authorization');
   // 無ければ認証情報無し

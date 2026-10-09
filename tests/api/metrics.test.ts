@@ -1,15 +1,25 @@
-// GET /metrics の認可と応答の形。
+// GET /metrics の認証と応答の形。
 //
 // **この経路は JSON を返さない唯一の API** なので、共通の `call()`（本文を JSON として読む）は
-// 200 の検査に使えない。401 / 403 の本文は JSON なので、そこだけ `call()` を使う。
-import { describe, expect, it } from 'vitest';
+// 200 の検査に使えない。401 / 503 の本文は JSON なので、そこだけ `call()` を使う。
+//
+// **守っているのは専用の読み取りトークン**（`METRICS_TOKEN`）で、プラットフォーム管理者
+// トークンでは読めない。あの資格情報はテナント作成（応答に新しいテナントの admin トークンの
+// 平文が載る）とプラン変更も通るので、監視の収集エージェントへ配らないため（§9 最小権限）。
+import { describe, expect, it, vi } from 'vitest';
 import { GET as getMetrics } from '@/app/api/v1/metrics/route';
-import { PROMETHEUS_CONTENT_TYPE, NO_STORE_CACHE_CONTROL } from '@/lib/constants';
+import {
+  METRICS_TOKEN_MIN_LENGTH,
+  NO_STORE_CACHE_CONTROL,
+  PROMETHEUS_CONTENT_TYPE,
+} from '@/lib/constants';
 import { Role } from '@/domain/types';
-import { COUNTERS } from '@/lib/metrics';
-import { PLATFORM_TOKEN, call, seedEachTest } from './helpers';
+import { COUNTERS, GAUGES } from '@/lib/metrics';
+import { resetMetricsAuthForTesting } from '@/lib/api/metrics-auth';
+import { loggedEvents } from '../lib/log-lines';
+import { METRICS_TOKEN, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 
-// 2 テナント × 3 役割を seed する（役割ごとの 403 を見るため）
+// 2 テナント × 3 役割を seed する（役割ごとの 401 を見るため）
 const seed = seedEachTest();
 
 /**
@@ -24,44 +34,59 @@ async function fetchMetrics(
   const headers = new Headers();
   if (token !== undefined) headers.set('authorization', `Bearer ${token}`);
   // ハンドラを直接呼ぶ（URL はダミー。この経路はクエリを見ない）
-  const response = await getMetrics(new Request('http://test.local/api/v1/metrics', { headers }), {
-    params: Promise.resolve({}),
-  });
+  const response = await getMetrics(new Request('http://test.local/api/v1/metrics', { headers }));
   // 本文はテキストのまま読む
   return { status: response.status, text: await response.text(), headers: response.headers };
 }
 
 describe('GET /metrics', () => {
-  it('プラットフォーム管理者は Prometheus のテキストを受け取る', async () => {
+  it('監視用トークンで Prometheus のテキストを受け取る', async () => {
     // 呼ぶ
-    const result = await fetchMetrics(PLATFORM_TOKEN);
+    const result = await fetchMetrics(METRICS_TOKEN);
     expect(result.status).toBe(200);
     // 形式を名乗っている（スクレイプ側が解析器を選ぶ手掛かり）
     expect(result.headers.get('content-type')).toBe(PROMETHEUS_CONTENT_TYPE);
     // 宣言したカウンタがすべて現れる（名前の一覧はここへ書き写さず COUNTERS から導く）
     for (const name of Object.keys(COUNTERS)) expect(result.text).toContain(`# TYPE ${name} `);
+    // **ゲージも同じ導出で照合する** — 名前を本体へ直書きしていた頃は、この 2 本だけが
+    // どの検査からも見えず、名前を書き換えても全件緑だった
+    for (const name of Object.keys(GAUGES)) expect(result.text).toContain(`# TYPE ${name} gauge`);
   });
 
-  it('保存を禁じている（route() が付けるキャッシュ制御がテキスト応答にも効く）', async () => {
-    // 数字は運用情報なので中間のキャッシュに残さない
-    const result = await fetchMetrics(PLATFORM_TOKEN);
+  it('保存を禁じている（認証付きの運用情報なので中間のキャッシュに残さない）', async () => {
+    // route() が包む応答と同じキャッシュ制御を自分で付けている
+    const result = await fetchMetrics(METRICS_TOKEN);
     expect(result.headers.get('cache-control')).toContain(NO_STORE_CACHE_CONTROL);
   });
 
   it('自分の応答も数える（結線が外れていれば増えない）', async () => {
     // 1 回呼ぶと、その応答が `agentops_http_responses_total` に乗る
-    await fetchMetrics(PLATFORM_TOKEN);
-    // 2 回目の本文に 1 回目の分が現れる（route() の中で数えているので、この経路も対象）
-    const result = await fetchMetrics(PLATFORM_TOKEN);
+    await fetchMetrics(METRICS_TOKEN);
+    // 2 回目の本文に 1 回目の分が現れる
+    const result = await fetchMetrics(METRICS_TOKEN);
     expect(result.text).toMatch(/agentops_http_responses_total\{method="GET",status="200"\} [1-9]/);
   });
 
+  it('拒否した応答も数える（401 の山が外から読めるようにする）', async () => {
+    // 合わないトークンで 1 回叩く
+    expect((await fetchMetrics('wrong-token-0123456789abcdefghijklmn')).status).toBe(401);
+    // 正しいトークンで読むと、その 401 が系列に乗っている
+    const result = await fetchMetrics(METRICS_TOKEN);
+    expect(result.text).toMatch(/agentops_http_responses_total\{method="GET",status="401"\} [1-9]/);
+  });
+
+  it('プラットフォーム管理者トークンでは読めない（最小権限）', async () => {
+    // テナント作成・プラン変更ができる資格情報では通さない
+    const result = await call(getMetrics, { token: PLATFORM_TOKEN });
+    expect(result.status).toBe(401);
+  });
+
   it.each([Role.admin, Role.operator, Role.viewer])(
-    'テナント内の %s は 403（テナント境界の外側の数字なので見せない）',
+    'テナント内の %s は 401（テナント境界の外側の数字なので見せない）',
     async (role) => {
       // テナントのユーザートークンで呼ぶ
       const result = await call(getMetrics, { token: seed.a.tokens[role] });
-      expect(result.status).toBe(403);
+      expect(result.status).toBe(401);
     },
   );
 
@@ -69,5 +94,43 @@ describe('GET /metrics', () => {
     // 認証を通らない（他テナントの活動量が読める経路なので、既定で閉じている）
     const result = await call(getMetrics, {});
     expect(result.status).toBe(401);
+  });
+
+  it('METRICS_TOKEN が未設定なら 503（誰も通れない = fail-closed）', async () => {
+    // 設定を消す（このテストの中だけ）
+    vi.stubEnv('METRICS_TOKEN', '');
+    // 正しい値を知っていても通れない
+    expect((await fetchMetrics(METRICS_TOKEN)).status).toBe(503);
+    // 未認証でも同じ（設定済みかどうかを応答の違いから読ませない）
+    expect((await fetchMetrics()).status).toBe(503);
+  });
+
+  it('METRICS_TOKEN が短すぎれば 503 で、警告は 1 度だけ出す', async () => {
+    // 警告の「出したか」を忘れる（テストの独立性のため）
+    resetMetricsAuthForTesting();
+    // 下限より 1 文字短い値を設定する
+    const tooShort = 'a'.repeat(METRICS_TOKEN_MIN_LENGTH - 1);
+    vi.stubEnv('METRICS_TOKEN', tooShort);
+    // ログを捕まえる
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // 2 回叩く（どちらも 503）
+      expect((await fetchMetrics(tooShort)).status).toBe(503);
+      expect((await fetchMetrics(tooShort)).status).toBe(503);
+      // 警告は 1 件だけ（未認証の総当たりでエラーログを埋められないようにしている）
+      expect(loggedEvents(spy.mock.calls)).toEqual(['metrics.token_too_short']);
+    } finally {
+      // 元へ戻す
+      spy.mockRestore();
+      resetMetricsAuthForTesting();
+    }
+  });
+
+  it('下限ちょうどの長さなら通る（境界）', async () => {
+    // 下限と同じ長さの値を設定する
+    const atLimit = 'b'.repeat(METRICS_TOKEN_MIN_LENGTH);
+    vi.stubEnv('METRICS_TOKEN', atLimit);
+    // その値で読める
+    expect((await fetchMetrics(atLimit)).status).toBe(200);
   });
 });

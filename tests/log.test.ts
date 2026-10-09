@@ -109,3 +109,34 @@ describe('出来事を出す', () => {
       expect(spec.message.trim().length, `${event} の説明が空`).toBeGreaterThan(0);
   });
 });
+
+describe('整形が失敗しても投げない', () => {
+  it('無効な Date を渡しても 1 行の JSON を返す（時刻は取り直す）', () => {
+    // `toISOString()` が RangeError を投げる Date
+    const invalid = new Date('どう見ても日付ではない');
+    // 投げずに縮退した行を返す
+    const line = formatLogLine('api.unexpected_error', undefined, invalid);
+    // JSON として読めること
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    // 出来事の識別子と深刻度は残る（警報の条件はここを見る）
+    expect(parsed.event).toBe('api.unexpected_error');
+    expect(parsed.level).toBe(LOG_EVENTS['api.unexpected_error'].level);
+    // 時刻はその場で取り直した有効な値（`Invalid Date` や欠落ではない）
+    expect(typeof parsed.ts).toBe('string');
+    expect(Number.isNaN(Date.parse(parsed.ts as string))).toBe(false);
+  });
+
+  it('JSON にできない診断は落として最小の行を返す', () => {
+    // 循環参照を持つ診断（`JSON.stringify` が throw する）
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    // 投げずに診断なしの行を返す
+    const parsed = JSON.parse(formatLogLine('api.unexpected_error', circular)) as Record<
+      string,
+      unknown
+    >;
+    // 診断は落ちているが、出来事は残る
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.event).toBe('api.unexpected_error');
+  });
+});

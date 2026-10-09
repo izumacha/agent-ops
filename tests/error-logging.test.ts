@@ -66,8 +66,9 @@ const LOG_EVENT = 'logEvent';
 const LOG_OUTLETS: Readonly<Record<string, number>> = {
   // 出来事 ＋ 診断（`describeError(...)`）
   [LOG_EVENT]: 2,
-  // 間引く側は出来事だけ（診断を渡せる形にすると、間引かれた回の診断が黙って消える）
-  logEventThrottled: 1,
+  // 間引く側も出来事 ＋ 診断。**間引いた回の診断は消える**が、同じ障害が続いているあいだ
+  // 診断は同じ内容なので落ちるのは重複だけ（`health.db_unreachable` がその形）
+  logEventThrottled: 2,
   // 1 度だけの側も出来事だけ（同じ理由。2 度目以降の診断が黙って消える）
   logEventOnce: 1,
 };

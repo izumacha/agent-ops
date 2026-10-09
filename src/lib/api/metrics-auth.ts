@@ -23,6 +23,7 @@
 import { API_MESSAGES, METRICS_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { secretsEqual } from '@/lib/tokens';
 import { logEventThrottled } from '@/lib/log';
+import { requireConfiguredSecret } from '@/lib/secret-gate';
 import { bearerTokenOrNull, invalidTokenError, unauthorizedError } from './auth';
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
@@ -44,32 +45,24 @@ function notConfiguredError(): ApiError {
  * - 値が合わない → **401**（比較は定数時間。早期終了すると一致した長さから 1 文字ずつ詰められる）
  * @param request 受け取った要求
  */
-export function assertMetricsToken(request: Request): void {
-  // 環境変数を読み、**前後の空白を落とす**（§9 の「環境変数は信頼値」なので中身は信頼する）。
-  // **落とさないと設定漏れより厄介な壊れ方になる** — 秘密を読む他の口も同じ理由で落として
-  // いる（**件数も場所もここに書かない**。`.trim()` を探せば分かる）。
-  // 貼り付けの改行が 1 つ混ざると、長さの門番は通る一方
-  // `secretsEqual` はハッシュ同士の比較なので**完全な不一致**になり、収集側が正しい値を
-  // 持っていても永久に 401。しかも唯一の信号である `metrics.token_rejected` の文言は
-  // 「収集側の設定ミス、または総当たり」と案内するので、運用者は逆側を調べることになる
-  const configured = process.env.METRICS_TOKEN?.trim();
-  // 未設定・空なら監視の入口は閉じたまま。**記録する** — ここだけログを出していなかったので、
-  // **いちばん起きやすい設定漏れが唯一どの出口にも現れない**状態だった（もう 1 つの痕跡で
-  // ある `agentops_http_responses_total{status="503"}` は `/metrics` 経由でしか読めず、
-  // その `/metrics` 自身が 503 なので到達できない）。**1 度きりにはしない** — 直すまで続く
-  // 状態なので続いていることと規模を残す（量は窓あたり対数に収まる。理由は
-  // `logEventThrottled`）
-  if (!configured) {
-    logEventThrottled('metrics.token_not_configured');
-    throw notConfiguredError();
-  }
-  // 短すぎる値は設定ミスとみなして使わない（弱いトークンで運用の数字を読ませない）
-  if (configured.length < METRICS_TOKEN_MIN_LENGTH) {
-    // 間引いて警告する（設定を直す手掛かりは残すが、総当たりでログを埋められないようにする）
-    logEventThrottled('metrics.token_too_short');
-    // 設定が使えないので 503（「短い値でも通る」にはしない）
-    throw notConfiguredError();
-  }
+export function assertMetricsToken(request: Request, env: NodeJS.ProcessEnv = process.env): void {
+  // 設定の判断は共通（空白の落とし方・未設定を先に見ること・短さの比較）。
+  // **ここだけ写しを持っていた** — 「未設定」の判定が別の綴り（`!configured`）で、
+  // 環境を注入できる形にもなっていなかった（兄弟 2 つは `env` を受け取る）。
+  // 記録しないと**いちばん起きやすい設定漏れが唯一どの出口にも現れない**
+  // （`{status="503"}` は `/metrics` 経由でしか読めず、その `/metrics` 自身が 503）
+  const configured = requireConfiguredSecret(
+    env.METRICS_TOKEN,
+    METRICS_TOKEN_MIN_LENGTH,
+    (reason) => {
+      // 繋いでいない配備では未設定が正常なので `warn`（走査でエラー率の警報を鳴らさない）
+      if (reason === 'missing') logEventThrottled('metrics.token_not_configured');
+      // 値を入れたのに短すぎる側は設定ミスが確定するので `error`（語彙が深刻度を持つ）
+      else logEventThrottled('metrics.token_too_short');
+      // どちらも 503 で倒す（鍵が無いのに素通しで数字を返す形は採らない）
+      throw notConfiguredError();
+    },
+  );
   // Authorization ヘッダから Bearer トークンを取り出す（無ければ null。auth.ts と同じ関数＝綴りが割れない）。
   // **投げさせずに受け取る** — `extractBearerToken` が投げる形にしていた頃は、ヘッダが
   // 無い／`Basic` などの非 Bearer のときに下のログへ一度も届かなかった（実測: ヘッダ無しと

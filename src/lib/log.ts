@@ -264,14 +264,20 @@ export const LOG_EVENTS = {
 /** ログに出せる出来事の名前 */
 export type LogEventName = keyof typeof LOG_EVENTS;
 
+// --- 縮退の 3 定数（**1 かたまりで読む**。文面の対応を見落とさないため） ---
 // 語彙も引けなかったときの深刻度。**最も重い側へ倒す**（縮退した行を見落とさせない）
-// 整形そのものが失敗したときに名乗る出来事（**語彙の中の値**。下の `LOG_EVENTS` にある）。
+const FALLBACK_LOG_LEVEL: LogLevel = 'error';
+// 整形そのものが失敗したときに名乗る出来事（**語彙の中の値**。上の `LOG_EVENTS` にある）。
 // 語彙の外の綴りを出していた頃は、運用者が `LOG_EVENTS` と `docs/deploy.md` から警報を
 // 組む以上**その行に当たる条件を書けず**、しかも数える側にも系列が無かった
 // （元の名前で数えようとして `incrementCounter` が捨てている）ので、
 // 「ログの出口自身が縮退した」というただ 1 行がどちらの出口からも見えなかった
 const FALLBACK_LOG_EVENT = 'log.format_failed';
-const FALLBACK_LOG_LEVEL: LogLevel = 'error';
+// 語彙を引けなかったときの説明。**「整形に失敗した」とは書かない** — ここへ来るのは
+// *整形は成功したが渡された名前が語彙に無い*場合で（型を破った呼び出し）、失敗したと書くと
+// **事実と違う行**になる。整形そのものが失敗した側の文面は語彙の
+// `log.format_failed` が持ち、最後の受け皿はそれをそのまま使う（写しを作らない）
+const FALLBACK_LOG_MESSAGE = '語彙に無い出来事が渡されたため、文言を引けませんでした';
 
 /**
  * 語彙から宣言を引く。**自身のキーとして持つものだけを信用する。**
@@ -297,8 +303,6 @@ function lookupLogEvent(event: LogEventName): LogEventSpec | undefined {
   // 表が自身のキーとして持つものだけを返す
   return Object.hasOwn(LOG_EVENTS, event) ? LOG_EVENTS[event] : undefined;
 }
-// 語彙も引けなかったときの説明（表の文言が使えないので、何が起きたかだけを書く）
-const FALLBACK_LOG_MESSAGE = 'ログ 1 行の整形に失敗したため、出来事の識別子だけを残しました';
 
 /**
  * ログ 1 行を組み立てる（JSON 文字列）。
@@ -404,7 +408,9 @@ export function formatLogLine(
       ts: new Date().toISOString(),
       level: FALLBACK_LOG_LEVEL,
       event: FALLBACK_LOG_EVENT,
-      message: FALLBACK_LOG_MESSAGE,
+      // **語彙の文言をそのまま使う**（写しを持つと、運用者が文書の文面で grep しても
+      // 実際の行に当たらなくなる。表の引きは定数の添字なので投げない）
+      message: LOG_EVENTS[FALLBACK_LOG_EVENT].message,
     });
   }
 }
@@ -557,9 +563,15 @@ function isReportableOccurrence(count: number): boolean {
  * 「1 万件の総当たり」が同じ行にならない（画面側の出来事では系列も読めないので、
  * 行が唯一の運び手）。**窓を越えると通算件数は 1 へ戻る**ので、続いているあいだは
  * 窓ごとに必ず 1 本出る。
+ * **診断（`describeError(...)`）を添えてよい。** 添えた診断は**行にした回だけ**残り、
+ * 間引いた回のぶんは消える — 同じ障害が続いているあいだ診断は同じ内容なので、落ちるのは
+ * 重複だけ（`health.db_unreachable` がその形で、DB 障害中は毎回同じ `name` / `code`）。
+ * **毎回違う診断を残したい出来事はここを使わない**（それは「量を相手に決めさせてよい」
+ * 経路、つまり認証済みの経路だけ）。
  * @param event 出来事の名前
+ * @param described 添える診断（`describeError` の戻り値。省略可）
  */
-export function logEventThrottled(event: LogEventName): void {
+export function logEventThrottled(event: LogEventName, described?: Record<string, unknown>): void {
   // いまの時刻（単調増加でなくてよい。窓の粗い刻みにしか使わない）
   const now = Date.now();
   // この出来事の間引きの状態（初回は無い）
@@ -587,7 +599,7 @@ export function logEventThrottled(event: LogEventName): void {
   // 1 行出す。**通算件数（`occurrence`）を添える**ので、最後の行がそのまま規模を表す。
   // **`logEvent` へ渡さずここで出す** — あちらは件数を知らないので、通してしまうと
   // 数えるのが 2 度になるか、件数を載せる引数を公開の署名へ足すことになる
-  writeLogLine(level, event, undefined, new Date(now), count);
+  writeLogLine(level, event, described, new Date(now), count);
 }
 
 // 既に 1 度出した出来事（プロセス内）。`logEventOnce` が使う

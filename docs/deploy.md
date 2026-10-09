@@ -204,10 +204,10 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
   - **「断った」記録と「設定が使えない」記録は間引いてある**（1 要求 1 行だと匿名の相手が
     ログの量＝保存の費用を好きなだけ増やせる）。対象は、断った側が
     `billing.signature_rejected` / `metrics.token_rejected` / `session.login_rejected` /
-    `session.cross_origin_action`、設定が使えない側が `audit.secret_not_configured` /
+    `session.cross_origin_action` / `health.db_unreachable`、設定が使えない側が `audit.secret_not_configured` /
     `audit.secret_too_short` / `auth.platform_token_too_short` /
     `billing.secret_not_configured` / `billing.secret_too_short` /
-    `metrics.token_not_configured` / `metrics.token_too_short`
+    `metrics.token_not_configured` / `metrics.token_too_short` / `plan.unknown_plan`
     （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
     `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
     ここが古いままなら落ちる。件数とファイル名は書かない）。

@@ -8,7 +8,7 @@ import type { HealthDto } from '@/lib/api-types';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 // エラーをログへ落とす形の唯一の参照元 (message を出さず name / code / フレームだけを残す)
 import { describeError } from '@/lib/describe-error';
-import { logEvent } from '@/lib/log';
+import { logEventThrottled } from '@/lib/log';
 // 応答を数え、例外を応答へ写し、**キャッシュ制御を付ける**共通のラッパー
 // (route() を通らない経路もこれを使う)
 import { withResponseCount } from '@/lib/api/response-count';
@@ -37,10 +37,12 @@ async function probe(): Promise<NextResponse<HealthDto>> {
     // 内部詳細は応答へ返さず、サーバログにだけ残す (§9)。
     // **message は出さない。** ドライバの接続失敗は message に DSN をそのまま埋める
     // (`connect ECONNREFUSED postgresql://user:password@host:5432/db`) ため、素で出すと
-    // 接続情報がログへ流れる。しかも compose の healthcheck が 10 秒ごとに叩くので、
-    // DB 障害中は同じ 1 行が毎分 6 回積まれ続ける。route() が通る経路と同じ describeError に
-    // 通し、種類 (name / code) と発生箇所だけを残す
-    logEvent('health.db_unreachable', describeError(error));
+    // 接続情報がログへ流れる。route() が通る経路と同じ describeError に通し、
+    // 種類 (name / code) と発生箇所だけを残す。
+    // **間引く側で出す。** この経路は未認証・枠なしで誰でも叩けるので (`route()` を通らない
+    // 理由付きの表に登録してある)、1 要求 1 行だと匿名の相手がログの量 (＝保存の費用) を
+    // 好きなだけ増やせる。DB 障害中は診断の中身も同じなので、落ちるのは重複だけ
+    logEventThrottled('health.db_unreachable', describeError(error));
     // 503 で「DB が落ちている」ことだけを伝える
     return NextResponse.json(
       { ok: false, db: 'down' },

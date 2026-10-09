@@ -9,6 +9,7 @@ import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES, BILLING_WEBHOOK_SECRET_MIN_LENGTH } from '@/lib/constants';
 import { logEventThrottled } from '@/lib/log';
+import { requireConfiguredSecret } from '@/lib/secret-gate';
 
 // 鍵を入れる環境変数の名前（ここが唯一の参照元。.env.example とドキュメントはこの名前を指す）
 export const BILLING_WEBHOOK_SECRET_ENV = 'STRIPE_WEBHOOK_SECRET';
@@ -137,29 +138,21 @@ function notConfiguredError(): ApiError {
  * 受けられないなら 503 を返して事業者に再送させるのが正しい倒れ方（§9）。
  */
 export function billingWebhookSecret(env: NodeJS.ProcessEnv = process.env): string {
-  // 環境変数を読み、前後の空白を落とす（貼り付けの改行で長さ判定が狂わないように）
-  const configured = env[BILLING_WEBHOOK_SECRET_ENV]?.trim();
-  // 未設定・空文字は設定されていないのと同じ。**記録してから投げる** — `ApiError` は
-  // `withResponseCount` の中でログを通らない（応答へ写すだけ）ので、ここで出さないと
-  // **どの出口にも現れない**（受信 Webhook は未認証なので 503 を見た運用者がいるとは限らず、
-  // 残る痕跡の `{status="503"}` は系列に経路のラベルが無く、サーバーレスでは引きに行く収集
-  // そのものが成り立たない）。無言だと、鍵の設定漏れで**全配信が 503 → 事業者がバックオフの
-  // のちエンドポイントを無効化**し、解約の反映が止まって有料の権限が残り続ける。
-  // **1 度きりにはしない**（直すまで続く状態なので続いていることと規模を残す）。
-  // **記録はここで行い、例外を作る関数には置かない** — 名前と戻り値が「副作用の無い
-  // 組み立て」を約束しているので、投げずに組み立てる呼び出し元が身に覚えのない行を書いて
-  // しまう（`checkSameOriginAction` へ改名したのと同じ理由）
-  if (configured === undefined || configured === '') {
-    logEventThrottled('billing.secret_not_configured');
-    throw notConfiguredError();
-  }
-  // 短すぎる鍵は総当たりで求められる（求められたら任意の本文を署名できる）
-  if (configured.length < BILLING_WEBHOOK_SECRET_MIN_LENGTH) {
-    // **「未設定」とは別の出来事**（未設定は繋いでいない配備では正常だが、こちらは設定ミスが
-    // 確定するので深刻度も違う。直し方も違う）
-    logEventThrottled('billing.secret_too_short');
-    throw notConfiguredError();
-  }
-  // 使える鍵
-  return configured;
+  // 判断（空白の落とし方・未設定を先に見ること・短さの比較）は `requireConfiguredSecret` が持つ。
+  // **記録を欠かさないのが要点** — `ApiError` は `withResponseCount` の中でログを通らないので、
+  // ここで出さないと鍵の設定漏れがどの出口にも現れず、**全配信が 503 → 事業者がバックオフの
+  // のちエンドポイントを無効化 → 解約が反映されず有料の権限が残る**（応答の系列には経路の
+  // ラベルが無く、サーバーレスでは引きに行く収集そのものが成り立たない）
+  return requireConfiguredSecret(
+    env[BILLING_WEBHOOK_SECRET_ENV],
+    BILLING_WEBHOOK_SECRET_MIN_LENGTH,
+    (reason) => {
+      // 繋いでいない配備では未設定が正常なので `warn`（走査でエラー率の警報を鳴らさない）
+      if (reason === 'missing') logEventThrottled('billing.secret_not_configured');
+      // 値を入れたのに短すぎる側は設定ミスが確定するので `error`（語彙が深刻度を持つ）
+      else logEventThrottled('billing.secret_too_short');
+      // どちらも 503 で倒す
+      throw notConfiguredError();
+    },
+  );
 }

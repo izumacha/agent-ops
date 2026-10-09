@@ -5,6 +5,7 @@ import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES, AUDIT_HMAC_SECRET_MIN_LENGTH } from '@/lib/constants';
 import { logEventThrottled } from '@/lib/log';
+import { requireConfiguredSecret } from '@/lib/secret-gate';
 
 // 鍵を入れる環境変数の名前 (ここが唯一の参照元。.env.example とドキュメントはこの名前を指す)
 export const AUDIT_HMAC_SECRET_ENV = 'AUDIT_HMAC_SECRET';
@@ -24,28 +25,19 @@ function notConfiguredError(): ApiError {
  * 正しい倒れ方 (§9 の fail-closed。UC-09 の事後条件「監査ログに残る」を守れないまま成功を返さない)。
  */
 export function auditHmacSecret(env: NodeJS.ProcessEnv = process.env): string {
-  // 環境変数を読み、前後の空白を落とす (貼り付けの改行で長さ判定が狂わないように)
-  const configured = env[AUDIT_HMAC_SECRET_ENV]?.trim();
-  // 未設定・空文字は設定されていないのと同じ。**記録してから投げる** —
-  // `ApiError` は応答へ写されるだけでログを通らないので、ここで出さないと「鍵が無いので
-  // 人の操作（停止・復帰・解決・ルール登録）と課金の反映がすべて 503」という状態が
-  // **どの出口にも現れない**（系列には経路のラベルが無く、サーバーレスでは引きに行く収集
-  // そのものが成り立たない）。**1 度きりにはしない**（直すまで続く状態なので、続いている
-  // ことと規模を残す。理由は `logEventThrottled`）。**記録はここで行い、例外を作る関数には
-  // 置かない** — 名前と戻り値が「副作用の無い組み立て」を約束しているので、投げずに組み立てる
-  // 呼び出し元（分岐で返す・`Promise.reject(...)` へ渡す・テストの補助）が身に覚えのない
-  // 「鍵が無い」の行を書いてしまう（`checkSameOriginAction` へ改名したのと同じ理由）
-  if (configured === undefined || configured === '') {
-    logEventThrottled('audit.secret_not_configured');
-    throw notConfiguredError();
-  }
-  // 短すぎる鍵は総当たりで求められるので使わない (求められたら連鎖を作り直せる)
-  if (configured.length < AUDIT_HMAC_SECRET_MIN_LENGTH) {
-    // **「未設定」とは別の出来事**（直し方が「変数を足す」ではなく「値を作り直す」なので、
-    // 同じ `event` だとログからも系列からも区別できない）
-    logEventThrottled('audit.secret_too_short');
-    throw notConfiguredError();
-  }
-  // 使える鍵
-  return configured;
+  // 判断（空白の落とし方・未設定を先に見ること・短さの比較）は `requireConfiguredSecret` が持ち、
+  // **どの出来事を出すかはここに残す**（語彙のキーをリテラルで書く。理由は secret-gate.ts）
+  return requireConfiguredSecret(
+    env[AUDIT_HMAC_SECRET_ENV],
+    AUDIT_HMAC_SECRET_MIN_LENGTH,
+    (reason) => {
+      // 記録してから投げる（`ApiError` は応答へ写されるだけでログを通らない）。
+      // **行は間引く**（直すまで続く状態なので 1 度きりにはせず、1 要求 1 行にもしない）
+      if (reason === 'missing') logEventThrottled('audit.secret_not_configured');
+      // 値はあるが短すぎる（未設定とは直し方が違うので別の出来事）
+      else logEventThrottled('audit.secret_too_short');
+      // どちらも 503 で倒す
+      throw notConfiguredError();
+    },
+  );
 }

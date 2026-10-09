@@ -14,7 +14,7 @@
 // 同じテストが「`'use client'` のモジュールからこの連鎖へ到達しないこと」も見張る
 // （`planAllows` は画面と同じ述語を読む用途なので、取り込まれやすい）。
 import { Plan } from '@/domain/types';
-import { logEvent } from '@/lib/log';
+import { logEventThrottled } from '@/lib/log';
 
 /**
  * プランで**可否**が変わる機能の名前。
@@ -105,8 +105,11 @@ export function planLimitsFor(plan: Plan): PlanLimits {
   // 表に**自身のキーとして**存在するプランだけを信用する（素の添字だと `constructor` 等が
   // Object 由来の値を返し、上限の比較が TypeError になる。`canPerform` と同じ理由）
   if (!Object.hasOwn(PLAN_LIMITS, plan)) {
-    // 値そのものはログに混ぜない（出してよい形は定型文だけ。src/lib/describe-error.ts の規約）
-    logEvent('plan.unknown_plan');
+    // 値そのものはログに混ぜない（出してよい形は定型文だけ。src/lib/describe-error.ts の規約）。
+    // **間引く側で出す** — この関数は中継 1 回ごと（`sharedLimitFor`）に呼ばれるので、
+    // enum の外の値が 1 行あるだけでそのテナントの全要求が 1 行ずつ積む（毎秒数百行）。
+    // 直すまで続く状態なので 1 度きりにもしない（`logEventThrottled` の説明）
+    logEventThrottled('plan.unknown_plan');
     // 最も厳しいプランの上限で続ける
     return PLAN_LIMITS[FALLBACK_PLAN];
   }
@@ -121,8 +124,13 @@ export function planLimitsFor(plan: Plan): PlanLimits {
  * してあるのは、API 層と画面が同じ述語を読むため（書き下すと「ボタンは出るのに 403」になる）。
  */
 export function planAllows(plan: Plan, feature: PlanFeature): boolean {
-  // 表に無いプランは何も使えない扱いにする（上限の方と違い、ここは拒否で縮退できる）
-  if (!Object.hasOwn(PLAN_LIMITS, plan)) return false;
+  // 表に無いプランは何も使えない扱いにする（上限の方と違い、ここは拒否で縮退できる）。
+  // **こちらも 1 行残す** — 残さないと「上限の側はログに出るのに、機能が全部使えない側は
+  // 痕跡ゼロ」という非対称になり、403 を見た利用者の問い合わせに運用者が答えられない
+  if (!Object.hasOwn(PLAN_LIMITS, plan)) {
+    logEventThrottled('plan.unknown_plan');
+    return false;
+  }
   // そのプランの機能の集合に含まれているかを返す
   return PLAN_LIMITS[plan].features.has(feature);
 }

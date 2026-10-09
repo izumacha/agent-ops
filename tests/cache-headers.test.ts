@@ -52,6 +52,22 @@ describe('キャッシュ禁止のヘッダ', () => {
     expect(response.headers.get('vary')).toBe('Cookie, Authorization');
   });
 
+  it('値が空の Vary に通しても空の要素を作らない（RFC 9110 の 1#field-name を守る）', () => {
+    // 値が空の Vary を持つ応答（ハンドラが `Vary: ''` を付けた場合）
+    const response = withPrivateCacheHeaders(new Response('x', { headers: { Vary: '' } }));
+    // 先頭に空の要素（`, Authorization, Cookie`）を作らず、2 項目だけを並べる
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
+  });
+
+  it('空白だけの要素は落として並べ直す', () => {
+    // カンマだけ・空白だけの要素が混ざった Vary
+    const response = withPrivateCacheHeaders(
+      new Response('x', { headers: { Vary: ' , Cookie ,  ' } }),
+    );
+    // 空の要素は消え、足りない Authorization だけが後ろへ付く
+    expect(response.headers.get('vary')).toBe('Cookie, Authorization');
+  });
+
   it('Vary: * には何も足さない（すべてで分ける指定の意味を薄めない）', () => {
     // すべてで分ける指定
     const response = withPrivateCacheHeaders(new Response('x', { headers: { Vary: '*' } }));

@@ -57,8 +57,11 @@ export function proxy(request: NextRequest): Response {
     // 現れなかった）。数えたように見えて見えない形を作るより、**ログで非可視だけは解く**。
     // 既知の非可視として ADR-0014 と docs/deploy.md にも書いてある
     if (!warnedUndecodablePath) {
-      // **1 度だけ出す** — 未認証で誰でも叩ける経路なので、毎回出すとログを埋められる
-      // (PLATFORM_ADMIN_TOKEN が短すぎる警告と同じ扱い)。続いているかは前段のログで見る
+      // **1 度だけ出す** — 未認証で誰でも叩ける経路なので、毎回出すとログを埋められる。
+      // **間引いても率は失われない**: 読めないパスは URL の形そのものなので、前段の
+      // アクセスログが 1 件ずつ記録している（この出来事の説明文もそう案内する）。
+      // ここの 1 行が解いているのは「この配備が 404 にした」という非可視だけ。
+      // 率を観測できる場所が他に無い出来事は間引かない (`src/app/login/actions.ts` が例)
       warnedUndecodablePath = true;
       logEvent('entry.undecodable_path');
     }

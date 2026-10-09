@@ -29,14 +29,33 @@ export function withPrivateCacheHeaders(response: Response): Response {
   const headers = new Headers(response.headers);
   // 保存させない
   headers.set('Cache-Control', NO_STORE_CACHE_CONTROL);
-  // 万一保存されても資格情報ごとに分ける。**既に並んでいれば足さない** — `append` は
-  // 冪等ではないので、同じ応答へ 2 度通すと `Vary: Authorization, Authorization` になる
-  // （実測。包む側と包まれる側が両方これを呼んでいた頃の `/metrics` が実際にそうだった）。
-  // 二重に並んでも意味は同じだが、ヘッダは応答の契約なので「同じ値を設定し直すだけ」が
-  // 本当にそうである形にしておく
-  for (const field of CREDENTIAL_HEADERS) {
-    // その項目が既に並んでいれば足さない
-    if (!varyLists(headers.get('Vary'), field)) headers.append('Vary', field);
+  // 万一保存されても資格情報ごとに分ける。**組み立て直して 1 度 set する**（`append` を
+  // 使わない） — `append` は冪等でないので同じ応答へ 2 度通すと
+  // `Vary: Authorization, Authorization` になり（実測。包む側と包まれる側が両方これを
+  // 呼んでいた頃の `/metrics` が実際にそうだった）、**値が空のヘッダがあると先頭に空の
+  // 要素を作る**（実測: `Vary: ''` の応答へ通すと `Vary: ", Authorization, Cookie"`。
+  // RFC 9110 の `Vary` は `1#field-name` なので空の要素は文法違反で、解析に失敗した
+  // 共有キャッシュがヘッダを丸ごと無視すると、この関数が防いでいる多層防御が消える）
+  const varyBefore = headers.get('Vary');
+  // いま並んでいる項目。**空の要素は落とす**（上記の文法違反を持ち込まないため）
+  const listed = (varyBefore ?? '')
+    .split(',')
+    .map((field) => field.trim())
+    .filter((field) => field.length > 0);
+  // `*` は「すべてで分ける」なので、あれば項目を足さない（RFC 9110。足しても意味が無い）
+  const varyAll = listed.some((field) => field === '*');
+  // まだ並んでいない資格情報のヘッダ名（比較は大文字小文字を無視する）
+  const missing = varyAll
+    ? []
+    : CREDENTIAL_HEADERS.filter(
+        (field) => !listed.some((entry) => entry.toLowerCase() === field.toLowerCase()),
+      );
+  // 並べるものがあれば組み立てて 1 度だけ設定する
+  if (listed.length > 0 || missing.length > 0) {
+    headers.set('Vary', [...listed, ...missing].join(', '));
+  } else if (varyBefore !== null) {
+    // 並べるものが 1 つも無いのにヘッダだけある（空文字など）なら、文法違反を残さず消す
+    headers.delete('Vary');
   }
   // 本文・状態はそのままで作り直す (204 の null 本文もそのまま通る)
   return new Response(response.body, {
@@ -44,25 +63,4 @@ export function withPrivateCacheHeaders(response: Response): Response {
     statusText: response.statusText,
     headers,
   });
-}
-
-/**
- * `Vary` が既にその項目を並べているか。
- *
- * **`*` も「すべてで分ける」なので足さない**（RFC 9110。`Vary: *` のある応答へ項目を足すと
- * 意味の無い項目が増える）。比較は大文字小文字を無視する（フィールド名は大文字小文字を
- * 区別しない）。
- * @param vary いまの `Vary` の値（無ければ null）
- * @param field 並んでいるか調べる項目（**綴りは問わない** — この関数が両辺を小文字へそろえる。
- *   呼び出し側の `CREDENTIAL_HEADERS` はヘッダ名の慣習どおり大文字始まりで持つ）
- * @returns 既に並んでいれば true
- */
-function varyLists(vary: string | null, field: string): boolean {
-  // ヘッダが無ければ並んでいない
-  if (vary === null) return false;
-  // カンマ区切りの項目に分け、前後の空白を落として突き合わせる
-  return vary
-    .split(',')
-    .map((listed) => listed.trim().toLowerCase())
-    .some((listed) => listed === field.toLowerCase() || listed === '*');
 }

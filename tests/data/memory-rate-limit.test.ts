@@ -184,14 +184,18 @@ describe('時刻の出どころ', () => {
 });
 
 describe('窓から外れた記録の掃き出し (sweep)', () => {
+  // **渡すのは窓の長さで、境目は表の時計が決める**（prisma が `statement_timestamp()` で
+  // 決めるのと同じ分担。理由は Port の `sweep`）。この検査では `now` を固定しているので、
+  // 「`now` から何ミリ秒前より古い行を消すか」を直に書ける
   it('期限切れだけを消し、消した件数を返す', async () => {
     // 2 つのキーに 2 件ずつ入れる
     for (const key of [KEY, 'tenant:tn-2']) {
       await consume({ key, at: T0 });
       await consume({ key, at: new Date(T0.getTime() + 30_000) });
     }
-    // 古いほうだけを対象にする（T0 を含む = lte）
-    const deleted = await repos.rateLimit.sweep(T0, SWEEP_LIMIT);
+    // 表の時計を 60 秒先へ進め、窓を 31 秒にすると T0 の行だけが外れる
+    clock = new Date(T0.getTime() + 60_000);
+    const deleted = await repos.rateLimit.sweep(31_000, SWEEP_LIMIT);
     // 2 キー × 1 件
     expect(deleted).toBe(2);
     // 新しいほうは残っている
@@ -201,8 +205,9 @@ describe('窓から外れた記録の掃き出し (sweep)', () => {
   it('1 件も残らないキーは表から消える（二度と来ないキーを抱え続けない）', async () => {
     // 1 件だけ入れる
     await consume({ at: T0 });
-    // その時刻まで掃く
-    const deleted = await repos.rateLimit.sweep(T0, SWEEP_LIMIT);
+    // 表の時計を進めて、その行が窓から外れるようにする
+    clock = new Date(T0.getTime() + 60_000);
+    const deleted = await repos.rateLimit.sweep(1_000, SWEEP_LIMIT);
     expect(deleted).toBe(1);
     // **キーごと消えている**（これが sweep の目的）
     expect(repos.store.rateLimitHits.has(KEY)).toBe(false);
@@ -213,21 +218,32 @@ describe('窓から外れた記録の掃き出し (sweep)', () => {
     for (let index = 0; index < 5; index += 1) {
       await consume({ at: new Date(T0.getTime() + index), sharedLimit: 10 });
     }
+    // 表の時計を進めて 5 件すべてを窓の外に出す
+    clock = new Date(T0.getTime() + 60_000);
     // 上限 2 で掃くと 2 件だけ消える
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() + 10), 2)).toBe(2);
+    expect(await repos.rateLimit.sweep(1_000, 2)).toBe(2);
     // 残りは 3 件（呼び出し側は「上限未満が返るまで」繰り返す）
     expect(repos.store.rateLimitHits.get(KEY)).toHaveLength(3);
     // 続けて呼べば残りも消える
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() + 10), 2)).toBe(2);
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() + 10), 2)).toBe(1);
+    expect(await repos.rateLimit.sweep(1_000, 2)).toBe(2);
+    expect(await repos.rateLimit.sweep(1_000, 2)).toBe(1);
     expect(repos.store.rateLimitHits.has(KEY)).toBe(false);
   });
 
   it('消すものが無ければ 0 を返す（何度呼んでも安全）', async () => {
-    // 記録を 1 件入れ、窓の下端より前を掃く
+    // 記録を 1 件入れ、まだ窓の中であるうちに掃く
     await consume({ at: T0 });
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() - 1), SWEEP_LIMIT)).toBe(0);
+    expect(await repos.rateLimit.sweep(60_000, SWEEP_LIMIT)).toBe(0);
     // 記録はそのまま
+    expect(repos.store.rateLimitHits.get(KEY)).toHaveLength(1);
+  });
+
+  it('境目はアプリの時計ではなく表の時計が決める（生きている記録を消さない）', async () => {
+    // 1 件入れる（表の時計は T0）
+    await consume({ at: T0 });
+    // **アプリの壁時計が 10 分進んでいても**、表の時計は T0 のままなので窓の中
+    // （境目を呼び出し側の時計で決めていた頃は、この行が消えて枠がリセットされた）
+    expect(await repos.rateLimit.sweep(60_000, SWEEP_LIMIT)).toBe(0);
     expect(repos.store.rateLimitHits.get(KEY)).toHaveLength(1);
   });
 });

@@ -46,6 +46,7 @@ export const POST = route(async ({ request, principal, repos }) => {
   const body: ApiSchemas['MaintenanceRunResult'] = {
     rateLimitHitsDeleted: result.rateLimitHitsDeleted,
     rateLimitSweepComplete: result.rateLimitSweepComplete,
+    tenantsVisited: result.tenantsVisited,
     agentsEvaluated: result.agentsEvaluated,
     rulesEvaluated: result.rulesEvaluated,
     fired: result.fired,

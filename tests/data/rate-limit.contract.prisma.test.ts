@@ -256,16 +256,27 @@ describe.skipIf(!ENABLED)('レート制限の記録の契約', () => {
     // 古い行を 5 件、新しい行を 1 件入れる
     for (let index = 0; index < 5; index += 1) await insertHitSecondsAgo(300 + index);
     await insertHitSecondsAgo(1);
-    // 100 秒より古い行を 2 件まで消す
-    const cutoff = new Date(Date.now() - 100_000);
-    expect(await repos.rateLimit.sweep(cutoff, 2)).toBe(2);
+    // **渡すのは窓の長さだけ**（境目は DB の時計が決める。理由は Port の `sweep`）。
+    // 窓を 100 秒にすると、300 秒前の 5 件が外れて 1 秒前の 1 件は窓の中
+    const windowMs = 100_000;
+    expect(await repos.rateLimit.sweep(windowMs, 2)).toBe(2);
     // 残りは 4 件（古い 3 件 + 新しい 1 件）
     expect(await storedRows()).toBe(4);
     // 続けて呼べば古い分だけが消え、新しい行は残る
-    expect(await repos.rateLimit.sweep(cutoff, SWEEP_LIMIT)).toBe(3);
+    expect(await repos.rateLimit.sweep(windowMs, SWEEP_LIMIT)).toBe(3);
     expect(await storedRows()).toBe(1);
     // 消すものが無ければ 0（何度呼んでも安全）
-    expect(await repos.rateLimit.sweep(cutoff, SWEEP_LIMIT)).toBe(0);
+    expect(await repos.rateLimit.sweep(windowMs, SWEEP_LIMIT)).toBe(0);
+  });
+
+  it('掃き出しの境目は DB の時計が決める（アプリの時計が進んでいても生きた行を消さない）', async () => {
+    // 1 秒前の行を 1 件（窓の中）
+    await insertHitSecondsAgo(1);
+    // **窓の長さだけを渡すので、呼び出し側の壁時計は境目に影響しない。**
+    // 境目を呼び出し側が渡していた頃は、アプリが DB より進んでいる配備で
+    // この行が消えて枠がリセットされた（レート制限が無言で無効化される fail-open）
+    expect(await repos.rateLimit.sweep(60_000, SWEEP_LIMIT)).toBe(0);
+    expect(await storedRows()).toBe(1);
   });
 
   it('テナントを消しても記録は残る（業務データではないので FK を張っていない）', async () => {

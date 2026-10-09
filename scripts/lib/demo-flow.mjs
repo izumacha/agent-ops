@@ -16,6 +16,8 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer as createTcpServer } from 'node:net';
 import { join } from 'node:path';
+// 上限付きの `fetch`（写しを持たない。理由は共有モジュール側のコメント）
+import { fetchWithTimeout } from './fetch-with-timeout.mjs';
 
 // 本番ビルド（standalone 出力）のエントリ
 const STANDALONE_SERVER = join(process.cwd(), '.next', 'standalone', 'server.js');
@@ -31,28 +33,14 @@ const STARTUP_OUTPUT_TRUNCATED_NOTE = '\n…(これ以降の出力は計測側�
 // 起動確認の 1 回あたりの上限（ミリ秒）。待ち受けは始まったが応答を返さない状態で
 // ループが止まらないようにする（上の `deadline` はこの中で進まないと評価されない）
 const STARTUP_PROBE_TIMEOUT_MS = 5_000;
-// デモの筋の 1 要求あたりの上限（ミリ秒）。**Node の global fetch は既定でタイムアウトしない**ので、
-// 配備が応答を返さなくなる（DB のロック待ち・プーラの飽和など）と `runDemoFlow` が返らず、
-// **基準の判定（所要時間と上限の比較）はその後ろにあるので一度も実行されない** —
-// ジョブは「基準違反で赤」ではなく GitHub の上限まで無言でハングする。上限に当たれば
-// `TimeoutError` が投げられ、ベンチは `runBench` 経由・プローブは catch 経由で
-// 「どの段で止まったか」を添えて非 0 終了する
-const REQUEST_TIMEOUT_MS = 30_000;
+// デモの筋の 1 要求あたりの上限は共有モジュールの既定（`DEFAULT_FETCH_TIMEOUT_MS`）。
+// **Node の global fetch は既定でタイムアウトしない**ので、配備が応答を返さなくなる
+// （DB のロック待ち・プーラの飽和など）と `runDemoFlow` が返らず、**基準の判定（所要時間と
+// 上限の比較）はその後ろにあるので一度も実行されない** — ジョブは「基準違反で赤」ではなく
+// GitHub の上限まで無言でハングする。上限に当たれば `TimeoutError` が投げられ、ベンチは
+// `runBench` 経由・プローブは catch 経由で「どの段で止まったか」を添えて非 0 終了する
 // OpenAPI の `servers.url` と同じ接頭辞
 const API_PREFIX = '/api/v1';
-
-/**
- * タイムアウト付きで叩く。**デモの筋のすべての要求がここを通る**（1 か所に集めるのは、
- * 新しい段を足した人が付け忘れても同じ上限が掛かるようにするため）。
- * @param {string} url 叩く先
- * @param {RequestInit} [init] fetch へ渡す設定（`signal` はここが決めるので渡さない）
- * @param {number} [timeoutMs] 上限（ミリ秒）
- * @returns {Promise<Response>} 応答
- */
-function fetchWithTimeout(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
-  // 上限を過ぎたら中断する signal を付けて叩く
-  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-}
 
 /**
  * デモの筋（この順で通す）。**件数の正本はここ** — `step7-criteria.mjs` の

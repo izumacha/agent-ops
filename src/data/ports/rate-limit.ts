@@ -106,9 +106,17 @@ export interface RateLimitPort {
    * 理由）。無制限の `DELETE` は、溜まった行数が多いときに長いトランザクションと大きなロックに
    * なり、同時に走る `consume` の per-key の掃き出しと順序が交差して待ち合わせうる。
    * 呼び出し側は「`limit` 件未満が返るまで」繰り返す。
-   * @param before この時刻以前（同値を含む）の記録を消す
+   *
+   * **境目の時刻は呼び出し側が渡さない（`consume` と同じ分担）。** 渡す形にすると、`at` を
+   * 書いたのは記録側の時計（prisma は `statement_timestamp()`）なのに、消す境目は呼び出した
+   * インスタンスの壁時計で決まる。アプリの時計が DB より Δ 進んでいる配備では境目が Δ ぶん
+   * 新しくなり、**窓の中で最も古い Δ 秒ぶんの生きた記録が消える** — Δ が窓の長さを超えると
+   * 掃きのたびに窓の全行が消え、**全テナントの枠が毎回リセットされる**（レート制限が無言で
+   * 無効化される fail-open。しかも応答には `rateLimitHitsDeleted` が大きく出るだけで
+   * 異常として現れない）。だから窓の長さだけを受け取り、境目は記録側が自分の時計から決める。
+   * @param windowMs 窓の長さ（ミリ秒。これより古い記録が対象）
    * @param limit 1 回で消す件数の上限（正の整数）
    * @returns 実際に消した件数
    */
-  sweep(before: Date, limit: number): Promise<number>;
+  sweep(windowMs: number, limit: number): Promise<number>;
 }

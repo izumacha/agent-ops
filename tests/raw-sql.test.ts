@@ -136,7 +136,11 @@ describe('生 SQL の書き方', () => {
 // ホストで動くので、アプリの時計と DB の時計が一致してしまう（実測: `statement_timestamp()` を
 // `${new Date()}` へ差し替える変異が契約テスト 10 件すべて緑のまま通った）。
 //
-// **捕まえられる範囲**: `consume` の SQL テンプレートに `statement_timestamp()` が無い／
+// **同じ約束は `sweep` にも掛かる** — 消す境目をアプリの壁時計で決めると、アプリが DB より
+// 進んでいる配備で**窓の中の生きた記録が消えて枠がリセットされる**（レート制限が無言で
+// 無効化される fail-open。応答には消した件数が大きく出るだけで異常として現れない）。
+//
+// **捕まえられる範囲**: SQL テンプレートに `statement_timestamp()` が無い／
 // テンプレートの中へ `Date` を埋め込んでいる、という**直接の綴り**だけ。アプリ側で作った時刻を
 // 変数へ入れて渡す形は（`tests/raw-sql.test.ts` の他の検査と同じ理由で）捕まえられないので、
 // これは「証明」ではなく「増やしたことに気付く」ための網。
@@ -146,8 +150,8 @@ describe('レート制限の判定の時刻', () => {
   // 時刻を DB に尋ねる関数の綴り
   const DB_CLOCK = 'statement_timestamp()';
 
-  // prisma アダプタの `consume` の本体を切り出す
-  function consumeSource(): string {
+  // prisma アダプタの指定したメソッドの本体を切り出す
+  function methodSource(method: string): string {
     // prisma アダプタのファイル
     const file = FILES.find(({ path }) => path.endsWith('/data/adapters/prisma/index.ts'));
     // 読めなければ走査が壊れている (fail-closed)
@@ -159,28 +163,40 @@ describe('レート制限の判定の時刻', () => {
       if (!ts.isClassDeclaration(node) || node.name?.text !== RATE_LIMIT_CLASS) return;
       // その中の `consume` メソッド
       for (const member of node.members) {
-        if (ts.isMethodDeclaration(member) && member.name.getText() === 'consume') {
+        if (ts.isMethodDeclaration(member) && member.name.getText() === method) {
           body = member.getText();
         }
       }
     });
     // 見つからなければ落とす (改名・移動に気付けるように)
-    expect(body, `${RATE_LIMIT_CLASS}.consume を読めない`).not.toBeNull();
+    expect(body, `${RATE_LIMIT_CLASS}.${method} を読めない`).not.toBeNull();
     return body!;
   }
 
-  it('時刻は DB に尋ねる（アプリの時計を SQL へ埋め込まない）', () => {
-    // 本体の綴り
-    const body = consumeSource();
-    // DB の時計を使っていること
-    expect(body.includes(DB_CLOCK), `${DB_CLOCK} を使っていない`).toBe(true);
-    // SQL のテンプレート（タグ付きテンプレートの中身）を取り出す
-    const templates = body.match(/\$queryRaw<[^>]*>`[\s\S]*?`/g) ?? [];
-    // 1 つも無ければ走査が壊れている (fail-closed)
-    expect(templates.length, 'SQL のテンプレートを読めない').toBeGreaterThan(0);
-    // テンプレートの中に `Date` を埋め込んでいないこと
-    for (const template of templates) {
-      expect(template.includes('Date'), 'SQL のテンプレートへ時刻を埋め込んでいる').toBe(false);
-    }
-  });
+  // **時刻を記録側が決める約束は 2 つのメソッドに掛かる。**
+  //   - `consume`: 窓の下端と `at` の両方（アプリの時計だと台数ぶん枠が割れる）
+  //   - `sweep`: 消す境目（アプリの時計が進んでいる配備では**窓の中の生きた記録を消して
+  //     枠をリセットする**＝レート制限が無言で無効化される fail-open）
+  // 契約テストではどちらも確かめられない（テストの DB とアプリは同じホストで時計が一致する）
+  it.each(['consume', 'sweep'])(
+    '%s の時刻は DB に尋ねる（アプリの時計を SQL へ埋め込まない）',
+    (method) => {
+      // 本体の綴り
+      const body = methodSource(method);
+      // DB の時計を使っていること
+      expect(body.includes(DB_CLOCK), `${method} が ${DB_CLOCK} を使っていない`).toBe(true);
+      // SQL のテンプレート（タグ付きテンプレートの中身）を取り出す。
+      // **`$queryRaw` と `$executeRaw` の両方を見る**（`sweep` は後者を使う）
+      const templates = body.match(/\$(?:queryRaw|executeRaw)(?:<[^>]*>)?`[\s\S]*?`/g) ?? [];
+      // 1 つも無ければ走査が壊れている (fail-closed)
+      expect(templates.length, `${method} の SQL のテンプレートを読めない`).toBeGreaterThan(0);
+      // テンプレートの中に `Date` を埋め込んでいないこと
+      for (const template of templates) {
+        expect(
+          template.includes('Date'),
+          `${method} の SQL のテンプレートへ時刻を埋め込んでいる`,
+        ).toBe(false);
+      }
+    },
+  );
 });

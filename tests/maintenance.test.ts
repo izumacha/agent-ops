@@ -11,6 +11,7 @@ import { AgentStatus, Provider, RuleAction, RuleKind } from '@/domain/types';
 import {
   MAINTENANCE_RATE_LIMIT_SWEEP_BATCH,
   MAINTENANCE_RATE_LIMIT_SWEEP_MAX_BATCHES,
+  MAINTENANCE_TENANT_SCAN_MAX,
   RATE_LIMIT_WINDOW_MS,
 } from '@/lib/constants';
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
@@ -79,6 +80,20 @@ describe('保守の定期実行', () => {
     return runMaintenance(repos, { agentBudget: 50, now: new Date(), ...overrides }, env());
   }
 
+  /**
+   * 表の時計を先へ進める（`MemoryStore.now` を差し替える）。
+   *
+   * **回収の境目は記録側の時計が決める**ので、要求の `now` を動かしても掃きは変わらない
+   * （理由は Port の `sweep`）。「窓から外れた行」を作るにはこちらを動かす。
+   * @param ms 進める量（ミリ秒）
+   */
+  function advanceStoreClock(ms: number): void {
+    // いまの時刻を控える（差し替える前に読む）
+    const shifted = new Date(store.now().getTime() + ms);
+    // 以後はこの時刻を返す
+    store.now = () => shifted;
+  }
+
   // レート制限の記録を 1 件入れる（`consume` を通すと「いま」の行になる）
   async function recordRateLimitHit(key: string): Promise<void> {
     await repos.rateLimit.consume({
@@ -107,13 +122,25 @@ describe('保守の定期実行', () => {
     it('窓から外れた記録は消す（二度と来ないキーの行）', async () => {
       // いまの記録を 1 件入れる
       await recordRateLimitHit('tenant:gone');
-      // **窓の長さより先の時刻**を基準にすると、その行はどの窓にも入らない
-      const result = await run({ now: new Date(Date.now() + RATE_LIMIT_WINDOW_MS * 2) });
+      // **表の時計を窓の長さより先へ進める**（境目を決めるのは記録側なので、
+      // 要求の `now` ではなくこちらを動かす。理由は Port の `sweep`）
+      advanceStoreClock(RATE_LIMIT_WINDOW_MS * 2);
+      const result = await run();
       // 消えている
       expect(result.rateLimitHitsDeleted).toBe(1);
       expect(result.rateLimitSweepComplete).toBe(true);
       // 表からも消えている（キーごと空になる）
       expect(store.rateLimitHits.get('tenant:gone')?.length ?? 0).toBe(0);
+    });
+
+    it('要求の時刻を先へずらしても消えない（境目は記録側の時計が決める）', async () => {
+      // いまの記録を 1 件入れる
+      await recordRateLimitHit('tenant:alive');
+      // **アプリの時計が 10 分進んでいても**、表の時計は進んでいないので窓の中。
+      // 境目を呼び出し側の時計で決めていた頃は、この行が消えて枠がリセットされた
+      const result = await run({ now: new Date(Date.now() + RATE_LIMIT_WINDOW_MS * 10) });
+      expect(result.rateLimitHitsDeleted).toBe(0);
+      expect(store.rateLimitHits.get('tenant:alive')?.length).toBe(1);
     });
 
     it('一巡の途中（カーソルあり）では回収しない（同じ掃きを何十回も繰り返さない）', async () => {
@@ -123,10 +150,11 @@ describe('保守の定期実行', () => {
       const tenantId = await makeTenant('a');
       const tenant = await repos.tenants.findById(tenantId);
       if (tenant === null) throw new Error('テナントが見つかりません');
+      // 表の時計を進めて、記録が窓から外れる状態にする
+      advanceStoreClock(RATE_LIMIT_WINDOW_MS * 2);
       // カーソルを渡して続きから進める
       const result = await run({
         tenantCursor: { createdAt: tenant.createdAt, id: tenant.id },
-        now: new Date(Date.now() + RATE_LIMIT_WINDOW_MS * 2),
       });
       // 回収は 1 件も行われていない
       expect(result.rateLimitHitsDeleted).toBe(0);
@@ -137,8 +165,9 @@ describe('保守の定期実行', () => {
     it('バッチ数の上限で打ち切ったら「まだ残っている」と返す', async () => {
       // 1 回のバッチで消す上限 × バッチ数の上限 + 1 件を、消せる位置に積む
       const total = MAINTENANCE_RATE_LIMIT_SWEEP_BATCH * MAINTENANCE_RATE_LIMIT_SWEEP_MAX_BATCHES;
-      // 表へ直接入れる（`consume` を 1 万回通すより速く、行の形は同じ）
-      const old = new Date(Date.now() - RATE_LIMIT_WINDOW_MS * 2);
+      // 表へ直接入れる（`consume` を 1 万回通すより速く、行の形は同じ）。
+      // **表の時計から見て窓の外**になる時刻を使う
+      const old = new Date(store.now().getTime() - RATE_LIMIT_WINDOW_MS * 2);
       store.rateLimitHits.set(
         'tenant:many',
         Array.from({ length: total + 1 }, () => ({ tier: RATE_LIMIT_TIER.standard, at: old })),
@@ -158,7 +187,7 @@ describe('保守の定期実行', () => {
       await makeAgent(tenantId, 'a1');
       // 回収が 1 要求で終わらないだけの行を、消せる位置に積む
       const total = MAINTENANCE_RATE_LIMIT_SWEEP_BATCH * MAINTENANCE_RATE_LIMIT_SWEEP_MAX_BATCHES;
-      const old = new Date(Date.now() - RATE_LIMIT_WINDOW_MS * 2);
+      const old = new Date(store.now().getTime() - RATE_LIMIT_WINDOW_MS * 2);
       store.rateLimitHits.set(
         'tenant:many',
         Array.from({ length: total + 1 }, () => ({ tier: RATE_LIMIT_TIER.standard, at: old })),
@@ -179,7 +208,7 @@ describe('保守の定期実行', () => {
       // 1 要求で回収しきれる件数だけ積む
       const tenantId = await makeTenant('a');
       await makeAgent(tenantId, 'a1');
-      const old = new Date(Date.now() - RATE_LIMIT_WINDOW_MS * 2);
+      const old = new Date(store.now().getTime() - RATE_LIMIT_WINDOW_MS * 2);
       store.rateLimitHits.set('tenant:few', [{ tier: RATE_LIMIT_TIER.standard, at: old }]);
       // 一巡を始める
       const result = await run();
@@ -192,6 +221,39 @@ describe('保守の定期実行', () => {
   });
 
   describe('ガードレールの定期掃き', () => {
+    it('稼働中のエージェントを持たないテナントも歩いた件数に数え、上限で打ち切る', async () => {
+      // **エージェントの予算だけではループの脱出条件にならない。** 稼働中のエージェントが
+      // 0 件のテナントは判定件数を増やさないので、上限が無いとテナント数ぶんのクエリを
+      // 1 要求で流し、配備先の実行時間上限に当たって要求ごと落ちる（応答が返らないので
+      // カーソルも受け取れず一巡が永久に終わらない）
+      const tenants = [];
+      for (const name of ['a', 'b', 'c']) tenants.push(await makeTenant(name));
+      // 1 件目のエージェントだけ作り、止めておく（＝稼働中は 0 件）
+      const stopped = await makeAgent(tenants[0], 'stopped');
+      await repos.agents.setStatus(tenants[0], stopped, AgentStatus.suspended);
+      // 一巡を始める（判定できるエージェントは 1 件も無い）
+      const result = await run();
+      // **3 件すべて歩いたことが応答に出る**（判定件数は 0）
+      expect(result.tenantsVisited).toBe(3);
+      expect(result.agentsEvaluated).toBe(0);
+      // テナントが尽きたので一巡は終わっている
+      expect(result.passComplete).toBe(true);
+    });
+
+    it('テナント側の上限に達したら続きのカーソルを返す（1 要求の長さを縛る）', async () => {
+      // 上限より 1 件多いテナントを作る（どれも稼働中のエージェントは 0 件）
+      for (let index = 0; index <= MAINTENANCE_TENANT_SCAN_MAX; index += 1) {
+        await makeTenant(`t${index}`);
+      }
+      // 一巡を始める
+      const result = await run();
+      // **上限ぶんだけ歩いて止まる**（上限が無ければテナント数ぶん全部歩いてしまう）
+      expect(result.tenantsVisited).toBe(MAINTENANCE_TENANT_SCAN_MAX);
+      // まだ終わっていないので続きのカーソルが返る
+      expect(result.passComplete).toBe(false);
+      expect(result.nextTenantCursor).not.toBeNull();
+    });
+
     it('テナントが 1 件も無ければ一巡はすぐ終わる', async () => {
       // 何も作らずに進める
       const result = await run();

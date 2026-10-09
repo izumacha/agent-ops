@@ -1768,14 +1768,19 @@ class PrismaRateLimit implements RateLimitPort {
    * 窓から外れた記録を消す。
    * **キーで絞らず、件数に上限を置く**（理由は Port の説明）。
    */
-  async sweep(before: Date, limit: number): Promise<number> {
+  async sweep(windowMs: number, limit: number): Promise<number> {
+    // 窓の長さを秒へ直す（`make_interval` は秒を取る。`consume` と同じ形）
+    const windowSeconds = windowMs / 1_000;
     // 期限切れを古い順に `limit` 件まで消す（`at` の索引が効く）。
-    // **`deleteMany` では上限を書けない**ので、消す対象を副問い合わせで決める
+    // **`deleteMany` では上限を書けない**ので、消す対象を副問い合わせで決める。
+    // **境目は DB の時計が決める**（`statement_timestamp()`）— 呼び出し側の壁時計で決めると
+    // アプリが進んでいる配備で生きている記録を消す（理由は Port の `sweep`）
     const deleted = await this.db.$executeRaw`
       DELETE FROM "RateLimitHit"
       WHERE "id" IN (
         SELECT "id" FROM "RateLimitHit"
-        WHERE "at" <= ${before}
+        WHERE "at" <= date_trunc('milliseconds', statement_timestamp())
+                       - make_interval(secs => ${windowSeconds}::double precision)
         ORDER BY "at"
         LIMIT ${limit}
       )

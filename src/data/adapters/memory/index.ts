@@ -1337,7 +1337,9 @@ class MemoryRateLimit implements RateLimitPort {
   }
 
   // 窓から外れた記録を消す（**キーで絞らず、件数に上限を置く**）
-  sweep(before: Date, limit: number): Promise<number> {
+  sweep(windowMs: number, limit: number): Promise<number> {
+    // 境目は**表の時計**が決める（prisma が `statement_timestamp()` で決めるのと同じ分担）
+    const before = new Date(this.store.now().getTime() - windowMs);
     // 消した件数
     let deleted = 0;
     // 全キーを見る（これが要るのは二度と来ないキーの記録なので、キーで絞らない）

@@ -13,9 +13,13 @@
 // （インシデントを作り、エージェントを止め、記録を消す）ので §9 により POST にしてある。
 // Vercel で配備する場合も外部のスケジューラからこのスクリプトを回す。
 //
-// **終了コード**: 0 = 一巡を回し切った / 1 = 設定不足・HTTP エラー・判定の失敗が残っている。
+// **終了コード**: 0 = 一巡を回し切った / 1 = 設定不足・HTTP エラー・**回数の上限に達して一巡を
+// 回し切れなかった**・判定の失敗が残っている。
 // 判定の失敗（`failed`）を 0 以外で終わらせるのは、**掃きが取りこぼしている状態を
 // スケジューラの失敗として見えるようにする**ため（アプリ側は 200 を返して一巡を続ける）。
+
+// 上限付きの `fetch`（写しを持たない。理由は共有モジュール側のコメント）
+import { fetchWithTimeout } from './lib/fetch-with-timeout.mjs';
 
 // 叩く先（アプリの入口。`/api/v1` までは付けない）
 const baseUrl = process.env.MAINTENANCE_BASE_URL;
@@ -37,16 +41,39 @@ if (token === undefined || token === '') {
   console.error('[maintenance:tick]', 'PLATFORM_ADMIN_TOKEN が未設定です');
   process.exit(1);
 }
+// 予算の指定があれば**正の整数であること**を先に確かめる。
+// `Number('abc')` は `NaN`、`Number('1e999')` は `Infinity` で、どちらも `JSON.stringify` で
+// `null` になる。アプリ側の既定は `undefined` にしか効かないので明示的な `null` は 422 で、
+// スクリプトは「HTTP 422 が返りました」としか言えない（**どの環境変数が悪いか伝わらない**）。
+// 他の 2 つは変数名を名指しして fail-closed にしているので、ここも同じ扱いにそろえる
+let budget;
+if (agentBudget !== undefined && agentBudget !== '') {
+  // 数値へ直す
+  budget = Number(agentBudget);
+  // 正の整数でなければ落とす（小数もアプリ側の `.int()` で 422 になる）
+  if (!Number.isInteger(budget) || budget < 1) {
+    console.error(
+      '[maintenance:tick]',
+      `MAINTENANCE_AGENT_BUDGET は 1 以上の整数で指定してください（受け取った値: ${agentBudget}）`,
+    );
+    process.exit(1);
+  }
+}
 
 // 一巡の合計（ログに出す）
 const total = {
   requests: 0,
   rateLimitHitsDeleted: 0,
+  tenantsVisited: 0,
   agentsEvaluated: 0,
   rulesEvaluated: 0,
   fired: 0,
   failed: 0,
 };
+// **やることが残っていないと分かって抜けたか。** 回数で判定すると、ちょうど上限の回で
+// 回し切ったときに「一巡が終わりません」と誤って非 0 終了する（off-by-one。予算 50 件なら
+// 5 万エージェント規模で実際に到達する）。旗で持てば回数に依存しない
+let completed = false;
 // 続きの位置（最初は両方なし＝一巡の開始）
 let tenantCursor;
 let agentCursor;
@@ -56,10 +83,10 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   const body = {};
   if (tenantCursor !== undefined && tenantCursor !== null) body.tenantCursor = tenantCursor;
   if (agentCursor !== undefined && agentCursor !== null) body.agentCursor = agentCursor;
-  if (agentBudget !== undefined && agentBudget !== '') body.agentBudget = Number(agentBudget);
+  if (budget !== undefined) body.agentBudget = budget;
 
   // 1 要求送る
-  const response = await fetch(new URL('/api/v1/maintenance/run', baseUrl), {
+  const response = await fetchWithTimeout(new URL('/api/v1/maintenance/run', baseUrl), {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -73,6 +100,7 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   const result = await response.json();
   total.requests += 1;
   total.rateLimitHitsDeleted += result.rateLimitHitsDeleted;
+  total.tenantsVisited += result.tenantsVisited;
   total.agentsEvaluated += result.agentsEvaluated;
   total.rulesEvaluated += result.rulesEvaluated;
   total.fired += result.fired;
@@ -87,14 +115,15 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
     continue;
   }
   // やることが残っていない
+  completed = true;
   break;
 }
 
 // 1 行 1 JSON（アプリのログと同じ形にして、収集側で同じように扱えるようにする）
 process.stdout.write(`${JSON.stringify({ event: 'maintenance.tick', ...total })}\n`);
 
-// 回数の上限で打ち切ったのは異常（カーソルが進んでいない可能性がある）
-if (total.requests >= MAX_REQUESTS) {
+// 回し切る前にループを抜けたのは異常（カーソルが進んでいない可能性がある）
+if (!completed) {
   console.error(
     '[maintenance:tick]',
     `要求が ${MAX_REQUESTS} 回に達しました（一巡が終わりません）`,

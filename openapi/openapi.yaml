@@ -2418,6 +2418,7 @@ components:
         [
           rateLimitHitsDeleted,
           rateLimitSweepComplete,
+          tenantsVisited,
           agentsEvaluated,
           rulesEvaluated,
           fired,
@@ -2436,6 +2437,12 @@ components:
             回収しきったか。false ならまだ消せる行が残っており、そのときは**テナントを 1 件も
             歩かずに**戻る (passComplete も偽・カーソルも両方 null になるので、呼び出し側は
             同じ呼び方をもう一度するだけでよい)
+        tenantsVisited:
+          type: integer
+          description: >-
+            歩いたテナントの件数。**エージェントの予算とは別に数える** — 稼働中の
+            エージェントを 1 件も持たないテナントは判定件数を増やさないので、
+            エージェントの予算だけでは 1 要求の長さを縛れない
         agentsEvaluated:
           type: integer
           description: 判定を試みたエージェントの件数

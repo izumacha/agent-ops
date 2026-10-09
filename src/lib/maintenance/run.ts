@@ -23,6 +23,7 @@ import { rateLimitWindowMs } from '@/lib/api/rate-limit';
 import {
   MAINTENANCE_RATE_LIMIT_SWEEP_BATCH,
   MAINTENANCE_RATE_LIMIT_SWEEP_MAX_BATCHES,
+  MAINTENANCE_TENANT_SCAN_MAX,
   PAGE_LIMIT_MAX,
 } from '@/lib/constants';
 import { evaluateGuardrailsSafely } from '@/lib/guardrail/evaluate';
@@ -59,6 +60,17 @@ export interface MaintenanceRunResult {
    * カーソルも両方 `null` になる（呼び出し側は同じ呼び方をもう一度するだけでよい）
    */
   rateLimitSweepComplete: boolean;
+  /**
+   * 歩いたテナントの件数。
+   *
+   * **エージェントの予算とは別に数える。** 稼働中のエージェントを 1 件も持たないテナント
+   * （全部止まっている・まだ登録していない）は `agentsEvaluated` を増やさないので、
+   * エージェントの予算だけではループの脱出条件にならない — このまま走らせると
+   * テナント数ぶんのクエリを 1 要求で流し、配備先の実行時間上限に当たって
+   * **要求ごと落ちる**（応答が返らないのでカーソルも受け取れず、一巡が永久に終わらない）。
+   * **エージェントを自動停止するのはまさにこの機能なので、止まったテナントは運用とともに増える。**
+   */
+  tenantsVisited: number;
   // 判定したエージェントの件数
   agentsEvaluated: number;
   // 判定しきったルールの件数（全エージェントぶんの合計）
@@ -92,24 +104,23 @@ export interface MaintenanceRunResult {
 /**
  * レート制限の記録のうち、どの窓にも入らない行を上限付きで回収する。
  *
- * **境目は窓の長さから導く**（`rateLimitWindowMs`）。`before` を新しくしすぎると**生きている
- * 記録を消して枠をリセットしてしまう**ので、「窓の長さぶん前」より古い行だけを消す。
+ * **境目の時刻はここで作らない。** 渡すのは窓の長さだけで、`at` を書いたのと同じ時計
+ * （記録側）が境目を決める — アプリの壁時計で決めると、DB より進んでいる配備で**窓の中の
+ * 生きた記録を消して枠をリセットする**（理由は Port の `sweep`）。
  * @param repos データ層
- * @param now 基準時刻
  * @returns 消した件数と、回収しきったか
  */
 async function sweepRateLimitHits(
   repos: Repositories,
-  now: Date,
 ): Promise<{ deleted: number; complete: boolean }> {
-  // どの窓にも入らない境目（窓の長さぶん前）
-  const before = new Date(now.getTime() - rateLimitWindowMs());
+  // 窓の長さ（境目を決めるのは記録側。理由は Port の `sweep`）
+  const windowMs = rateLimitWindowMs();
   // 消した合計
   let deleted = 0;
   // バッチ数の上限まで繰り返す
   for (let batch = 0; batch < MAINTENANCE_RATE_LIMIT_SWEEP_MAX_BATCHES; batch += 1) {
     // 1 バッチぶん消す
-    const removed = await repos.rateLimit.sweep(before, MAINTENANCE_RATE_LIMIT_SWEEP_BATCH);
+    const removed = await repos.rateLimit.sweep(windowMs, MAINTENANCE_RATE_LIMIT_SWEEP_BATCH);
     // 合計へ足す
     deleted += removed;
     // 上限未満しか返らなければ、もう消せる行は無い
@@ -121,6 +132,7 @@ async function sweepRateLimitHits(
 
 /** 判定の進み具合（結果を組み立てるのに使う可変の集計） */
 interface Progress {
+  tenantsVisited: number;
   agentsEvaluated: number;
   rulesEvaluated: number;
   fired: number;
@@ -150,11 +162,15 @@ export async function runMaintenance(
   // 一巡の開始か（テナントのカーソルが無ければ先頭から）
   const startsPass = input.tenantCursor === undefined && input.agentCursor === undefined;
   // レート制限の記録の回収（一巡の開始でだけ行う。理由は入力の `tenantCursor`）
-  const swept = startsPass
-    ? await sweepRateLimitHits(repos, input.now)
-    : { deleted: 0, complete: true };
+  const swept = startsPass ? await sweepRateLimitHits(repos) : { deleted: 0, complete: true };
   // 判定した件数の集計
-  const progress: Progress = { agentsEvaluated: 0, rulesEvaluated: 0, fired: 0, failed: 0 };
+  const progress: Progress = {
+    tenantsVisited: 0,
+    agentsEvaluated: 0,
+    rulesEvaluated: 0,
+    fired: 0,
+    failed: 0,
+  };
 
   // 結果を組み立てる（掃きの結果と集計は共通で、違うのは続きの位置だけ）
   const build = (
@@ -181,13 +197,21 @@ export async function runMaintenance(
   // エージェントのカーソルは最初に読むテナントだけに効く（2 件目以降は先頭から）
   let agentCursor = input.agentCursor;
 
-  // 予算を使い切るか、テナントが尽きるまで進む
-  while (progress.agentsEvaluated < input.agentBudget) {
+  // **2 つの予算のどちらかを使い切るか、テナントが尽きるまで進む。**
+  // テナント側の上限を定数にしてあるのは、歩くだけのテナント 1 件は 2 クエリで安く、
+  // 運用者が調整したいのは「判定するエージェント数」の側だから（入力の口を 2 つにすると
+  // 検証も契約も倍になる）。足りない分は次の要求が続きから拾う
+  while (
+    progress.agentsEvaluated < input.agentBudget &&
+    progress.tenantsVisited < MAINTENANCE_TENANT_SCAN_MAX
+  ) {
     // テナントを 1 件だけ読む（1 件ずつ進めるので、残りのカーソルがそのまま次の位置になる）
     const tenants = await repos.tenants.list({ limit: 1, cursor: tenantCursor });
     const tenant = tenants.items[0];
     // 1 件も無ければ一巡が終わった
     if (tenant === undefined) return build(true, null, null);
+    // 歩いた件数（エージェントが 0 件でも数える。これがテナント側の予算の根拠）
+    progress.tenantsVisited += 1;
 
     // このテナントの稼働中のエージェントを、残りの予算ぶんだけ読む
     // （1 ページの上限は超えない。`list` は正規化済みの件数を期待する）
@@ -219,7 +243,7 @@ export async function runMaintenance(
     if (tenants.nextCursor === undefined) return build(true, null, null);
   }
 
-  // 予算を使い切った（次のテナントの先頭から続ける）
+  // どちらかの予算を使い切った（次のテナントの先頭から続ける）
   return build(false, tenantCursor === undefined ? null : encodeCursor(tenantCursor), null);
 }
 
@@ -243,8 +267,22 @@ async function evaluateOneAgent(
   // 判定（例外は包みが受け止めてサーバログへ残す）
   const evaluation = await evaluateGuardrailsSafely(
     repos,
-    // 人が起点ではないので操作主体は null（自動発火と同じ扱い）
-    { tenantId, agentId, kinds: ALL_RULE_KINDS, now, actorId: null },
+    {
+      tenantId,
+      agentId,
+      kinds: ALL_RULE_KINDS,
+      now,
+      // 人が起点ではないので操作主体は null（自動発火と同じ扱い）
+      actorId: null,
+      // **通知の完了を待たない**（中継の経路と同じ理由）。待つと受け手の応答時間が
+      // 1 件ずつ積み上がり（`NOTIFY_TIMEOUT_MS` ぶん × 予算の件数）、`agentBudget` が
+      // 1 要求の長さを縛れなくなる — 「窓から古い行が抜けて越える」エージェントが
+      // まとめて初回発火するのは、この機能を繋いだ直後のティックそのもの。
+      // **停止は通知より前に確定している**ので、待たないことで失うのは通知だけで、
+      // それは元から fail-open（ADR-0010）。**残る境界**: 応答後に関数を凍結する
+      // 配備先（serverless）では通知が完了しないことがある
+      detachNotifications: true,
+    },
     env,
   );
   // 判定を試みた件数

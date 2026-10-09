@@ -11,7 +11,7 @@ import { canPerform } from '@/domain/rbac';
 import type { UserPrincipal } from '@/lib/api/auth';
 import { LOGIN_PATH } from '@/lib/constants';
 import { isSameOriginRequest } from '@/lib/csrf';
-import { logEvent } from '@/lib/log';
+import { logEventThrottled } from '@/lib/log';
 import {
   SESSION_COOKIE_NAME,
   clearedSessionCookieOptions,
@@ -38,8 +38,10 @@ export interface DashboardSession {
  * （`src/lib/uncounted-response-sources.ts`）ので、ログが唯一の出口になる。**判定の呼び出し側ではなく
  * ここで出す** — 画面ごとに書くと、Server Action を足した人が出し忘れたぶんだけ黙る。
  *
- * **毎回出す**（1 プロセスに 1 度にしない）。設定の通知と違い、率そのものが信号なので
- * 間引くと意味が消える。量は前段のレート制限で抑える（理由は `src/app/login/actions.ts`）。
+ * **行は窓あたり 1 本に間引き、数えるのは毎回**（`logEventThrottled`）。設定の通知と違い
+ * 「いま起きているか」が知りたいことなので 1 度だけにはしないが、未認証で誰でも叩ける経路
+ * なので 1 要求 1 行にもしない（未認証経路の「断った」記録はすべてこの形。理由の詳しい
+ * 書き分けは `src/app/login/actions.ts`）。量は前段のレート制限でも抑える。
  */
 export async function isSameOriginAction(): Promise<boolean> {
   // ヘッダを読む（Next.js 16 では非同期）
@@ -47,7 +49,7 @@ export async function isSameOriginAction(): Promise<boolean> {
   // Origin と Host を突き合わせる（判定の規則は csrf.ts の 1 か所）
   const sameOrigin = isSameOriginRequest(headerList.get('origin'), headerList.get('host'));
   // 断ったときだけ 1 行残す（値そのものは出さない。出してよい形は定型文だけ）
-  if (!sameOrigin) logEvent('session.cross_origin_action');
+  if (!sameOrigin) logEventThrottled('session.cross_origin_action');
   // 判定をそのまま返す
   return sameOrigin;
 }

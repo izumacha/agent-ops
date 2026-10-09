@@ -24,10 +24,16 @@ beforeEach(() => {
   // カウンタを空へ戻す（前のテストを引きずらない）
   resetMetricsForTesting();
   lines = [];
-  // 出口が呼ぶ console.error を捕まえる（実引数は 1 つだけのはず）
-  vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
-    lines.push(args.map((arg) => String(arg)).join(' '));
-  });
+  // 間引きの記憶を空へ戻す（窓あたり 1 本の出口を使うテストが互いに影響しないように）
+  resetThrottledLogsForTesting();
+  // **`warn` と `error` の両方**を捕まえる — 出口のメソッドは深刻度で決まるので、
+  // `error` だけを差し替えていた頃は **`warn` の出来事（`plan.unknown_plan` 等）が
+  // 本物の stderr へ漏れ、`lines` からも黙って抜けていた**（実測でテストの出力に現れた）
+  for (const method of ['warn', 'error'] as const) {
+    vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(' '));
+    });
+  }
 });
 
 afterEach(() => {
@@ -171,6 +177,25 @@ describe('整形が失敗しても投げない', () => {
     expect(renderMetrics(new Date())).toContain(
       'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 3',
     );
+  });
+
+  it('時計が巻き戻っても間引きが居座らない（負の経過は窓を越えたとみなす）', () => {
+    // 1 本出してから**時計を巻き戻す**（NTP の補正・ライブマイグレーションで実際に起きる）
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 1 本目（この時点の時刻を覚える）
+      logEventThrottled('metrics.token_rejected');
+      // 1 時間巻き戻す
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 60 * 60 * 1000);
+      // 2 本目。**出ること** — 経過が負のときも窓の中と扱っていた頃は、
+      // 巻き戻した 1 時間ぶん行が 1 本も出なかった（しかもサーバーレスではこの行が
+      // 唯一の読める信号なので、原因を調べたいまさにその時間が沈黙する）
+      logEventThrottled('metrics.token_rejected');
+      expect(loggedEvents(outlet.calls())).toHaveLength(2);
+    } finally {
+      outlet.restore();
+    }
   });
 
   it('間引きの記憶を忘れると次の 1 本が出る', () => {

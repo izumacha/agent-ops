@@ -11,6 +11,7 @@ import type { Repositories } from '@/data/ports';
 import { DASHBOARD_PATH, LOGIN_PATH, UI_TEXT } from '@/lib/constants';
 import { SESSION_COOKIE_NAME } from '@/lib/session';
 import { generateSecret, hashSecret } from '@/lib/tokens';
+import { resetThrottledLogsForTesting } from '@/lib/log';
 
 // 送信元として使うヘッダ（既定は自分自身からの要求）
 let requestHeaders: Record<string, string>;
@@ -84,7 +85,7 @@ async function redirectTarget(run: () => Promise<unknown>): Promise<string | nul
 
 describe('ログインの Server Action', () => {
   // ログの出口（`console.error`）を捕まえる。**Server Action の応答は
-  // `agentops_http_responses_total` に乗らない**（`src/lib/metrics.ts` の
+  // `agentops_http_responses_total` に乗らない**（`src/lib/uncounted-response-sources.ts` の
   // `UNCOUNTED_RESPONSE_SOURCES`）ので、拒否が外から見える唯一の出口がこの行
   let outlet: ReturnType<typeof captureLogOutlet>;
 
@@ -96,6 +97,9 @@ describe('ログインの Server Action', () => {
     // 深刻度の正本は `LOG_EVENTS` で、出口のメソッドはそこから決まるので、テスト側で
     // どちらかを決め打つと語彙の `level` を変えた瞬間に何も見なくなる
     outlet = captureLogOutlet();
+    // 間引きの記憶も忘れる（**未認証経路の「断った」記録は窓あたり 1 本**なので、
+    // 前のテストが 1 本出していると次のテストでは出ない）
+    resetThrottledLogsForTesting();
   });
 
   afterEach(() => {

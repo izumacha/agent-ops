@@ -56,7 +56,7 @@ describe('GET /health', () => {
     const response = await GET(healthRequest());
     expect(response.status).toBe(503);
     // 失敗側にも同じく付いていること
-    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
     // 本文は「DB が落ちている」ことだけ (項目を足す変更もここで落ちる)
     const body = await response.json();
     expect(body).toEqual({ ok: false, db: 'down' });

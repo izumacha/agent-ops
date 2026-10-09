@@ -95,8 +95,11 @@ export function bearerTokenOrNull(request: Request): string | null {
   return token;
 }
 
-// Authorization ヘッダから Bearer トークンを取り出す (無ければ 401)
-export function extractBearerToken(request: Request): string {
+// Authorization ヘッダから Bearer トークンを取り出す (無ければ 401)。
+// **export しない** — この版は**ログを出す前に投げる**ので、未認証の経路から呼ぶと
+// 「断ったのに 1 行も残らない」形になる（まさにそれを `metrics-auth.ts` で直した）。
+// 外から使うのは `bearerTokenOrNull` の側で、断り方は呼び出し側が決める
+function extractBearerToken(request: Request): string {
   // 解析は 1 か所に寄せ、取り出せなければ 401 へ写す
   const token = bearerTokenOrNull(request);
   if (token === null) throw unauthorizedError();

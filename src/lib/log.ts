@@ -384,8 +384,13 @@ export function logEventThrottled(event: LogEventName): void {
   const now = Date.now();
   // 前回この出来事で行を出した時刻（初回は無い）
   const last = lastThrottledAt.get(event);
-  // 窓の中ならもう行は出さない。**それでも数える**（率は失わない）
-  if (last !== undefined && now - last < THROTTLED_LOG_WINDOW_MS) {
+  // 前回からの経過。**壁時計なので負になりうる**（NTP の巻き戻し・ライブマイグレーション）
+  const elapsed = last === undefined ? undefined : now - last;
+  // 窓の中ならもう行は出さない。**それでも数える**（率は失わない）。
+  // **負の経過は「窓を越えた」として扱う** — `elapsed < 窓` だけを見ていると、時計が 1 時間
+  // 巻き戻った配備でその 1 時間ぶん行が 1 本も出なくなる（しかもサーバーレスではこの行が
+  // 唯一の読める信号なので、運用者が原因を調べたいまさにその時間が沈黙する）
+  if (elapsed !== undefined && elapsed >= 0 && elapsed < THROTTLED_LOG_WINDOW_MS) {
     // 深刻度は語彙から引く（出口と同じ引き方。引けなければ最も重い側へ倒す）
     const level = lookupLogEvent(event)?.level ?? FALLBACK_LOG_LEVEL;
     // 行は出さずに数えるだけ

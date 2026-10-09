@@ -8,7 +8,7 @@
 import { redirect } from 'next/navigation';
 import { getRepos } from '@/data';
 import { DASHBOARD_PATH, LOGIN_PATH, UI_TEXT } from '@/lib/constants';
-import { logEvent } from '@/lib/log';
+import { logEventThrottled } from '@/lib/log';
 import { resolveSessionPrincipal } from '@/lib/session';
 import { clearSessionCookie, isSameOriginAction, setSessionCookie } from '@/lib/session-server';
 
@@ -51,14 +51,19 @@ export async function login(_previous: LoginState, formData: FormData): Promise<
   //   - 読めないパスは URL の形そのものなので、**前段のアクセスログが 1 件ずつ記録している**
   //     （あの出来事の説明文もそう案内する）。アプリの行は非可視を解くための 1 本で足りる。
   //   - ここは違う。拒否も成功も Server Action の 200 応答なので、**前段から見分けが付かない**
-  //     ＝率を観測できる場所がこの 1 行しかない。1 件は打ち間違い、1 分で 500 件は総当たりで、
-  //     間引くとその違いが消える（`agentops_log_events_total` にも乗らない。画面側は
-  //     Route Handler と別のモジュール実体なので ——`src/lib/log.ts` の `logEvent` 参照）。
-  // 量は前段で抑える — README の「前段の責務」が**認証経路のレート制限は前段で掛ける**と
+  //     ＝率を観測できる場所がこの 1 行しかない（`agentops_log_events_total` にも乗らない。
+  //     画面側は Route Handler と別のモジュール実体なので ——`src/lib/log.ts` の `logEvent` 参照）。
+  //
+  // **それでも 1 要求 1 行にはしない。** 未認証で誰でも叩ける経路なので、匿名の相手が
+  // ログの量（＝保存の費用）を好きなだけ増やせる。`logEventThrottled` で**行は窓あたり
+  // 1 本**に抑え、**数えるのは毎回**（続いているあいだは窓ごとに 1 本出るので「いま
+  // 起きているか」は分かる。受信 Webhook と監視トークンの 401 と同じ扱いで、未認証経路の
+  // 「断った」記録はすべてこの形にそろえてある）。
+  // 量は前段でも抑える — README の「前段の責務」が**認証経路のレート制限は前段で掛ける**と
   // 決めている（アプリ側の枠のキーは認証済みの主体から作るので、まだ認証していないこの経路には無い）
   if (principal === null) {
     // 拒否したことだけを出す（トークンも理由も出さない。理由を区別しないのは上の方針と同じ）
-    logEvent('session.login_rejected');
+    logEventThrottled('session.login_rejected');
     return { error: UI_TEXT.loginFailed };
   }
   // 通ったので Cookie を張る (属性は session.ts の 1 か所から取る)

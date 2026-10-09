@@ -31,9 +31,10 @@ export type CounterName = keyof typeof COUNTERS;
 interface GaugeSpec {
   // `# HELP` に出る説明
   readonly help: string;
-  // 出す値。**`renderMetrics` に渡された時刻を受け取れる**が、使わないゲージは引数を
-  // 宣言しない（稼働秒数は壁時計に依存しないので Node のモノトニックな時計から読む）
-  readonly value: (now: Date) => number;
+  // 出す値。**引数は取らない** — 2 本ともプロセスの時計（起動時刻と `process.uptime()`）から
+  // 求まるので、書き出す時刻は入力にならない。「受け取れるが誰も使わない引数」を残すと
+  // 事実でない契約が読めてしまい、死んだ引数を型エラーとして指摘する唯一の経路も塞がる
+  readonly value: () => number;
 }
 
 /**
@@ -336,10 +337,9 @@ function groupSeriesByName(): Map<string, { key: string; labels: string[]; value
  *
  * **判定も集計もしない** — 出すだけで、しきい値はスクレイプする側が決める
  * （ベンチや Lighthouse と同じ「測る側は出すだけ」の分担）。
- * @param now 現在時刻（起動からの経過を出すのに使う）
  * @returns 1 行 1 系列のテキスト
  */
-export function renderMetrics(now: Date): string {
+export function renderMetrics(): string {
   // 出力する行
   const lines: string[] = [];
   // 系列を 1 度だけ走査してカウンタ名で束ねる
@@ -389,13 +389,7 @@ export function renderMetrics(now: Date): string {
     // 宣言と値を並べる（小数 3 桁まで。ミリ秒の分解能をそのまま表す）
     lines.push(`# HELP ${name} ${escapeHelpText(GAUGES[name].help)}`);
     lines.push(`# TYPE ${name} gauge`);
-    // **宣言を `GaugeSpec` として受け直してから呼ぶ。** 表の値は `as const` で推論されるので、
-    // すべてのゲージが `now` を使わなくなると**この呼び出しだけが型エラー**になる
-    // （引数を取らない関数の合併になる）。契約は「書き出す時刻を受け取れる」ままにしておき、
-    // 使わないゲージはその引数を宣言しない（受け取って捨てる形にすると「使っているつもり」の
-    // 読み違いを招く）
-    const gauge: GaugeSpec = GAUGES[name];
-    lines.push(`${name} ${gauge.value(now).toFixed(3)}`);
+    lines.push(`${name} ${GAUGES[name].value().toFixed(3)}`);
   }
   // 末尾の改行まで含めて返す（テキスト形式は行指向）
   return `${lines.join('\n')}\n`;

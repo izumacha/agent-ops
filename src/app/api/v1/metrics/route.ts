@@ -41,7 +41,7 @@ export const GET = withResponseCount(async (request: Request): Promise<Response>
   // 監視用トークンを照合する（未設定・短すぎは 503、合わなければ 401）
   assertMetricsToken(request);
   // いまの値をテキストへ書き出す（判定はしない。しきい値はスクレイプ側が決める）
-  const body = renderMetrics(new Date());
+  const body = renderMetrics();
   // JSON ではないので Response.json は使わず、形式を名乗って返す。
   // **`no-store` は包む側（`withResponseCount`）が付ける** — 認証付きの運用情報なので
   // 共有キャッシュへは載せないが、付ける場所は `route()` を通る経路と同じ 1 か所にそろえる

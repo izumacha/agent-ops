@@ -240,7 +240,7 @@ describe('POST /billing/webhook', () => {
     });
     expect(result.status).toBe(401);
     // その応答が系列に 1 件乗っている
-    expect(renderMetrics(new Date())).toContain(
+    expect(renderMetrics()).toContain(
       'agentops_http_responses_total{method="POST",status="401"} 1',
     );
     // **キャッシュ制御も包む側が 1 度だけ付ける** — このルートが自分でも付けていた頃は、

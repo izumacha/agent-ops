@@ -70,7 +70,7 @@ describe('メトリクスのカウンタ', () => {
     // ラベルを変えて 1 回数える
     incrementCounter('agentops_http_responses_total', { method: 'POST', status: '201' });
     // 書き出した結果を読む
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     expect(valueOf(text, 'agentops_http_responses_total{method="GET",status="200"}')).toBe(2);
     expect(valueOf(text, 'agentops_http_responses_total{method="POST",status="201"}')).toBe(1);
   });
@@ -79,14 +79,14 @@ describe('メトリクスのカウンタ', () => {
     // わざと逆順で渡す
     incrementCounter('agentops_log_events_total', { level: 'error', event: 'plan.unknown_plan' });
     // 出力は名前順（event → level）
-    expect(renderMetrics(new Date())).toContain(
+    expect(renderMetrics()).toContain(
       'agentops_log_events_total{event="plan.unknown_plan",level="error"} 1',
     );
   });
 
   it('1 件も無いカウンタも宣言は出す（「まだ 0」と「名前が無い」を区別できる）', () => {
     // 何も数えずに書き出す
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     // 宣言したカウンタはすべて現れる
     for (const name of Object.keys(COUNTERS)) {
       expect(text).toContain(`# HELP ${name} `);
@@ -98,10 +98,10 @@ describe('メトリクスのカウンタ', () => {
     // **ラベル無しの `<名前> 0` を出していた版の退行を固定する** — 1 件目が数えられた瞬間に
     // 同じカウンタがラベル付きとラベル無しの両方の形を持ち、ラベル無しの系列がそのまま
     // 古く残る（`sum by (status)` に空の `status` のバケツが現れる）
-    expect(valueOf(renderMetrics(new Date()), 'agentops_http_responses_total')).toBeNull();
+    expect(valueOf(renderMetrics(), 'agentops_http_responses_total')).toBeNull();
     // 1 件数えるとラベル付きの系列だけが現れる
     countHttpResponse('GET', HTTP_STATUS.OK);
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     expect(text).toContain('agentops_http_responses_total{method="GET",status="200"} 1');
     // ラベル無しの標本は出ない
     expect(valueOf(text, 'agentops_http_responses_total')).toBeNull();
@@ -112,7 +112,7 @@ describe('メトリクスのカウンタ', () => {
     countHttpResponse('GET', HTTP_STATUS.OK);
     incrementCounter('agentops_log_events_total', { event: 'x', level: 'error' });
     // 末尾の改行で分かれる空行を落として 1 行ずつ見る
-    const lines = renderMetrics(new Date()).split('\n').slice(0, -1);
+    const lines = renderMetrics().split('\n').slice(0, -1);
     // **行の文法を固定する** — 宣言の説明文に改行が入ると「続きが別の行になる」形で壊れるが、
     // 説明文は定数なのでテストから値を差し込めない。**行の形で見れば、改行が入った時点で
     // どちらの `# HELP` でも落ちる**（`escapeHelpText` が無い版は本文に素の改行を通す）
@@ -127,7 +127,7 @@ describe('メトリクスのカウンタ', () => {
   it('ラベルを取らないカウンタ（捨てた数）は 0 でも標本を出す', () => {
     // **こちらは常にラベル無しの 1 系列**なので、0 を出しても形が混ざらない
     // （「捨てていない」ことを見せる必要がある）
-    expect(valueOf(renderMetrics(new Date()), 'agentops_metrics_series_dropped_total')).toBe(0);
+    expect(valueOf(renderMetrics(), 'agentops_metrics_series_dropped_total')).toBe(0);
   });
 
   it.each([
@@ -139,7 +139,7 @@ describe('メトリクスのカウンタ', () => {
   ])('%s は出さずに捨てた系列として数える（出力を構文違反にしない）', (_label, name) => {
     // 出せない形のラベル名で数える
     incrementCounter('agentops_log_events_total', { [name]: 'v', level: 'error' });
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     // その系列は 1 行も出ない（`agentops_log_events_total` の標本が無い）
     expect(text).not.toContain('agentops_log_events_total{');
     // 捨てたことは観測できる（黙って落とさない）
@@ -150,9 +150,7 @@ describe('メトリクスのカウンタ', () => {
     // 仕様の文字集合に収まる名前
     incrementCounter('agentops_log_events_total', { _a1: 'v', level: 'error' });
     // 出力に現れる（名前の検査が広すぎて正しい名前を落としていないこと）
-    expect(renderMetrics(new Date())).toContain(
-      'agentops_log_events_total{_a1="v",level="error"} 1',
-    );
+    expect(renderMetrics()).toContain('agentops_log_events_total{_a1="v",level="error"} 1');
   });
 
   it('ラベル値が文字列でなくても投げず、捨てた系列として数える', () => {
@@ -164,7 +162,7 @@ describe('メトリクスのカウンタ', () => {
       }),
     ).not.toThrow();
     // 黙って消さず、捨てた系列として出力に現れる（§6 エラーを握り潰さない）
-    expect(valueOf(renderMetrics(new Date()), 'agentops_metrics_series_dropped_total')).toBe(1);
+    expect(valueOf(renderMetrics(), 'agentops_metrics_series_dropped_total')).toBe(1);
   });
 
   it('系列が上限に達したら新しい系列を捨て、捨てた数を数える', () => {
@@ -174,7 +172,7 @@ describe('メトリクスのカウンタ', () => {
       incrementCounter('agentops_log_events_total', { event: `e${i}`, level: 'error' });
     // ここで 1 本増やすと上限を超える
     incrementCounter('agentops_log_events_total', { event: 'overflow', level: 'error' });
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     // 捨てた系列は出力に現れない
     expect(valueOf(text, 'agentops_log_events_total{event="overflow",level="error"}')).toBeNull();
     // 捨てた数が 1 件として観測できる（黙って落とさない）
@@ -187,7 +185,7 @@ describe('メトリクスのカウンタ', () => {
     // 以前はこのカウンタを `renderMetrics` の出力からしか読んでおらず、
     // `incrementCounter` を直接呼ぶテストが 1 つも無かったので、**分岐を消しても全件緑**だった
     incrementCounter('agentops_metrics_series_dropped_total', { event: 'x', level: 'error' });
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     // ラベル付きの系列は作られない（渡したラベルは無視される）
     expect(text).not.toContain('agentops_metrics_series_dropped_total{');
     // 値はラベル無しの 1 系列として増える
@@ -200,7 +198,7 @@ describe('メトリクスのカウンタ', () => {
       incrementCounter('agentops_log_events_total', { event: `e${i}`, level: 'error' });
     // 既存の系列をもう 1 回数える（捨ててはいけない — 上限は「新しい系列」に対するもの）
     incrementCounter('agentops_log_events_total', { event: 'e0', level: 'error' });
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     expect(valueOf(text, 'agentops_log_events_total{event="e0",level="error"}')).toBe(2);
     // 捨てていないので捨てた数は 0
     expect(valueOf(text, 'agentops_metrics_series_dropped_total')).toBe(0);
@@ -216,7 +214,7 @@ describe('メトリクスのカウンタ', () => {
     // 行や引用の境目を壊しうる 4 文字を含む値を渡す（閉じた語彙から外れた値が来ても壊れない）
     incrementCounter('agentops_log_events_total', { event: 'a\\b"c\nd\re', level: 'error' });
     // 逃がした形で現れる（解析器が行や引用の境目を取り違えない）
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     expect(text).toContain('agentops_log_events_total{event="a\\\\b\\"c\\nd\\ne",level="error"} 1');
     // **定義の無い逃がし方を 1 つも出さないこと** — 綴りで照合するだけでは「`\r` を足した」
     // 変異に気付かないので、出力全体から定義済みの 3 つを取り除いたうえで逆斜線が残らないことを見る
@@ -230,7 +228,7 @@ describe('メトリクスのカウンタ', () => {
     // その行だけでなく**そのターゲットのスクレイプ全体を捨てる**ので、監視が丸ごと止まる
     incrementCounter('agentops_log_events_total', { event: 'a\u0000b', level: 'error' });
     // 書き出した行
-    const line = renderMetrics(new Date())
+    const line = renderMetrics()
       .split('\n')
       .find((text) => text.startsWith('agentops_log_events_total{'));
     // ラベル名が空の項目が無いこと（`,="` や `{="` が現れない）
@@ -245,14 +243,14 @@ describe('メトリクスのカウンタ', () => {
     // 行ごと捨てる＝その系列が黙って落ちる）
     incrementCounter('agentops_log_events_total', { event: 'x\ry', level: 'error' });
     // 書き出した本文の行数は、生の CR が残っていれば増える
-    const lines = renderMetrics(new Date()).split('\n');
+    const lines = renderMetrics().split('\n');
     // どの行にも生の CR が無いこと
     expect(lines.some((line) => line.includes('\r'))).toBe(false);
   });
 
   it('宣言したゲージはすべて宣言と値を出す（名前は GAUGES から導く）', () => {
     // 現在時刻を渡して書き出す
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     // **名前をここへ書き写さない** — 本体へ直書きしていた頃は、名前を書き換えても
     // どの検査も落ちなかった（表に移したので導出で照合できる）
     expect(Object.keys(GAUGES).length).toBeGreaterThan(0);
@@ -286,7 +284,7 @@ describe('メトリクスのカウンタ', () => {
     vi.resetModules();
     const fresh = (await import('@/lib/metrics')) as typeof import('@/lib/metrics');
     // 読み直した実体で書き出す
-    const text = fresh.renderMetrics(new Date());
+    const text = fresh.renderMetrics();
     // 出力の稼働秒数
     const reported = valueOf(text, 'agentops_process_uptime_seconds');
     expect(reported).not.toBeNull();
@@ -298,9 +296,9 @@ describe('メトリクスのカウンタ', () => {
   });
 
   it('起動時刻は「いま − 稼働秒数」と一致する（2 つのゲージが同じ原点を指す）', () => {
-    // 同じ時刻で両方を書き出す
+    // 書き出す時刻は入力ではないので、照合に使う「いま」は自分で読む
     const now = new Date();
-    const text = renderMetrics(now);
+    const text = renderMetrics();
     const start = valueOf(text, 'agentops_process_start_time_seconds');
     const uptime = valueOf(text, 'agentops_process_uptime_seconds');
     expect(start).not.toBeNull();
@@ -313,11 +311,12 @@ describe('メトリクスのカウンタ', () => {
   //
   // `いま − 起動時刻` で求めていた版は、NTP が壁時計を稼働秒数より大きく巻き戻すと**負の値**を
   // 書き出した（実測で `-1791547215.343`）。負になると用途が反転し、`< 60`（再起動の検出）の
-  // 警報が実体の無い再起動で鳴る。**巻き戻しは書き出す時刻を過去にして再現できる**
+  // 警報が実体の無い再起動で鳴る。**巻き戻しは壁時計そのものを差し替えて再現する**
+  // （書き出す時刻は入力ではなくなったので、壁時計に戻す変異はこの形でしか捕まえられない）
   it('稼働秒数は壁時計の巻き戻しで負にならない（モノトニックな時計から求める）', () => {
-    // 1 年前の時刻で書き出す（壁時計が大きく巻き戻った配備と同じ）
-    const rewound = new Date(Date.now() - 365 * 24 * 3_600 * 1_000);
-    const uptime = valueOf(renderMetrics(rewound), 'agentops_process_uptime_seconds');
+    // 壁時計を 1 年巻き戻す（NTP の巻き戻しと同じ）
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 365 * 24 * 3_600 * 1_000);
+    const uptime = valueOf(renderMetrics(), 'agentops_process_uptime_seconds');
     expect(uptime).not.toBeNull();
     // 負にならず、Node が報告する経過秒数と一致する（**別の手掛かり**）
     expect(uptime!).toBeGreaterThanOrEqual(0);
@@ -326,12 +325,12 @@ describe('メトリクスのカウンタ', () => {
 
   it('ゲージはカウンタと混ざらない（型の宣言が counter にならない）', () => {
     // 同じ名前が counter として宣言されていないこと
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     for (const name of Object.keys(GAUGES)) expect(text).not.toContain(`# TYPE ${name} counter`);
   });
 
   it('末尾は改行で終わる（行指向の形式なので最後の行も区切る）', () => {
-    expect(renderMetrics(new Date()).endsWith('\n')).toBe(true);
+    expect(renderMetrics().endsWith('\n')).toBe(true);
   });
 });
 
@@ -382,7 +381,7 @@ describe('応答を数える入口', () => {
     // 未知のメソッド・`HTTP_STATUS` に無い番号（メソッドはまとめ先、ステータスは級へ入る）
     countHttpResponse('TRACE', 418);
     // 書き出して確かめる
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     expect(
       valueOf(text, `agentops_http_responses_total{method="POST",status="${HTTP_STATUS.CREATED}"}`),
     ).toBe(1);
@@ -397,7 +396,7 @@ describe('応答を数える入口', () => {
     // 1 系列に 3 が乗る
     expect(
       valueOf(
-        renderMetrics(new Date()),
+        renderMetrics(),
         `agentops_http_responses_total{method="GET",status="${HTTP_STATUS.OK}"}`,
       ),
     ).toBe(3);
@@ -466,7 +465,7 @@ describe('テスト専用の初期化', () => {
     countHttpResponse('GET', HTTP_STATUS.OK);
     // 戻すと系列が消える（宣言だけが残り、標本は 1 本も出ない）
     resetMetricsForTesting();
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     expect(text).toContain('# TYPE agentops_http_responses_total counter');
     expect(text).not.toContain('agentops_http_responses_total{');
     expect(valueOf(text, 'agentops_http_responses_total')).toBeNull();

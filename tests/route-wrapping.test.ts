@@ -331,7 +331,7 @@ describe('Route Handler の結線', () => {
     // 応答が返ること（例外が漏れない）
     expect(response.status).toBe(200);
     // メソッドが読めないので閉じた集合の外として `other` に寄る（ラベルは増えない）
-    expect(renderMetrics(new Date())).toContain('agentops_http_responses_total{method="other"');
+    expect(renderMetrics()).toContain('agentops_http_responses_total{method="other"');
     // 後始末
     resetMetricsForTesting();
   });
@@ -353,7 +353,7 @@ describe('Route Handler の結線', () => {
     // 1 回呼ぶ
     await outer(new Request('http://test.local/x'));
     // 出力の中で該当する系列の値を読む（`agentops_http_responses_total{...} <値>` の行）
-    const line = renderMetrics(new Date())
+    const line = renderMetrics()
       .split('\n')
       .find((row) => row.startsWith('agentops_http_responses_total{'));
     // ちょうど 1 件（2 なら二重に数えている）

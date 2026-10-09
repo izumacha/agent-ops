@@ -211,7 +211,7 @@ describe('GET /metrics', () => {
       outlet.restore();
     }
     // **数えるのは毎回**（間引きが率を消さないこと）
-    expect(renderMetrics(new Date())).toContain(
+    expect(renderMetrics()).toContain(
       'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 3',
     );
   });

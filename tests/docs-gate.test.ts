@@ -8,7 +8,7 @@ import { gitTrackedFiles, repoRoot, testBudgetFor } from './lib/child-process';
 import { join } from 'node:path';
 import { importSharedModule, sharedModuleNames } from './lib/script-files';
 // ソースを構文で読む共通部分（間引く出口の呼び出し箇所を導くのに使う）
-import { forEachNode, parseSourceFiles } from './lib/source-files';
+import { forEachNode, namedCallArguments, parseSourceFiles } from './lib/source-files';
 import ts from 'typescript';
 
 // リポジトリのルート（**`process.cwd()` ではなく git が報告する根**。`gitTrackedFiles` が
@@ -916,11 +916,13 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
       const thrown = new Set<string>();
       for (const parsed of parseSourceFiles()) {
         forEachNode(parsed.source, (node) => {
-          // 関数呼び出しで、呼ばれている名前が素の識別子であること
-          if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)) return;
-          if (node.expression.text !== 'logEventThrottled') return;
+          // **包みを剥がしてから**呼び先を見る（規則は `namedCallArguments` が唯一の持ち主。
+          // 素の識別子だけを見ていた版は `(0, f)(…)` / `.call` / `.apply` / `.bind` /
+          // `Reflect.apply` の 5 形を素通りし、兄弟の検出網より緩かった）
+          const args = namedCallArguments(node, 'logEventThrottled');
+          if (args === null) return;
           // 第 1 引数が文字列リテラルのときだけ拾う（変数渡しは error-logging 側が落とす）
-          const [first] = node.arguments;
+          const [first] = args;
           if (first !== undefined && ts.isStringLiteralLike(first)) thrown.add(first.text);
         });
       }

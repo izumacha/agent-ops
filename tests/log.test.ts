@@ -108,7 +108,7 @@ describe('出来事を出す', () => {
     logEvent('notify.send_failed');
     logEvent('plan.unknown_plan');
     // 深刻度もラベルに入る（語彙が持つ値をそのまま使う）
-    const text = renderMetrics(new Date());
+    const text = renderMetrics();
     expect(text).toContain('agentops_log_events_total{event="notify.send_failed",level="error"} 2');
     expect(text).toContain('agentops_log_events_total{event="plan.unknown_plan",level="warn"} 1');
   });
@@ -178,7 +178,7 @@ describe('整形が失敗しても投げない', () => {
       outlet.restore();
     }
     // **数えるのは毎回**（行にしなかった回も率に残る）
-    expect(renderMetrics(new Date())).toContain(
+    expect(renderMetrics()).toContain(
       'agentops_log_events_total{event="metrics.token_rejected",level="warn"} 10',
     );
   });
@@ -351,9 +351,7 @@ describe('整形が失敗しても投げない', () => {
     // 出すのにカウンタは `level="warn"` で数え、`level="error"` で警報を組んだ運用者には
     // 縮退した行が 1 件も見えない。ADR-0014 が「同じモジュール実体の中では食い違わない」と
     // 名乗っているのはまさにこの一致なので、両辺を同じテストで固定する
-    expect(renderMetrics(new Date())).toContain(
-      'agentops_log_events_total{event="valueOf",level="error"} 1',
-    );
+    expect(renderMetrics()).toContain('agentops_log_events_total{event="valueOf",level="error"} 1');
   });
 
   it('logEvent も語彙に無いキーで投げない（固めた縮退へ実際に届く）', () => {

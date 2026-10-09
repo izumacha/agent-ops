@@ -15,13 +15,12 @@ import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 /**
  * このルートへ渡す要求を作る。
  * **包む側 (`withResponseCount`) がメソッドを要求から読む**ので、ハンドラを直接呼ぶときも
- * 要求を渡す必要がある（文字列を書かないので `HEAD` も正しいラベルで数えられる）。
- * @param method HTTP メソッド（既定は GET）
+ * 要求を渡す必要がある（メソッドのラベルの付け方そのものは `tests/metrics.test.ts` が固定する）。
  * @returns 要求
  */
-function healthRequest(method = 'GET'): Request {
+function healthRequest(): Request {
   // URL はダミー（この経路はクエリを見ない）
-  return new Request('http://test.local/api/v1/health', { method });
+  return new Request('http://test.local/api/v1/health');
 }
 
 // 各テストの後でモックの記録を消す
@@ -97,7 +96,7 @@ describe('GET /health', () => {
     // 呼ぶ
     expect((await GET(healthRequest())).status).toBe(status);
     // その応答が系列に 1 件乗っている
-    expect(renderMetrics(new Date())).toContain(
+    expect(renderMetrics()).toContain(
       `agentops_http_responses_total{method="GET",status="${status}"} 1`,
     );
   });

@@ -175,5 +175,10 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
 - **数えるのは `route()` を通る経路だけではない。** 未認証の受信 Webhook・`GET /health`・
   画面側の CSV・`/metrics` 自身も同じ系列に乗るので、`agentops_http_responses_total{status="401"}`
   の増加で署名鍵の設定ミスやなりすましの総当たりが分かる。
+- **数えられない経路が 1 つある**（既知の非可視）: 入口（`src/proxy.ts`）が percent-decode
+  できないパスへ返す 404。入口は Route Handler とは別のモジュール実体で評価されるため、
+  そこで数えてもこのカウンタには入らない（本番ビルドで実測）。代わりに
+  `proxy.undecodable_path` を **1 プロセスに 1 度だけ**ログへ出すので、起きたことは分かる。
+  同種の要求が続いているかは**前段のアクセスログ**で見る。
 - **耐久する事実はここに出さない。** 利用量・コストは `GET /api/v1/usage/daily`、
   インシデントは画面と `GET /api/v1/incidents`、操作の記録は `GET /api/v1/audit-logs`。

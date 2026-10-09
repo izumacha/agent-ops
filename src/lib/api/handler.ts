@@ -216,8 +216,12 @@ export function withResponseCount<A extends unknown[]>(
 ): (request: Request, ...rest: A) => Promise<Response> {
   // Next.js が呼ぶ形の関数
   const counted = async (request: Request, ...rest: A): Promise<Response> => {
-    // 応答を組み立てる（例外も応答へ写す）
-    const response = await buildResponse(() => handler(request, ...rest));
+    // 応答を組み立てる（例外も応答へ写す）。**キャッシュ制御もここで付ける** —
+    // 以前は例外の経路にだけ付けていたので、本体が**返した**早期の 401 / 404 には
+    // 付かなかった（画面側の CSV がそれで、認証付きの経路の 401 / 404 が共有キャッシュへ
+    // 載りうる状態だった）。`route()` も Webhook も既に自分で付けているが、
+    // 同じ値を設定し直すだけなので二重でも問題にならない
+    const response = withPrivateCacheHeaders(await buildResponse(() => handler(request, ...rest)));
     // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）
     countHttpResponse(request.method, response.status);
     // 組み立てた応答をそのまま返す

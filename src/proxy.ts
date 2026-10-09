@@ -25,6 +25,7 @@
 // (ADR-0005 の宿題)。
 import { NextResponse, type NextRequest } from 'next/server';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
+import { logEvent } from '@/lib/log';
 import { errorResponse } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES } from '@/lib/constants';
@@ -42,11 +43,25 @@ function isDecodablePath(url: string): boolean {
   }
 }
 
+// 読めないパスの 404 を 1 度ログへ出したか (未認証で叩ける経路なので毎回は出さない)
+let warnedUndecodablePath = false;
+
 // 全リクエストの入口 (Next.js が名前で呼ぶので、この関数名と export の形は変えない)
 export function proxy(request: NextRequest): Response {
   // 読めないパスは「そんな資源は無い」として 404 で返す (500 にしない・本体まで通さない)。
   // 応答の形は API のエラー契約に揃える (この配備が持つ経路はほぼ API で、形が割れる方が扱いにくい)
   if (!isDecodablePath(request.url)) {
+    // **この応答はメトリクスに現れない（実測）。** 入口は route handler とは別のモジュール実体で
+    // 評価されるので、ここで `countHttpResponse` を呼んでも `/metrics` が読むカウンタとは
+    // 別の表に入る（本番ビルドで確認: health の 200 は現れるのに、ここの 404 は 2 件とも
+    // 現れなかった）。数えたように見えて見えない形を作るより、**ログで非可視だけは解く**。
+    // 既知の非可視として ADR-0014 と docs/deploy.md にも書いてある
+    if (!warnedUndecodablePath) {
+      // **1 度だけ出す** — 未認証で誰でも叩ける経路なので、毎回出すとログを埋められる
+      // (PLATFORM_ADMIN_TOKEN が短すぎる警告と同じ扱い)。続いているかは前段のログで見る
+      warnedUndecodablePath = true;
+      logEvent('proxy.undecodable_path');
+    }
     // キャッシュ制御も route() の応答と同じ規律に揃える (この 1 経路だけ外れていると、
     // 将来 proxy が分岐を増やしたときに気付けない)
     return withPrivateCacheHeaders(errorResponse(HTTP_STATUS.NOT_FOUND, API_MESSAGES.notFound));

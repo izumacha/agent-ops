@@ -10,6 +10,7 @@ import { buildDailyReportCsv, dailyReportFileName } from '@/lib/dashboard/csv';
 import { resolveDashboardRange } from '@/lib/dashboard/range';
 import { loadDashboardSummary } from '@/lib/dashboard/summary';
 import { withResponseCount } from '@/lib/api/handler';
+import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 import { currentSession } from '@/lib/session-server';
 
 // **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**（`route()` を通る
@@ -57,8 +58,9 @@ async function respond(request: Request): Promise<Response> {
       'Content-Type': 'text/csv; charset=utf-8',
       // ファイル名は期間が分かる形にする
       'Content-Disposition': `attachment; filename="${dailyReportFileName(range.fromText, range.toText)}"`,
-      // **キャッシュさせない** — テナントごとに中身が違うので、共有キャッシュに載ると他テナントへ漏れる
-      'Cache-Control': 'private, no-store',
+      // **キャッシュさせない** — テナントごとに中身が違うので、共有キャッシュに載ると他テナントへ漏れる。
+      // 値の正本は `NO_STORE_CACHE_CONTROL`（包む側も同じ値を設定するので、ここは明示の意思表示）
+      'Cache-Control': NO_STORE_CACHE_CONTROL,
     },
   });
 }

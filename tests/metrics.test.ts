@@ -21,6 +21,14 @@ import { LOG_EVENTS } from '@/lib/log';
 // Next.js が Route Handler として呼ぶ export 名（閉じた集合の網羅を照合する独立な手掛かり）
 import { HTTP_METHOD_EXPORTS } from './lib/route-files';
 
+/**
+ * 「モジュールの評価を遅らせる」待ち時間（ミリ秒）。
+ *
+ * 起動時刻の検査がこれだけ待ってからモジュールを読み直すので、**評価時刻を起点にしている
+ * 実装はこの時間ぶんずれる**。短すぎると退行を拾えず、長すぎるとスイートが遅くなる。
+ */
+const MODULE_EVAL_DELAY_MS = 1_200;
+
 // 1 本ずつ独立に見る（カウンタはモジュールの状態なので前のテストを引きずる）
 beforeEach(() => {
   resetMetricsForTesting();
@@ -127,6 +135,48 @@ describe('メトリクスのカウンタ', () => {
     // 起動時刻は正の UNIX 秒、稼働秒数は 0 以上（意味のある値であること）
     expect(valueOf(text, 'agentops_process_start_time_seconds')).toBeGreaterThan(0);
     expect(valueOf(text, 'agentops_process_uptime_seconds')).toBeGreaterThanOrEqual(0);
+  });
+
+  // **プロセスの起動時刻は `process.uptime()` と突き合わせる。**
+  //
+  // 手掛かりを出力の `..._start_time_seconds` 側から取ると（それで稼働秒数を検算する形）
+  // **同じ値を自分自身と比べるだけ**になり、`Date.now()` をそのまま入れる退行を 1 件も
+  // 拾えない（実測で、プロセスは 35 秒生きているのに稼働秒数が 29.774 を返す状態が
+  // 全件緑だった）。`process.uptime()` は Node が持つ独立な手掛かり。
+  //
+  // **モジュールを遅らせて読み直すのが要点。** このファイルの静的 import は vitest の
+  // ワーカー起動の直後に評価されるので、`Date.now()` でも差はミリ秒しか出ない
+  // （実測で、素の `Date.now()` へ戻す変異が全件緑で通った）。待ってから**新しい
+  // モジュール実体**を読めば、「評価時刻を起点にしている実装」だけがその待ち時間ぶん
+  // ずれる。サーバーレスのコールドスタートで実際に起きるのがこのずれ。
+  it('稼働秒数はプロセスの起動からの経過と一致する（モジュールの評価時刻ではない）', async () => {
+    // 評価の遅れを作る（この待ち時間がそのまま「ずれ」の下限になる）
+    await new Promise((resolve) => setTimeout(resolve, MODULE_EVAL_DELAY_MS));
+    // モジュールの登録簿を捨てて読み直す（新しい実体が「いま」評価される）
+    vi.resetModules();
+    const fresh = (await import('@/lib/metrics')) as typeof import('@/lib/metrics');
+    // 読み直した実体で書き出す
+    const text = fresh.renderMetrics(new Date());
+    // 出力の稼働秒数
+    const reported = valueOf(text, 'agentops_process_uptime_seconds');
+    expect(reported).not.toBeNull();
+    // Node が報告するプロセスの経過秒数（**別の手掛かり**）
+    const actual = process.uptime();
+    // 差は待ち時間より十分小さいこと。評価時刻を起点にしている実装では
+    // `reported` がほぼ 0 になるので、この差が待ち時間ぶん開いて落ちる
+    expect(Math.abs(reported! - actual)).toBeLessThan(MODULE_EVAL_DELAY_MS / 1_000 / 2);
+  });
+
+  it('起動時刻は「いま − 稼働秒数」と一致する（2 つのゲージが同じ原点を指す）', () => {
+    // 同じ時刻で両方を書き出す
+    const now = new Date();
+    const text = renderMetrics(now);
+    const start = valueOf(text, 'agentops_process_start_time_seconds');
+    const uptime = valueOf(text, 'agentops_process_uptime_seconds');
+    expect(start).not.toBeNull();
+    expect(uptime).not.toBeNull();
+    // 起動時刻 + 稼働秒数 = いま（原点が食い違っていれば開く）
+    expect(Math.abs(start! + uptime! - now.getTime() / 1_000)).toBeLessThan(0.01);
   });
 
   it('稼働秒数は渡した時刻から求める（引数を無視していれば増えない）', () => {

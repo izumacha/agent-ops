@@ -19,6 +19,7 @@ import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import {
+  withResponseCount,
   RESPONSE_COUNT_BRAND,
   ROUTE_HANDLER_BRAND,
   ROUTE_RATE_LIMIT_BRAND,
@@ -29,6 +30,9 @@ import {
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import { reachesModule, SRC_DIR, sourceImportGraph } from './lib/source-files';
 import { PLAN_FEATURES } from '@/domain/plan';
+import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
+import { ApiError } from '@/lib/api/errors';
+import { HTTP_STATUS } from '@/lib/api/http-status';
 
 // App Router の入口 (この下にある route.ts はすべて配信される)
 const APP_DIR = join(process.cwd(), 'src', 'app');
@@ -45,7 +49,8 @@ const UNAUTHENTICATED_ROUTES: Record<string, string> = {
 // `route()` を通らないことを許す代わりに、下の 2 つを必ず要求する:
 //   (a) 署名検証のモジュール（`@/lib/billing/signature`）へ到達すること
 //       （= 誰でも叩ける経路に認証がある。到達しなければ誰でもプランを書き換えられる）
-//   (b) `no-store` を宣言すること（`route()` が包む応答と同じ扱い）
+// キャッシュ制御と応答の数え上げは**包むラッパー（`withResponseCount`）が全応答へ行う**ので
+// ここでは要求しない（下の 2 つの検査が 1 か所で固定する）
 // **`RouteOptions` に `auth: 'none'` を足す形は採らなかった** — 既定を 1 つ緩めると、
 // どのルートも宣言 1 行で未認証にできる口になる（理由は ADR-0012）。
 // **ここに増える差分は理由の妥当性をレビューで必ず確認する**
@@ -63,7 +68,8 @@ const SIGNED_WEBHOOK_ROUTES: Record<string, string> = {
 // `route()` を通らないことを許す代わりに、下の 2 つを必ず要求する:
 //   (a) 監視用トークンの入口（`@/lib/api/metrics-auth`）へ到達すること
 //       （= 到達しなければ運用の数字が誰でも読める）
-//   (b) `no-store` を宣言すること（`route()` が包む応答と同じ扱い）
+// キャッシュ制御と応答の数え上げは**包むラッパー（`withResponseCount`）が全応答へ行う**ので
+// ここでは要求しない（下の 2 つの検査が 1 か所で固定する）
 // 応答を数える出口への到達は**全ルート共通の要求**なので別の検査が見る。
 // **ここに増える差分は理由の妥当性をレビューで必ず確認する**
 const METRICS_TOKEN_ROUTES: Record<string, string> = {
@@ -78,8 +84,8 @@ const METRICS_TOKEN_ROUTES: Record<string, string> = {
 // api/v1 の下に置かないこと・route() を通らないことを許す代わりに、下の 3 つを必ず要求する:
 //   (a) api/v1 の**外**にあること (契約の下に紛れ込ませない)
 //   (b) `@/lib/session-server` へ到達すること (= セッションを自分で確かめている)
-//   (c) `Cache-Control` に `no-store` を宣言すること (テナントごとに中身が違うので共有キャッシュへ
-//       載ると他テナントへ漏れる)
+// キャッシュ制御と応答の数え上げは**包むラッパー（`withResponseCount`）が全応答へ行う**ので
+// ここでは要求しない（下の 2 つの検査が 1 か所で固定する）
 // **ここに増える差分は理由の妥当性をレビューで必ず確認する**。表に無い route.ts は
 // 従来どおり「api/v1 の下で route() を通る」ことを要求される
 const SESSION_PAGE_ROUTES: Record<string, string> = {
@@ -145,7 +151,7 @@ describe('Route Handler の結線', () => {
     }
   });
 
-  it('画面側ルートはセッションを自分で確かめ、キャッシュを禁止している', () => {
+  it('画面側ルートはセッションを自分で確かめている', () => {
     // 走査が壊れていたら fail-closed で落とす
     const sessionModule = join(SRC_DIR, 'lib', 'session-server.ts');
     expect(importGraph.has(sessionModule), 'セッションの入口を走査できていない').toBe(true);
@@ -163,11 +169,6 @@ describe('Route Handler の結線', () => {
         `${key} がセッションの確認を通っていない`,
       ).toBe(true);
       // (c) 共有キャッシュへ載らないことを宣言していること。
-      // **綴りを見るだけの弱い検査**だが、テナントごとに中身が違う応答なので宣言の有無は固定する
-      expect(
-        readFileSync(file!.full, 'utf8').includes('no-store'),
-        `${key} が Cache-Control に no-store を宣言していない`,
-      ).toBe(true);
     }
   });
 
@@ -184,7 +185,7 @@ describe('Route Handler の結線', () => {
     }
   });
 
-  it('署名 Webhook は署名検証を通り、キャッシュを禁止している', () => {
+  it('署名 Webhook は署名検証を通っている', () => {
     // 署名検証のモジュール (走査できていなければ fail-closed で落とす)
     const signatureModule = join(SRC_DIR, 'lib', 'billing', 'signature.ts');
     expect(importGraph.has(signatureModule), '署名検証の入口を走査できていない').toBe(true);
@@ -199,13 +200,6 @@ describe('Route Handler の結線', () => {
       expect(
         reachesModule(importGraph, file!.full, signatureModule),
         `${key} が署名の検証を通っていない`,
-      ).toBe(true);
-      // (b) 共有キャッシュへ載らないことを宣言していること。
-      // **綴りを見るだけの弱い検査**だが、宣言の有無は固定する (画面側ルートと同じ扱い)
-      expect(
-        readFileSync(file!.full, 'utf8').includes('no-store') ||
-          readFileSync(file!.full, 'utf8').includes('withPrivateCacheHeaders'),
-        `${key} が Cache-Control の禁止を宣言していない`,
       ).toBe(true);
     }
   });
@@ -223,7 +217,7 @@ describe('Route Handler の結線', () => {
     }
   });
 
-  it('監視専用トークンの経路は専用の入口で認証し、キャッシュを禁止している', () => {
+  it('監視専用トークンの経路は専用の入口で認証している', () => {
     // 監視用トークンの入口 (走査できていなければ fail-closed で落とす)
     const authModule = join(SRC_DIR, 'lib', 'api', 'metrics-auth.ts');
     expect(importGraph.has(authModule), '監視用トークンの入口を走査できていない').toBe(true);
@@ -238,12 +232,6 @@ describe('Route Handler の結線', () => {
       expect(
         reachesModule(importGraph, file!.full, authModule),
         `${key} が監視用トークンの確認を通っていない`,
-      ).toBe(true);
-      // (b) 共有キャッシュへ載らないことを宣言していること (画面側ルート・署名 Webhook と同じ扱い)
-      const source = readFileSync(file!.full, 'utf8');
-      expect(
-        source.includes('no-store') || source.includes('withPrivateCacheHeaders'),
-        `${key} が Cache-Control の禁止を宣言していない`,
       ).toBe(true);
     }
   });
@@ -288,6 +276,30 @@ describe('Route Handler の結線', () => {
     }
     // 1 つも見ていなければ走査が壊れている (fail-closed)
     expect(checked, 'Route Handler の export を 1 つも見つけられない').toBeGreaterThan(0);
+  });
+
+  // **包むラッパーは「本体が返した応答」にもキャッシュ制御を付ける。**
+  //
+  // 例外の経路にだけ付けていた版では、本体が**返した**早期の 401 / 404 に付かなかった
+  // （画面側の CSV がそれで、認証付きの経路の 401 / 404 が共有キャッシュへ載りうる状態だった）。
+  // ルートごとに `no-store` の綴りを探す検査では**成功の経路の 1 行で条件が満たされる**ので、
+  // 返した 401 / 404 は覆えていなかった。ここで**実際に応答を作って**固定する
+  it.each([
+    { label: '返した', build: (): Response => new Response('x', { status: 401 }) },
+    {
+      label: '投げた',
+      build: (): Response => {
+        throw new ApiError(HTTP_STATUS.UNAUTHORIZED, 'だめ');
+      },
+    },
+  ])('応答を数えるラッパーは $label 応答にもキャッシュ制御を付ける', async ({ build }) => {
+    // 本体を包む
+    const handler = withResponseCount(() => Promise.resolve(build()));
+    // 呼ぶ（メソッドは要求から読まれる）
+    const response = await handler(new Request('http://test.local/x'));
+    // 保存させない・資格情報ごとに分ける
+    expect(response.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
+    expect(response.headers.get('vary')).toContain('Authorization');
   });
 
   // 意図して置いている Next の入口と、その理由 (**ここに増える差分は理由の妥当性をレビューで必ず確認する**)。

@@ -65,6 +65,12 @@ export const LOG_EVENTS = {
   },
   // --- 健康確認 ---
   'health.db_unreachable': { level: 'error', message: 'DB 到達性チェックに失敗' },
+  // --- 入口（src/proxy.ts） ---
+  'proxy.undecodable_path': {
+    level: 'warn',
+    message:
+      'パスを percent-decode できない要求を 404 で返しました (以降は出しません)。同種の要求が続いているかは前段のアクセスログで確認してください。',
+  },
   // --- 監視（/metrics） ---
   'metrics.token_too_short': {
     level: 'error',
@@ -259,8 +265,18 @@ export function formatLogLine(
  * @param described `describeError()` が作った診断（省略可）
  */
 export function logEvent(event: LogEventName, described?: Record<string, unknown>): void {
-  // 深刻度をラベルに使う（語彙が閉じているので系列は増えない）
-  incrementCounter('agentops_log_events_total', { event, level: LOG_EVENTS[event].level });
+  // 語彙から宣言を引く。**`formatLogLine` と同じく防御的に引く** — 以前はここで
+  // `LOG_EVENTS[event].level` を直接読んでいたので、**語彙に無いキーではここで TypeError**
+  // になり、`formatLogLine` に入れた縮退の経路へ一度も届かなかった（固めたのは到達しない側）。
+  // この関数は `catch` の中からも、`pg` のプール障害ハンドラ（要求の外。
+  // `src/lib/prisma-client.ts`）からも呼ばれるので、投げると本来の失敗が別の失敗に化けるか、
+  // 誰も捕まえられない例外になる
+  const spec: LogEventSpec | undefined = LOG_EVENTS[event];
+  // 深刻度をラベルに使う（語彙が閉じているので系列は増えない。引けなければ最も重い側へ倒す）
+  incrementCounter('agentops_log_events_total', {
+    event,
+    level: spec?.level ?? FALLBACK_LOG_LEVEL,
+  });
   // 1 行の JSON を stderr へ出す。**`console` を呼ぶのは src 全体でこの 1 行だけ**
   console.error(formatLogLine(event, described));
 }

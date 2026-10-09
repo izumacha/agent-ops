@@ -91,8 +91,17 @@ let droppedSeries = 0;
 // 1 秒のミリ秒数（ゲージを秒で出すのに使う）
 const MILLIS_PER_SECOND = 1_000;
 
-// プロセスが始まった時刻（ミリ秒）。再起動の検出に使うので固定値ではなく実時刻
-const STARTED_AT_MS = Date.now();
+/**
+ * プロセスが始まった時刻（ミリ秒）。
+ *
+ * **`Date.now()` そのままにしない。** このモジュールが評価されるのは「最初の要求が
+ * これを取り込むルートへ届いたとき」なので、`Date.now()` を書くと**プロセスの起動から
+ * 最初の要求までの遅れだけ後ろへずれる**（実測: プロセスは 35 秒生きているのに
+ * `agentops_process_uptime_seconds` が 29.774 を返した）。サーバーレスではその遅れが
+ * コールドスタート 1 回分になる。`process_start_time_seconds` は Prometheus の慣習で
+ * 「プロセスの起動時刻」を意味する名前なので、名前のとおりの値を出す。
+ */
+const STARTED_AT_MS = Date.now() - process.uptime() * MILLIS_PER_SECOND;
 
 // 系列のキーの区切り（ラベルの値に現れない制御文字にして衝突を避ける）
 const KEY_SEPARATOR = '\u0000';
@@ -152,8 +161,15 @@ export function incrementCounter(name: CounterName, labels: MetricLabels = {}): 
  * （`GET /health`・受信 Webhook・画面側の CSV・`GET /metrics` 自身）もここを通す。
  * 以前は `route()` の中でだけ数えていたので、**未認証で誰でも叩ける受信 Webhook の
  * 401 の山がメトリクスにもログにも 1 件も現れなかった**（署名鍵の設定ミスが無言になる）。
- * 「どの `route.ts` もこの出口へ到達していること」は `tests/route-wrapping.test.ts` が
- * 走査で導いて要求する。
+ * 「どの Route Handler もこのラッパーを通っていること」は `tests/route-wrapping.test.ts` が
+ * 印から導いて要求する。
+ *
+ * **数えられない経路が 1 つある: 入口（`src/proxy.ts`）が返す 404。** 入口は Route Handler とは
+ * **別のモジュール実体**で評価されるので、そこで数えてもこのカウンタには入らない
+ * （本番ビルドで実測: health の 200 は `/metrics` に現れるのに、入口の 404 は 2 件とも
+ * 現れなかった）。数えたように見えて見えない形は作らず、**あちらはログだけで非可視を解いて
+ * ある**（`proxy.undecodable_path`。1 プロセスに 1 度だけ）。この非可視は ADR-0014 と
+ * `docs/deploy.md` にも書いてある。
  * @param method 要求のメソッド（閉じた集合へ写してからラベルにする）
  * @param status 応答のステータス（同じく閉じた集合へ写す）
  */

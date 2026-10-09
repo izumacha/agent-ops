@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LOG_EVENTS, formatLogLine, logEvent } from '@/lib/log';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { describeError } from '@/lib/describe-error';
+import { parseLoggedLine } from './lib/log-lines';
 
 // console へ出た行を集める
 let lines: string[] = [];
@@ -125,6 +126,24 @@ describe('整形が失敗しても投げない', () => {
     // 時刻はその場で取り直した有効な値（`Invalid Date` や欠落ではない）
     expect(typeof parsed.ts).toBe('string');
     expect(Number.isNaN(Date.parse(parsed.ts as string))).toBe(false);
+  });
+
+  it('logEvent も語彙に無いキーで投げない（固めた縮退へ実際に届く）', () => {
+    // ログを端末へ出さない
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // **`logEvent` が先に落ちると `formatLogLine` の縮退へ一度も届かない。**
+      // 以前はここで `LOG_EVENTS[event].level` を直接読んでいたので TypeError になり、
+      // 固めたのは到達しない側だった（実測）。この関数は `catch` の中からも、
+      // `pg` のプール障害ハンドラ（要求の外）からも呼ばれる
+      expect(() => logEvent('typo.not_in_vocabulary' as never)).not.toThrow();
+      // 1 行は出ていること（握り潰しではない）
+      expect(spy).toHaveBeenCalledTimes(1);
+      // 出来事の識別子は残る
+      expect(parseLoggedLine(spy.mock.calls[0]).event).toBe('typo.not_in_vocabulary');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('語彙に無いキーを渡しても投げない（型の外からの呼び出しへの保険）', () => {

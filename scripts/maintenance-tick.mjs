@@ -54,8 +54,14 @@ if (token === undefined || token === '') {
 //
 // ここで送るのは配備でいちばん強い資格情報（プラットフォーム管理者トークン）を
 // `Authorization: Bearer` に載せた要求なので、`http://` を設定すると**平文で流れる**。
-// アプリ側の外向き通信は `src/lib/outbound-url.ts` が同じ理由で https を強制しているので、
-// 送り手側もそろえる（ループバックを許すのは手元とテストのため。同じ集合を使う）
+// アプリ側の外向き通信は `src/lib/outbound-url.ts` が同じ理由で https を強制している。
+//
+// **この一覧は `src/lib/outbound-url.ts` の写しで、共有していない。** このスクリプトは
+// 依存ゼロの素の node で動かす前提なので（`npm ci --omit=dev` の配備でもスケジューラから
+// 叩ける）、TypeScript のモジュールを import できない。写しなので**ずれうる** — ずれても
+// 倒れる向きは「アプリが受けるループバックの綴りをスクリプトが拒む」か、その逆で、
+// どちらも手元・テスト用の例外の範囲に収まる（本番は https なので影響しない）。
+// アプリ側へ綴りを足すときはここも見ること（`src/` の検出網はこのファイルを見ない）
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
 let entry;
 try {
@@ -135,13 +141,22 @@ for (let request = 0; request < MAX_REQUESTS; request += 1) {
   if (agentCursor !== undefined && agentCursor !== null) body.agentCursor = agentCursor;
   if (budget !== undefined) body.agentBudget = budget;
 
+  // 叩く先（**入口のパスを捨てない**）。`new URL('/api/v1/...', base)` は絶対パスなので
+  // `https://host/ops` のような接頭辞付きの入口だと `/ops` が黙って落ち、毎回 404 になる
+  // （しかも理由は「HTTP 404」としか出ないので、運用者は原因から遠ざけられる）。
+  // 検証済みの `entry` に末尾の `/` を足してから相対パスで足す
+  const endpoint = new URL(
+    'api/v1/maintenance/run',
+    entry.href.endsWith('/') ? entry.href : `${entry.href}/`,
+  );
+
   // 1 要求送る。**例外をそのまま外へ出さない** — 素の `await` で落とすと Node が未処理の
   // reject として stack trace だけを出し、`[maintenance:tick]` の 1 行も下の合計の JSON も
   // 残らない（他の失敗経路はすべて理由を名指ししているので、ここだけ扱いを変えない）
   let response;
   try {
     response = await fetchWithTimeout(
-      new URL('/api/v1/maintenance/run', baseUrl),
+      endpoint,
       {
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },

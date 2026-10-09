@@ -25,9 +25,10 @@ const TOKEN = 'maintenance-tick-test-token-0123456789';
 // 立てたサーバー（各テストの後で閉じる）
 let server: Server | undefined;
 
-/** 受け取った本文の列（カーソルを送り返しているかを見る） */
+/** 受け取った本文と、叩かれたパスの列 */
 interface Received {
   bodies: Record<string, unknown>[];
+  paths: string[];
 }
 
 /**
@@ -41,7 +42,7 @@ async function startStub(
   status = 200,
 ): Promise<{ baseUrl: string; received: Received }> {
   // 受け取った本文を控える
-  const received: Received = { bodies: [] };
+  const received: Received = { bodies: [], paths: [] };
   // 何回目の要求かを数える
   let call = 0;
   // 要求ごとに本文を読んで応答を返す
@@ -53,6 +54,8 @@ async function startStub(
       // 控える（JSON として読めなければ空として扱う）
       const text = Buffer.concat(chunks).toString('utf8');
       received.bodies.push(text === '' ? {} : (JSON.parse(text) as Record<string, unknown>));
+      // 叩かれたパスも控える（入口の接頭辞を落としていないかを見る）
+      received.paths.push(request.url ?? '');
       // その回の応答（足りなければ最後のもの）
       const body = responses[Math.min(call, responses.length - 1)];
       call += 1;
@@ -265,6 +268,18 @@ describe('保守の定期実行のティック', () => {
     expect(tick.status).not.toBe(0);
     // **上限そのものはスクリプトへ書き写さない**（アプリ側の文言をそのまま見せる）
     expect(tick.stderr).toContain('agentBudget');
+  });
+
+  it('入口にパスの接頭辞があっても落とさない', async () => {
+    // 入口が `/ops` 配下にある配備（リバースプロキシで前置きする形）
+    const { baseUrl, received } = await startStub([result()]);
+    const tick = await runTick({
+      MAINTENANCE_BASE_URL: `${baseUrl}/ops`,
+      PLATFORM_ADMIN_TOKEN: TOKEN,
+    });
+    expect(tick.status, tick.stderr).toBe(0);
+    // **接頭辞が残っている**（絶対パスで組み立てると `/ops` が黙って落ち、毎回 404 になる）
+    expect(received.paths).toEqual(['/ops/api/v1/maintenance/run']);
   });
 
   it('予算の指定があれば本文に載せる', async () => {

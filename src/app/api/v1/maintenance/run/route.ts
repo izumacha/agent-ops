@@ -23,6 +23,15 @@ import type { ApiSchemas } from '@/lib/api-types';
 import { runMaintenance } from '@/lib/maintenance/run';
 import { maintenanceRunSchema } from '@/lib/validations/maintenance';
 
+// この経路が動いてよい秒数（Next.js のルートセグメント設定。配備先の関数タイムアウトへ渡る）。
+// **既定のままにしない** — 1 要求でテナントを 1 ページぶん歩き（テナントごとに稼働中の
+// エージェントを 1 本引く）、予算ぶんのエージェントを全種別で判定するので、正常でも数十秒かかる。
+// 既定（配備先により 10〜15 秒）だと**毎回 504 になり、繋いだのに一巡が一度も終わらない**
+// — 症状はスケジューラが赤いだけで、ガードレールの fail-open（ADR-0010 の宿題）は開いたまま。
+// 評価実行（`src/app/api/v1/evaluations/route.ts`）と同じ理由・同じ値にそろえてある。
+// ただしこれは**時間を延ばすだけで、完了を保証しない**（1 要求の予算と残る宿題は ADR-0016）
+export const maxDuration = 300;
+
 // POST /maintenance/run (runMaintenance)
 export const POST = route(async ({ request, principal, repos }) => {
   // プラットフォーム管理者のみ（テナントをまたいで読むので）

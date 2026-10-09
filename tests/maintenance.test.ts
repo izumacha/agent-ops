@@ -353,6 +353,43 @@ describe('保守の定期実行', () => {
       expect(result.failed).toBe(1);
       expect(result.passComplete).toBe(true);
     });
+
+    it('エージェントの一覧が読めなかったテナントは飛ばして続ける（一巡を止めない）', async () => {
+      // 2 テナント × 1 エージェント
+      const a = await makeTenant('a');
+      const b = await makeTenant('b');
+      await makeAgent(a, 'a1');
+      await makeAgent(b, 'b1');
+      // 1 つ目のテナントの読み出しだけ失敗させる
+      const original = repos.agents.list.bind(repos.agents);
+      let calls = 0;
+      vi.spyOn(repos.agents, 'list').mockImplementation(async (...args) => {
+        calls += 1;
+        if (calls === 1) throw new Error('一覧の読み出しに失敗');
+        return original(...args);
+      });
+      // 一巡を始める
+      const result = await run();
+      // **飛ばしたテナントは取りこぼしとして数え、残りは判定され、一巡は終わっている**
+      // （投げると 500 になり、続きのカーソルが応答に載らずそのテナント以降が丸ごと止まる）
+      expect(result.failed).toBe(1);
+      expect(result.agentsEvaluated).toBe(1);
+      expect(result.passComplete).toBe(true);
+    });
+
+    it('テナントの一覧が読めなければ進めた分とカーソルを返す（進捗を捨てない）', async () => {
+      // テナントを 1 件（読み出しを必ず失敗させるので中身は使わない）
+      await makeTenant('a');
+      // テナントの読み出しを失敗させる
+      vi.spyOn(repos.tenants, 'list').mockRejectedValue(new Error('一覧の読み出しに失敗'));
+      // 一巡を始める
+      const result = await run();
+      // 取りこぼしとして数え、**やることは残っている**と伝える（500 にして進捗を捨てない）
+      expect(result.failed).toBe(1);
+      expect(result.passComplete).toBe(false);
+      // 掃きは済んでいるので、その件数は応答に残る
+      expect(result.rateLimitSweepComplete).toBe(true);
+    });
   });
 
   describe('入力の検証', () => {

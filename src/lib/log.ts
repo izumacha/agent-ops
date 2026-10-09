@@ -199,6 +199,11 @@ export const LOG_EVENTS = {
     level: 'error',
     message: 'ガードレールの判定に失敗しました',
   },
+  // --- 保守の定期実行（ADR-0016） ---
+  'maintenance.tenant_scan_failed': {
+    level: 'error',
+    message: 'テナントを歩けませんでした (このテナントは今回の一巡では判定していません)',
+  },
   // --- 通知（Step4） ---
   'notify.response_drain_failed': {
     level: 'error',

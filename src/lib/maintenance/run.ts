@@ -26,7 +26,9 @@ import {
   MAINTENANCE_TENANT_SCAN_MAX,
   PAGE_LIMIT_MAX,
 } from '@/lib/constants';
+import { describeError } from '@/lib/describe-error';
 import { evaluateGuardrailsSafely } from '@/lib/guardrail/evaluate';
+import { logEvent } from '@/lib/log';
 
 // 全種別を見る。**enum から導く**ので、種別を足したときにここへ書き足す必要が無い
 // （明示実行 `POST /guardrails/run` と同じ理由・同じ形）
@@ -79,7 +81,11 @@ export interface MaintenanceRunResult {
   fired: number;
   /**
    * 判定できなかったルールの件数（例外で飛ばしたもの）＋**判定そのものが失敗した**
-   * エージェントの件数。
+   * エージェントの件数＋**一覧が読めずに飛ばしたテナントの件数**。
+   *
+   * **3 つを 1 つの欄にまとめてあるのは、どれも「掃きが取りこぼした」ことを意味するから**
+   * （呼び出し側がすることは同じ＝非 0 終了で運用者へ見せる）。内訳はサーバログにある
+   * （`guardrail.*_failed` と `maintenance.tenant_scan_failed`）。
    *
    * **0 でないことを呼び出し側へ必ず伝える** — 伝えないと「何も超過していない」と
    * 見分けの付かない応答になり、運用者は上限内だと読む（`POST /guardrails/run` が
@@ -222,11 +228,26 @@ export async function runMaintenance(
     // （§8 の「ループの中で 1 件ずつクエリを投げない」）、稼働中のエージェントを持たないテナントが
     // 並ぶ配備では**その往復だけで実行時間上限に当たって応答そのものが返らない** — カーソルを
     // 受け取れないので一巡が先へ進まず、この機能が塞ぐはずの fail-open に戻る。
-    // 読む件数はテナント側の残り予算で抑える（1 ページの上限は超えない）
-    const tenantPage = await repos.tenants.list({
-      limit: Math.min(MAINTENANCE_TENANT_SCAN_MAX - progress.tenantsVisited, PAGE_LIMIT_MAX),
-      cursor: tenantCursor,
-    });
+    // 読む件数はテナント側の残り予算で抑える（1 ページの上限は超えない）。
+    // **ただしエージェントの続きから始めるときは 1 件でよい** — その要求はそのテナントの残りを
+    // 片付けるために呼ばれており、予算が小さいと（既知の制限の `agentBudget: 1`）1 件の判定の
+    // ために 1 ページぶんの行を読むことになる
+    const tenantLimit =
+      agentCursor === undefined
+        ? Math.min(MAINTENANCE_TENANT_SCAN_MAX - progress.tenantsVisited, PAGE_LIMIT_MAX)
+        : 1;
+    // 読み出しそのものも落ちうる（文のタイムアウト・接続枯渇）。**投げさせない** — 投げると
+    // 500 になって応答に続きのカーソルが載らず、**この要求で進めた分がまるごと捨てられる**
+    // （次のティックはまた先頭から。1 テナントの不調が配備全体の backstop を止める倒れ方）
+    let tenantPage;
+    try {
+      tenantPage = await repos.tenants.list({ limit: tenantLimit, cursor: tenantCursor });
+    } catch (error) {
+      // 取りこぼしとして数え（ティックの終了コードに出る）、進めた分とカーソルを返して終える
+      logEvent('maintenance.tenant_scan_failed', describeError(error));
+      progress.failed += 1;
+      return build(false, resumeAt(), agentCursor === undefined ? null : encodeCursor(agentCursor));
+    }
     // 1 件も無ければ一巡が終わった
     if (tenantPage.items.length === 0) return build(true, null, null);
 
@@ -239,13 +260,30 @@ export async function runMaintenance(
       progress.tenantsVisited += 1;
 
       // このテナントの稼働中のエージェントを、残りの予算ぶんだけ読む
-      // （1 ページの上限は超えない。`list` は正規化済みの件数を期待する）
+      // （1 ページの上限は超えない。`list` は正規化済みの件数を期待する）。
+      // **ここも投げさせない** — 1 テナントの読み出しの失敗で一巡を止めると、そのテナント以降が
+      // 丸ごと判定されない（下の `evaluateOneAgent` を包んでいるのとまったく同じ理由）。
+      // 取りこぼしとして数え、**このテナントは飛ばして次へ進む**
       const remaining = input.agentBudget - progress.agentsEvaluated;
-      const agents = await repos.agents.list(
-        tenant.id,
-        { limit: Math.min(remaining, PAGE_LIMIT_MAX), cursor: agentCursor },
-        { status: AgentStatus.active },
-      );
+      let agents;
+      try {
+        agents = await repos.agents.list(
+          tenant.id,
+          { limit: Math.min(remaining, PAGE_LIMIT_MAX), cursor: agentCursor },
+          { status: AgentStatus.active },
+        );
+      } catch (error) {
+        // 飛ばした事実を残す（ティックの終了コードにも出る）。
+        // **渡すのは語彙のキーと `describeError(...)` だけ** — 出口の規約（`src/lib/log.ts` と
+        // `tests/error-logging.test.ts`）で、例外に触れてよいのはあの関数だけなので
+        // テナント ID は添えない（どのテナントかは例外の文脈から追う）
+        logEvent('maintenance.tenant_scan_failed', describeError(error));
+        progress.failed += 1;
+        // カーソルを進めて次のテナントへ（同じテナントで止まり続けない）
+        tenantCursor = { createdAt: tenant.createdAt, id: tenant.id };
+        agentCursor = undefined;
+        continue;
+      }
       // 1 件ずつ全種別を判定する
       for (const agent of agents.items) {
         await evaluateOneAgent(repos, tenant.id, agent.id, input.now, env, progress);

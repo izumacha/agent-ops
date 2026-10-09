@@ -8,6 +8,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES, BILLING_WEBHOOK_SECRET_MIN_LENGTH } from '@/lib/constants';
+import { logEventThrottled } from '@/lib/log';
+import { requireConfiguredSecret } from '@/lib/secret-gate';
 
 // 鍵を入れる環境変数の名前（ここが唯一の参照元。.env.example とドキュメントはこの名前を指す）
 export const BILLING_WEBHOOK_SECRET_ENV = 'STRIPE_WEBHOOK_SECRET';
@@ -124,7 +126,7 @@ export function verifyBillingSignature(
 
 // 設定が使えないときの例外（503）。何が足りないかは応答に出さない
 function notConfiguredError(): ApiError {
-  // 503: 設定が無いので今はこの操作を行えない（監査ログの鍵と同じ扱い）
+  // 503: 設定が無いので今はこの操作を行えない（課金の鍵・監査ログの鍵と同じ扱い）
   return new ApiError(HTTP_STATUS.SERVICE_UNAVAILABLE, API_MESSAGES.billingNotConfigured);
 }
 
@@ -136,12 +138,21 @@ function notConfiguredError(): ApiError {
  * 受けられないなら 503 を返して事業者に再送させるのが正しい倒れ方（§9）。
  */
 export function billingWebhookSecret(env: NodeJS.ProcessEnv = process.env): string {
-  // 環境変数を読み、前後の空白を落とす（貼り付けの改行で長さ判定が狂わないように）
-  const configured = env[BILLING_WEBHOOK_SECRET_ENV]?.trim();
-  // 未設定・空文字は設定されていないのと同じ
-  if (configured === undefined || configured === '') throw notConfiguredError();
-  // 短すぎる鍵は総当たりで求められる（求められたら任意の本文を署名できる）
-  if (configured.length < BILLING_WEBHOOK_SECRET_MIN_LENGTH) throw notConfiguredError();
-  // 使える鍵
-  return configured;
+  // 判断（空白の落とし方・未設定を先に見ること・短さの比較）は `requireConfiguredSecret` が持つ。
+  // **記録を欠かさないのが要点** — `ApiError` は `withResponseCount` の中でログを通らないので、
+  // ここで出さないと鍵の設定漏れがどの出口にも現れず、**全配信が 503 → 事業者がバックオフの
+  // のちエンドポイントを無効化 → 解約が反映されず有料の権限が残る**（応答の系列には経路の
+  // ラベルが無く、サーバーレスでは引きに行く収集そのものが成り立たない）
+  return requireConfiguredSecret(
+    env[BILLING_WEBHOOK_SECRET_ENV],
+    BILLING_WEBHOOK_SECRET_MIN_LENGTH,
+    (reason) => {
+      // 繋いでいない配備では未設定が正常なので `warn`（走査でエラー率の警報を鳴らさない）
+      if (reason === 'missing') logEventThrottled('billing.secret_not_configured');
+      // 値を入れたのに短すぎる側は設定ミスが確定するので `error`（語彙が深刻度を持つ）
+      else logEventThrottled('billing.secret_too_short');
+      // どちらも 503 で倒す
+      throw notConfiguredError();
+    },
+  );
 }

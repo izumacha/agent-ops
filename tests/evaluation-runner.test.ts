@@ -18,6 +18,7 @@ import {
   JUDGE_DEFAULT_MODEL,
   JUDGE_DEFAULT_PROVIDER,
 } from '@/lib/constants';
+import { loggedEvents } from './lib/log-lines';
 
 // スタブ上流の接続先 (ループバック。fetch は差し替えるので実際には繋がない)
 const STUB_BASE_URL = 'http://127.0.0.1:4011';
@@ -320,18 +321,15 @@ describe('評価を 1 回実行する', () => {
   it('同じ理由で全件が失敗してもログは種類ごとに 1 行だけ', async () => {
     // エージェントの上流が全件 500 を返す (judge までは届かない)
     stubUpstream(() => new Response('{}', { status: 500 }));
-    // console.error を数える
-    const logged: string[] = [];
-    const spy = vi.spyOn(console, 'error').mockImplementation((first: unknown) => {
-      logged.push(String(first));
-    });
+    // console.error を数える（行は 1 引数の JSON なので、出来事の識別子で照合する）
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     // 20 件のセットを評価する
     await runEvaluation({ agent: AGENT, judge: JUDGE, cases: makeCases(20) });
-    spy.mockRestore();
     // **ケース数ぶん出さない。** 出るのは種類ごとに 1 行で、20 件が同じ理由で失敗しても 1 行。
     // ここを緩めると、execute 権限があれば 1 リクエストで 200 行を何度でも積めるようになり、
     // 本物の異常がその中に埋もれる (ケースごとの結末は excludedReason として DB に残る)
-    expect(logged).toEqual(['[evaluation] エージェントの上流が 2xx 以外のステータスを返しました']);
+    expect(loggedEvents(spy.mock.calls)).toEqual(['evaluation.agent_status_not_2xx']);
+    spy.mockRestore();
   });
 
   it('ケースが 0 件なら上流を 1 度も呼ばない', async () => {

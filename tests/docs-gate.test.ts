@@ -7,6 +7,9 @@ import { gitTrackedFiles, repoRoot, testBudgetFor } from './lib/child-process';
 // パス結合 (Node 標準)
 import { join } from 'node:path';
 import { importSharedModule, sharedModuleNames } from './lib/script-files';
+// ソースを構文で読む共通部分（間引く出口の呼び出し箇所を導くのに使う）
+import { forEachNode, namedCallArguments, parseSourceFiles } from './lib/source-files';
+import ts from 'typescript';
 
 // リポジトリのルート（**`process.cwd()` ではなく git が報告する根**。`gitTrackedFiles` が
 // 根からの相対でパスを返すので、読む側もそこへそろえないと下位ディレクトリから走らせたときに
@@ -14,6 +17,56 @@ import { importSharedModule, sharedModuleNames } from './lib/script-files';
 const ROOT = repoRoot();
 // docs/ の場所
 const DOCS = join(ROOT, 'docs');
+
+/**
+ * 文書を「いちばん小さい塊」へ切る（空行・箇条書きの項目・表の行）。
+ *
+ * **空行だけで切ってはいけない。** 箇条書きは空行を挟まないので全体が 1 つの塊になり、
+ * **別の項目が言っている綴り**で条件が満たされる（実測: 一覧から 1 つ消しても、同じ
+ * 箇条書きの兄弟の項目がその名前を持っていたため全件緑だった）。表も同じで、環境変数の表は
+ * 別の行が同じ綴りを持つ。
+ *
+ * **箇条書きの判定で行頭の字下げを飛ばす。** `docs/deploy.md` の項目は入れ子で 2 文字
+ * 字下げされているので、`\n- ` だけを切れ目にすると**入れ子の項目がまったく切れない**
+ * （これも実測で素通りした）。
+ * @param text 文書の全文
+ * @returns 塊の配列
+ */
+function docBlocks(text: string): string[] {
+  // 空行 / 字下げを許した箇条書きの項目 / 表の行で切る
+  return text.split(/\n\s*\n|\n(?=[ \t]*- )|\n(?=[ \t]*\|)/);
+}
+
+// src 配下の構文木（**1 度だけ**作って使い回す）
+const PARSED_SOURCES = parseSourceFiles();
+
+/**
+ * `src/` 全体から「その出口へ渡した出来事の名前」を集める。
+ *
+ * **綴りではなく構文で読み、包みも剥がす**（規則は `namedCallArguments` が唯一の持ち主。
+ * 素の識別子だけを見ていた版は `(0, f)(…)` / `.call` / `.apply` / `.bind` /
+ * `Reflect.apply` の 5 形を素通りした）。
+ * @param outlet 出口の関数名
+ * @returns 渡された出来事の名前（文字列リテラルの分だけ）
+ */
+function eventsPassedTo(outlet: string): Set<string> {
+  // 見つけた名前
+  const found = new Set<string>();
+  // src 配下を構文で走査する（**走査結果はモジュール評価時の 1 度だけ**。呼ぶたびに
+  // `parseSourceFiles()` を叩いていた版は 1 回のテスト実行で src 全体を 3 度パースしていた
+  // ——`sourceImportGraph` に `parsed` を渡せるようにしたのと同じ理由）
+  for (const parsed of PARSED_SOURCES) {
+    forEachNode(parsed.source, (node) => {
+      // その出口の呼び出しなら実引数を得る
+      const args = namedCallArguments(node, outlet);
+      if (args === null) return;
+      // 第 1 引数が文字列リテラルのときだけ拾う（変数渡しは error-logging 側が落とす）
+      const [first] = args;
+      if (first !== undefined && ts.isStringLiteralLike(first)) found.add(first.text);
+    });
+  }
+  return found;
+}
 
 // 追跡集合は 1 回だけ聞いて使い回す (検査ごとに git を起こさない)。**`expect` を含むので
 // モジュール評価時ではなく最初のテストの中で解決する**
@@ -25,7 +78,11 @@ function trackedOnce(): string[] {
   return trackedCache;
 }
 // 定数の正本 (文書に書かれた数値と突き合わせる)
-import { PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
+import { METRICS_TOKEN_MIN_LENGTH, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
+// ログの語彙の正本 (deploy.md の例が実在の出来事を指していることを突き合わせる)
+import { LOG_EVENTS } from '@/lib/log';
+// 「数えない応答の種類」の正本 (文書の目印をここから導く)
+import { UNCOUNTED_RESPONSE_SOURCES } from '@/lib/uncounted-response-sources';
 // 監査ログの連番の上限 (README が運用者向けに数値で書いているので突き合わせる)
 import { MAX_AUDIT_SEQ } from '@/domain/audit/seq';
 // RBAC の許可表 (役割と操作の唯一の真実の源)
@@ -118,6 +175,120 @@ describe('Step0 の設計成果物', () => {
     ]) {
       // その数値が本文に現れること
       expect(readFileSync(path, 'utf8'), `${path} の最小長が実装とずれている`).toContain(expected);
+    }
+  });
+
+  // 監視用トークンの最小長も同じ扱い (運用者が読む 3 か所と実装の定数)。
+  //
+  // **照合は「変数名と同じ塊」に限る。** 文書全体から「32 文字以上」を探す形にしていた版は、
+  // 他の秘密 (PLATFORM_ADMIN_TOKEN / AUDIT_HMAC_SECRET / NOTIFY_SIGNING_SECRET /
+  // STRIPE_WEBHOOK_SECRET) の記述がその綴りを既に何度も持っているので、**METRICS_TOKEN の
+  // 記述を両方の文書から丸ごと消しても緑のまま**通った (既存エントリの文が新しい項目を
+  // 黙って覆う形。CLAUDE.md が incident-insight の除外表について記録しているのと同じ)。
+  //
+  // **塊は空行だけで切らない。** 空行で切る版では README の箇条書き (空行を挟まない) が
+  // 1 つの塊になり、**前段のプロキシを説明する別の項目が言っている「32 文字以上」**で
+  // 条件が満たされた (実測: METRICS_TOKEN の項目から最小長を消しても緑)。表も同じで、
+  // `docs/deploy.md` の環境変数の表は PLATFORM_ADMIN_TOKEN の行が同じ綴りを持つ。
+  // だから**箇条書きの項目と表の行も塊の切れ目**として扱う (いちばん小さい単位で見る)
+  it(`監視用トークンの最小長 ${METRICS_TOKEN_MIN_LENGTH} が文書と一致する`, () => {
+    // 実装の値を文書の書き方 (「32 文字以上」) に合わせた文字列
+    const expected = `${METRICS_TOKEN_MIN_LENGTH} 文字以上`;
+    // 運用者がこの値を読む 3 か所
+    for (const path of [
+      join(DOCS, 'deploy.md'),
+      join(ROOT, '.env.example'),
+      join(ROOT, 'README.md'),
+    ]) {
+      // 変数名を含む塊 (切り方は docBlocks。空行・箇条書きの項目・表の行で区切る) だけを取り出す
+      const blocks = docBlocks(readFileSync(path, 'utf8')).filter((block) =>
+        block.includes('METRICS_TOKEN'),
+      );
+      // 変数名に触れている段落が無ければ、記述そのものが消えている (fail-closed)
+      expect(blocks.length, `${path} に METRICS_TOKEN の記述が無い`).toBeGreaterThan(0);
+      // そのうち少なくとも 1 つが最小長を言っていること
+      expect(
+        blocks.some((block) => block.includes(expected)),
+        `${path} の METRICS_TOKEN の最小長が実装とずれている`,
+      ).toBe(true);
+    }
+  });
+
+  // **`docs/deploy.md` のログの例は実在の出来事を指していること**（ADR-0014）。
+  //
+  // 運用者はこの例を見て警報の条件を組むので、`event` が語彙に無い綴りだと「その条件は
+  // 一度も当たらない」警報を作ることになる。**例に書いてよいのは `event` と `level` だけ**で、
+  // `message` は正本の側で推敲してよい（だから例では伏せてある。写すと推敲のたびに古くなる）。
+  //
+  // **残る境界**: 文言の検査は「正本と一字一句同じ綴りが例に入っていないこと」しか見ないので、
+  // 言い換えて書いた例は捕まらない（それは写しではないので、この検査の対象でもない）。
+  // 例の文章そのものが妥当かはレビューで見る。
+  it('deploy.md のログの例は LOG_EVENTS に実在する出来事を指している', () => {
+    // 文書を読む
+    const deploy = readFileSync(join(DOCS, 'deploy.md'), 'utf8');
+    // 例の行（JSON のコードブロック内で `"event":"..."` を含む行）
+    const lines = deploy.split('\n').filter((line) => line.includes('"event":"'));
+    // 1 件も無ければ走査が壊れている（fail-closed。例を消したときもここで気付く）
+    expect(lines.length, 'deploy.md にログの例が無い').toBeGreaterThan(0);
+    for (const line of lines) {
+      // `event` と `level` を取り出す
+      const event = /"event":"([^"]+)"/.exec(line)?.[1];
+      const level = /"level":"([^"]+)"/.exec(line)?.[1];
+      // 語彙に実在すること
+      expect(event, `${line} から event を読めない`).toBeDefined();
+      expect(Object.hasOwn(LOG_EVENTS, event!), `${event} は LOG_EVENTS に無い`).toBe(true);
+      // 深刻度も語彙の宣言と一致すること（例だけが別の深刻度を言っていると警報の重み付けが狂う）
+      expect(level, `${line} から level を読めない`).toBe(
+        LOG_EVENTS[event as keyof typeof LOG_EVENTS].level,
+      );
+      // **文言は写していないこと**（正本の側で推敲してよいので、写すとこの例だけが古くなる）
+      expect(
+        line.includes(LOG_EVENTS[event as keyof typeof LOG_EVENTS].message),
+        `${event} の文言を例へ写している（推敲すると古くなる）`,
+      ).toBe(false);
+    }
+  });
+
+  // **「数えない応答の種類」は正本（コード）から導いて文書と突き合わせる**（ADR-0014）。
+  //
+  // 散文だけに置いていた版は実際に古くなった — 入口の 404 だけを「数えられない経路が 1 つ
+  // ある」と書き、画面の描画と Server Action が 1 件も数えられていないのに言及が無かった。
+  // 運用者は「他の HTTP 通信はすべて `agentops_http_responses_total` に乗る」と読め、
+  // ダッシュボードのログイン総当たりを条件に書いても一度も発火しない。
+  //
+  // **突き合わせるのは散文ではなく目印**（`<!--uncounted:<鍵>-->`）。文章は推敲してよく、
+  // 鍵はコード側の表の鍵そのものなので、種類を足した人が文書へ 1 行足すことになる。
+  it('数えない応答の種類は、どの鍵も文書の目印として現れている', () => {
+    // 正本の鍵（1 つも無ければ表が壊れている）
+    const sources = Object.keys(UNCOUNTED_RESPONSE_SOURCES);
+    expect(sources.length, 'UNCOUNTED_RESPONSE_SOURCES が空').toBeGreaterThan(0);
+    // 運用者と設計判断の読み手が見る 2 つの文書
+    for (const path of [join(DOCS, 'deploy.md'), join(DOCS, 'adr', '0014-observability.md')]) {
+      // 文書を読む
+      const text = readFileSync(path, 'utf8');
+      for (const source of sources) {
+        // 鍵ごとの目印があること
+        expect(text, `${path} に <!--uncounted:${source}--> が無い`).toContain(
+          `<!--uncounted:${source}-->`,
+        );
+      }
+      // **表に無い鍵の目印が残っていないこと**（種類を消したときの掃除漏れ）
+      // **鍵の文字種は識別子と同じに取る** — `[A-Za-z]+` だけを見ていた版では、数字や
+      // 下線を含む鍵（`entry404` / `page_render`）が**掃除側の照合から外れ**、表から鍵を
+      // 消しても文書の目印が残り続けた（前向きの照合はもう要求しないので両方緑になる）
+      const found = [...text.matchAll(/<!--uncounted:([A-Za-z0-9_]+)-->/g)].map(
+        (match) => match[1],
+      );
+      for (const key of found) {
+        // 文書側の目印が正本の鍵であること
+        expect(sources, `${path} の <!--uncounted:${key}--> は正本に無い鍵`).toContain(key);
+      }
+    }
+    // 理由が空の宣言を許さない（登録するだけで黙らせる形にしない）。**文書ごとのループの外**で
+    // 見る — 表の性質は文書と無関係なので、中に置くと文書の数だけ同じ検査が繰り返され、
+    // 失敗したときの文言も「どの文書を見ていて落ちたか」と無関係になる
+    for (const reason of Object.values(UNCOUNTED_RESPONSE_SOURCES)) {
+      expect(reason.trim().length, '数えない種類の理由が空').toBeGreaterThan(0);
     }
   });
 
@@ -762,6 +933,93 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
           mentionsModel(specMentions[0].paragraph, name),
           `tenantId の例外 ${name} が docs/spec.md の該当箇所で名指しされていない（件数とモデル名は同じ段落に書く。空行で分けると名前が別の段落になる）`,
         ).toBe(true);
+      }
+    },
+    testBudgetFor(1),
+  );
+
+  // **間引く出口（`logEventThrottled`）で出す出来事の一覧を、文書とソースで突き合わせる。**
+  //
+  // `docs/deploy.md` は運用者に「この 4 つが間引かれる」と**名前を並べて**案内しつつ、同じ文で
+  // 「一覧の正本は `src/` 全体で呼んでいる箇所」と断っている。並べた名前そのものが写しなので、
+  // 5 つ目（いちばん自然なのはレート制限の拒否）を足すとこの案内が黙って古くなる — 行が出る
+  // 条件を誤解した警報（行数をしきい値にする等）はそこから生まれる。**導出はソース側から**
+  // 行い、文書がその集合と一致していることだけを要求する（件数は書かない）。
+  it(
+    '間引く出口で出す出来事が docs/deploy.md の一覧と一致する',
+    () => {
+      // ソースから `logEventThrottled('<出来事>')` の第 1 引数を集める
+      const thrown = eventsPassedTo('logEventThrottled');
+      // 1 件も拾えなければ走査が壊れている（fail-closed）
+      expect(thrown.size, '間引く出口の呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
+      // 文書の中で `logEventThrottled` に触れている塊（切り方は docBlocks）
+      const blocks = docBlocks(readFileSync(join(DOCS, 'deploy.md'), 'utf8')).filter((block) =>
+        block.includes('logEventThrottled'),
+      );
+      expect(blocks.length, 'docs/deploy.md に logEventThrottled の記述が無い').toBeGreaterThan(0);
+      // 並べた名前を持つ塊（一覧はそのうち 1 つ）
+      const listed = blocks.filter((block) => [...thrown].some((event) => block.includes(event)));
+      expect(
+        listed.length,
+        'docs/deploy.md に間引く出来事を並べた箇所が無い（名前を 1 つも挙げていない）',
+      ).toBe(1);
+      // その塊が**全部**挙げていること（部分集合のまま残るのを防ぐ）
+      for (const event of thrown) {
+        expect(
+          listed[0].includes(event),
+          `docs/deploy.md の一覧に ${event} が無い（間引く出口で出しているのに案内されていない）`,
+        ).toBe(true);
+      }
+      // 逆向き: 間引いていない出来事を一覧に書いていないこと（消した出来事が残るのを防ぐ）
+      for (const event of Object.keys(LOG_EVENTS)) {
+        if (thrown.has(event)) continue;
+        expect(
+          listed[0].includes(event),
+          `docs/deploy.md の一覧に ${event} が載っているが、間引く出口では出していない`,
+        ).toBe(false);
+      }
+    },
+    testBudgetFor(1),
+  );
+
+  // **1 度きりの出口（`logEventOnce`）に載せてよい出来事は、率を別の出口から読めるものだけ。**
+  //
+  // ADR-0014 §3-c はこの軸を「率を別の場所から読めるか」1 つに置き直した（当初は設定ミスを
+  // 1 度きりにしており、**それが誤りだった** — 1 行を取りこぼした配備では以降どの出口にも
+  // 何も現れず、数える側も 1 で止まる）。**間引く側だけを導出していたころは、新しい設定ミスを
+  // `logEventOnce` へ載せても全件緑だった** — その出来事は間引く側の一覧に現れないので、
+  // どちらの照合にも掛からない（CLAUDE.md が言う「片方だけが緩い」形）。
+  it(
+    '1 度きりの出口で出す出来事が docs/deploy.md の案内と一致する',
+    () => {
+      // ソースから `logEventOnce('<出来事>')` の第 1 引数を集める
+      const once = eventsPassedTo('logEventOnce');
+      // 1 件も無ければ、その出口は使われていない（走査の壊れと区別できないので落とす）
+      expect(once.size, '1 度きりの出口の呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
+      // 文書の中で `logEventOnce` に触れている塊（切り方は docBlocks）
+      const blocks = docBlocks(readFileSync(join(DOCS, 'deploy.md'), 'utf8')).filter((block) =>
+        block.includes('1 プロセスに 1 度だけ'),
+      );
+      expect(
+        blocks.length,
+        'docs/deploy.md に「1 プロセスに 1 度だけ」の案内が無い',
+      ).toBeGreaterThan(0);
+      // **塊の数は決め打たない** — 「1 プロセスに 1 度だけ」は方針の節と「数えない応答の種類」の
+      // 節の両方で触れるのが自然で、1 つに絞ると正しい文書で落ちる。案内の合計で照合する
+      const guidance = blocks.join('\n');
+      // 載せている出来事が**全部**名指しされていること
+      for (const event of once) {
+        expect(
+          guidance.includes(event),
+          `docs/deploy.md の案内に ${event} が無い（1 度きりの出口で出しているのに案内されていない）`,
+        ).toBe(true);
+      }
+      // 逆向き: 間引く側の出来事をこちらの案内に書いていないこと（軸がぶれていないこと）
+      for (const event of eventsPassedTo('logEventThrottled')) {
+        expect(
+          guidance.includes(event),
+          `docs/deploy.md の「1 度きり」の案内に ${event} が載っているが、その出来事は間引く側で出している`,
+        ).toBe(false);
       }
     },
     testBudgetFor(1),

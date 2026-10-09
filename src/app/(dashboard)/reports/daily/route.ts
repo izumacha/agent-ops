@@ -9,9 +9,16 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { buildDailyReportCsv, dailyReportFileName } from '@/lib/dashboard/csv';
 import { resolveDashboardRange } from '@/lib/dashboard/range';
 import { loadDashboardSummary } from '@/lib/dashboard/summary';
+import { withResponseCount } from '@/lib/api/response-count';
 import { currentSession } from '@/lib/session-server';
 
-export async function GET(request: Request): Promise<Response> {
+// **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**（`route()` を通る
+// 経路と同じ 1 本）。自分で `try` を書いていた頃はこの経路だけ包み忘れており、**例外のときに
+// 何も数えず**、DB 障害中の 5xx が系列に一度も現れなかった
+export const GET = withResponseCount(respond);
+
+// セッションを確かめて CSV を組み立てる（包む側が数えるので、ここは応答を作るだけ）
+async function respond(request: Request): Promise<Response> {
   // **認証はここでも自分で確かめる**（レイアウトの認証は画面の枝で、このルートは通らない。§9）
   const session = await currentSession();
   // 未ログインなら 401（画面と違いリダイレクトしない。ファイルの取得なので遷移先が無い）
@@ -42,16 +49,18 @@ export async function GET(request: Request): Promise<Response> {
   // 画面と同じ集計から CSV を組み立てる
   const csv = buildDailyReportCsv(summary);
   // ダウンロードとして返す
-  // status を書かない（Response の既定が 200。HTTP_STATUS に OK を足さないのは、
-  // 既存のルートも成功時は既定に任せているため）
+  // status を書かない（`Response` の既定が 200）。明示して返したいときは `HTTP_STATUS.OK` を使う
+  // （この経路は既定に任せる。成功時に status を書いていないルートと同じ扱い）
   return new Response(csv, {
     headers: {
       // 文字コードを明示する（CSV 本文の先頭にも BOM を付けている）
       'Content-Type': 'text/csv; charset=utf-8',
       // ファイル名は期間が分かる形にする
       'Content-Disposition': `attachment; filename="${dailyReportFileName(range.fromText, range.toText)}"`,
-      // **キャッシュさせない** — テナントごとに中身が違うので、共有キャッシュに載ると他テナントへ漏れる
-      'Cache-Control': 'private, no-store',
+      // **キャッシュ制御はここに書かない** — テナントごとに中身が違うので共有キャッシュへ
+      // 載せてはいけないが、付けるのは包む側（`withResponseCount`）の 1 か所。ここでも
+      // 書いていた頃は「成功の経路に綴りがあれば条件を満たす」検査しか無く、**早期に
+      // `return` する 401 / 404 には付いていなかった**
     },
   });
 }

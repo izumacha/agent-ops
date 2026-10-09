@@ -3,8 +3,10 @@
 // **`route()` を通らない唯一の API。** `route()` は必ず Bearer 認証を行うが、この経路を呼ぶのは
 // 事業者であって利用者ではない。`RouteOptions` に `auth: 'none'` を足す形は採らなかった —
 // 既定を 1 つ緩めると、どのルートも宣言 1 行で未認証にできる口になる（ADR-0012）。
-// 代わりに `tests/route-wrapping.test.ts` の理由付きの表へ登録し、**署名検証を通ること**と
-// **`no-store` を宣言すること**を機械で要求している（CSV の画面側ルートと同じ扱い）。
+// 代わりに `tests/route-wrapping.test.ts` の理由付きの表へ登録し、**署名検証を通ること**を
+// 機械で要求している（CSV の画面側ルートと同じ扱い）。**キャッシュ制御と応答の数え上げは
+// この表では要求しない** — 包むラッパー（`withResponseCount`）が全応答へ付けるので、
+// 全ルート共通の 2 本の検査が固定する（理由は `src/lib/api/metrics-auth.ts` と同じ）。
 //
 // 順序が決まっている: 鍵の確認（503）→ 本文を生テキストで読む（415 / 413）→ **署名検証（401）**
 // → 解釈とスキーマ検証（400 / 422）→ 顧客 ID からテナントを引く → 反映すべきプランを決める
@@ -23,8 +25,7 @@
 import { parseJsonText, readRawJsonText } from '@/lib/api/body';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
-import { toErrorResponse } from '@/lib/api/handler';
-import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
+import { withResponseCount } from '@/lib/api/response-count';
 import { getRepos } from '@/data';
 import type { BillingPlanApplication } from '@/data/ports';
 import type { Plan } from '@/domain/types';
@@ -38,6 +39,7 @@ import {
   verifyBillingSignature,
 } from '@/lib/billing/signature';
 import { billingWebhookEventSchema } from '@/lib/validations/billing';
+import { logEvent, logEventThrottled } from '@/lib/log';
 
 // 課金事業者の名前（受信記録のキーの一部。いまは stripe の 1 つだけ）
 const PROVIDER = 'stripe';
@@ -45,115 +47,129 @@ const PROVIDER = 'stripe';
 const MILLIS_PER_SECOND = 1_000;
 
 /** POST /billing/webhook (receiveBillingWebhook) */
-export async function POST(request: Request): Promise<Response> {
-  // 例外はすべて HTTP 応答へ写す（`route()` を通らないので、この 1 か所で受ける）
-  try {
-    // 共有シークレット（未設定・短すぎは 503。検証を飛ばして受け入れることはしない）。
-    // **DB へ触る前に確かめる** — この経路は未認証なので、設定していない配備で
-    // 誰でも接続プールを起こせる状態にしない
-    const secret = billingWebhookSecret();
-    // データ層の束（本番/テストの切り替えは Composition Root が持つ）
-    const repos = await getRepos();
-    // 本文を**生のテキストのまま**読む（415 → 413。署名の対象は受け取った本文そのまま）
-    const raw = await readRawJsonText(request);
-    // 署名を確かめる（**形が違う・時刻が古い・一致しない のどれでも同じ 401**。
-    // 理由を区別して返すと総当たりの手がかりになる）。
-    // **解釈より前に確かめる** — 後ろに置くと、未認証の相手に JSON の解析とスキーマ検証の費用を
-    // 払わせたうえ、400 / 422 と 401 の出方の違いから受け付ける本文の形を探らせることになる
-    const verified = verifyBillingSignature(
-      request.headers.get(BILLING_SIGNATURE_HEADER),
-      raw,
-      secret,
-      Math.floor(Date.now() / MILLIS_PER_SECOND),
-    );
-    if (verified !== 'ok') {
-      throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.billingSignatureInvalid);
-    }
-    // 署名が合ってから解釈・検証する（400 → 422）
-    const event = parseJsonText(raw, billingWebhookEventSchema);
-    // **反映する前に「監査ログを書ける状態か」を確かめる** — 反映してから記録に失敗すると、
-    // 再送は「2 通目」として無視されるので**その変更が記録の無いまま残る**。鍵が無いなら
-    // 1 行も書かず 503 を返し、事業者の再送でやり直させる（§9 fail-closed）
-    assertAuditConfigured();
-    // 顧客 ID からテナントを引く（引けなければ null。**記録は残す** — 残さないと
-    // 「知らない顧客からの再送」を何度でも処理してしまう）
-    const customerId = event.data.object.customer ?? null;
-    const tenant =
-      customerId === null ? null : await repos.tenants.findByBillingCustomerId(customerId);
-    // 反映すべきプランを決める（知らない種別・知らない価格・未確定の状態なら null）
-    const change = planChangeFor(event);
-    // 反映に渡すもの（渡さなければ「受信の記録だけ」になる）と、記録に残す変更前のプラン
-    let pending: { apply: BillingPlanApplication; from: Plan } | null = null;
-    // 反映しない理由（ログに残すのは初めての受信のときだけなので、ここでは**種類だけ**を持つ）
-    let skipped: SkipReason | null = null;
-    if (tenant === null) {
-      // 顧客 ID に対応するテナントが無い（連携していない・取り違えている）
-      skipped = SKIP_REASON.tenantMissing;
-    } else if (change === null) {
-      // 種別は表にあるのにプランを決められなかった（価格の名前の取り違え・未確定の状態）
-      skipped = SKIP_REASON.planUndecidable;
-    } else if (isStaleCancellation(change, tenant.billingSubscriptionId)) {
-      // **いまの契約とは別のサブスクリプションの解約は反映しない**（配信順は保証されないので、
-      // 解約の再送が遅れているあいだに結び直した新しい契約を古い解約が打ち消しうる）
-      skipped = SKIP_REASON.staleCancellation;
-    } else {
-      // 反映できる。**ID が本文に無いときは項目ごと渡さない** — Port の `null` は「未連携へ
-      // 戻す」という明示の指示なので、無条件に渡すと**本文が ID を運んでいないだけの再送で
-      // 既存の連携が消える**（`data.object.id` は省略されうる。`undefined` なら据え置き）
-      pending = {
-        apply: {
-          tenantId: tenant.id,
-          update: {
-            plan: change.plan,
-            ...(change.subscriptionId === null
-              ? {}
-              : { billingSubscriptionId: change.subscriptionId }),
-          },
-          // **解約のときだけ「いまの契約のままか」を条件にする** — 読んでから書くまでの間に
-          // 結び直されていたら反映しない（契約の開始・変更は新しい契約が勝つので条件なし）
-          expectSubscriptionId: change.cancellation ? tenant.billingSubscriptionId : null,
-        },
-        from: tenant.plan,
-      };
-    }
-    // **受信の記録とプランの反映を 1 度だけ・同じ原子的操作で行う（冪等性）.** 判定は DB の
-    // 一意制約に任せるので、同時に届いた 2 通でも必ず 1 通だけが `recorded` になる
-    const recorded = await repos.billingEvents.recordOnce(
-      { provider: PROVIDER, eventId: event.id, type: event.type, tenantId: tenant?.id ?? null },
-      pending?.apply ?? null,
-    );
-    // 2 通目は何もせず 200（再送は正常系。エラーにすると事業者が再送を増やす）
-    if (recorded.outcome === 'duplicate') return received(false);
-    // **反映しなかった理由は「初めての受信」のときだけ残す** — 判定より前に出すと、同じ
-    // イベントの再送（事業者の at-least-once・画面からの手動再送）のたびに同じ行が鳴り、
-    // 「無関係な通知で鳴らさない」ために種別で絞った意味が薄れる
-    if (skipped !== null) logSkipped(skipped, event.type);
-    // 反映を渡していない（上の理由のどれか）か、条件に合わなかった／並行削除なら反映できていない
-    if (pending === null || recorded.tenant === null) return received(false);
-    // 監査ログに 1 行残す（記録の形は `PATCH /tenants/{tenantId}` と共有する）
-    await recordPlanChangeAudit(repos, {
-      tenantId: recorded.tenant.id,
-      from: pending.from,
-      // 変更後は**実際に書かれた行**から取る（渡した値ではなく保存された値）
-      to: recorded.tenant.plan,
-      update: pending.apply.update,
-      source: PLAN_CHANGE_SOURCE.webhook,
-    });
-    // 反映した
-    return received(true);
-  } catch (error) {
-    // 応答へ写す（**`route()` と同じ関数**。500 のログもそこが残す）。
-    // 失敗の応答にも `no-store` を付ける（成功と同じ扱い）
-    return withPrivateCacheHeaders(toErrorResponse(error));
+// **応答を数えるのと例外を応答へ写すのは `withResponseCount` が受け持つ**（`route()` を通る
+// 経路と同じ 1 本）。ただし**署名の不一致が増えたことを読むのは応答の系列ではなくログ**
+// （`billing.signature_rejected`）— 系列には経路を示すラベルが無いので他の 401 と区別できず、
+// サーバーレスでは引きに行く収集そのものが成り立たない（`docs/deploy.md`）
+export const POST = withResponseCount(respond);
+
+// 署名を確かめてプランへ反映する（**例外はそのまま投げる**。応答へ写すのも `no-store` を
+// 付けるのも数えるのも、包む側 `withResponseCount` の 1 か所）
+async function respond(request: Request): Promise<Response> {
+  // 共有シークレット（未設定・短すぎは 503。検証を飛ばして受け入れることはしない）。
+  // **DB へ触る前に確かめる** — この経路は未認証なので、設定していない配備で
+  // 誰でも接続プールを起こせる状態にしない
+  const secret = billingWebhookSecret();
+  // データ層の束（本番/テストの切り替えは Composition Root が持つ）
+  const repos = await getRepos();
+  // 本文を**生のテキストのまま**読む（415 → 413。署名の対象は受け取った本文そのまま）
+  const raw = await readRawJsonText(request);
+  // 署名を確かめる（**形が違う・時刻が古い・一致しない のどれでも同じ 401**。
+  // 理由を区別して返すと総当たりの手がかりになる）。
+  // **解釈より前に確かめる** — 後ろに置くと、未認証の相手に JSON の解析とスキーマ検証の費用を
+  // 払わせたうえ、400 / 422 と 401 の出方の違いから受け付ける本文の形を探らせることになる
+  const verified = verifyBillingSignature(
+    request.headers.get(BILLING_SIGNATURE_HEADER),
+    raw,
+    secret,
+    Math.floor(Date.now() / MILLIS_PER_SECOND),
+  );
+  if (verified !== 'ok') {
+    // **1 行残す。** `ApiError` は `withResponseCount` の中でログを通らない（応答へ写すだけ）ので、
+    // ここで出さないと**どの出口にも現れない** — 応答の系列には 401 が出るが、経路を示す
+    // ラベルが無いので期限切れユーザートークンの 401 と区別できず、サーバーレスでは引きに行く
+    // 収集そのものが成り立たない（`docs/deploy.md`）。共有シークレットのローテーションを
+    // し損ねて全配信が 401 になった状態を無言にしないため。**理由（`verified` の値）は出さない**
+    // — 形・時刻・一致のどれで落ちたかは総当たりの手がかりになる。
+    // **行は間引く**（`logEventThrottled`。窓の中の通算件数が 2 の冪の回だけ出し、その件数を
+    // 行の `occurrence` に載せるので、止まった総当たりでも規模が残る）— 未認証で誰でも叩ける
+    // 経路なので、1 要求 1 行だと匿名の相手がログの量（＝保存の費用）を好きなだけ増やせる。
+    // **数えるのは毎回**なので率は `agentops_log_events_total` に残る（理由は
+    // `logEventThrottled` の説明）
+    logEventThrottled('billing.signature_rejected');
+    throw new ApiError(HTTP_STATUS.UNAUTHORIZED, API_MESSAGES.billingSignatureInvalid);
   }
+  // 署名が合ってから解釈・検証する（400 → 422）
+  const event = parseJsonText(raw, billingWebhookEventSchema);
+  // **反映する前に「監査ログを書ける状態か」を確かめる** — 反映してから記録に失敗すると、
+  // 再送は「2 通目」として無視されるので**その変更が記録の無いまま残る**。鍵が無いなら
+  // 1 行も書かず 503 を返し、事業者の再送でやり直させる（§9 fail-closed）
+  assertAuditConfigured();
+  // 顧客 ID からテナントを引く（引けなければ null。**記録は残す** — 残さないと
+  // 「知らない顧客からの再送」を何度でも処理してしまう）
+  const customerId = event.data.object.customer ?? null;
+  const tenant =
+    customerId === null ? null : await repos.tenants.findByBillingCustomerId(customerId);
+  // 反映すべきプランを決める（知らない種別・知らない価格・未確定の状態なら null）
+  const change = planChangeFor(event);
+  // 反映に渡すもの（渡さなければ「受信の記録だけ」になる）と、記録に残す変更前のプラン
+  let pending: { apply: BillingPlanApplication; from: Plan } | null = null;
+  // 反映しない理由（ログに残すのは初めての受信のときだけなので、ここでは**種類だけ**を持つ）
+  let skipped: SkipReason | null = null;
+  if (tenant === null) {
+    // 顧客 ID に対応するテナントが無い（連携していない・取り違えている）
+    skipped = SKIP_REASON.tenantMissing;
+  } else if (change === null) {
+    // 種別は表にあるのにプランを決められなかった（価格の名前の取り違え・未確定の状態）
+    skipped = SKIP_REASON.planUndecidable;
+  } else if (isStaleCancellation(change, tenant.billingSubscriptionId)) {
+    // **いまの契約とは別のサブスクリプションの解約は反映しない**（配信順は保証されないので、
+    // 解約の再送が遅れているあいだに結び直した新しい契約を古い解約が打ち消しうる）
+    skipped = SKIP_REASON.staleCancellation;
+  } else {
+    // 反映できる。**ID が本文に無いときは項目ごと渡さない** — Port の `null` は「未連携へ
+    // 戻す」という明示の指示なので、無条件に渡すと**本文が ID を運んでいないだけの再送で
+    // 既存の連携が消える**（`data.object.id` は省略されうる。`undefined` なら据え置き）
+    pending = {
+      apply: {
+        tenantId: tenant.id,
+        update: {
+          plan: change.plan,
+          ...(change.subscriptionId === null
+            ? {}
+            : { billingSubscriptionId: change.subscriptionId }),
+        },
+        // **解約のときだけ「いまの契約のままか」を条件にする** — 読んでから書くまでの間に
+        // 結び直されていたら反映しない（契約の開始・変更は新しい契約が勝つので条件なし）
+        expectSubscriptionId: change.cancellation ? tenant.billingSubscriptionId : null,
+      },
+      from: tenant.plan,
+    };
+  }
+  // **受信の記録とプランの反映を 1 度だけ・同じ原子的操作で行う（冪等性）.** 判定は DB の
+  // 一意制約に任せるので、同時に届いた 2 通でも必ず 1 通だけが `recorded` になる
+  const recorded = await repos.billingEvents.recordOnce(
+    { provider: PROVIDER, eventId: event.id, type: event.type, tenantId: tenant?.id ?? null },
+    pending?.apply ?? null,
+  );
+  // 2 通目は何もせず 200（再送は正常系。エラーにすると事業者が再送を増やす）
+  if (recorded.outcome === 'duplicate') return received(false);
+  // **反映しなかった理由は「初めての受信」のときだけ残す** — 判定より前に出すと、同じ
+  // イベントの再送（事業者の at-least-once・画面からの手動再送）のたびに同じ行が鳴り、
+  // 「無関係な通知で鳴らさない」ために種別で絞った意味が薄れる
+  if (skipped !== null) logSkipped(skipped, event.type);
+  // 反映を渡していない（上の理由のどれか）か、条件に合わなかった／並行削除なら反映できていない
+  if (pending === null || recorded.tenant === null) return received(false);
+  // 監査ログに 1 行残す（記録の形は `PATCH /tenants/{tenantId}` と共有する）
+  await recordPlanChangeAudit(repos, {
+    tenantId: recorded.tenant.id,
+    from: pending.from,
+    // 変更後は**実際に書かれた行**から取る（渡した値ではなく保存された値）
+    to: recorded.tenant.plan,
+    update: pending.apply.update,
+    source: PLAN_CHANGE_SOURCE.webhook,
+  });
+  // 反映した
+  return received(true);
 }
 
 /**
  * 反映しなかった理由（ログの文はこの種類から選ぶ）。
  *
- * **文字列を組み立てて `console.error` へ渡さない** — このリポジトリはログの実引数を
- * リテラルと `describeError()` だけに縛っている（`tests/error-logging.test.ts`）。
- * 理由を値として持ち、出すのは `logSkipped` の中のリテラルに限る。
+ * **文字列を組み立ててログへ渡さない** — ログは閉じた語彙（`src/lib/log.ts` の `LOG_EVENTS`）で
+ * 名乗る形なので、理由ごとに**別の出来事**として出す（`tests/error-logging.test.ts` が
+ * 第 1 引数が語彙のキーのリテラルであることを構文で見張る）。理由を値として持ち、
+ * 出来事へ写すのは `logSkipped` の中だけに限る。
  */
 const SKIP_REASON = {
   // 顧客 ID に対応するテナントが無い
@@ -176,23 +192,43 @@ type SkipReason = (typeof SKIP_REASON)[keyof typeof SKIP_REASON];
 function logSkipped(reason: SkipReason, type: string): void {
   // 無関係な通知では鳴らさない
   if (!isPlanChangeEvent(type)) return;
-  // 理由ごとに固定の文を出す（値そのものは出さない）
-  if (reason === SKIP_REASON.tenantMissing) {
-    console.error('[billing] 受信した顧客 ID に対応するテナントがありません');
-  } else if (reason === SKIP_REASON.planUndecidable) {
-    console.error('[billing] 契約の変更イベントからプランを決められませんでした');
-  } else {
-    console.error('[billing] いまの契約とは別のサブスクリプションの解約なので反映しません');
+  // 理由ごとに固定の文を出す（値そのものは出さない）。
+  //
+  // **`switch` ＋ 到達不能な `default` にする。** 以前の `if / else if / else` は末尾が
+  // 受け皿だったので、4 つ目の理由を足した人がここを直し忘れると**その理由が
+  // 「別のサブスクリプションの解約」として運用者へ報告される**（違う runbook を引く）。
+  // typecheck も lint もテストも緑のまま通った。`default` で `never` へ代入すれば鍵の
+  // 足し忘れが typecheck で落ちる（`RULE_ACTION_SUSPENDS` 等と同じ流儀）。
+  //
+  // **表の添字（`TABLE[reason]`）にはしない** — `tests/error-logging.test.ts` は
+  // 「出口の第 1 引数は語彙のキーの**リテラル**」を要求しており、それが
+  // 「語彙に宣言した出来事はどれも実際に出している」の照合を成り立たせている。
+  // 添字にすると網羅性は型で守れるが、語彙の網羅の方が機械で見えなくなる。
+  switch (reason) {
+    case SKIP_REASON.tenantMissing:
+      logEvent('billing.customer_unknown');
+      return;
+    case SKIP_REASON.planUndecidable:
+      logEvent('billing.plan_undecidable');
+      return;
+    case SKIP_REASON.staleCancellation:
+      logEvent('billing.stale_cancellation');
+      return;
+    default: {
+      // 理由を足してここを直し忘れたら typecheck が落ちる（受け皿にしない）
+      const unhandled: never = reason;
+      return unhandled;
+    }
   }
 }
 
 /**
  * 受信した旨の 200 応答（`applied` は反映したかどうか）。
  *
- * **`no-store` を必ず付ける**（`route()` が包む応答と同じ扱い。この経路は `route()` を
- * 通らないので、付け忘れるとここだけ共有キャッシュに載りうる）。
+ * **`no-store` は包む側（`withResponseCount`）が付ける**ので、ここでは付けない
+ * （`route()` を通る経路と同じ 1 か所。自分でも付けていた頃は `Vary` が二重に並んでいた）。
  */
 function received(applied: boolean): Response {
-  // 共通のヘッダを付けて返す
-  return withPrivateCacheHeaders(Response.json({ received: true, applied }));
+  // 本文だけを返す
+  return Response.json({ received: true, applied });
 }

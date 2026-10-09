@@ -18,6 +18,7 @@ import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { GET as listApiKeys, POST as createApiKey } from '@/app/api/v1/api-keys/route';
 import { DELETE as revokeApiKey } from '@/app/api/v1/api-keys/[apiKeyId]/route';
 import { GET as getMe } from '@/app/api/v1/me/route';
+import { GET as getMetrics } from '@/app/api/v1/metrics/route';
 import { GET as listTenants, POST as createTenant } from '@/app/api/v1/tenants/route';
 import { GET as getTenant, PATCH as updateTenantPlan } from '@/app/api/v1/tenants/[tenantId]/route';
 import { GET as listUsers, POST as createUser } from '@/app/api/v1/users/route';
@@ -64,15 +65,17 @@ const seed = seedEachTest();
 //   - 'admin': 役割そのものが admin であること (ユーザー管理・トークン管理)
 //   - 'platform': プラットフォーム管理者トークン (テナントの外側。テナント内の役割はすべて 403)
 //   - 'apiKey': プロキシ専用。API キー (aop_k_...) でしか呼べず、ユーザートークンは**認証の段階で**弾かれる
-type Requirement = Action | 'admin' | 'platform' | 'apiKey';
+//   - 'metricsToken': 監視専用。読み取り専用の環境変数トークンでしか呼べず、ユーザートークンも
+//     プラットフォーム管理者トークンも**認証の段階で**弾かれる (§9 最小権限。ADR-0014)
+type Requirement = Action | 'admin' | 'platform' | 'apiKey' | 'metricsToken';
 
 // 権限を満たさない資格情報で呼んだときに返るべきステータス。
 // プロキシだけ 401 なのは、ユーザートークンが「権限が足りない」のではなく
 // 「この経路では資格情報として受け付けない」ため (ADR-0007)。403 を期待すると、
 // 認証を緩めて認可で弾く形へ変えたときに気付けない
 function deniedStatus(requirement: Requirement): number {
-  // プロキシ経路は認証で弾く
-  return requirement === 'apiKey' ? 401 : 403;
+  // プロキシ経路と監視経路は認証で弾く (資格情報の種類が違うので 403 ではない)
+  return requirement === 'apiKey' || requirement === 'metricsToken' ? 401 : 403;
 }
 
 // 契約の operationId → 「要る権限」と「呼び方」。
@@ -81,6 +84,10 @@ const ENDPOINTS: Record<
   string,
   { requires: Requirement; invoke: (token: string) => Promise<number> }
 > = {
+  getMetrics: {
+    requires: 'metricsToken',
+    invoke: async (t) => (await call(getMetrics, { token: t })).status,
+  },
   listTenants: {
     requires: 'platform',
     invoke: async (t) => (await call(listTenants, { token: t })).status,
@@ -342,8 +349,8 @@ const PUBLIC_OPERATIONS: Record<string, string> = {
 
 // その役割がそのオペレーションを呼べるか
 function allows(requirement: Requirement, role: Role): boolean {
-  // プロキシ専用の経路はどの役割のユーザートークンでも呼べない
-  if (requirement === 'apiKey') return false;
+  // プロキシ専用・監視専用の経路はどの役割のユーザートークンでも呼べない
+  if (requirement === 'apiKey' || requirement === 'metricsToken') return false;
   // プラットフォーム管理者専用はテナント内の役割では呼べない
   if (requirement === 'platform') return false;
   // admin 限定は役割そのものを見る
@@ -373,7 +380,10 @@ describe('全オペレーションの認可', () => {
       it(`${operationId} はプラットフォーム管理者が呼ぶと ${deniedStatus(endpoint.requires)}`, async () => {
         // プラットフォーム管理者トークンで呼ぶ
         const status = await endpoint.invoke(PLATFORM_TOKEN);
-        // テナント内の資源なので 403 (プロキシ経路は資格情報の種類が違うので 401)
+        // テナント内の資源なので 403 (プロキシ・監視の経路は資格情報の種類が違うので 401)。
+        // **監視の経路でこれが要る理由**: あの資格情報はテナント作成 (応答に新しいテナントの
+        // admin トークンの平文が載る) とプラン変更も通るので、収集エージェントへ配らない。
+        // 配れる値にしてしまう変更 (認証を platform へ戻す) はここで落ちる
         expect(status).toBe(deniedStatus(endpoint.requires));
       });
     }

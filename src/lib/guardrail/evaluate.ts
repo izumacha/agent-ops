@@ -29,6 +29,7 @@ import { GUARDRAIL_WINDOW_MAX_MINUTES, GUARDRAIL_WINDOW_MIN_MINUTES } from '@/li
 import { describeError } from '@/lib/describe-error';
 import { notifyGuardrailIncident, type NotifyPayload } from '@/lib/notify/send';
 import { guardrailIncidentSummary } from '@/lib/guardrail/summary';
+import { logEvent } from '@/lib/log';
 
 /** 判定の起点が渡す材料 */
 export interface GuardrailTrigger {
@@ -283,7 +284,7 @@ export async function evaluateGuardrails(
       // 窓が作れないルールは判定できない。**DB の CHECK 制約があるので通常は起きない**ので、
       // 起きたら設定が壊れている（制約を入れる前の行が残っている等）。黙って飛ばさずログに残す
       if (measurement === null) {
-        console.error('[guardrail] 集計窓の長さが範囲外のルールを判定できませんでした');
+        logEvent('guardrail.window_out_of_range');
         // **記録できなかった発火と同じく失敗として数える**（下の `raised === null` と同じ理由）。
         // 数えないと「判定しきった」側に入り、`stop` のルールが 1 度も判定されていないのに
         // `POST /guardrails/run` は 200 を返す。しかも窓が範囲外になる原因は設定の壊れ方
@@ -313,7 +314,7 @@ export async function evaluateGuardrails(
       });
       // エージェントかルールが（並行して）消えていれば記録できない。握り潰さずログに残す
       if (raised === null) {
-        console.error('[guardrail] インシデントを記録できませんでした (対象が見つかりません)');
+        logEvent('guardrail.incident_target_missing');
         // **失敗として数える。** しきい値は越えているのに記録も停止もできていないので、
         // ここを数えないと `evaluated` が「判定しきった」側に加算され、
         // `POST /guardrails/run` は `{ evaluated: N, fired: [] }` の 200 を返す
@@ -360,15 +361,13 @@ export async function evaluateGuardrails(
       } catch (error) {
         // 鍵の未設定（503）も DB の障害も同じ扱い。**どの環境変数を直せばよいかを文言に書く**。
         //
-        // 環境変数の名前を定数（`AUDIT_HMAC_SECRET_ENV`）から置換で埋めないのは、
-        // `tests/error-logging.test.ts` の許可表へ 1 件足すことになるため。あの表は
-        // 「静かに緩む口」としてこの repo が繰り返し見てきた形なので、文言の中へ直接書いて
-        // 表を増やさない側を採る（通知の `src/lib/notify/send.ts` と同じ判断）。
+        // 環境変数の名前を定数（`AUDIT_HMAC_SECRET_ENV`）から置換で埋めないのは、文言を持つのが
+        // 語彙の表（`LOG_EVENTS`）で、そこへ置換を持ち込むと `tests/error-logging.test.ts` の
+        // 許可表へ 1 件足すことになるため。あの表は「静かに緩む口」としてこの repo が繰り返し
+        // 見てきた形なので、文言の中へ直接書いて表を増やさない側を採る
+        // （通知の `src/lib/notify/send.ts` と同じ判断）。
         // **値ではなく名前なので、これは正本の写しではない**（値は secret.ts が読む）
-        console.error(
-          '[guardrail] 発火の監査ログを書けませんでした (AUDIT_HMAC_SECRET の設定を確認してください):',
-          describeError(error),
-        );
+        logEvent('guardrail.audit_write_failed', describeError(error));
       }
       // 通知の材料を貯める（送信は最後）
       notifications.push({
@@ -388,12 +387,11 @@ export async function evaluateGuardrails(
         occurredAt: trigger.now.toISOString(),
       });
     } catch (error) {
-      // 握り潰さずログに残す（§6）。**ルール id は文に入れない** —
-      // `tests/error-logging.test.ts` はログの実引数を「文字列リテラル / 置換の無い
-      // テンプレート / describeError(...) / 許可表の識別子」に限っており、id を入れるには
-      // 許可表を広げることになる。あの表は「静かに緩む口」としてこの repo が繰り返し
-      // 見てきた形なので、表を増やさない側を採る（種別や実測値も同じ理由で書かない）
-      console.error('[guardrail] ルールを判定できませんでした:', describeError(error));
+      // 握り潰さずログに残す（§6）。**ルール id は行に入れない** — 出来事は閉じた語彙で名乗り、
+      // 添えられるのは `describeError(...)` の診断だけ（`tests/error-logging.test.ts` が構文で
+      // 見張る）。id を載せるには引数の形を広げることになり、そこは例外の message を
+      // 載せる形と区別できなくなる（種別や実測値も同じ理由で書かない）
+      logEvent('guardrail.rule_evaluation_failed', describeError(error));
       // **数える** — 呼び出し側が「判定しきれなかった」ことを見分けられるようにする
       failed += 1;
     }
@@ -413,7 +411,7 @@ export async function evaluateGuardrails(
   if (trigger.detachNotifications === true) {
     // 失敗は握り潰さずログに残す（通知は fail-open だが、黙って消さない。§6）
     void sending.catch((error: unknown) => {
-      console.error('[guardrail] 通知の送信に失敗しました:', describeError(error));
+      logEvent('guardrail.notify_failed', describeError(error));
     });
   } else {
     // 待つ側は呼び出し元へそのまま伝える（`notifyGuardrailIncident` は例外を出さない設計）
@@ -447,7 +445,7 @@ export async function evaluateGuardrailsSafely(
     return await evaluateGuardrails(repos, trigger, env);
   } catch (error) {
     // DB の障害などで判定できなかったことを残す（黙って飛ばさない。§6）
-    console.error('[guardrail] ガードレールの判定に失敗しました:', describeError(error));
+    logEvent('guardrail.evaluation_failed', describeError(error));
     // 判定できなかったことを null で表す
     return null;
   }

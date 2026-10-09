@@ -15,6 +15,7 @@ import {
   NOTIFY_TIMEOUT_MS,
 } from '@/lib/constants';
 import { OutboundUrlRejection, parseOutboundUrl } from '@/lib/outbound-url';
+import { loggedEvents } from './lib/log-lines';
 
 // 署名鍵 (下限を満たす固定値)
 const SECRET = 'notify-test-signing-secret-0123456789';
@@ -174,14 +175,13 @@ describe('ガードレールの通知', () => {
     // 受け手が 500 を返す
     stubFetch(() => new Response(null, { status: 500 }));
     await notifyGuardrailIncident(PAYLOAD, env());
-    // 2 つの宛先ぶん「届かなかった」が残る
-    expect(logged.filter((args) => String(args[0]).includes('届きませんでした'))).toHaveLength(2);
-    // 署名鍵が短いとき: 直すべき環境変数の名前が文言に出る
+    // 2 つの宛先ぶん「届かなかった」が残る。**照合は `event` で行う**（文言は推敲してよい
+    // という分担なので、散文で照合すると文言を直すだけで CI が赤くなる）
+    expect(loggedEvents(logged)).toEqual(['notify.webhook_undelivered', 'notify.mail_undelivered']);
+    // 署名鍵が短いとき: 署名せずに送らないことが 2 つの宛先ぶん残る
     logged.length = 0;
     await notifyGuardrailIncident(PAYLOAD, env({ [NOTIFY_SIGNING_SECRET_ENV]: 'short' }));
-    expect(logged.filter((args) => String(args[0]).includes('NOTIFY_SIGNING_SECRET'))).toHaveLength(
-      2,
-    );
+    expect(loggedEvents(logged)).toEqual(['notify.webhook_unsigned', 'notify.mail_unsigned']);
     // 宛先が未設定なら 1 行も出さない (送るものが無いだけで異常ではない)
     logged.length = 0;
     await notifyGuardrailIncident(

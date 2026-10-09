@@ -28,6 +28,7 @@ import { resetSharedRateLimiterForTesting } from '@/lib/api/rate-limit';
 import { createTestAgent } from '../lib/agent-limits';
 // ガードレールのルールを作るときの上限（上限そのものを主題にしないので共有の値）
 import { TEST_GUARDRAIL_RULE_LIMITS } from '../lib/guardrail-limits';
+import { loggedEvents } from '../lib/log-lines';
 
 // seed (2 テナント × 3 役割 + 既存エージェント)
 const seed = seedEachTest();
@@ -952,19 +953,15 @@ describe('サーバログ', () => {
     stubUpstream({ status: 200, body: { id: 'x' } });
     const key = seedApiKey(seed, { tenantId: seed.a.id, agentId: seed.a.agent.id });
     await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
-    // 1 回だけ出る
-    expect(logged.mock.calls.filter((args) => String(args[0]).includes('トークン数'))).toHaveLength(
-      1,
-    );
+    // 1 回だけ出る（**照合は `event` で行う**。文言は推敲してよいという分担）
+    expect(loggedEvents(logged.mock.calls)).toEqual(['proxy.usage_tokens_unreadable']);
     // 4xx では出さない (上流のエラー本文に usage は載らないので必ず読めず、
     // 安く量産できる 400 でログが埋まって本物の異常が隠れる)
     logged.mockClear();
     stubUpstream({ status: 400, body: { error: { type: 'invalid_request_error' } } });
     await call(proxyAnthropic, { token: key.secret, body: { model: ANTHROPIC_MODEL } });
     // 1 回も出ない
-    expect(logged.mock.calls.filter((args) => String(args[0]).includes('トークン数'))).toHaveLength(
-      0,
-    );
+    expect(loggedEvents(logged.mock.calls)).toEqual([]);
   });
 });
 

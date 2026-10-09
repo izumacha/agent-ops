@@ -25,6 +25,7 @@
 // (ADR-0005 の宿題)。
 import { NextResponse, type NextRequest } from 'next/server';
 import { withPrivateCacheHeaders } from '@/lib/api/cache-headers';
+import { logEventOnce } from '@/lib/log';
 import { errorResponse } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES } from '@/lib/constants';
@@ -42,11 +43,36 @@ function isDecodablePath(url: string): boolean {
   }
 }
 
+// **この入口が `@/lib/log` を取り込む費用（測った上で受け入れている）。**
+// `log.ts` は `@/lib/metrics` を取り込むので、1 本のログ行のために入口の束へカウンタの表と
+// Prometheus の整形まで入り、モジュール評価時に `process.uptime()` / `Date.now()` を読む。
+// しかも入口は別のモジュール実体なので、ここで数えた系列は `/metrics` から**原理的に読めない**
+// （`logEvent` の説明にある実測）。それでも分けないのは、**`console` を呼べるのを 1 ファイルに
+// 限る**という不変条件の方が強いから — 入口用に 2 つ目の出口を作ると、`describeError` を
+// 通さない実引数や語彙に無い綴りがそちらから入る口ができる（`tests/error-logging.test.ts` の
+// 守備範囲がファイル 1 つを前提にしている）。**費用は入口の起動時の評価だけ**で、
+// 要求ごとの仕事は増えない。文書専用の表（`uncounted-response-sources.ts`）を
+// `metrics.ts` から外したのは、あちらが**本番のコードから 1 度も読まれない**ので
+// 同じ費用に見合うものが何も無かったため（こちらには 1 行の記録という用がある）。
+
 // 全リクエストの入口 (Next.js が名前で呼ぶので、この関数名と export の形は変えない)
 export function proxy(request: NextRequest): Response {
   // 読めないパスは「そんな資源は無い」として 404 で返す (500 にしない・本体まで通さない)。
   // 応答の形は API のエラー契約に揃える (この配備が持つ経路はほぼ API で、形が割れる方が扱いにくい)
   if (!isDecodablePath(request.url)) {
+    // **この応答はメトリクスに現れない（実測）。** 入口は route handler とは別のモジュール実体で
+    // 評価されるので、ここで `countHttpResponse` を呼んでも `/metrics` が読むカウンタとは
+    // 別の表に入る（本番ビルドで確認: health の 200 は現れるのに、ここの 404 は 2 件とも
+    // 現れなかった）。数えたように見えて見えない形を作るより、**ログで非可視だけは解く**。
+    // 既知の非可視として ADR-0014 と docs/deploy.md にも書いてある
+    // **1 度だけ出す** — 未認証で誰でも叩ける経路なので、毎回出すとログを埋められる。
+    // **間引いても率は失われない**: 読めないパスは URL の形そのものなので、前段の
+    // アクセスログが 1 件ずつ記録している（この出来事の説明文もそう案内する）。
+    // ここの 1 行が解いているのは「この配備が 404 にした」という非可視だけ。
+    // **他はすべて間引く側** (`logEventThrottled`。窓の中の通算件数が 2 の冪の回だけ出す)。
+    // こちらだけ 1 度きりにしてよいのは、読めないパスの率が**前段のアクセスログに 1 件ずつ
+    // 残る**から (上記) — 分ける軸は「率を別の出口から読めるか」それだけ
+    logEventOnce('entry.undecodable_path');
     // キャッシュ制御も route() の応答と同じ規律に揃える (この 1 経路だけ外れていると、
     // 将来 proxy が分岐を増やしたときに気付けない)
     return withPrivateCacheHeaders(errorResponse(HTTP_STATUS.NOT_FOUND, API_MESSAGES.notFound));

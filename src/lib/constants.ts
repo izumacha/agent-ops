@@ -169,6 +169,13 @@ export const USER_TOKEN_DEFAULT_TTL_DAYS = 90;
 export const USER_TOKEN_MAX_TTL_DAYS = 365;
 // プラットフォーム管理者トークン (環境変数) に要求する最小長。短い値は設定ミスとみなして使わない (fail-closed)
 export const PLATFORM_ADMIN_TOKEN_MIN_LENGTH = 32;
+// 監視用トークン (環境変数 METRICS_TOKEN) に要求する最小長。
+// **プラットフォーム管理者トークンとは別の資格情報にする** — あちらはテナント作成
+// (応答に新しいテナントの admin トークンの平文が載る) とプラン・課金の変更も通るので、
+// 数字を読むだけの収集エージェントへ配ると、収集側の設定ファイルや収集サーバの侵害が
+// そのままテナント作成・プラン変更の権限になる (§9 最小権限)。
+// 長さの要求は他の環境変数由来の秘密と同じ 32 文字以上 (別の値にする理由が無い)
+export const METRICS_TOKEN_MIN_LENGTH = 32;
 // ガードレールの集計窓の下限 (分)。0 や負の窓は「期間が無い」ので判定できない
 export const GUARDRAIL_WINDOW_MIN_MINUTES = 1;
 // ガードレールの集計窓の上限 (分 = 7 日)。**無制限の窓を許さない** (§8 / §9) —
@@ -394,6 +401,12 @@ export const API_MESSAGES = {
   billingSignatureInvalid: 'Webhook の署名が確認できません。',
   // 受信 Webhook の共有シークレットが未設定・短すぎる (503)。何が足りないかは応答に出さない
   billingNotConfigured: '課金の設定が完了していないため、この操作は現在実行できません。',
+  // 監視用トークンが未設定・短すぎる (503)。**どちらなのかは応答に出さない**
+  // (「未設定」と「短すぎる」を区別すると、下限の値を探る手掛かりになる)。
+  // **「設定済みかどうか」は隠していない** — 未設定なら 503、設定済みで不一致なら 401 なので、
+  // 未認証の相手にも区別できる。運用者が「鍵を入れ忘れた」と「鍵が違う」を取り違えないことを
+  // 優先した判断で、設定状態そのものは権限にも情報にもつながらない (ADR-0014)
+  metricsNotConfigured: '監視の設定が完了していないため、この操作は現在実行できません。',
   budgetExceeded:
     'このエージェントの予算 (当月) を超えました。予算を見直すか、翌月まで待ってから呼び出してください。',
   unsupportedModel:
@@ -435,6 +448,14 @@ export const API_MESSAGES = {
   internal: 'サーバー内部でエラーが発生しました。',
 } as const;
 
-// 保存を禁じる Cache-Control の値。route() が全応答に付けるのと、route() を通らない /health が
-// 自分で付けるのとで同じ値を使うため、ここを唯一の参照元にする
+// 保存を禁じる Cache-Control の値。**付けるのは `withResponseCount` の 1 か所**
+// （`route()` を通る経路も通らない経路も同じラッパーを通る）と、入口の `src/proxy.ts`。
+// その 2 つが同じ値を使うため、ここを唯一の参照元にする
+// （ルートごとに自分でも付けていた頃は `Vary` が二重に並んでいた＝実測）
 export const NO_STORE_CACHE_CONTROL = 'no-store';
+
+/**
+ * メトリクスの応答に付ける `Content-Type`。
+ * Prometheus のテキスト形式（`version=0.0.4`）を名乗る（スクレイプ側が解析器を選ぶ手掛かりにする）。
+ */
+export const PROMETHEUS_CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8';

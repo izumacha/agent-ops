@@ -14,6 +14,7 @@ import { Provider, RuleAction, RuleKind } from '@/domain/types';
 import { USAGE_RULE_KINDS } from '@/lib/guardrail/evaluate';
 // エージェントを作るテスト用ヘルパー (上限は必須引数なので 1 か所にまとめる)
 import { createTestAgent } from './lib/agent-limits';
+import { loggedEvents } from './lib/log-lines';
 
 // 通知のモジュールを差し替える（**必ず拒否する**通知にする）
 vi.mock('@/lib/notify/send', () => ({
@@ -113,10 +114,10 @@ describe('待たない経路での通知の拒否', () => {
     // 拒否が処理されるまで数ティック待つ（`catch` が付いていなければ vitest が
     // unhandled rejection としてこのテストを落とす）
     await new Promise((resolve) => setTimeout(resolve, 10));
-    // 理由がログに残っている（握り潰していない）
-    expect(
-      logged.some((args) => String(args[0]).includes('通知の送信に失敗しました')),
-      '通知の拒否がログに残っていない',
-    ).toBe(true);
+    // 理由がログに残っている（握り潰していない）。**照合は `event` で行う** — 文言は推敲して
+    // よいという分担なので、散文で照合すると文言を直すだけで CI が赤くなる
+    expect(loggedEvents(logged), '通知の拒否がログに残っていない').toContain(
+      'guardrail.notify_failed',
+    );
   });
 });

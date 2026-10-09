@@ -9,6 +9,7 @@ import { describeError } from '@/lib/describe-error';
 import { buildRequestBody, readResponseText } from '@/lib/llm/messages';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
 import { ALWAYS_LOG, type RunLogGate } from './run-log';
+import { logEvent } from '@/lib/log';
 
 /** 応答を得る相手 (評価対象エージェントの結線) */
 export interface AgentTarget {
@@ -51,10 +52,10 @@ export async function requestAgentResponse(
       timeoutMs: EVALUATION_UPSTREAM_TIMEOUT_MS,
     });
     // 2xx 以外は応答として使えない。ログにステータスを差し込まない理由は judge.ts と同じ
-    // (console の実引数は「出してよい形」だけに絞ってある。tests/error-logging.test.ts)
+    // (出来事は閉じた語彙で名乗る形なので、可変の値は行に載せられない。tests/error-logging.test.ts)
     if (result.status < 200 || result.status >= 300) {
       if (log.first('agent-status')) {
-        console.error('[evaluation] エージェントの上流が 2xx 以外のステータスを返しました');
+        logEvent('evaluation.agent_status_not_2xx');
       }
       return null;
     }
@@ -65,7 +66,7 @@ export async function requestAgentResponse(
     } catch {
       // 応答が JSON でない
       if (log.first('agent-json')) {
-        console.error('[evaluation] エージェントの応答を JSON として解釈できませんでした');
+        logEvent('evaluation.agent_body_not_json');
       }
       return null;
     }
@@ -74,7 +75,7 @@ export async function requestAgentResponse(
   } catch (error) {
     // 時間切れ・接続不能・設定不足。詳細はサーバログにだけ残す (§9)
     if (log.first('agent-error')) {
-      console.error('[evaluation] エージェントの呼び出しに失敗しました:', describeError(error));
+      logEvent('evaluation.agent_call_failed', describeError(error));
     }
     return null;
   }

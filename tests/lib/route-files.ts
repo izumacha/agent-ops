@@ -30,3 +30,26 @@ export function findRouteFiles(dir: string): string[] {
     return ROUTE_FILE_PATTERN.test(entry) ? [full] : [];
   });
 }
+
+/**
+ * Next.js が Route Handler として呼ぶ export 名。
+ *
+ * **5 つに絞ると `HEAD` / `OPTIONS` が死角になる。** Next.js は `HEAD` を **`GET` の
+ * ハンドラを呼んで**応え、`OPTIONS` は自分で実装するので、export が無くても**届く**
+ * （「export の無いメソッドは 405」は成り立たない）。
+ *
+ * 読む側が 2 か所ある: `tests/route-wrapping.test.ts` は「この名前の export が結線を
+ * 通っているか」を見て、`tests/metrics.test.ts` は「**この名前のメソッドがメトリクスの
+ * ラベルの閉じた集合に入っているか**」を見る。後者にとってこれは**独立な手掛かり**で、
+ * `KNOWN_METHODS` 自身から導くと「集合から外した分は検査のケースからも消える」ので
+ * 外す変異が素通りする（実測で全件緑だった）。
+ */
+export const HTTP_METHOD_EXPORTS = [
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+  'HEAD',
+  'OPTIONS',
+] as const;

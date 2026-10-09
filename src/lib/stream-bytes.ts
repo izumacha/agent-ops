@@ -9,6 +9,7 @@
 
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
+import { logEvent } from '@/lib/log';
 
 // 読み取りの結果 (成功なら本文、失敗なら理由)
 export type StreamReadResult =
@@ -66,10 +67,7 @@ export async function readStreamWithinByteLimit(
         // 握り潰さずログだけ残す (§6 エラーを握り潰さない)
         if (options.cancelOnOverflow === true) {
           await reader.cancel().catch((error: unknown) => {
-            console.error(
-              '[stream] 上限超過後のストリーム解放に失敗しました:',
-              describeError(error),
-            );
+            logEvent('stream.release_failed', describeError(error));
           });
         }
         // 打ち切った理由

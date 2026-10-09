@@ -12,6 +12,7 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
+import { logEvent } from '@/lib/log';
 
 // 1 プロバイダ分の結線 (既定の接続先・上書き用の環境変数名・資格情報の環境変数名・叩くパス)
 interface UpstreamConfig {
@@ -217,9 +218,9 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> 
       // 理由は閉じた語彙 (上限超過 / UTF-8 として壊れている) なので、分岐して定型文で出す
       // (上流由来の文字列は 1 バイトも混ぜない)
       if (read.reason === 'too_large') {
-        console.error('[proxy] 上流の応答が上限を超えたため打ち切りました');
+        logEvent('proxy.upstream_response_too_large');
       } else {
-        console.error('[proxy] 上流の応答が UTF-8 として解釈できませんでした');
+        logEvent('proxy.upstream_response_not_utf8');
       }
       // 使えなかったので 502
       throw new ApiError(HTTP_STATUS.BAD_GATEWAY, API_MESSAGES.upstreamFailure);
@@ -236,7 +237,7 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamResult> 
     // **上流の失敗はサーバログに残す** — 利用者へ返すのは定型文なので、ここで残さないと
     // 接続不能も時間切れも証明書エラーも運用者にはまったく見えない (実測で、502 / 504 を
     // 返すテストを流しても関連するログは 1 行も出なかった)。形は describeError に任せる
-    console.error('[proxy] 上流の呼び出しに失敗しました:', describeError(error));
+    logEvent('proxy.upstream_call_failed', describeError(error));
     // 時間切れは 504 (上流が応答しなかった)
     if (error instanceof Error && error.name === 'TimeoutError') {
       throw new ApiError(HTTP_STATUS.GATEWAY_TIMEOUT, API_MESSAGES.upstreamTimeout);

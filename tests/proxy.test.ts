@@ -20,6 +20,8 @@ import {
 } from '@/lib/body-limits';
 import nextConfig from '../next.config';
 import { findRouteFiles } from './lib/route-files';
+import { captureLogOutlet, loggedEvents } from './lib/log-lines';
+import { resetThrottledLogsForTesting } from '@/lib/log';
 
 // App Router の入口 (この下の route.* がそのまま URL になる)
 const APP_DIR = join(process.cwd(), 'src', 'app');
@@ -85,6 +87,27 @@ describe('入口の proxy', () => {
       }
     },
   );
+
+  // **読めないパスの記録は 1 プロセスに 1 度だけ。**
+  //
+  // 未認証で誰でも叩ける経路なので、1 要求 1 行だと匿名の相手がログの量（＝保存の費用）を
+  // 好きなだけ増やせる。率は**前段のアクセスログ**が 1 件ずつ持つので、アプリ側の 1 行が
+  // 解いているのは「この配備が 404 にした」という非可視だけ。**この 1 本が無いと
+  // `logEventOnce` を `logEvent` へ差し替えても全件緑だった**（実測）
+  it('読めないパスの記録は 1 度だけ（毎回出すと匿名の相手にログを埋められる）', () => {
+    // 「1 度だけ」の記憶を空へ戻してから出口を捕まえる
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 同じ壊れた URL を 3 回投げる
+      for (let i = 0; i < 3; i += 1) proxy(request('http://test.local/api/v1/agents/%ff'));
+      // 行は 1 本だけ
+      expect(loggedEvents(outlet.calls())).toEqual(['entry.undecodable_path']);
+    } finally {
+      outlet.restore();
+      resetThrottledLogsForTesting();
+    }
+  });
 
   it.each([
     ['API のパス', 'http://test.local/api/v1/agents'],

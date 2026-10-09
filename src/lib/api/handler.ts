@@ -1,18 +1,17 @@
 // Route Handler の共通ラッパー: 認証 → ハンドラ本体 → 例外の HTTP 応答化 を 1 か所にまとめる。
 // 各ルートは route(async ({ principal, repos, params, request }) => Response) の形で書く
-import { DuplicateError, getRepos, type Repositories } from '@/data';
+import { getRepos, type Repositories } from '@/data';
 import { isResourceId } from '@/domain/resource-id';
-import { API_MESSAGES } from '@/lib/constants';
 import { authenticate, authenticateApiKey, type Principal } from './auth';
-import { withPrivateCacheHeaders } from './cache-headers';
-import { ApiError, errorResponse, notFoundError, validationError } from './errors';
+// 応答を数えるのと例外の写し・キャッシュ制御は**この 1 本**が受け持つ
+// （`route()` を通らない経路も同じ関数を使う。置き場所を分けた理由は response-count.ts の冒頭）
+import { withResponseCount } from './response-count';
+import { notFoundError } from './errors';
+import { HTTP_STATUS } from './http-status';
 import { enforceRateLimit, type RateLimitTier } from './rate-limit';
 import { requireAction, requireAdminRole, requirePlanFeature } from './guard';
 import type { Action } from '@/domain/rbac';
 import type { PlanFeature } from '@/domain/plan';
-import { HTTP_STATUS } from './http-status';
-// エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
-import { describeError } from '@/lib/describe-error';
 
 // Next.js 16 の Route Handler が受け取る第 2 引数 (動的セグメントは Promise で届く)
 export interface RouteContext<P> {
@@ -162,72 +161,49 @@ function assertResourceIdParams(params: unknown): void {
 }
 
 /**
- * 例外を HTTP 応答へ写す。
- *
- * **`route()` を通らない経路（署名付きの受信 Webhook。Step6）も同じ関数を通す** —
- * 写し方を 2 か所に分けると、一意制約違反の 422 への翻訳や 500 のログの有無がずれる。
- */
-export function toErrorResponse(error: unknown): Response {
-  // 明示的な API エラーはそのまま (ApiError → Response の写しはここ 1 か所)
-  if (error instanceof ApiError) {
-    return errorResponse(error.status, error.message, error.issues, error.headers);
-  }
-  // 一意制約違反は 422 の ApiError に翻訳してから同じ経路で写す (どのフィールドかを添える)
-  if (error instanceof DuplicateError) {
-    return toErrorResponse(
-      validationError([{ path: error.field, message: API_MESSAGES.duplicate }]),
-    );
-  }
-  // それ以外は内部エラー。応答には出さず、サーバログに残す (§6 文脈を付けてログに残す / §9)
-  console.error('[api] 予期しないエラー:', describeError(error));
-  return errorResponse(HTTP_STATUS.INTERNAL_SERVER_ERROR, API_MESSAGES.internal);
-}
-
-/**
  * 認証付き Route Handler を組み立てる。
  * 認証 (401) はどのルートでも本体より前に行い、認可 (403) は本体の先頭で guard.ts を呼ぶ
  */
 export function route<P = Record<string, never>>(handler: Handler<P>, options: RouteOptions = {}) {
   // このルートで使う認証関数を決める (指定が無ければユーザートークンの経路)
   const authenticateRequest = options.auth === 'apiKey' ? authenticateApiKey : authenticate;
-  // Next.js が呼ぶ形の関数
-  const wrapped = async (request: Request, context: RouteContext<P>): Promise<Response> => {
-    // 例外はすべて HTTP 応答へ写す
-    try {
-      // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
-      const repos = await getRepos();
-      // 認証 (失敗は 401 の ApiError)
-      const principal = await authenticateRequest(request, repos);
-      // **レート制限は認証の後**に掛ける。キーを認証済みの id から作るので、
-      // 偽装できるヘッダ (X-Forwarded-For) に頼らずに数えられる。
-      // 認証より前に掛けると、未認証の総当たりで正規の利用者の枠を枯渇させられる
-      // **認可はレート制限より先に。** 権限の無い要求で枠を消費させない（理由は requiredAction）
-      if (options.requiredAction !== undefined) {
-        requireAction(principal, options.requiredAction);
-      }
-      // admin 限定のルートはロールそのものを確かめる（理由は requiredRole）
-      if (options.requiredRole === 'admin') {
-        requireAdminRole(principal);
-      }
-      // プランで可否が決まる機能はここで確かめる（枠を消費する前。理由は requiredPlanFeature）
-      if (options.requiredPlanFeature !== undefined) {
-        requirePlanFeature(principal, options.requiredPlanFeature);
-      }
-      // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
-      if (options.rateLimit !== undefined) {
-        enforceRateLimit(principal, options.rateLimit, Date.now());
-      }
-      // 動的セグメントを解決する
-      const params = await context.params;
-      // 資源 id の形でないセグメントは本体へ渡さず 404 にする (DB へ渡すと 500 になる値を入口で止める)
-      assertResourceIdParams(params);
-      // 本体を実行する (応答にはキャッシュ禁止のヘッダを付ける)
-      return withPrivateCacheHeaders(await handler({ request, params, principal, repos }));
-    } catch (error) {
-      // 応答に写す (401/403 等もテナント固有なので同じヘッダを付ける)
-      return withPrivateCacheHeaders(toErrorResponse(error));
+  // 応答を組み立てる本体（**例外はそのまま投げる**。応答へ写すのとキャッシュ制御を付けるのは
+  // 包む側 `withResponseCount` の 1 か所。ここでも写していた頃は、同じ判断が 2 か所にあり
+  // `Vary` が二重に並んでいた）
+  const respond = async (request: Request, context: RouteContext<P>): Promise<Response> => {
+    // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
+    const repos = await getRepos();
+    // 認証 (失敗は 401 の ApiError)
+    const principal = await authenticateRequest(request, repos);
+    // **レート制限は認証の後**に掛ける。キーを認証済みの id から作るので、
+    // 偽装できるヘッダ (X-Forwarded-For) に頼らずに数えられる。
+    // 認証より前に掛けると、未認証の総当たりで正規の利用者の枠を枯渇させられる
+    // **認可はレート制限より先に。** 権限の無い要求で枠を消費させない（理由は requiredAction）
+    if (options.requiredAction !== undefined) {
+      requireAction(principal, options.requiredAction);
     }
+    // admin 限定のルートはロールそのものを確かめる（理由は requiredRole）
+    if (options.requiredRole === 'admin') {
+      requireAdminRole(principal);
+    }
+    // プランで可否が決まる機能はここで確かめる（枠を消費する前。理由は requiredPlanFeature）
+    if (options.requiredPlanFeature !== undefined) {
+      requirePlanFeature(principal, options.requiredPlanFeature);
+    }
+    // 指定があれば、その枠で数えて上限を超えていれば 429 (Retry-After 付き) を投げる
+    if (options.rateLimit !== undefined) {
+      enforceRateLimit(principal, options.rateLimit, Date.now());
+    }
+    // 動的セグメントを解決する
+    const params = await context.params;
+    // 資源 id の形でないセグメントは本体へ渡さず 404 にする (DB へ渡すと 500 になる値を入口で止める)
+    assertResourceIdParams(params);
+    // 本体を実行する（応答のヘッダと例外の写しは包む側が受け持つ）
+    return await handler({ request, params, principal, repos });
   };
+  // Next.js が呼ぶ形の関数。**応答を数えるのは `withResponseCount` の 1 か所**
+  // （`route()` を通らない経路も同じ関数を使うので、ラベルの写し方も try の有無も割れない）
+  const wrapped = withResponseCount(respond);
   // 「route() が包んだ」という印を付ける (列挙されない定義なので DTO や JSON には現れない)
   Object.defineProperty(wrapped, ROUTE_HANDLER_BRAND, { value: true });
   // レート制限を掛けたかも同じ形で載せる (検出網が結線そのものを読めるようにする)

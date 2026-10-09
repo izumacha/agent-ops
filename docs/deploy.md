@@ -77,6 +77,7 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 | `PLATFORM_ADMIN_TOKEN` | テナントを作るなら必須 | 32 文字以上の乱数（`openssl rand -base64 48`） |
 | `AUDIT_HMAC_SECRET` | **必須** | 32 文字以上の乱数。**未設定だと人の操作（停止・復帰・解決・ルール登録）が 503 になる** |
 | `STRIPE_WEBHOOK_SECRET` | 課金を繋ぐなら必須 | 事業者が発行する `whsec_…`。未設定だと受信を 503 で断る |
+| `METRICS_TOKEN` | 監視を繋ぐなら必須 | 32 文字以上の乱数。**収集エージェント専用の読み取り用**（`PLATFORM_ADMIN_TOKEN` を使い回さない）。未設定だと `/metrics` は 503 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | 中継・評価を使うなら | 上流の資格情報。**クライアントからは受け取らない** |
 | `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` | 任意 | 省略すると公式のエンドポイント |
 | `PROXY_RATE_LIMIT_PER_MINUTE` | 任意 | 省略すると定数の既定値 |
@@ -130,3 +131,161 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 `docs/api.md` の一覧と README の「5 分で試す」をそのまま使う。所要時間の基準
 （クリーン環境から 5 分以内）は CI の `docker-smoke` ジョブと `npm run bench:demo-ready` が
 機械で確かめている（解釈は `docs/roadmap.md` の「Step7 の受け入れ基準の解釈」）。
+
+## 監視を繋ぐ（配備後）
+
+出口は 2 つ（[ADR-0014](./adr/0014-observability.md)）。
+
+### 1. ログ（1 行 1 JSON）
+
+アプリは `stderr` へ 1 行 1 JSON を書く。収集は配備側（Vercel のログドレイン、
+コンテナのログドライバ）に任せる — アプリから外へ送る経路は持たない。
+
+```json
+{"ts":"2026-10-09T01:02:03.000Z","level":"error","event":"proxy.upstream_call_failed","message":"<LOG_EVENTS が持つ文言>","error":{"name":"TypeError","cause":{"code":"ECONNREFUSED"}}}
+```
+
+**警報は `event` の等値で組む**（文言は推敲で変わる）。語彙の一覧は
+`src/lib/log.ts` の `LOG_EVENTS` が正本で、`level` は `error` / `warn` の 2 値。
+`error` は「運用者が対処すべき」、`warn` は「縮退して続けた」の意味。
+
+**`console` のメソッドも深刻度に合わせる**（`warn` は `console.warn`、それ以外は
+`console.error`。どちらも `stderr` で、行の形は同じ）。配備側のログ基盤はメソッドで
+深刻度を付けるので、全部 `error` で出すと**利用者がログイン用トークンを 1 回打ち間違えた
+だけで ERROR のレコードが立ち**、プラットフォーム側のエラー率の警報が鳴る（行の中の
+`level` は `warn` なので、基盤の深刻度で見る運用者と文書どおり `level` で見る運用者で
+答えが割れる）。**基盤側で絞るときも、アプリ側の条件は `event` で書く。**
+上の例で `message` を伏せてあるのは**意図したもの**で、文言は正本の側で推敲してよい
+（ここに実際の文を写すと、推敲するたびにこの例だけが古くなる。`event` と `level` は
+警報の条件そのものなので写してある。この 2 つが語彙と一致することは
+`tests/docs-gate.test.ts` が `LOG_EVENTS` から導いて照合する）。
+
+### 2. メトリクス（Prometheus のテキスト形式）
+
+```bash
+curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/metrics
+```
+
+- **専用の読み取りトークン（`METRICS_TOKEN`）だけ**が読める。32 文字以上の乱数を
+  `.env` へ置き（生成例 `openssl rand -base64 48`）、同じ値をスクレイプする側へ渡す。
+  **未設定・短すぎなら 503 で誰も読めない**（fail-closed）。
+- **`PLATFORM_ADMIN_TOKEN` を代わりに使わないこと。** あちらは `POST /api/v1/tenants`
+  （応答に**新しいテナントの admin トークンの平文**が載る）と `PATCH /api/v1/tenants/{id}`
+  （プラン・課金の紐付けの変更）も通る。収集エージェントがするのは数字を読むことだけなので、
+  同じ値を配ると収集側の設定ファイルや収集サーバの侵害がそのままテナント作成・プラン変更の
+  権限になる（§15 の「このトークンは配らない」と同じ理由）。
+- **テナントの利用者には見せない**（値はテナントごとに分かれていないので、他テナントの
+  活動量が読める）。テナントが見るべき数字は画面と `GET /api/v1/usage/daily`。
+- **レート制限は前段で掛ける**（受信 Webhook と同じ）。アプリ側の枠のキーは認証済みの主体から
+  作るので、テナントを持たないこの経路にはキーが無い。照合は定数時間比較なので総当たりは
+  トークンの乱数長に対して行うことになるが、**前段で経路ごとの上限を掛けておく**こと。
+- **値はインスタンスごと。** 足し合わせるのはスクレイプ側で、サーバーレスではインスタンスが
+  短命なので `agentops_process_start_time_seconds` / `..._uptime_seconds` を見て
+  「カウンタが 0 へ戻った」ことを判別する。
+- **ただしサーバーレス（この文書が主に案内する Vercel）では、引きに行く形の収集は成り立たない。**
+  要求ごとにどのインスタンスへ届くかが決まるので、`GET /api/v1/metrics` へのスクレイプが
+  読むのは**その 1 回を処理したインスタンスの表だけ**（多くの場合、そのスクレイプ自身の
+  `GET` だけが乗っている）。他のインスタンスが処理した応答は 1 件も見えず、コールドスタート
+  ごとに 0 へ戻る。したがって **`rate(agentops_http_responses_total{status=~"5.."}[5m])` の形の
+  警報は、全要求が 500 でも鳴らない。**
+  - **サーバーレスで数を見たいなら、警報は構造化ログの `event` で組む**（下の「ログ」の節。
+    ログは 1 行ごとに収集基盤へ流れるのでインスタンスの数に依存しない）。この経路の
+    `agentops_http_responses_total` は「いま応答しているインスタンスが生きているか」の
+    健康確認として読む。
+  - 常駐のプロセス（1 台／固定台数のコンテナ）へ配備するなら、引きに行く形がそのまま成り立つ。
+  - 押す形（スクレイプを待たずに送る）は入れていない。理由と代替案は ADR-0014 の宿題。
+- **数えるのは `route()` を通る経路だけではない。** 未認証の受信 Webhook・`GET /health`・
+  画面側の CSV・`/metrics` 自身も同じ系列に乗る（**この系列が「どの経路の応答か」は分からない** —
+  ラベルは method と status だけなので、受信 Webhook の 401 と期限切れユーザートークンの 401 は
+  見分けが付かない）。
+  - **だから「署名鍵の設定ミス」「収集側の設定ミス」はログの `event` で見る**:
+    `billing.signature_rejected` / `metrics.token_rejected`。`{status="401"}` の増加は
+    「何かが 401 を積んでいる」までしか言わない。
+  - **「断った」記録と「設定が使えない」記録は間引いてある**（1 要求 1 行だと匿名の相手が
+    ログの量＝保存の費用を好きなだけ増やせる）。対象は、断った側が
+    `billing.signature_rejected` / `metrics.token_rejected` / `session.login_rejected` /
+    `session.cross_origin_action` / `health.db_unreachable`、設定が使えない側が `audit.secret_not_configured` /
+    `audit.secret_too_short` / `auth.platform_token_not_configured` /
+    `auth.platform_token_too_short` /
+    `billing.secret_not_configured` / `billing.secret_too_short` /
+    `metrics.token_not_configured` / `metrics.token_too_short` / `plan.unknown_plan`
+    （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
+    `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
+    ここが古いままなら落ちる。件数とファイル名は書かない）。
+    - **`auth.platform_token_not_configured` は「どの資格情報としても読めない値が来たとき」
+      にだけ出る。** あの照合は成功する要求もすべて通るので、読んだ場所で出すと
+      `PLATFORM_ADMIN_TOKEN` を使わない配備が毎要求 1 件を数え、警報が鳴り続ける。
+      設定漏れのまま最初の手順（`POST /api/v1/tenants`）を叩けば必ず鳴る。
+    - **「未設定」と「短すぎる」は別の出来事にしてある。** 直し方が違う（変数を足すのか、
+      値を作り直すのか）ので、同じ `event` だとログからも
+      `agentops_log_events_total` からも区別できない。
+    - **設定が使えない側も 1 度きりにはしない。** 鍵やトークンの設定漏れは直すまで続き、
+      続いていること自体が運用者の知りたいこと（たとえば `STRIPE_WEBHOOK_SECRET` の
+      設定漏れは受信 Webhook を全滅させ、事業者はバックオフののちエンドポイントを無効化する
+      ので、解約が反映されず有料の権限が残る）。1 度きりだと、その 1 行を取りこぼした配備では
+      以降どの出口にも何も現れず、`agentops_log_events_total` も 1 で止まる。
+    - **1 プロセスに 1 度だけ出すのは、率を別の出口から読める出来事に限る。** いま該当するのは
+      入口が返す読めないパスの 404（`entry.undecodable_path`）で、その率は**前段のアクセス
+      ログが 1 件ずつ持っている**。
+  - **間引きは「窓あたり 1 本」ではなく、窓の中の通算件数が 2 の冪のときだけ行にする**
+    （1 / 2 / 4 / 8 / … 件目）。行には**その時点の通算件数**が `occurrence` として載る。
+    だから**警報は「行が出たこと」で組み、規模は最後に出た行の `occurrence` で読む**。
+    - 窓あたり 1 本にして「次の行に間引いた件数を載せる」形は使えない。**止まった総当たり**
+      （1 万件叩いて去る）では次の行が永遠に来ないので、記録は 1 件目の 1 行だけになる。
+    - 2 の冪なら行数は件数の対数で収まり（1 万件でも 14 行）、**最後の行を見れば桁が分かる**。
+      行数そのものをしきい値にしないこと（対数なので「毎分 1 件」と「毎分 1 万件」で
+      行数は 1 対 14 しか違わない）。
+    - `agentops_log_events_total{event="…"}` には**毎回**積まれる。ただし**画面側
+      （Server Action）の出来事はその系列が `/metrics` から読めない**（上記の実体の違い）ので、
+      そこでは `occurrence` が唯一の規模の手掛かり。
+- **ただし `agentops_http_responses_total` は「アプリが返す HTTP 応答のすべて」ではない。**
+  乗るのは Route Handler（`src/app/**/route.ts`）の応答だけで、**数えない種類が別にある**
+  （正本は `src/lib/uncounted-response-sources.ts` の `UNCOUNTED_RESPONSE_SOURCES`。下の箇条書きはそこから
+  導いた写しで、`tests/docs-gate.test.ts` が両向きに突き合わせる）。この系列だけを見て
+  「他の通信はすべて覆われている」と読まないこと。
+  - **スクレイプ自身もこの系列に乗る。** `/metrics` も包むラッパーを通るので、1 回の収集が
+    `{method="GET",status="200"}` を 1 つ積む（実測）。系列に経路のラベルは無いので、
+    **PromQL で除くことはできない**。15 秒間隔なら 1 時間に 240 件の 200 が分母へ入るので、
+    **率（`rate(…{status=~"5.."}[5m]) / rate(…[5m])`）はこの配備では当てにならない** —
+    とくに本来の流量が少ない配備では、全要求が 500 でも率が数％に見える。**警報は率ではなく
+    5xx の絶対数**（`rate(…{status=~"5.."}[5m])`）で組むこと。401 / 503 を数えているのは
+    収集側の設定ミスを見つけるためで、そこは有用（上記のログの `event` と併せて読む）。
+  - 入口（`src/proxy.ts`）が percent-decode できないパスへ返す 404。<!--uncounted:entryProxy-->
+    入口は Route Handler とは**別のモジュール実体**で評価されるため、そこで数えてもこの
+    カウンタには入らない（本番ビルドで実測）。代わりに `entry.undecodable_path` を
+    **1 プロセスに 1 度だけ**ログへ出すので、起きたことは分かる（**同じ理由でその行数も
+    `agentops_log_events_total` には現れない**ので、警報の条件はログ側の `event` で書く）。
+    同種の要求が続いているかは**前段のアクセスログ**で見る。
+  - 画面の描画（`src/app` 配下の `.tsx`）。<!--uncounted:pageRender-->
+    Next.js は描画の応答を Route Handler として扱わないので、包める入口が無い。
+    画面の通信量・エラー率は**前段のアクセスログ**で見る。
+  - Server Action（`'use server'` のモジュール）。<!--uncounted:serverAction-->
+    同じく包める入口が無い。**ダッシュボードのログインの拒否はログに出る**ので、総当たりは
+    `session.login_rejected` で警報にする（別オリジンからの送信は
+    `session.cross_origin_action`）。**行は間引いてあるので、行数ではなく行の
+    `occurrence`（窓の中の通算件数）で規模を読む** — 行数は件数の対数なので、打ち間違いの
+    1 件と総当たりの 1 万件で 1 対 14 しか違わない（上の「間引き」の項）。**条件はログの `event` で組むこと** —
+    `agentops_http_responses_total` にも `agentops_log_events_total` にも現れない
+    （下の「ログの出来事の数は Route Handler の束の分だけ」を参照）。
+  - Next.js がルートの代わりに組み立てる応答。<!--uncounted:frameworkSynthesized-->
+    export の無いメソッドへの **405** と、自動実装される **`OPTIONS`** の 204。
+    本番ビルドで実測（3 件とも系列に現れない）。**メソッド総当たりの 405 の急増は
+    この系列では見えない**ので、前段のアクセスログで見る（405 は本文が無く `OPTIONS` は
+    `allow` だけなので、テナント固有の内容は漏れない）。
+  - Route Handler から投げた Next.js の制御フローの例外。<!--uncounted:nextControlFlow-->
+    `redirect()` / `notFound()` などは応答を Next.js が組み立てるので、アプリ側に数える場所が
+    無い（包むラッパーはこれを 500 へ写さず投げ直す。写すと遷移も 404 も起きない）。
+    **数えられないだけでなく `Cache-Control: no-store` も `Vary` も付かない**（押印も
+    ラッパーの中なので投げ直した時点で通らない）。遷移先は共通のログイン画面でテナント固有の
+    内容を持たないが、**認証付きの経路から投げるようになったら前段のキャッシュ設定を見直す**。
+    **いま投げている経路は 1 本も無い**が、画面側のルートを `requireSession()` へ寄せると
+    生まれる。前段のアクセスログで見る。
+- **`agentops_log_events_total` は Route Handler の束が実行した分だけ。** Next.js はアプリを
+  複数の束へ分けて配るので、カウンタの状態も束ごとに別の実体になる（本番ビルドで確認した束は
+  3 つ: Route Handler ／ 画面の描画と Server Action ／ 入口）。`/metrics` が読むのは
+  Route Handler の実体なので、**Server Action や入口からしか出ない出来事は系列に現れず**
+  （`session.login_rejected` / `session.cross_origin_action` / `entry.undecodable_path`）、
+  両方の層から出る出来事（`plan.unknown_plan`）は一部しか数えられない。
+  **`event` の警報はログの行で組むこと。** メトリクスの系列を条件にすると一度も発火しない。
+- **耐久する事実はここに出さない。** 利用量・コストは `GET /api/v1/usage/daily`、
+  インシデントは画面と `GET /api/v1/incidents`、操作の記録は `GET /api/v1/audit-logs`。

@@ -4,6 +4,8 @@
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { API_MESSAGES, AUDIT_HMAC_SECRET_MIN_LENGTH } from '@/lib/constants';
+import { logEventThrottled } from '@/lib/log';
+import { requireConfiguredSecret } from '@/lib/secret-gate';
 
 // 鍵を入れる環境変数の名前 (ここが唯一の参照元。.env.example とドキュメントはこの名前を指す)
 export const AUDIT_HMAC_SECRET_ENV = 'AUDIT_HMAC_SECRET';
@@ -23,12 +25,19 @@ function notConfiguredError(): ApiError {
  * 正しい倒れ方 (§9 の fail-closed。UC-09 の事後条件「監査ログに残る」を守れないまま成功を返さない)。
  */
 export function auditHmacSecret(env: NodeJS.ProcessEnv = process.env): string {
-  // 環境変数を読み、前後の空白を落とす (貼り付けの改行で長さ判定が狂わないように)
-  const configured = env[AUDIT_HMAC_SECRET_ENV]?.trim();
-  // 未設定・空文字は設定されていないのと同じ
-  if (configured === undefined || configured === '') throw notConfiguredError();
-  // 短すぎる鍵は総当たりで求められるので使わない (求められたら連鎖を作り直せる)
-  if (configured.length < AUDIT_HMAC_SECRET_MIN_LENGTH) throw notConfiguredError();
-  // 使える鍵
-  return configured;
+  // 判断（空白の落とし方・未設定を先に見ること・短さの比較）は `requireConfiguredSecret` が持ち、
+  // **どの出来事を出すかはここに残す**（語彙のキーをリテラルで書く。理由は secret-gate.ts）
+  return requireConfiguredSecret(
+    env[AUDIT_HMAC_SECRET_ENV],
+    AUDIT_HMAC_SECRET_MIN_LENGTH,
+    (reason) => {
+      // 記録してから投げる（`ApiError` は応答へ写されるだけでログを通らない）。
+      // **行は間引く**（直すまで続く状態なので 1 度きりにはせず、1 要求 1 行にもしない）
+      if (reason === 'missing') logEventThrottled('audit.secret_not_configured');
+      // 値はあるが短すぎる（未設定とは直し方が違うので別の出来事）
+      else logEventThrottled('audit.secret_too_short');
+      // どちらも 503 で倒す
+      throw notConfiguredError();
+    },
+  );
 }

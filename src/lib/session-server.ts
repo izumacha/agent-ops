@@ -11,6 +11,7 @@ import { canPerform } from '@/domain/rbac';
 import type { UserPrincipal } from '@/lib/api/auth';
 import { LOGIN_PATH } from '@/lib/constants';
 import { isSameOriginRequest } from '@/lib/csrf';
+import { logEventThrottled } from '@/lib/log';
 import {
   SESSION_COOKIE_NAME,
   clearedSessionCookieOptions,
@@ -26,17 +27,39 @@ export interface DashboardSession {
 }
 
 /**
- * 要求元が自分自身かを返す。**すべての Server Action が冒頭で呼ぶ**（CSRF 対策の 1 枚目）。
+ * 要求元が自分自身かを確かめ、**断ったときは記録もする**（CSRF 対策の 1 枚目。
+ * すべての Server Action が冒頭で呼ぶ）。
+ *
+ * **名前を `is…` にしない。** 純粋な述語に見える名前のまま記録（＋
+ * `agentops_log_events_total` への計数）という副作用を持たせると、判定だけを使いたい
+ * 呼び出し元（診断・2 段の確認・分岐の選択）が**身に覚えのない `session.cross_origin_action`
+ * を積む**。`check…` なら「確かめて、所定の後始末もする」と読めるので、署名を見ただけで
+ * 副作用があると分かる。
  *
  * ヘッダを読むのはこのファイルだけなので、判定の規則（`isSameOriginRequest`）を呼ぶ側も
  * ここに置く — 画面ごとに `headers()` を呼ぶ形にすると、`Origin` の読み方（ヘッダ名の綴りや
  * 無いときの扱い）が Server Action ごとに割れる。
+ *
+ * **断ったことはここで 1 行残す。** Server Action の応答は
+ * `agentops_http_responses_total` に乗らない
+ * （`src/lib/uncounted-response-sources.ts`）ので、ログが唯一の出口になる。**判定の呼び出し側ではなく
+ * ここで出す** — 画面ごとに書くと、Server Action を足した人が出し忘れたぶんだけ黙る。
+ *
+ * **行は間引き、数えるのは毎回**（`logEventThrottled`。窓の中の通算件数が 2 の冪の回だけ
+ * 行にし、その件数を `occurrence` に載せる）。設定の通知と違い「いま起きているか」が
+ * 知りたいことなので 1 度だけ（`logEventOnce`）にはしないが、未認証で誰でも叩ける経路なので
+ * 1 要求 1 行にもしない（未認証経路の「断った」記録はすべてこの形。理由の詳しい書き分けは
+ * `src/app/login/actions.ts`）。量は前段のレート制限でも抑える。
  */
-export async function isSameOriginAction(): Promise<boolean> {
+export async function checkSameOriginAction(): Promise<boolean> {
   // ヘッダを読む（Next.js 16 では非同期）
   const headerList = await headers();
   // Origin と Host を突き合わせる（判定の規則は csrf.ts の 1 か所）
-  return isSameOriginRequest(headerList.get('origin'), headerList.get('host'));
+  const sameOrigin = isSameOriginRequest(headerList.get('origin'), headerList.get('host'));
+  // 断ったときだけ 1 行残す（値そのものは出さない。出してよい形は定型文だけ）
+  if (!sameOrigin) logEventThrottled('session.cross_origin_action');
+  // 判定をそのまま返す
+  return sameOrigin;
 }
 
 /** Cookie からセッショントークンを読む (無ければ undefined)。 */

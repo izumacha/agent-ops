@@ -65,7 +65,7 @@ async function readBodyWithinByteLimit(request: Request, maxBytes: number): Prom
     result = await readStreamWithinByteLimit(request.body, maxBytes);
   } catch (error) {
     // 送信の途中でクライアントが切断すると read() が Node の切断エラーで reject する。サーバの障害ではないので
-    // 500 と障害ログ (handler.ts の console.error) にせず 400 で終える (日常の切断で本物の内部エラーが埋もれない)
+    // 500 と障害ログ (`toErrorResponse` が残す `api.unexpected_error`) にせず 400 で終える (日常の切断で本物の内部エラーが埋もれない)
     if (request.signal.aborted || isConnectionReset(error)) {
       throw new ApiError(HTTP_STATUS.BAD_REQUEST, API_MESSAGES.bodyIncomplete);
     }

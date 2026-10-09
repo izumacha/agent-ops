@@ -37,26 +37,47 @@
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 import { basename, dirname, join, resolve } from 'node:path';
-import { forEachNode, parseSourceFiles } from './lib/source-files';
+import {
+  callArgumentsFor,
+  forEachNode,
+  namedCallArguments,
+  parseSourceFiles,
+} from './lib/source-files';
+import { LOG_EVENTS } from '@/lib/log';
 
 // 形を決める唯一の関数の名前
 const DESCRIBE_ERROR = 'describeError';
 
+// ログの出口を所有するモジュール（**`console` を呼べるのは src 全体でここだけ**）
+const LOG_OWNER = join(process.cwd(), 'src', 'lib', 'log.ts');
+// 出口の関数の名前（呼び出し側が使う）
+const LOG_EVENT = 'logEvent';
+
+/**
+ * ログの出口の関数と、受け取れる実引数の最大数。
+ *
+ * **出口は 1 つではない。** `logEvent`（毎回 1 行）・`logEventThrottled`（窓の中の通算件数が
+ * 2 の冪の回だけ。未認証で誰でも叩ける経路の「断った」記録用）・`logEventOnce`（1 プロセスに
+ * 1 度だけ。設定の通知用）で、**どれも第 1 引数は語彙のキーのリテラル**。名前を 1 つだけ
+ * 決め打っていた頃は、間引く側へ変数や例外の `message` を渡しても**どの検査にも
+ * 掛からなかった**（この表から導くので、出口を増やす人はここへ 1 行足すことになり、
+ * 足し忘れは下の「語彙を全部出している」側が先に落とす）。
+ */
+const LOG_OUTLETS: Readonly<Record<string, number>> = {
+  // 出来事 ＋ 診断（`describeError(...)`）
+  [LOG_EVENT]: 2,
+  // 間引く側も出来事 ＋ 診断。**間引いた回の診断は消える**が、同じ障害が続いているあいだ
+  // 診断は同じ内容なので落ちるのは重複だけ（`health.db_unreachable` がその形）
+  logEventThrottled: 2,
+  // 1 度だけの側も出来事だけ（同じ理由。2 度目以降の診断が黙って消える）
+  logEventOnce: 1,
+};
+// 1 行を組み立てる関数の名前（`console` へ渡してよい形の 1 つ）
+const FORMAT_LOG_LINE = 'formatLogLine';
+
 // ログを吐く console のメソッド。**`error` だけを見ない** — 実測で `console.warn('…', error)` は
 // 素通りした。出力先が stderr か stdout かは問題ではなく、message が残ることが問題
 const CONSOLE_METHODS = new Set(['error', 'warn', 'log', 'info', 'debug', 'trace']);
-
-// テンプレートの置換に置いてよい識別子と、その理由。
-// **例外にも利用者の入力にも由来しない値だけ**を登録する。エントリが増える差分は
-// 理由の妥当性をレビューで確認する（この repo の他の除外表と同じ扱い）。
-// **ただしレビュー任せの範囲は構文で狭める** — 登録名は「モジュールスコープの `const` で
-// リテラル初期化子を持つ」ことまで要求する。そうしないと `error` / `err` / `message` の
-// ような**まさに塞ぎたい名前ほど**「src に実在する」という条件を自明に満たしてしまい、
-// 1 行足すだけで例外の message をテンプレートへ埋められた（実測で 3 件緑）
-const SAFE_SUBSTITUTIONS: Record<string, string> = {
-  PLATFORM_ADMIN_TOKEN_MIN_LENGTH:
-    '設定の下限値を表す定数。例外にも利用者の入力にも由来せず、値は公開しても差し支えない',
-};
 
 // 走査結果はモジュール評価時に 1 度だけ作る
 const SOURCES = parseSourceFiles();
@@ -76,70 +97,6 @@ function resolveModule(from: string, specifier: string): string {
     : resolve(dirname(from), specifier);
   // 拡張子が無ければ `.ts` を補う
   return /\.[cm]?tsx?$/.test(base) ? base : `${base}.ts`;
-}
-
-// そのファイルが「モジュールスコープの `const` にリテラルを入れて」宣言している名前
-function literalConstantsIn(source: ts.SourceFile): Set<string> {
-  // 見つかった名前
-  const names = new Set<string>();
-  // **文のトップレベルだけを見る**（関数の中の const は含めない）
-  for (const statement of source.statements) {
-    // `const x = …;` の形か
-    if (!ts.isVariableStatement(statement)) continue;
-    if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      // 名前と初期化子
-      const initializer = declaration.initializer;
-      if (!ts.isIdentifier(declaration.name) || initializer === undefined) continue;
-      // `as const` などの注釈は剥がして中身を見る
-      const value = ts.isAsExpression(initializer) ? initializer.expression : initializer;
-      // リテラル（数値・文字列）で初期化されていること
-      if (ts.isNumericLiteral(value) || ts.isStringLiteralLike(value))
-        names.add(declaration.name.text);
-    }
-  }
-  return names;
-}
-
-// ファイルごとの「リテラルのモジュール定数」の一覧
-const LITERAL_CONSTANTS = new Map<string, Set<string>>(
-  SOURCES.map(({ path, source }) => [path, literalConstantsIn(source)]),
-);
-
-// ファイルごとの「名前を変えずに named import した名前 → 取り込み元の絶対パス」
-function namedImportsIn(path: string, source: ts.SourceFile): Map<string, string> {
-  // 取り込んだ名前と、その出どころ
-  const imports = new Map<string, string>();
-  forEachNode(source, (node) => {
-    // `import { X } from '…'` の形だけ（`as` で付け替えたものは別物なので採らない）
-    if (!ts.isImportSpecifier(node) || node.propertyName !== undefined) return;
-    // 取り込み元の綴り
-    const from = node.parent.parent.parent.moduleSpecifier;
-    if (ts.isStringLiteralLike(from)) imports.set(node.name.text, resolveModule(path, from.text));
-  });
-  return imports;
-}
-
-// ファイルごとの named import
-const NAMED_IMPORTS = new Map<string, Map<string, string>>(
-  SOURCES.map(({ path, source }) => [path, namedImportsIn(path, source)]),
-);
-
-/**
- * **その置き場所で**、その名前がリテラルのモジュール定数を指しているか。
- * **「src のどこかに同名のリテラル定数がある」では足りない** — 一覧を全ファイルの和集合で
- * 持っていた版は、無関係なファイルの `const message = 'x'` が許可表の裏打ちになり、
- * 別のファイルで `${message}` に例外の message を入れられた（登録名と実際に埋まる値が
- * 別のファイルなので、差分を見ても対応が分からない）。
- * @param path その識別子が書かれているファイル
- * @param name 識別子
- */
-function resolvesToLiteralConstant(path: string, name: string): boolean {
-  // そのファイル自身が宣言している
-  if (LITERAL_CONSTANTS.get(path)?.has(name) === true) return true;
-  // 名前を変えずに取り込んでいて、取り込み元がリテラル定数として宣言している
-  const from = NAMED_IMPORTS.get(path)?.get(name);
-  return from !== undefined && LITERAL_CONSTANTS.get(from)?.has(name) === true;
 }
 
 // 呼び先が console のログメソッドを指しているか（分岐は「どれか 1 つでも」で見る = fail-closed）
@@ -191,104 +148,19 @@ function isConsoleCallee(expression: ts.Expression): boolean {
   return false;
 }
 
-// `f.apply(this, [引数])` / `Reflect.apply(f, this, [引数])` の第 3 引数を実引数へ開く
-function spreadArrayArgument(argument: ts.Expression | undefined): readonly ts.Expression[] {
-  // 引数が無ければログに出る値も無い
-  if (argument === undefined) return [];
-  // 配列リテラルなら中身がそのまま実引数（スプレッド要素はその式のまま判定させる）
-  if (ts.isArrayLiteralExpression(argument))
-    return argument.elements.map((element) =>
-      ts.isSpreadElement(element) ? element.expression : element,
-    );
-  // 配列リテラルでなければ中身を読めないので、その式自体を判定に回す (fail-closed)
-  return [argument];
-}
-
-// 包みを剥がしながら「元の呼び先」と「包みの種類」「`bind` で先渡しした引数」を取り出す
-function peelCallee(expression: ts.Expression): {
-  callee: ts.Expression;
-  wrapper: 'call' | 'apply' | 'bind' | null;
-  boundArguments: readonly ts.Expression[];
-} {
-  // 走査中の式と、いちばん外側の包み
-  let current: ts.Expression = expression;
-  let wrapper: 'call' | 'apply' | 'bind' | null = null;
-  const boundArguments: ts.Expression[] = [];
-  for (;;) {
-    // `( … )`
-    if (ts.isParenthesizedExpression(current)) {
-      current = current.expression;
-      continue;
-    }
-    // `a, b` のカンマ式は右端が呼び先
-    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
-      current = current.right;
-      continue;
-    }
-    // `f.call` / `f.apply` / `f.bind` は f まで戻る
-    if (
-      ts.isPropertyAccessExpression(current) &&
-      ['call', 'apply', 'bind'].includes(current.name.text)
-    ) {
-      // いちばん外側の包みだけを覚える（内側は this の付け替えなので実引数を動かさない）
-      wrapper ??= current.name.text as 'call' | 'apply' | 'bind';
-      current = current.expression;
-      continue;
-    }
-    // `f.bind(console)(…)` のように、剥がした先がさらに呼び出しなら中を見る
-    if (ts.isCallExpression(current)) {
-      // 呼び先が `f.bind` の形のときだけ辿る（無関係な呼び出しを巻き込まない）
-      const inner = current.expression;
-      if (ts.isPropertyAccessExpression(inner) && inner.name.text === 'bind') {
-        // `bind` の第 2 引数以降は呼び出し時に先頭へ渡される（ログに出る）
-        boundArguments.push(...current.arguments.slice(1));
-        current = inner.expression;
-        continue;
-      }
-    }
-    return { callee: current, wrapper, boundArguments };
-  }
-}
-
 /**
- * console のログ呼び出しなら「実際にログへ出る実引数」を返す（違えば null）。
- * **包みごとに実引数の位置が違う**ので、剥がした種類に応じて取り出す
- * （`.call` / `.bind` の先頭は this なのでログには出ない。ここを一律に判定へ回していた
- * 版は `console` という識別子を毎回「許していない形」として報告し、失敗文言が嘘になっていた）。
+ * console のログ呼び出しなら、実際にログへ出る実引数を返す（違えば null）。
+ * @param node 走査中のノード
+ * @returns 実引数（console の呼び出しでなければ null）
  */
 function consoleLogArguments(node: ts.Node): readonly ts.Expression[] | null {
-  // 呼び出しでなければ違う
-  if (!ts.isCallExpression(node)) return null;
-  // **`Reflect.apply(console.error, this, [引数])`** — 包みを剥がす経路では届かない形
-  const direct = node.expression;
-  const isReflectApply =
-    ts.isPropertyAccessExpression(direct) &&
-    ts.isIdentifier(direct.expression) &&
-    direct.expression.text === 'Reflect' &&
-    direct.name.text === 'apply';
-  if (isReflectApply) {
-    // 第 1 引数が呼び先、第 3 引数が実引数の配列
-    const target = node.arguments[0];
-    if (target === undefined || !isConsoleCallee(target)) return null;
-    return spreadArrayArgument(node.arguments[2]);
-  }
-  // 括弧・カンマ式・`.call` / `.apply` / `.bind` を剥がしてから呼び先を見る — 実測で
-  // `console.error.call(console, …)` / `.apply` / `.bind(console)(…)` /
-  // `(0, console.error)(…)` / `(console.error)(…)` の 5 形がどれも素通りした。
-  // `.call` / `.apply` は Prettier も ESLint も書き換えないので、`console[m]` と違って
-  // 「意図的に迂回した形」には見えない = レビューを通りやすい
-  const peeled = peelCallee(direct);
-  if (!isConsoleCallee(peeled.callee)) return null;
-  // 包みの種類ごとに、ログへ出る実引数を取り出す
-  if (peeled.wrapper === 'call') return [...peeled.boundArguments, ...node.arguments.slice(1)];
-  if (peeled.wrapper === 'apply')
-    return [...peeled.boundArguments, ...spreadArrayArgument(node.arguments[1])];
-  return [...peeled.boundArguments, ...node.arguments];
+  // 呼び先の判定だけを差し替えて同じ剥がし方を使う
+  return callArgumentsFor(node, isConsoleCallee);
 }
 
 // その実引数はログに出してよい形か
-function isAllowedLogArgument(argument: ts.Expression, path: string): boolean {
-  // (1) 文字列リテラル
+function isAllowedLogArgument(argument: ts.Expression): boolean {
+  // (1) 文字列リテラル・置換の無いテンプレート（`isStringLiteralLike` が両方を通す）
   if (ts.isStringLiteralLike(argument)) return true;
   // (3) `describeError(...)` の呼び出し
   if (
@@ -297,21 +169,54 @@ function isAllowedLogArgument(argument: ts.Expression, path: string): boolean {
     argument.expression.text === DESCRIBE_ERROR
   )
     return true;
-  // (2)(4) テンプレート: 置換がすべて許可表の識別子であること（置換なしもここで通る）
-  if (ts.isTemplateExpression(argument))
-    return argument.templateSpans.every(
-      (span) =>
-        ts.isIdentifier(span.expression) &&
-        // **`in` で見ない** — オブジェクトリテラルは `Object.prototype` を継承するので、
-        // `toString` / `constructor` / `valueOf` は**登録せずに許可されていた**（実測で
-        // `const toString = error instanceof Error ? error.message : String(error);` が
-        // 3 件緑を通った）。許可表を 1 文字も触らないので差分にも現れない
-        Object.hasOwn(SAFE_SUBSTITUTIONS, span.expression.text) &&
-        // **その置き場所で**リテラルのモジュール定数を指していること（他ファイルの同名は不可）
-        resolvesToLiteralConstant(path, span.expression.text),
-    );
-  // それ以外は通さない (fail-closed)
+  // (5) `formatLogLine(...)` の呼び出し。許せる理由は (3) と同じで、**受け取れる値が構造で
+  // 縛られている**から（第 1 引数は閉じた語彙のキー、第 2 引数は describeError が作った診断）。
+  // この形が現れるのは所有モジュール（src/lib/log.ts）の中だけで、それは下の
+  // 「console を呼べるのは出口のモジュールだけ」が別に固定する
+  if (
+    ts.isCallExpression(argument) &&
+    ts.isIdentifier(argument.expression) &&
+    argument.expression.text === FORMAT_LOG_LINE
+  )
+    return true;
+  // それ以外は通さない (fail-closed)。
+  // **置換を持つテンプレートは一律に通さない。** 以前は「許可表に登録した識別子だけを
+  // 置換に持つテンプレート」を許していたが、`console` を呼ぶのが出口の 1 行だけになった時点で
+  // その枝は**どの呼び出しからも到達しなくなり**、残ったのは「登録するだけで黙らせられる口」
+  // としての除外表だけだった（この repo が繰り返し避けている形）。設定値を文言へ入れたいときは
+  // 値ではなく**定数の名前**を書く（notify と log.ts の既存の文言がその形）。
   return false;
+}
+
+/**
+ * 出口の所有モジュール（`src/lib/log.ts`）が持つ、**語彙のキーと同じ綴りの文字列リテラル**。
+ *
+ * あのファイルは自分の縮退の行を自分の出口に通さない（通すと同じ理由で投げうる）ので、
+ * 出口の呼び出しからは見えない。**語彙に実在する綴りだけを拾う**ので、無関係なリテラルを
+ * 「出している」ことにはしない。
+ * @returns 見つけた綴り
+ */
+function ownerEventLiterals(): Set<string> {
+  // 語彙のキー（この集合に無い綴りは拾わない）
+  const vocabulary = new Set<string>(Object.keys(LOG_EVENTS));
+  // 見つけた綴り
+  const found = new Set<string>();
+  // 所有モジュールだけを見る
+  for (const { path, source } of SOURCES) {
+    if (path !== LOG_OWNER) continue;
+    forEachNode(source, (node) => {
+      // 文字列リテラルで、語彙に実在する綴りのものだけ
+      if (!ts.isStringLiteralLike(node)) return;
+      if (!vocabulary.has(node.text)) return;
+      // **語彙そのものの鍵は数えない。** `LOG_EVENTS` はこのファイルにあるので、鍵の
+      // リテラルまで拾うと**宣言しただけで「出している」ことになり、この検査が丸ごと死ぬ**
+      // （実測で、縮退の行を語彙の外の綴りへ戻す変異が全件緑のまま通った）
+      const parent = node.parent;
+      if (parent !== undefined && ts.isPropertyAssignment(parent) && parent.name === node) return;
+      found.add(node.text);
+    });
+  }
+  return found;
 }
 
 describe('エラーのログ出力', () => {
@@ -330,7 +235,7 @@ describe('エラーのログ出力', () => {
         inspected += 1;
         for (const argument of args) {
           // 出してよい形なら次へ
-          if (isAllowedLogArgument(argument, path)) continue;
+          if (isAllowedLogArgument(argument)) continue;
           // それ以外はそのまま失敗文言に出す
           offenders.push(
             `${path.slice(process.cwd().length + 1)}: ${argument.getText().replace(/\s+/g, ' ')}`,
@@ -343,37 +248,21 @@ describe('エラーのログ出力', () => {
     expect(
       offenders,
       `ログに出してよいのは 文字列リテラル / 置換の無いテンプレート / ${DESCRIBE_ERROR}(...) / ` +
-        '許可表の識別子だけを置換に持つテンプレート だけ (例外の message には PII や接続情報が載る)',
+        `${FORMAT_LOG_LINE}(...) だけ (例外の message には PII や接続情報が載る)`,
     ).toEqual([]);
   });
 
-  it('許可表に登録できるのはリテラルで初期化したモジュール定数だけ', () => {
-    // 手掛かりが 0 件なら走査が壊れている (fail-closed)
-    const total = [...LITERAL_CONSTANTS.values()].reduce((sum, names) => sum + names.size, 0);
-    expect(total, 'リテラルのモジュール定数を 1 つも読めない').toBeGreaterThan(0);
-    // 登録が条件を満たすこと
-    for (const [name, reason] of Object.entries(SAFE_SUBSTITUTIONS)) {
-      // **「src に識別子として現れる」だけでは足りない** — `error` / `err` / `message` の
-      // ような、まさに塞ぎたい名前ほどその条件を自明に満たす（実測で `error` を
-      // 登録するだけで例外の message をテンプレートへ埋められた）。
-      // **和集合でも足りない** — 裏打ちと使用箇所が別ファイルでよいと、無関係なファイルの
-      // `const message = 'x'` が許可の根拠になる。実際の判定は使用箇所ごとに
-      // `resolvesToLiteralConstant` が行い、ここはその名前がどこかに実在することだけを見る
-      expect(
-        SOURCES.some(({ path }) => resolvesToLiteralConstant(path, name)),
-        `${name} はリテラルで初期化したモジュール定数ではない (例外・引数・catch 束縛は登録できない)`,
-      ).toBe(true);
-      expect(reason.trim().length, `${name} の許可に理由が無い`).toBeGreaterThan(0);
-    }
-  });
-
-  it('describeError という名前の出自は所有モジュールだけ', () => {
-    // 所有モジュールの絶対パス
-    const owner = join(process.cwd(), 'src', 'lib', 'describe-error.ts');
+  /**
+   * **その名前を名乗れるのは所有モジュールだけ**、を固定する。
+   * 許可リストは名前を信頼しているので、名前の出自を縛らないと囮モジュールへ差し替えられる。
+   * @param name 縛る名前
+   * @param owner その名前を宣言してよい唯一のファイル（絶対パス）
+   */
+  function expectNameOwnedBy(name: string, owner: string): void {
     // 所有モジュールが実在すること (fail-closed)
     expect(
       SOURCES.some(({ path }) => path === owner),
-      `${DESCRIBE_ERROR} の所有モジュールが無い`,
+      `${name} の所有モジュールが無い`,
     ).toBe(true);
     // **同じ名前のファイルが 2 つ以上あれば落とす** — 取り込み元の判定を 1 つ漏らしても、
     // この独立な手がかりが囮モジュールの存在自体を捉える (fail-closed)
@@ -397,7 +286,7 @@ describe('エラーのログ出力', () => {
         // `import { describeError } from '@/lib/describe-error'` の形
         if (
           ts.isImportSpecifier(node) &&
-          node.name.text === DESCRIBE_ERROR &&
+          node.name.text === name &&
           // `as` で名前を付け替えていないこと（別物を describeError と名乗らせない）
           node.propertyName === undefined
         ) {
@@ -411,8 +300,7 @@ describe('エラーのログ出力', () => {
         }
         // **再公開も禁止** — `export { x as describeError } from './x'` は束縛の検出にも
         // 取り込み元の検出にも引っかからないまま、所有モジュールの名前を名乗れる
-        if (!isOwner && ts.isExportSpecifier(node) && node.name.text === DESCRIBE_ERROR)
-          shadowed = true;
+        if (!isOwner && ts.isExportSpecifier(node) && node.name.text === name) shadowed = true;
         // **import 以外の束縛**（`const` / `function` / 仮引数）は所有モジュール以外では禁止
         if (
           !isOwner &&
@@ -421,7 +309,7 @@ describe('エラーのログ出力', () => {
             ts.isParameter(node)) &&
           node.name !== undefined &&
           ts.isIdentifier(node.name) &&
-          node.name.text === DESCRIBE_ERROR
+          node.name.text === name
         )
           shadowed = true;
         // **分割代入で覆う形も禁止** — `const { describeError } = deps;` や
@@ -432,14 +320,14 @@ describe('エラーのログ出力', () => {
           !isOwner &&
           ts.isBindingElement(node) &&
           ts.isIdentifier(node.name) &&
-          node.name.text === DESCRIBE_ERROR
+          node.name.text === name
         )
           shadowed = true;
         // 呼び出し
         if (
           ts.isCallExpression(node) &&
           ts.isIdentifier(node.expression) &&
-          node.expression.text === DESCRIBE_ERROR
+          node.expression.text === name
         )
           calls = true;
       });
@@ -456,6 +344,131 @@ describe('エラーのログ出力', () => {
     // 縛るのが要。実測で、`src/lib/stream-bytes.ts` の import 1 行を同名の `const`
     // パススルーへ差し替えるだけで、tsc・eslint・851 件すべてが件数まで含めて
     // ベースラインと完全一致のまま緑になり、生の例外が console.error へ流れた
-    expect(offenders, `${DESCRIBE_ERROR} は所有モジュールのものだけを使う`).toEqual([]);
+    expect(offenders, `${name} は所有モジュールのものだけを使う`).toEqual([]);
+  }
+
+  it.each([
+    [DESCRIBE_ERROR, join(process.cwd(), 'src', 'lib', 'describe-error.ts')],
+    [LOG_EVENT, LOG_OWNER],
+    [FORMAT_LOG_LINE, LOG_OWNER],
+  ])('%s という名前の出自は所有モジュールだけ', (name, owner) => {
+    // 3 つとも「許可リストが名前を信頼している」関数なので、同じ縛りを掛ける
+    expectNameOwnedBy(name, owner);
+  });
+
+  it('console を呼べるのは出口のモジュールだけ', () => {
+    // **これが規則の中心**。以前は「実引数が安全な形なら、どのファイルからでも console を
+    // 呼んでよい」だったので、文言は人間向けの散文のままで、出来事の種類で集計も警報も作れなかった。
+    // 出口を 1 本に閉じると、呼び出し側が渡せるのは閉じた語彙のキーだけになる（下の it）
+    const offenders: string[] = [];
+    // 実際に見た console のログ呼び出しの件数（0 なら走査が空振りしている）
+    let inspected = 0;
+    for (const { path, source } of SOURCES)
+      forEachNode(source, (node) => {
+        // console のログ呼び出しでなければ関係ない
+        if (consoleLogArguments(node) === null) return;
+        inspected += 1;
+        // 出口のモジュール以外で呼んでいれば違反
+        if (path !== LOG_OWNER) offenders.push(path.slice(process.cwd().length + 1));
+      });
+    // 1 件も見ていなければ走査が壊れている (fail-closed)
+    expect(inspected, 'console のログ呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
+    // 違反があれば直し方まで文言に書く
+    expect(
+      [...new Set(offenders)],
+      `console を直接呼ばず ${LOG_EVENT}('<${Object.keys(LOG_EVENTS)[0]} のような語彙のキー>') を使う ` +
+        '(出口が 1 本だと、出来事の種類で集計・警報を作れる)',
+    ).toEqual([]);
+  });
+
+  it(`ログの出口の実引数は語彙のキーと ${DESCRIBE_ERROR}(...) だけ`, () => {
+    // 規約を破っている箇所
+    const offenders: string[] = [];
+    // 実際に見た呼び出しの件数（0 なら走査が空振りしている）
+    let inspected = 0;
+    for (const { path, source } of SOURCES) {
+      // **出口を所有するモジュール自身は対象外。** あのファイルの中では間引く側が
+      // 毎回出す側へ転送するので、第 1 引数は必ず変数になる（`console` を呼べるのが
+      // あのファイルだけなのと同じ理由で、実装の内側は規約の対象にしない）。
+      // 呼び出し側（`src` の他のファイル）が変数を渡す形は引き続き落ちる
+      if (path === LOG_OWNER) continue;
+      forEachNode(source, (node) => {
+        // **出口の表から導いて**どれかの呼び出しを探す（名前を決め打つと 2 つ目が素通りする）
+        const outlet = Object.keys(LOG_OUTLETS).find(
+          (name) => namedCallArguments(node, name) !== null,
+        );
+        if (outlet === undefined) return;
+        // その出口の実引数（**包みを剥がしてから**。理由は namedCallArguments）
+        const args = namedCallArguments(node, outlet);
+        if (args === null) return;
+        inspected += 1;
+        // 置き場所を失敗文言に出すための見出し
+        const where = `${path.slice(process.cwd().length + 1)}: ${node
+          .getText()
+          .replace(/\s+/g, ' ')
+          .slice(0, 80)}`;
+        // 第 1 引数は**語彙に実在するキーの文字列リテラル**だけ（変数だと語彙の網羅を照合できない）
+        const first = args[0];
+        if (
+          first === undefined ||
+          !ts.isStringLiteralLike(first) ||
+          !Object.hasOwn(LOG_EVENTS, first.text)
+        )
+          offenders.push(`${where} (第 1 引数が語彙のキーのリテラルでない)`);
+        // 第 2 引数は `describeError(...)` だけ（例外に触れてよいのは相変わらずあの関数だけ）
+        const second = args[1];
+        if (
+          second !== undefined &&
+          !(
+            ts.isCallExpression(second) &&
+            ts.isIdentifier(second.expression) &&
+            second.expression.text === DESCRIBE_ERROR
+          )
+        )
+          offenders.push(`${where} (第 2 引数が ${DESCRIBE_ERROR}(...) でない)`);
+        // 出口ごとの上限を超えたら落とす（型でも拒むが、署名を広げる変更を構文で止める）
+        const maxArgs = LOG_OUTLETS[outlet] ?? 0;
+        if (args.length > maxArgs) offenders.push(`${where} (実引数が多い: ${outlet})`);
+      });
+    }
+    // 1 件も見ていなければ走査が壊れている (fail-closed)
+    expect(inspected, 'ログの出口の呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
+    // 違反があれば落とす
+    expect(offenders, `ログの出口に渡せるのは語彙のキーと ${DESCRIBE_ERROR}(...) だけ`).toEqual([]);
+  });
+
+  it('語彙に宣言した出来事はどれも実際に出している', () => {
+    // **宣言だけして使わない値を置かない**（`src/domain/audit/action.ts` と同じ流儀）。
+    // 使われない語彙は「この出来事は監視できる」という誤解を生み、警報の条件が永久に空振りする
+    const emitted = new Set<string>();
+    for (const { source } of SOURCES)
+      forEachNode(source, (node) => {
+        // `logEvent('<キー>')` の第 1 引数を集める。**実引数の取り出しは
+        // `namedCallArguments` に任せる** — 素の識別子の呼び出しだけを見ていた版は、
+        // 同じファイルが実引数の形の検査のために剥がしている包み方（`(0, logEvent)(...)` /
+        // `.call` / `Reflect.apply`）をここでは剥がしておらず、**同じ 1 つの網の片方だけが
+        // 緩い写し**になっていた（倒れる向きは誤った赤だが、写しは必ずどちらかが古くなる）
+        // **出口の表から導く**（片方だけを見ると、その出口からしか出さない出来事が
+        // 「宣言だけで出していない」と誤って報告される）
+        for (const name of Object.keys(LOG_OUTLETS)) {
+          const args = namedCallArguments(node, name);
+          if (args === null) continue;
+          const first = args[0];
+          if (first !== undefined && ts.isStringLiteralLike(first)) emitted.add(first.text);
+        }
+      });
+    // **出口の所有モジュールが自分で名乗る分も数える。** `formatLogLine` は整形が失敗した
+    // ときに「ログの出口自身が縮退した」という行を出すが、それは自分の出口を通らない
+    // （通せば同じ理由で投げうる）。語彙の中の綴りとして `src/lib/log.ts` に書いてあれば
+    // 出していると認める — 認めないと、**その行を語彙の外の綴りにする**しかなくなり、
+    // 運用者が `LOG_EVENTS` から警報を組めない行が生まれる（それが直前の状態だった）
+    for (const literal of ownerEventLiterals()) emitted.add(literal);
+    // 語彙が空なら走査が壊れている (fail-closed)
+    expect(Object.keys(LOG_EVENTS).length, '語彙が空').toBeGreaterThan(0);
+    // 出していないキーを並べる
+    expect(
+      Object.keys(LOG_EVENTS).filter((event) => !emitted.has(event)),
+      '語彙にあるのに src のどこからも出していない出来事がある',
+    ).toEqual([]);
   });
 });

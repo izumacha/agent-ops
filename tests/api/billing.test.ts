@@ -12,11 +12,15 @@ import { BILLING_SIGNATURE_HEADER } from '@/lib/billing/signature';
 import { BILLING_PRICE_LOOKUP_KEYS } from '@/lib/billing/events';
 import { PLAN_FEATURES, PLAN_LIMITS, planAllows } from '@/domain/plan';
 import { Plan } from '@/domain/types';
+import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 import { API_MESSAGES, PROXY_RATE_LIMIT_ENV } from '@/lib/constants';
+import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { BILLING_SECRET, PLATFORM_TOKEN, call, seedEachTest } from './helpers';
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { AuditAction, AuditTargetType } from '@/domain/audit/action';
 import { PLAN_CHANGE_LINK, PLAN_CHANGE_SOURCE } from '@/lib/billing/apply-plan';
+import { captureLogOutlet, loggedEvents, parseLoggedLine } from '../lib/log-lines';
+import { resetThrottledLogsForTesting } from '@/lib/log';
 
 // seed（各テストの前に作り直す）
 const seed = seedEachTest();
@@ -222,6 +226,59 @@ describe('POST /billing/webhook', () => {
     expect(await planOfA()).toBe(Plan.free);
   });
 
+  // **この経路も応答を数える**（ADR-0014）。`route()` を通らないので、数える結線が外れると
+  // メトリクスにもログにも 1 件も現れない。未認証で誰でも叩ける経路なので、署名鍵の設定ミスや
+  // なりすましの総当たりで 401 が積まれても運用者が気付けなくなる
+  it('署名が合わなかった応答も数える（401 の山が外から読める）', async () => {
+    // カウンタを空にしてから 1 回だけ叩く
+    resetMetricsForTesting();
+    // 署名を付けずに呼ぶ（401）
+    const result = await call(receiveBillingWebhook, {
+      method: 'POST',
+      rawBody: JSON.stringify(webhookBody({ plan: Plan.enterprise })),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(result.status).toBe(401);
+    // その応答が系列に 1 件乗っている
+    expect(renderMetrics()).toContain(
+      'agentops_http_responses_total{method="POST",status="401"} 1',
+    );
+    // **キャッシュ制御も包む側が 1 度だけ付ける** — このルートが自分でも付けていた頃は、
+    // `Vary: Authorization, Authorization` を返していた（実測）
+    expect(result.headers.get('cache-control')).toBe(NO_STORE_CACHE_CONTROL);
+    expect(result.headers.get('vary')).toBe('Authorization, Cookie');
+  });
+
+  // **401 を読むのは系列ではなくログ。** 系列には経路を示すラベルが無いので、期限切れ
+  // ユーザートークンの POST 401 と区別できない。しかもサーバーレスでは引きに行く収集が
+  // 成り立たない（`docs/deploy.md`）。共有シークレットのローテーションをし損ねて全配信が
+  // 401 になった状態を無言にしないため、ここで 1 行出す
+  it('署名が合わなかったことをログに残す（鍵の設定ミスを無言にしない）', async () => {
+    // 間引きの記憶を忘れる（前のテストが 1 本出していると窓の中になる）
+    resetThrottledLogsForTesting();
+    // ログを端末へ出さない（この出来事は warn なので `console.warn`）
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // 署名を付けずに 2 回叩く
+      for (let i = 0; i < 2; i += 1) {
+        const result = await call(receiveBillingWebhook, {
+          method: 'POST',
+          rawBody: JSON.stringify(webhookBody({ plan: Plan.enterprise })),
+          headers: { 'content-type': 'application/json' },
+        });
+        expect(result.status).toBe(401);
+      }
+      // **行は 2 の冪の回だけ**（2 件なのでどちらも冪＝2 本出る）。1 万件なら 14 本に収まり、
+      // 最後の行の `occurrence` が規模を表す（率は `agentops_log_events_total` にも残る）
+      expect(loggedEvents(spy.mock.calls)).toEqual([
+        'billing.signature_rejected',
+        'billing.signature_rejected',
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('別の鍵で署名した本文は 401（鍵を知らない相手は通れない）', async () => {
     // **これが通ると誰でも任意のテナントを enterprise へ上げられる**
     await linkCustomer();
@@ -233,15 +290,37 @@ describe('POST /billing/webhook', () => {
     expect(await planOfA()).toBe(Plan.free);
   });
 
-  it('共有シークレットが未設定なら 503（検証を飛ばして受け入れない）', async () => {
+  it('共有シークレットが未設定なら 503 で、続いていることが記録に残る', async () => {
     // 鍵を消す（この経路を主題にするテストだけが明示的に消す）
     vi.stubEnv('STRIPE_WEBHOOK_SECRET', '');
-    await linkCustomer();
-    const result = await postWebhook(webhookBody({ plan: Plan.enterprise }));
-    expect(result.status).toBe(503);
-    expect(await planOfA()).toBe(Plan.free);
-    // 後片付け
-    vi.unstubAllEnvs();
+    // 「1 度だけ」の記憶を忘れる（前のテストが出していると、ここで出ない）
+    resetThrottledLogsForTesting();
+    // 出口を捕まえる（深刻度でメソッドが分かれるので両方）
+    const outlet = captureLogOutlet();
+    try {
+      await linkCustomer();
+      const result = await postWebhook(webhookBody({ plan: Plan.enterprise }));
+      expect(result.status).toBe(503);
+      expect(await planOfA()).toBe(Plan.free);
+      // 2 通目も 503（検証を飛ばして受け入れることはしない）
+      expect((await postWebhook(webhookBody({ plan: Plan.pro }))).status).toBe(503);
+      // **行が残る。** `ApiError` は包む側でログを通らない（応答へ写すだけ）ので、ここで
+      // 出さないと鍵の設定漏れが**どの出口にも現れない** — 事業者は 503 を受けてバックオフの
+      // のちエンドポイントを無効化するので、解約の反映が止まって有料の権限が残り続ける。
+      // **1 度きりにはしない**（直すまで続く状態なので、続いていることと規模を残す）。
+      // 間引きは窓の中の通算件数が 2 の冪の回だけなので、2 通で 2 本
+      expect(loggedEvents(outlet.calls())).toEqual([
+        'billing.secret_not_configured',
+        'billing.secret_not_configured',
+      ]);
+      // 2 本目は通算 2 件目であることを言う（規模は最後の行の `occurrence` で読む）
+      expect(parseLoggedLine(outlet.calls()[1])).toMatchObject({ occurrence: 2 });
+    } finally {
+      outlet.restore();
+      // 後片付け
+      vi.unstubAllEnvs();
+      resetThrottledLogsForTesting();
+    }
   });
 
   it('顧客 ID に対応するテナントが無ければ記録だけして 200', async () => {
@@ -364,15 +443,32 @@ describe('POST /billing/webhook', () => {
     });
   });
 
-  it('監査ログの鍵が無ければ 503 で、受信記録も残さない', async () => {
+  it('監査ログの鍵が無ければ 503 で、受信記録も残さず記録が残る', async () => {
     // **記録してから反映に失敗すると、再送は「2 通目」として無視され永久に反映されない。**
     // 鍵が無いなら 1 行も記録せず 503 を返し、事業者の再送でやり直させる
     await linkCustomer();
     vi.stubEnv('AUDIT_HMAC_SECRET', '');
+    // 「1 度だけ」の記憶を忘れてから出口を捕まえる
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
     const body = webhookBody({ plan: Plan.pro, eventId: 'evt_no_audit' });
-    expect((await postWebhook(body)).status).toBe(503);
-    // 鍵を戻すと、同じイベントがやり直せる（記録が残っていれば duplicate で無視されてしまう）
-    vi.unstubAllEnvs();
+    try {
+      expect((await postWebhook(body)).status).toBe(503);
+      // 2 通目も 503（鍵が無いあいだは何も反映しない）
+      expect((await postWebhook(body)).status).toBe(503);
+      // **鍵が無いことが記録に残る** — 残さないと「人の操作と課金の反映が全部 503」という
+      // 状態がどの出口にも現れない（応答の系列には経路のラベルが無い）。間引きは窓の中の
+      // 通算件数が 2 の冪の回だけなので、2 通で 2 本（1 件目と 2 件目）
+      expect(loggedEvents(outlet.calls())).toEqual([
+        'audit.secret_not_configured',
+        'audit.secret_not_configured',
+      ]);
+    } finally {
+      outlet.restore();
+      // 鍵を戻すと、同じイベントがやり直せる（記録が残っていれば duplicate で無視されてしまう）
+      vi.unstubAllEnvs();
+      resetThrottledLogsForTesting();
+    }
     expect((await postWebhook(body)).json).toEqual({ received: true, applied: true });
     expect(await planOfA()).toBe(Plan.pro);
   });

@@ -195,6 +195,15 @@ export const UNCOUNTED_RESPONSE_SOURCES = {
   // いま投げている経路は 1 本も無いが、画面側の CSV を `currentSession()` から
   // `requireSession()` へ寄せる 1 行の整理で生まれる（`response-count.ts` がその例を挙げている）
   nextControlFlow: 'Route Handler から投げた Next.js の制御フローの例外（応答は Next.js が作る）',
+  // **Next.js がルートの代わりに組み立てる応答**（実測）。export の無いメソッドへの 405 と、
+  // 自動実装される `OPTIONS` の 204 がこれ。本番ビルドで `PUT /api/v1/health` → 405・
+  // `DELETE /api/v1/metrics` → 405・`OPTIONS /api/v1/metrics` → 204 を叩いてから `/metrics` を
+  // 読むと、3 件とも系列に 1 つも現れなかった（`auto-implement-methods` が応答を作るので
+  // ラッパーを通らない。同じ理由で `no-store` も `Vary` も付かない — ただし 405 は本文が無く、
+  // `OPTIONS` は `allow` だけなので、テナント固有の内容は漏れない）。
+  // **メソッド総当たりの 405 の急増は、この系列では見えない**（前段のアクセスログで見る）
+  frameworkSynthesized:
+    'Next.js がルートの代わりに組み立てる応答（export の無いメソッドの 405・自動実装の OPTIONS）',
 } as const;
 
 /** 数えない応答の種類の名前（上の表の鍵） */
@@ -348,11 +357,18 @@ export function renderMetrics(now: Date): string {
  * **閉じた集合にする** — `request.method` をそのまま入れると、未知のメソッドを送るだけで
  * 系列を増やせる（ラベルの値を外から決められる形そのものを残さない）。
  *
- * **`HEAD` と `OPTIONS` も入れる。** Next.js の App Router は `HEAD` を **`GET` の
- * ハンドラを呼んで**応えるし、`OPTIONS` は自分で実装する（どちらも export は要らない）。
- * つまり「export の無いメソッドは 405 で届かない」は成り立たず、外していた版では
- * 死活監視の `HEAD` が**未知・敵対的なメソッド用のまとめ先 `other`** に積まれていた
- * （警報に使える信号ではなくなる）。
+ * **`HEAD` を入れる理由（実測）**: Next.js の App Router は `HEAD` を **`GET` のハンドラを
+ * 呼んで**応えるので、export が無くてもラッパーに届く。つまり「export の無いメソッドは 405 で
+ * 届かない」は成り立たず、外していた版では死活監視の `HEAD` が**未知・敵対的なメソッド用の
+ * まとめ先 `other`** に積まれていた（警報に使える信号ではなくなる）。
+ *
+ * **`OPTIONS` を入れる理由は `HEAD` とは違う。** Next.js が自分で実装する `OPTIONS` は
+ * **ラッパーを通らない**（だから数えられない。`UNCOUNTED_RESPONSE_SOURCES` の
+ * `frameworkSynthesized`）。ここに入れてあるのは**ルートが自分で `OPTIONS` を export した
+ * とき**のためで、そのときは他の export と同じくラッパーを通る（`tests/route-wrapping.test.ts`
+ * が全 export に印を要求する）。いま export しているルートは 1 本も無いので、この値は
+ * **出るとしたらそのときだけ**。「Next が自分で実装するから入れる」という以前の説明は
+ * 向きが逆で、読み手に「自動の `OPTIONS` も数えられている」と誤読させる。
  */
 export const KNOWN_METHODS = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'] as const;
 
@@ -389,6 +405,7 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set(
  *
  * 級へ丸めれば集合は閉じたまま（+4 値）で、成功した中継は `2xx` として読める。
  */
+// **1xx は入れない** — `Response` の status は 200〜599 なので応答として返らない
 const STATUS_CLASS_LABELS = ['2xx', '3xx', '4xx', '5xx'] as const;
 
 /** ステータスの級を表すラベル値の型 */
@@ -401,9 +418,10 @@ const STATUS_CLASS_DIVISOR = 100;
  * ステータスをラベル値へ写す。
  *
  * 1. `HTTP_STATUS` にある番号はその値（アプリ自身が返すものは 1 件ずつ読みたい）。
- * 2. それ以外で級が分かるもの（100〜599）は級（`2xx` 等）。上流から中継した番号がここへ来る。
+ * 2. それ以外で級が**閉じた集合にある**もの（200〜599）は級（`2xx` 等）。上流から中継した
+ *    番号がここへ来る。
  * 3. どちらでもない値は `other`（**未知・敵対的な値のまとめ先**。`Response` の status は
- *    200〜599 に限られるので、普通の経路ではここへ来ない）。
+ *    200〜599 に限られるので、1xx も範囲外も普通の経路ではここへ来ない）。
  * @param status 応答のステータス
  * @returns ラベル値
  */

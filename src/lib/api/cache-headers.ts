@@ -53,7 +53,8 @@ export function withPrivateCacheHeaders(response: Response): Response {
  * 意味の無い項目が増える）。比較は大文字小文字を無視する（フィールド名は大文字小文字を
  * 区別しない）。
  * @param vary いまの `Vary` の値（無ければ null）
- * @param field 並んでいるか調べる項目（小文字で渡す）
+ * @param field 並んでいるか調べる項目（**綴りは問わない** — この関数が両辺を小文字へそろえる。
+ *   呼び出し側の `CREDENTIAL_HEADERS` はヘッダ名の慣習どおり大文字始まりで持つ）
  * @returns 既に並んでいれば true
  */
 function varyLists(vary: string | null, field: string): boolean {

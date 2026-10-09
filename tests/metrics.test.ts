@@ -144,6 +144,19 @@ describe('メトリクスのカウンタ', () => {
     expect(valueOf(text, 'agentops_metrics_series_dropped_total')).toBe(1);
   });
 
+  it('捨てた数のカウンタは COUNTS の外で数える（ラベルを渡しても系列を作らない）', () => {
+    // **この分岐が上限の不変条件を保っている唯一の場所** — `COUNTS` の中で数えていた頃は、
+    // 上限に達して**最初に**捨てるときにその系列を作るので `COUNTS.size` が上限を 1 本超えた。
+    // 以前はこのカウンタを `renderMetrics` の出力からしか読んでおらず、
+    // `incrementCounter` を直接呼ぶテストが 1 つも無かったので、**分岐を消しても全件緑**だった
+    incrementCounter('agentops_metrics_series_dropped_total', { event: 'x', level: 'error' });
+    const text = renderMetrics(new Date());
+    // ラベル付きの系列は作られない（渡したラベルは無視される）
+    expect(text).not.toContain('agentops_metrics_series_dropped_total{');
+    // 値はラベル無しの 1 系列として増える
+    expect(valueOf(text, 'agentops_metrics_series_dropped_total')).toBe(1);
+  });
+
   it('上限に達しても既にある系列は増やせる', () => {
     // 上限ちょうどまで埋める
     for (let i = 0; i < MAX_METRIC_SERIES; i += 1)

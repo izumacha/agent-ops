@@ -196,6 +196,11 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     同じく包める入口が無い。**ダッシュボードのログインの拒否はログに出る**ので、総当たりは
     `session.login_rejected` の増加で警報にできる（別オリジンからの送信は
     `session.cross_origin_action`）。`agentops_http_responses_total` では見えない。
+  - Next.js がルートの代わりに組み立てる応答。<!--uncounted:frameworkSynthesized-->
+    export の無いメソッドへの **405** と、自動実装される **`OPTIONS`** の 204。
+    本番ビルドで実測（3 件とも系列に現れない）。**メソッド総当たりの 405 の急増は
+    この系列では見えない**ので、前段のアクセスログで見る（405 は本文が無く `OPTIONS` は
+    `allow` だけなので、テナント固有の内容は漏れない）。
   - Route Handler から投げた Next.js の制御フローの例外。<!--uncounted:nextControlFlow-->
     `redirect()` / `notFound()` などは応答を Next.js が組み立てるので、アプリ側に数える場所が
     無い（包むラッパーはこれを 500 へ写さず投げ直す。写すと遷移も 404 も起きない）。

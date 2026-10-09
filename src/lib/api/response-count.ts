@@ -41,12 +41,20 @@ import { logEvent } from '@/lib/log';
  * （どちらも実測。`src/lib/describe-error.ts` が「`'cause' in error` はゲッターを起こさないが
  * 続く読み出しは起こす」と記録しているのと同じ罠）。そうなると応答が組み立てられず、
  * 500 の契約も `api.unexpected_error` のログも `countHttpResponse` もまとめて飛ぶ。
- * **`digest` だけを持つ素のオブジェクト**を渡せば、上流の判定は同じまま `cause` を辿らない
+ * **`digest` だけを持つ素のオブジェクト**を渡せば `cause` を辿らない
  * （`instanceof Error` が false になるため）。
  *
- * **代償**: 制御フローの例外が別の例外の `cause` に包まれている形は見分けられない
- * （上流はそこまで辿る）。そのときは従来どおり 500 の応答になる＝この差分より前と同じ倒れ方で、
- * 新しい壊れ方は持ち込まない。
+ * **代償は 2 つあり、どちらも「見分けられない＝従来どおり 500」側へ倒れる。**
+ * 1. 制御フローの例外が**別の例外の `cause` に包まれている**形（上流はそこまで辿る）。
+ * 2. **`digest` を見ない判定**は成立しない。上流の 7 本のうち `digest` を見るのは
+ *    `isNextRouterError`（`redirect()` / `notFound()` / `forbidden()` / `unauthorized()`）・
+ *    `isBailoutToCSRError`・`isDynamicServerError`・`isHangingPromiseRejectionError` で、
+ *    残る `isPostpone`（`$$typeof` を見る）・`isDynamicPostpone`（`message` を見る）・
+ *    `isPrerenderInterruptedError`（`instanceof Error` ＋ `name` / `message` を要求）は
+ *    素のオブジェクトでは false になる。**この 3 本は PPR / `cacheComponents` の prerender 中の
+ *    合図**で、`next.config.ts` はどちらも有効にしていないので Route Handler の経路では
+ *    起こらない。**有効にするときはここを読み直すこと** — そのままだと prerender の中断が
+ *    500 の JSON へ写り、`api.unexpected_error` の警報まで鳴る。
  * @param error 受け取った例外
  * @returns 制御フローの例外なら true
  */

@@ -133,6 +133,14 @@ PII が、pg のプールエラー経由で接続文字列が載る）。
     実体の中での話**で、docstring をそう書き直した。
   - 画面の描画（`src/app` 配下の `.tsx`）。<!--uncounted:pageRender-->
     Next.js は描画の応答を Route Handler として扱わないので、包める入口が無い。
+  - Next.js がルートの代わりに組み立てる応答。<!--uncounted:frameworkSynthesized-->
+    export の無いメソッドへの 405 と、自動実装される `OPTIONS` の 204
+    （`auto-implement-methods` が応答を作るのでラッパーを通らない。本番ビルドで実測:
+    `PUT /api/v1/health` → 405・`DELETE /api/v1/metrics` → 405・`OPTIONS /api/v1/metrics`
+    → 204 を叩いた後、3 件とも系列に 1 つも現れなかった）。同じ理由で `no-store` も `Vary` も
+    付かないが、405 は本文が無く `OPTIONS` は `allow` だけなのでテナント固有の内容は漏れない。
+    **この種類は検出網では見つけられない** — `src/app` 配下の分類ガードは「ファイル」しか
+    見ないので、フレームワークの継ぎ目は**実測で見つけて表へ足す**しかない。
   - Route Handler から投げた Next.js の制御フローの例外。<!--uncounted:nextControlFlow-->
     包むラッパーは `redirect()` / `notFound()` / `forbidden()` / `unauthorized()` を**応答へ
     写さず投げ直す**（写すと遷移も 404 も起きず 500 の JSON になり、`api.unexpected_error` の
@@ -154,9 +162,13 @@ PII が、pg のプールエラー経由で接続文字列が載る）。
   1 回分ずれる（実測: プロセスは 35 秒生きているのに稼働秒数が 29.774 を返した）。
   検査も `process.uptime()` と突き合わせ、**モジュールを 1.2 秒遅らせて読み直す**
   （遅らせない版では素の `Date.now()` へ戻す変異が全件緑で通った）。
-- **`HEAD` と `OPTIONS` はラベルの閉じた集合に入れる。** Next.js の App Router は `HEAD` を
-  `GET` のハンドラで応え、`OPTIONS` は自分で実装するので、外していた版では死活監視の `HEAD` が
+- **`HEAD` と `OPTIONS` はラベルの閉じた集合に入れるが、理由は別。** Next.js の App Router は
+  `HEAD` を `GET` のハンドラで応えるので**ラッパーに届く**。外していた版では死活監視の `HEAD` が
   「未知・敵対的なメソッド」のまとめ先 `other` に積まれていた（警報に使える信号ではなくなる）。
+  **`OPTIONS` は逆で、Next.js が自分で実装するものはラッパーを通らない**（上の
+  `frameworkSynthesized`）。集合に入れてあるのは**ルートが自分で `OPTIONS` を export した
+  とき**のためで、いま export しているルートは 1 本も無い。「Next が自分で実装するから入れる」
+  という以前の説明は向きが逆で、「自動の `OPTIONS` も数えられている」と誤読させていた。
 
 ### 3-b. `/metrics` は専用の読み取りトークンで守る
 

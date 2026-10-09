@@ -38,6 +38,8 @@ tags:
     description: 契約プランの参照と課金事業者からの受信 Webhook (Step6)
   - name: metrics
     description: プロセス内のカウンタの出口 (Prometheus のテキスト形式。運用の観測。ADR-0014)
+  - name: maintenance
+    description: 保守の定期実行 (ガードレールの定期掃きとレート制限の記録の回収。ADR-0016)
 security:
   - bearerAuth: []
 paths:
@@ -1396,6 +1398,50 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /maintenance/run:
+    post:
+      tags: [maintenance]
+      operationId: runMaintenance
+      summary: |
+        保守の定期実行 (プラットフォーム管理者のみ)。スケジューラから繰り返し叩く
+
+        2 つの後片付けを 1 要求ぶんだけ進める: (1) **ガードレールの定期掃き** —
+        集計窓から古い行が抜けるだけでしきい値を越えるルール (エラー率・品質) は、
+        使われなくなったエージェントでは判定を起こす要求が無いので永久に発火しない。
+        (2) **レート制限の記録の回収** — 二度と来ないキー (解約したテナント) の行は誰も消さない。
+
+        **1 要求でやる仕事には上限があり、続きはカーソルで返る。** `passComplete` が真に
+        なるまで `nextTenantCursor` / `nextAgentCursor` をそのまま送り返して繰り返す
+        (`null` のカーソルは送らない)。`failed` が 0 でなくても 200 を返す — 一巡を回し切ること
+        自体が仕事なので、500 にすると呼び出し側が続きのカーソルを受け取れずそれ以降が
+        丸ごと判定されない。件数は応答で見える (サーバログにも 1 行ずつ残る)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceRunRequest'
+      responses:
+        '200':
+          description: 1 要求ぶん進めた
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceRunResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
 components:
   securitySchemes:
     bearerAuth:
@@ -2346,6 +2392,76 @@ components:
         agentId:
           type: string
           description: 判定対象のエージェント (自テナントのもの。見つからなければ 404)
+    MaintenanceRunRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        tenantCursor:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: 続きのテナント (前回応答の nextTenantCursor)。省略すると先頭から = 新しい一巡の開始
+        agentCursor:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: 続きのエージェント (前回応答の nextAgentCursor)。省略するとそのテナントの先頭から
+        agentBudget:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+          description: この要求で判定するエージェント数の上限 (大きくするほど 1 要求が長くなる)
+    MaintenanceRunResult:
+      type: object
+      required:
+        [
+          rateLimitHitsDeleted,
+          rateLimitSweepComplete,
+          agentsEvaluated,
+          rulesEvaluated,
+          fired,
+          failed,
+          passComplete,
+          nextTenantCursor,
+          nextAgentCursor,
+        ]
+      properties:
+        rateLimitHitsDeleted:
+          type: integer
+          description: 消したレート制限の記録の件数 (回収は一巡の開始でだけ行うので、それ以外では 0)
+        rateLimitSweepComplete:
+          type: boolean
+          description: >-
+            回収しきったか。false ならまだ消せる行が残っており、そのときは**テナントを 1 件も
+            歩かずに**戻る (passComplete も偽・カーソルも両方 null になるので、呼び出し側は
+            同じ呼び方をもう一度するだけでよい)
+        agentsEvaluated:
+          type: integer
+          description: 判定を試みたエージェントの件数
+        rulesEvaluated:
+          type: integer
+          description: 判定しきったルールの件数 (全エージェントぶんの合計)
+        fired:
+          type: integer
+          description: 発火したルールの件数 (全エージェントぶんの合計)
+        failed:
+          type: integer
+          description: >-
+            判定できなかったルールの件数 + 判定そのものが失敗したエージェントの件数。
+            0 でなければ掃きが取りこぼしている (詳細はサーバログ)
+        passComplete:
+          type: boolean
+          description: >-
+            やることが何も残っていないか。**カーソルの null では表せない** — 記録の回収を
+            打ち切ったときはテナントを 1 件も歩かず「続きは先頭から」(カーソルは両方 null) で
+            戻るので、null に 2 つの意味を持たせると回収の残りが永久に消える
+        nextTenantCursor:
+          type: [string, 'null']
+          description: 続きのテナント (null は先頭のテナントから。passComplete が真なら意味を持たない)
+        nextAgentCursor:
+          type: [string, 'null']
+          description: 続きのエージェント (null ならそのテナントの先頭から)
     GuardrailRunResult:
       type: object
       required: [evaluated, fired]

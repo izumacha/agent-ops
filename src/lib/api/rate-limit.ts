@@ -200,9 +200,12 @@ export function extraRateLimitFor(tier: RateLimitTier): number | null {
  * **正の整数でなければ落とす（fail-closed）。** 0 以下だと窓の下端が「いま」と同値以降になり、
  * **どの記録も数えられず全部通る**＝レート制限が無言で消える（以前はこの検証を制限器の
  * コンストラクタが持っていた）。渡す側のバグを隠さない。
+ * **`export` してあるのは保守の定期実行（`src/lib/maintenance/run.ts`）が「どの窓にも入らない
+ * 記録」の境目を同じ値から導くため。** `RATE_LIMIT_WINDOW_MS` を直接読む形にすると、
+ * テストの上書きが効かないうえ、上の fail-closed の検証を通らない値で境目が決まりうる。
  * @returns 窓の長さ
  */
-function rateLimitWindowMs(): number {
+export function rateLimitWindowMs(): number {
   // 上書きが無ければ既定（毎分）
   const windowMs = windowMsOverrideForTesting ?? RATE_LIMIT_WINDOW_MS;
   // 壊れていれば落とす（0 以下は「制限が丸ごと無効」を意味する）

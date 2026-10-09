@@ -13,6 +13,8 @@ import {
   API_MESSAGES,
   EMAIL_MAX_LENGTH,
   LONG_TEXT_MAX_LENGTH,
+  MAINTENANCE_AGENT_BUDGET_DEFAULT,
+  MAINTENANCE_AGENT_BUDGET_MAX,
   PAGE_CURSOR_MAX_LENGTH,
   SHORT_TEXT_MAX_LENGTH,
   PAGE_LIMIT_DEFAULT,
@@ -37,6 +39,7 @@ import {
   guardrailRunSchema,
 } from '@/lib/validations/guardrail';
 import { billingWebhookEventSchema } from '@/lib/validations/billing';
+import { maintenanceRunSchema } from '@/lib/validations/maintenance';
 import { BILLING_WEBHOOK_FIELD_MAX_LENGTH } from '@/lib/constants';
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 import { sanitizeUpstreamErrorBody } from '@/lib/proxy/error-body';
@@ -127,6 +130,7 @@ const BODY_SCHEMAS: Record<string, ZodObject<Record<string, ZodTypeAny>>> = {
   GuardrailRuleUpdate: guardrailRuleUpdateSchema,
   GuardrailRunRequest: guardrailRunSchema,
   BillingWebhookEvent: billingWebhookEventSchema,
+  MaintenanceRunRequest: maintenanceRunSchema,
 };
 
 // **未知キーを許すことが意図である本文の除外表 (理由付き)。**
@@ -430,6 +434,11 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
     const expiresInDays = spec.components.schemas.UserTokenCreate.properties?.expiresInDays;
     expect(expiresInDays?.default).toBe(USER_TOKEN_DEFAULT_TTL_DAYS);
     expect(expiresInDays?.maximum).toBe(USER_TOKEN_MAX_TTL_DAYS);
+    // 保守の定期実行の予算 (ADR-0016)。**既定も上限も契約と定数の 2 か所にある**ので、
+    // どちらかだけを動かすと「契約上は通る値が 422」/「契約が禁じた値が 200」になる
+    const agentBudget = spec.components.schemas.MaintenanceRunRequest.properties?.agentBudget;
+    expect(agentBudget?.default).toBe(MAINTENANCE_AGENT_BUDGET_DEFAULT);
+    expect(agentBudget?.maximum).toBe(MAINTENANCE_AGENT_BUDGET_MAX);
   });
 
   // 連鎖の検証の fromSeq も同じ事情（上限が YAML と定数の 2 か所にある）。**ここが古くなると
@@ -750,6 +759,8 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
       MICRO_USD_MAX.toString().length,
       // 課金事業者側の id・種別・価格の名前 (Step6)
       BILLING_WEBHOOK_FIELD_MAX_LENGTH,
+      // 符号化されたページネーションカーソル (保守の定期実行が本文で受ける。ADR-0016)
+      PAGE_CURSOR_MAX_LENGTH,
     ]);
     // components.schemas のプロパティを走査する
     for (const [schemaName, schema] of Object.entries(spec.components.schemas)) {
@@ -789,6 +800,11 @@ describe('OpenAPI 定義 (openapi/openapi.yaml)', () => {
         model: SHORT_TEXT_MAX_LENGTH,
       },
       ApiKeyCreate: { name: SHORT_TEXT_MAX_LENGTH, agentId: RESOURCE_ID_MAX_LENGTH },
+      // 保守の定期実行が本文で受ける 2 つのカーソル (ADR-0016)
+      MaintenanceRunRequest: {
+        tenantCursor: PAGE_CURSOR_MAX_LENGTH,
+        agentCursor: PAGE_CURSOR_MAX_LENGTH,
+      },
     };
     // スキーマごとに宣言された maxLength を突き合わせる
     for (const [schemaName, properties] of Object.entries(expected)) {

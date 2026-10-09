@@ -351,10 +351,13 @@ erDiagram
 | PATCH    | `/tenants/{tenantId}`      | `updateTenantPlan` | プラットフォーム管理者 | 6 |
 | GET      | `/billing`                 | `getBilling`     | view           | 6    |
 | POST     | `/billing/webhook`         | `receiveBillingWebhook` | 課金事業者の署名（Bearer 認証なし） | 6 |
+| POST     | `/maintenance/run`         | `runMaintenance` | プラットフォーム管理者 | — |
 
 **`PATCH /tenants/{tenantId}` はプランと課金連携（`billingCustomerId`）の両方を受ける。** 受信 Webhook は顧客 ID で**テナントを引く**だけで書かないので、**連携を作るのはこの経路だけ**（事業者の画面で作った顧客を運用者が結び付ける）。項目を省略すると据え置き、`null` で連携を外す。テナント内の `admin` は呼べない（403）。
 
 **`POST /billing/webhook` は Bearer 認証を持たない唯一の API**（呼ぶのは課金事業者であって利用者ではない）。`Stripe-Signature` の HMAC-SHA256 を定数時間で照合し、合わなければ 401・署名鍵が未設定なら 503（fail-closed）。`route()` を通らない代わりに、`tests/route-wrapping.test.ts` の理由付きの表へ登録して「署名検証を通ること」を機械で要求している（ADR-0012）。キャッシュ制御と応答の数え上げは**この表では要求しない** — 包むラッパー（`withResponseCount`）が全応答へ付けるので、全ルート共通の 2 本の検査が固定する（ADR-0014）。
+
+**`POST /maintenance/run` はスケジューラから繰り返し叩く保守の受け口**（ADR-0016）。2 つの後片付けを 1 要求ぶんだけ進める: **ガードレールの定期掃き**（集計窓から古い行が抜けるだけでしきい値を越えるルール＝エラー率・品質は、使われなくなったエージェントでは判定を起こす要求が無いので永久に発火しない）と**レート制限の記録の回収**（二度と来ないキーの行）。**1 要求でやる仕事に上限があり、続きはカーソルで返る** — `passComplete` が真になるまで `nextTenantCursor` / `nextAgentCursor` をそのまま送り返して繰り返す。**スケジューラは同梱していない**（配備先ごとに手段が違う。繋ぎ方は `docs/deploy.md`、ティックは `npm run maintenance:tick`）。Step の列が「—」なのは、Step7 までの受け入れ基準ではなく宿題の解消として足したため。
 
 **ルールの設定は `admin` ロール限定**（停止そのものは `stop` 権限で行えるが、「止まる条件を変える」のは運用の設定変更なので役割そのもので縛る）。**明示実行は `stop` 権限**（発火すると停止しうるので停止と同じ重さ）。**監査ログの更新・削除の操作は無い**（追記専用）。
 

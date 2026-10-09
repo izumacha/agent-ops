@@ -251,6 +251,32 @@ export const OUTBOUND_WAIT_ROUTE_RATE_LIMIT_PER_MINUTE = 60;
 export const HEAVY_READ_ROUTE_RATE_LIMIT_PER_MINUTE = 10;
 // レート制限の窓の長さ (ミリ秒)。1 分 = 上の定数の「1 分」の定義
 export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+
+// 保守の定期実行 (`POST /maintenance/run`。ADR-0016) の上限。
+//
+// **1 要求でやる仕事に必ず上限を置く** (§8「一覧取得は必ず上限・ページネーションを持たせる」)。
+// テナント数もエージェント数も運用で増える一方なので、「全件を 1 要求で」にすると配備が育つほど
+// 1 回が長くなり、いずれ配備先の実行時間上限 (serverless) に当たって**最後まで届かなくなる** —
+// しかも途中で切れたことは応答に現れないので、掃きが静かに効かなくなる。
+// 呼び出し側 (`scripts/maintenance-tick.mjs`) は「次のカーソルが無くなるまで」繰り返す。
+//
+// 1 要求で判定するエージェント数の既定。**最大プランのエージェント上限より小さくしてある** —
+// 1 テナントぶんを必ず 1 要求で終える形にすると、そのテナントの規模が 1 要求の長さを決めてしまう
+// (上限を上げるたびに 1 要求が長くなる)。足りない分は次の要求が続きから拾う
+export const MAINTENANCE_AGENT_BUDGET_DEFAULT = 50;
+// 1 要求で判定するエージェント数の上限 (これより大きい指定は 422)。
+// 一覧 1 ページの上限 (PAGE_LIMIT_MAX) と同じ値にしているのは、1 要求で読む行数の桁を
+// 既存の「一番重い読み出し」とそろえるため (判定はエージェント 1 件につき数クエリ走る)
+export const MAINTENANCE_AGENT_BUDGET_MAX = PAGE_LIMIT_MAX;
+// レート制限の記録を 1 回の DELETE で消す件数の上限。
+// 無制限の DELETE は溜まった行数が多いときに長いトランザクションと大きなロックになり、
+// 同時に走る `consume` の per-key の掃き出しと待ち合わせうる (理由は Port の `sweep`)
+export const MAINTENANCE_RATE_LIMIT_SWEEP_BATCH = 1_000;
+// レート制限の記録を 1 要求で消すバッチ数の上限 (= 1 要求で最大 BATCH × この数だけ消す)。
+// **「`limit` 件未満が返るまで」を無制限に回さない** — 溜まった行が多い配備で 1 要求が
+// いつまでも終わらなくなる。残りは次の要求が続けるので、応答の
+// `rateLimitSweepComplete` が false のあいだ呼び出し側は掃きだけを繰り返す
+export const MAINTENANCE_RATE_LIMIT_SWEEP_MAX_BATCHES = 10;
 // 監査ログのハッシュ連鎖に使う HMAC 鍵 (環境変数 AUDIT_HMAC_SECRET) に要求する最小長。
 // 短い鍵は総当たりで求められ、求められた鍵があれば連鎖をまるごと作り直せるので検知の意味が消える。
 // プラットフォーム管理者トークンと同じ 32 文字以上を要求する (別の値にする理由が無いので値も揃える)

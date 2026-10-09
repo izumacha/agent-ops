@@ -19,6 +19,7 @@
     "test:e2e": "playwright test",
     "lighthouse": "tsx scripts/measure-lighthouse.mts",
     "capture:screenshots": "tsx scripts/capture-screenshots.mts",
+    "maintenance:tick": "node scripts/maintenance-tick.mjs",
     "gen": "openapi-typescript openapi/openapi.yaml -o src/generated/openapi.d.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

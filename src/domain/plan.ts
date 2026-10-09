@@ -6,6 +6,7 @@
 //
 // **DB・Next.js に依存しない**ので、プランの差はユニットテストで全パターン固定できる（§11）。
 import { Plan } from '@/domain/types';
+import { logEvent } from '@/lib/log';
 
 /**
  * プランで**可否**が変わる機能の名前。
@@ -97,7 +98,7 @@ export function planLimitsFor(plan: Plan): PlanLimits {
   // Object 由来の値を返し、上限の比較が TypeError になる。`canPerform` と同じ理由）
   if (!Object.hasOwn(PLAN_LIMITS, plan)) {
     // 値そのものはログに混ぜない（出してよい形は定型文だけ。src/lib/describe-error.ts の規約）
-    console.error('[plan] 未知の契約プランを最も厳しいプランとして扱いました');
+    logEvent('plan.unknown_plan');
     // 最も厳しいプランの上限で続ける
     return PLAN_LIMITS[FALLBACK_PLAN];
   }

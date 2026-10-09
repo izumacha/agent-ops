@@ -10,6 +10,7 @@ import { HTTP_STATUS } from '@/lib/api/http-status';
 import { describeError } from '@/lib/describe-error';
 // 保存を禁じる Cache-Control の値 (route() が全ルートへ付けているのと同じ値。唯一の参照元は constants)
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
+import { logEvent } from '@/lib/log';
 
 // 応答に付けるキャッシュ制御 (成功・失敗のどちらにも同じものを付ける)
 const CACHE_HEADERS = { 'Cache-Control': NO_STORE_CACHE_CONTROL };
@@ -34,7 +35,7 @@ export async function GET(): Promise<NextResponse<HealthDto>> {
     // 接続情報がログへ流れる。しかも compose の healthcheck が 10 秒ごとに叩くので、
     // DB 障害中は同じ 1 行が毎分 6 回積まれ続ける。route() が通る経路と同じ describeError に
     // 通し、種類 (name / code) と発生箇所だけを残す
-    console.error('[health] DB 到達性チェックに失敗:', describeError(error));
+    logEvent('health.db_unreachable', describeError(error));
     // 503 で「DB が落ちている」ことだけを伝える
     return NextResponse.json(
       { ok: false, db: 'down' },

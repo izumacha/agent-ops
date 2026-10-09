@@ -438,3 +438,9 @@ export const API_MESSAGES = {
 // 保存を禁じる Cache-Control の値。route() が全応答に付けるのと、route() を通らない /health が
 // 自分で付けるのとで同じ値を使うため、ここを唯一の参照元にする
 export const NO_STORE_CACHE_CONTROL = 'no-store';
+
+/**
+ * メトリクスの応答に付ける `Content-Type`。
+ * Prometheus のテキスト形式（`version=0.0.4`）を名乗る（スクレイプ側が解析器を選ぶ手掛かりにする）。
+ */
+export const PROMETHEUS_CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8';

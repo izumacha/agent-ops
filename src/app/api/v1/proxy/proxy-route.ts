@@ -24,6 +24,7 @@ import { evaluateGuardrailsSafely, USAGE_RULE_KINDS } from '@/lib/guardrail/eval
 import { proxyRequestSchema } from '@/lib/validations/proxy';
 // エラーをログへ落とす形 (PII やクエリ引数を message ごと出さないための唯一の経路)
 import { describeError } from '@/lib/describe-error';
+import { logEvent } from '@/lib/log';
 
 // 中継できなかった・計測できなかったときに記録するトークン数 (0)
 const NO_TOKENS = 0;
@@ -147,14 +148,14 @@ async function recordUsage(
     const recorded = await repos.usageEvents.record(input);
     // 記録できなかったのは想定外 (認証時に同テナントのエージェントだと確かめている) なので残す
     if (recorded === null) {
-      console.error('[proxy] 利用イベントを記録できませんでした (エージェントが見つかりません)');
+      logEvent('proxy.usage_agent_missing');
       return null;
     }
     // **書いた行の時刻を返す。** 判定の基準時刻に使う (理由は evaluationBasisTime)
     return recorded.createdAt;
   } catch (error) {
     // DB の障害などで記録できなくても中継は成立しているので、ログだけ残して続ける
-    console.error('[proxy] 利用イベントの記録に失敗しました:', describeError(error));
+    logEvent('proxy.usage_record_failed', describeError(error));
     return null;
   }
 }
@@ -272,7 +273,7 @@ export function proxyRoute(provider: Provider) {
         // **4xx では出さない** — 上流のエラー本文に usage は載らないので必ず読めず、
         // 有効なキーを持つ相手が安く量産できる 400 でログが埋まって本物の異常が隠れる
         if (usage === null && result.status < SUCCESS_STATUS_CEILING) {
-          console.error('[proxy] 上流の応答からトークン数を読めませんでした');
+          logEvent('proxy.usage_tokens_unreadable');
         }
         // **本文が JSON として読めなければ、ステータスに関わらず中継しない** (502)。
         // 前段のゲートウェイが返す HTML のエラーページや、本文を持てない 204 / 304 がここに来る

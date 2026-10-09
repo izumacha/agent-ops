@@ -38,6 +38,7 @@ import {
   verifyBillingSignature,
 } from '@/lib/billing/signature';
 import { billingWebhookEventSchema } from '@/lib/validations/billing';
+import { logEvent } from '@/lib/log';
 
 // 課金事業者の名前（受信記録のキーの一部。いまは stripe の 1 つだけ）
 const PROVIDER = 'stripe';
@@ -151,9 +152,10 @@ export async function POST(request: Request): Promise<Response> {
 /**
  * 反映しなかった理由（ログの文はこの種類から選ぶ）。
  *
- * **文字列を組み立てて `console.error` へ渡さない** — このリポジトリはログの実引数を
- * リテラルと `describeError()` だけに縛っている（`tests/error-logging.test.ts`）。
- * 理由を値として持ち、出すのは `logSkipped` の中のリテラルに限る。
+ * **文字列を組み立ててログへ渡さない** — ログは閉じた語彙（`src/lib/log.ts` の `LOG_EVENTS`）で
+ * 名乗る形なので、理由ごとに**別の出来事**として出す（`tests/error-logging.test.ts` が
+ * 第 1 引数が語彙のキーのリテラルであることを構文で見張る）。理由を値として持ち、
+ * 出来事へ写すのは `logSkipped` の中だけに限る。
  */
 const SKIP_REASON = {
   // 顧客 ID に対応するテナントが無い
@@ -178,11 +180,11 @@ function logSkipped(reason: SkipReason, type: string): void {
   if (!isPlanChangeEvent(type)) return;
   // 理由ごとに固定の文を出す（値そのものは出さない）
   if (reason === SKIP_REASON.tenantMissing) {
-    console.error('[billing] 受信した顧客 ID に対応するテナントがありません');
+    logEvent('billing.customer_unknown');
   } else if (reason === SKIP_REASON.planUndecidable) {
-    console.error('[billing] 契約の変更イベントからプランを決められませんでした');
+    logEvent('billing.plan_undecidable');
   } else {
-    console.error('[billing] いまの契約とは別のサブスクリプションの解約なので反映しません');
+    logEvent('billing.stale_cancellation');
   }
 }
 

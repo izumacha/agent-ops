@@ -38,9 +38,17 @@ import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 import { basename, dirname, join, resolve } from 'node:path';
 import { forEachNode, parseSourceFiles } from './lib/source-files';
+import { LOG_EVENTS } from '@/lib/log';
 
 // 形を決める唯一の関数の名前
 const DESCRIBE_ERROR = 'describeError';
+
+// ログの出口を所有するモジュール（**`console` を呼べるのは src 全体でここだけ**）
+const LOG_OWNER = join(process.cwd(), 'src', 'lib', 'log.ts');
+// 出口の関数の名前（呼び出し側が使う）
+const LOG_EVENT = 'logEvent';
+// 1 行を組み立てる関数の名前（`console` へ渡してよい形の 1 つ）
+const FORMAT_LOG_LINE = 'formatLogLine';
 
 // ログを吐く console のメソッド。**`error` だけを見ない** — 実測で `console.warn('…', error)` は
 // 素通りした。出力先が stderr か stdout かは問題ではなく、message が残ることが問題
@@ -297,6 +305,16 @@ function isAllowedLogArgument(argument: ts.Expression, path: string): boolean {
     argument.expression.text === DESCRIBE_ERROR
   )
     return true;
+  // (5) `formatLogLine(...)` の呼び出し。許せる理由は (3) と同じで、**受け取れる値が構造で
+  // 縛られている**から（第 1 引数は閉じた語彙のキー、第 2 引数は describeError が作った診断）。
+  // この形が現れるのは所有モジュール（src/lib/log.ts）の中だけで、それは下の
+  // 「console を呼べるのは出口のモジュールだけ」が別に固定する
+  if (
+    ts.isCallExpression(argument) &&
+    ts.isIdentifier(argument.expression) &&
+    argument.expression.text === FORMAT_LOG_LINE
+  )
+    return true;
   // (2)(4) テンプレート: 置換がすべて許可表の識別子であること（置換なしもここで通る）
   if (ts.isTemplateExpression(argument))
     return argument.templateSpans.every(
@@ -367,13 +385,17 @@ describe('エラーのログ出力', () => {
     }
   });
 
-  it('describeError という名前の出自は所有モジュールだけ', () => {
-    // 所有モジュールの絶対パス
-    const owner = join(process.cwd(), 'src', 'lib', 'describe-error.ts');
+  /**
+   * **その名前を名乗れるのは所有モジュールだけ**、を固定する。
+   * 許可リストは名前を信頼しているので、名前の出自を縛らないと囮モジュールへ差し替えられる。
+   * @param name 縛る名前
+   * @param owner その名前を宣言してよい唯一のファイル（絶対パス）
+   */
+  function expectNameOwnedBy(name: string, owner: string): void {
     // 所有モジュールが実在すること (fail-closed)
     expect(
       SOURCES.some(({ path }) => path === owner),
-      `${DESCRIBE_ERROR} の所有モジュールが無い`,
+      `${name} の所有モジュールが無い`,
     ).toBe(true);
     // **同じ名前のファイルが 2 つ以上あれば落とす** — 取り込み元の判定を 1 つ漏らしても、
     // この独立な手がかりが囮モジュールの存在自体を捉える (fail-closed)
@@ -397,7 +419,7 @@ describe('エラーのログ出力', () => {
         // `import { describeError } from '@/lib/describe-error'` の形
         if (
           ts.isImportSpecifier(node) &&
-          node.name.text === DESCRIBE_ERROR &&
+          node.name.text === name &&
           // `as` で名前を付け替えていないこと（別物を describeError と名乗らせない）
           node.propertyName === undefined
         ) {
@@ -411,8 +433,7 @@ describe('エラーのログ出力', () => {
         }
         // **再公開も禁止** — `export { x as describeError } from './x'` は束縛の検出にも
         // 取り込み元の検出にも引っかからないまま、所有モジュールの名前を名乗れる
-        if (!isOwner && ts.isExportSpecifier(node) && node.name.text === DESCRIBE_ERROR)
-          shadowed = true;
+        if (!isOwner && ts.isExportSpecifier(node) && node.name.text === name) shadowed = true;
         // **import 以外の束縛**（`const` / `function` / 仮引数）は所有モジュール以外では禁止
         if (
           !isOwner &&
@@ -421,7 +442,7 @@ describe('エラーのログ出力', () => {
             ts.isParameter(node)) &&
           node.name !== undefined &&
           ts.isIdentifier(node.name) &&
-          node.name.text === DESCRIBE_ERROR
+          node.name.text === name
         )
           shadowed = true;
         // **分割代入で覆う形も禁止** — `const { describeError } = deps;` や
@@ -432,14 +453,14 @@ describe('エラーのログ出力', () => {
           !isOwner &&
           ts.isBindingElement(node) &&
           ts.isIdentifier(node.name) &&
-          node.name.text === DESCRIBE_ERROR
+          node.name.text === name
         )
           shadowed = true;
         // 呼び出し
         if (
           ts.isCallExpression(node) &&
           ts.isIdentifier(node.expression) &&
-          node.expression.text === DESCRIBE_ERROR
+          node.expression.text === name
         )
           calls = true;
       });
@@ -456,6 +477,115 @@ describe('エラーのログ出力', () => {
     // 縛るのが要。実測で、`src/lib/stream-bytes.ts` の import 1 行を同名の `const`
     // パススルーへ差し替えるだけで、tsc・eslint・851 件すべてが件数まで含めて
     // ベースラインと完全一致のまま緑になり、生の例外が console.error へ流れた
-    expect(offenders, `${DESCRIBE_ERROR} は所有モジュールのものだけを使う`).toEqual([]);
+    expect(offenders, `${name} は所有モジュールのものだけを使う`).toEqual([]);
+  }
+
+  it.each([
+    [DESCRIBE_ERROR, join(process.cwd(), 'src', 'lib', 'describe-error.ts')],
+    [LOG_EVENT, LOG_OWNER],
+    [FORMAT_LOG_LINE, LOG_OWNER],
+  ])('%s という名前の出自は所有モジュールだけ', (name, owner) => {
+    // 3 つとも「許可リストが名前を信頼している」関数なので、同じ縛りを掛ける
+    expectNameOwnedBy(name, owner);
+  });
+
+  it('console を呼べるのは出口のモジュールだけ', () => {
+    // **これが規則の中心**。以前は「実引数が安全な形なら、どのファイルからでも console を
+    // 呼んでよい」だったので、文言は人間向けの散文のままで、出来事の種類で集計も警報も作れなかった。
+    // 出口を 1 本に閉じると、呼び出し側が渡せるのは閉じた語彙のキーだけになる（下の it）
+    const offenders: string[] = [];
+    // 実際に見た console のログ呼び出しの件数（0 なら走査が空振りしている）
+    let inspected = 0;
+    for (const { path, source } of SOURCES)
+      forEachNode(source, (node) => {
+        // console のログ呼び出しでなければ関係ない
+        if (consoleLogArguments(node) === null) return;
+        inspected += 1;
+        // 出口のモジュール以外で呼んでいれば違反
+        if (path !== LOG_OWNER) offenders.push(path.slice(process.cwd().length + 1));
+      });
+    // 1 件も見ていなければ走査が壊れている (fail-closed)
+    expect(inspected, 'console のログ呼び出しを 1 つも見つけられない').toBeGreaterThan(0);
+    // 違反があれば直し方まで文言に書く
+    expect(
+      [...new Set(offenders)],
+      `console を直接呼ばず ${LOG_EVENT}('<${Object.keys(LOG_EVENTS)[0]} のような語彙のキー>') を使う ` +
+        '(出口が 1 本だと、出来事の種類で集計・警報を作れる)',
+    ).toEqual([]);
+  });
+
+  it(`${LOG_EVENT} の実引数は語彙のキーと ${DESCRIBE_ERROR}(...) だけ`, () => {
+    // 規約を破っている箇所
+    const offenders: string[] = [];
+    // 実際に見た呼び出しの件数（0 なら走査が空振りしている）
+    let inspected = 0;
+    for (const { path, source } of SOURCES)
+      forEachNode(source, (node) => {
+        // `logEvent(...)` の呼び出しだけを見る
+        if (
+          !ts.isCallExpression(node) ||
+          !ts.isIdentifier(node.expression) ||
+          node.expression.text !== LOG_EVENT
+        )
+          return;
+        inspected += 1;
+        // 置き場所を失敗文言に出すための見出し
+        const where = `${path.slice(process.cwd().length + 1)}: ${node
+          .getText()
+          .replace(/\s+/g, ' ')
+          .slice(0, 80)}`;
+        // 第 1 引数は**語彙に実在するキーの文字列リテラル**だけ（変数だと語彙の網羅を照合できない）
+        const first = node.arguments[0];
+        if (
+          first === undefined ||
+          !ts.isStringLiteralLike(first) ||
+          !Object.hasOwn(LOG_EVENTS, first.text)
+        )
+          offenders.push(`${where} (第 1 引数が語彙のキーのリテラルでない)`);
+        // 第 2 引数は `describeError(...)` だけ（例外に触れてよいのは相変わらずあの関数だけ）
+        const second = node.arguments[1];
+        if (
+          second !== undefined &&
+          !(
+            ts.isCallExpression(second) &&
+            ts.isIdentifier(second.expression) &&
+            second.expression.text === DESCRIBE_ERROR
+          )
+        )
+          offenders.push(`${where} (第 2 引数が ${DESCRIBE_ERROR}(...) でない)`);
+        // 3 つ目以降は受け取らない（型でも拒むが、署名を広げる変更を構文で止める）
+        if (node.arguments.length > 2) offenders.push(`${where} (実引数が多い)`);
+      });
+    // 1 件も見ていなければ走査が壊れている (fail-closed)
+    expect(inspected, `${LOG_EVENT} の呼び出しを 1 つも見つけられない`).toBeGreaterThan(0);
+    // 違反があれば落とす
+    expect(offenders, `${LOG_EVENT} に渡せるのは語彙のキーと ${DESCRIBE_ERROR}(...) だけ`).toEqual(
+      [],
+    );
+  });
+
+  it('語彙に宣言した出来事はどれも実際に出している', () => {
+    // **宣言だけして使わない値を置かない**（`src/domain/audit/action.ts` と同じ流儀）。
+    // 使われない語彙は「この出来事は監視できる」という誤解を生み、警報の条件が永久に空振りする
+    const emitted = new Set<string>();
+    for (const { source } of SOURCES)
+      forEachNode(source, (node) => {
+        // `logEvent('<キー>')` の第 1 引数を集める
+        if (
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === LOG_EVENT
+        ) {
+          const first = node.arguments[0];
+          if (first !== undefined && ts.isStringLiteralLike(first)) emitted.add(first.text);
+        }
+      });
+    // 語彙が空なら走査が壊れている (fail-closed)
+    expect(Object.keys(LOG_EVENTS).length, '語彙が空').toBeGreaterThan(0);
+    // 出していないキーを並べる
+    expect(
+      Object.keys(LOG_EVENTS).filter((event) => !emitted.has(event)),
+      '語彙にあるのに src のどこからも出していない出来事がある',
+    ).toEqual([]);
   });
 });

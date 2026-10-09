@@ -15,6 +15,7 @@ import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { UPSTREAM_MAX_RESPONSE_BYTES, USAGE_TOKENS_MAX } from '@/lib/constants';
 import { Provider } from '@/domain/types';
+import { parseLoggedLine, renderLoggedLine } from './lib/log-lines';
 
 // 環境変数の入れ物を作る (process.env を汚さずに判定だけを試す)
 function env(values: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
@@ -361,11 +362,13 @@ describe('上流の失敗の記録', () => {
     // 502 へ写り、記録はちょうど 1 行
     expect(status).toBe(HTTP_STATUS.BAD_GATEWAY);
     expect(calls, '上流の失敗が 1 行も記録されていない').toHaveLength(1);
-    // 2 つ目の引数が describeError の形 (name と、cause を 1 段たどった code が残る)
-    expect(calls[0][1]).toMatchObject({ name: 'TypeError', cause: { code: 'ECONNREFUSED' } });
+    // 診断が describeError の形 (name と、cause を 1 段たどった code が残る)
+    const line = parseLoggedLine(calls[0]);
+    expect(line.event).toBe('proxy.upstream_call_failed');
+    expect(line.error).toMatchObject({ name: 'TypeError', cause: { code: 'ECONNREFUSED' } });
     // **message は 1 バイトも出ない** (接続文字列が載っていた)
-    expect(JSON.stringify(calls[0])).not.toContain('postgres://');
-    expect(JSON.stringify(calls[0])).not.toContain('10.0.0.9');
+    expect(renderLoggedLine(calls[0])).not.toContain('postgres://');
+    expect(renderLoggedLine(calls[0])).not.toContain('10.0.0.9');
   });
 
   it('時間切れを 504 として記録する', async () => {
@@ -386,7 +389,7 @@ describe('上流の失敗の記録', () => {
     expect(status).toBe(HTTP_STATUS.GATEWAY_TIMEOUT);
     expect(calls, '時間切れが 1 行も記録されていない').toHaveLength(1);
     // 例外の種類は残る (これが無いと運用者は 504 の理由を切り分けられない)
-    expect(calls[0][1]).toMatchObject({ name: 'TimeoutError' });
+    expect(parseLoggedLine(calls[0]).error).toMatchObject({ name: 'TimeoutError' });
   });
 
   it('応答本文が上限を超えた 502 も記録する (ApiError は catch を素通りする)', async () => {
@@ -410,8 +413,8 @@ describe('上流の失敗の記録', () => {
     // 502 へ写り、記録はちょうど 1 行
     expect(status).toBe(HTTP_STATUS.BAD_GATEWAY);
     expect(calls, '上限超過が 1 行も記録されていない').toHaveLength(1);
-    // 理由が読み取れること (上流由来の文字列は混ぜない)
-    expect(String(calls[0][0])).toContain('上限');
+    // 理由が読み取れること (上流由来の文字列は混ぜない)。**識別子で照合する**
+    expect(parseLoggedLine(calls[0]).event).toBe('proxy.upstream_response_too_large');
   });
 });
 

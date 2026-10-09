@@ -11,6 +11,7 @@ import { API_MESSAGES, PLATFORM_ADMIN_TOKEN_MIN_LENGTH } from '@/lib/constants';
 import { hashSecret, isApiKey, isUserToken, secretsEqual } from '@/lib/tokens';
 import { ApiError } from './errors';
 import { HTTP_STATUS } from './http-status';
+import { logEvent } from '@/lib/log';
 
 // テナント内のユーザーとして認証された主体
 export interface UserPrincipal {
@@ -98,9 +99,7 @@ function matchesPlatformAdminToken(token: string): boolean {
     // 設定ミスの警告は初回だけ出す
     if (!warnedShortPlatformToken) {
       warnedShortPlatformToken = true;
-      console.error(
-        `[auth] PLATFORM_ADMIN_TOKEN が短すぎます (${PLATFORM_ADMIN_TOKEN_MIN_LENGTH} 文字以上が必要)。無視します。`,
-      );
+      logEvent('auth.platform_token_too_short');
     }
     return false;
   }

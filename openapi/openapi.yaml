@@ -36,6 +36,8 @@ tags:
     description: 監査ログの閲覧とハッシュ連鎖の検証 (Step4)
   - name: billing
     description: 契約プランの参照と課金事業者からの受信 Webhook (Step6)
+  - name: metrics
+    description: プロセス内のカウンタの出口 (Prometheus のテキスト形式。運用の観測。ADR-0014)
 security:
   - bearerAuth: []
 paths:
@@ -58,6 +60,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+  /metrics:
+    get:
+      tags: [metrics]
+      operationId: getMetrics
+      summary: プロセス内のカウンタ (プラットフォーム管理者のみ)。Prometheus のテキスト形式で返す
+      responses:
+        '200':
+          description: 1 行 1 系列のテキスト (値はこのインスタンスの分だけ。足し合わせるのはスクレイプ側)
+          content:
+            text/plain:
+              schema:
+                type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /tenants:
     get:
       tags: [tenants]

@@ -50,6 +50,7 @@
 | メソッドとパス | operationId | タグ |
 | -------------- | ----------- | ---- |
 | `GET /health` | `getHealth` | health |
+| `GET /metrics` | `getMetrics` | metrics |
 | `GET /tenants` | `listTenants` | tenants |
 | `POST /tenants` | `createTenant` | tenants |
 | `GET /tenants/{tenantId}` | `getTenant` | tenants |

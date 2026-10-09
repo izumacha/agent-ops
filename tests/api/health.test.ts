@@ -8,6 +8,7 @@ vi.mock('@/lib/prisma', () => ({ prisma: { $queryRaw: queryRaw } }));
 
 // 差し替えた後で読む (静的 import でも vi.mock が先に効く)
 import { GET } from '@/app/api/v1/health/route';
+import { parseLoggedLine, renderLoggedLine } from '../lib/log-lines';
 
 // 各テストの後でモックの記録を消す
 afterEach(() => {
@@ -52,11 +53,14 @@ describe('GET /health', () => {
     // コンテナログへ流れる。しかも compose の healthcheck が 10 秒ごとに叩くため
     // 障害中は同じ 1 行が積まれ続ける。route() が通る経路と同じ describeError に
     // 通し、種類 (name / code) と発生箇所だけを残す
-    const logged = JSON.stringify(errorLog.mock.calls[0]);
+    const logged = renderLoggedLine(errorLog.mock.calls[0]);
     expect(logged).not.toContain('s3cret');
     expect(logged).not.toContain('postgresql://');
     expect(logged).not.toContain('db-host');
-    // 何が起きたかは分かること (握り潰しではない)
-    expect(errorLog.mock.calls[0]?.[1]).toMatchObject({ name: 'Error' });
+    // 何が起きたかは分かること (握り潰しではない)。**文言ではなく出来事の識別子で照合する**
+    // （文言は推敲で変わるが、識別子は警報の条件そのものなので変えたら気付く必要がある）
+    const line = parseLoggedLine(errorLog.mock.calls[0]);
+    expect(line.event).toBe('health.db_unreachable');
+    expect(line.error).toMatchObject({ name: 'Error' });
   });
 });

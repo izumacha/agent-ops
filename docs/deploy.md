@@ -130,3 +130,34 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 `docs/api.md` の一覧と README の「5 分で試す」をそのまま使う。所要時間の基準
 （クリーン環境から 5 分以内）は CI の `docker-smoke` ジョブと `npm run bench:demo-ready` が
 機械で確かめている（解釈は `docs/roadmap.md` の「Step7 の受け入れ基準の解釈」）。
+
+## 監視を繋ぐ（配備後）
+
+出口は 2 つ（[ADR-0014](./adr/0014-observability.md)）。
+
+### 1. ログ（1 行 1 JSON）
+
+アプリは `stderr` へ 1 行 1 JSON を書く。収集は配備側（Vercel のログドレイン、
+コンテナのログドライバ）に任せる — アプリから外へ送る経路は持たない。
+
+```json
+{"ts":"2026-10-09T01:02:03.000Z","level":"error","event":"proxy.upstream_call_failed","message":"上流の呼び出しに失敗しました","error":{"name":"TypeError","cause":{"code":"ECONNREFUSED"}}}
+```
+
+**警報は `event` の等値で組む**（文言は推敲で変わる）。語彙の一覧は
+`src/lib/log.ts` の `LOG_EVENTS` が正本で、`level` は `error` / `warn` の 2 値。
+`error` は「運用者が対処すべき」、`warn` は「縮退して続けた」の意味。
+
+### 2. メトリクス（Prometheus のテキスト形式）
+
+```bash
+curl -sS -H "Authorization: Bearer $PLATFORM_ADMIN_TOKEN" https://<配備先>/api/v1/metrics
+```
+
+- **プラットフォーム管理者トークンだけ**が読める（値はテナントごとに分かれていないので、
+  テナントの利用者には見せない）。スクレイプする側に同じトークンを渡す。
+- **値はインスタンスごと。** 足し合わせるのはスクレイプ側で、サーバーレスではインスタンスが
+  短命なので `agentops_process_start_time_seconds` / `..._uptime_seconds` を見て
+  「カウンタが 0 へ戻った」ことを判別する。
+- **耐久する事実はここに出さない。** 利用量・コストは `GET /api/v1/usage/daily`、
+  インシデントは画面と `GET /api/v1/incidents`、操作の記録は `GET /api/v1/audit-logs`。

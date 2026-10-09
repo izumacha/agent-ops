@@ -22,6 +22,7 @@ import { describeError } from '@/lib/describe-error';
 import { buildRequestBody, readResponseText } from '@/lib/llm/messages';
 import { ALWAYS_LOG, type RunLogGate } from './run-log';
 import { callUpstream, resolveUpstreamTarget } from '@/lib/proxy/upstream';
+import { logEvent } from '@/lib/log';
 
 // プロバイダとして受け付ける値の一覧 (綴りの照合に使う。src/lib/validations/common.ts の
 // provider スキーマと同じく「値」から導き、キーの綴りには頼らない)
@@ -109,12 +110,12 @@ export async function scoreBatch(
       timeoutMs: EVALUATION_UPSTREAM_TIMEOUT_MS,
     });
     // 2xx 以外は採点として使えない (本文の中身は利用者へ出さない)。
-    // **ログにステータスを差し込まない** — `console` の実引数は「出してよい形」だけに絞ってあり
-    // (tests/error-logging.test.ts)、式を埋める形を 1 か所でも許すと例外の message を埋める形と
-    // 区別できなくなる。状況が分かる定型文にする
+    // **ログにステータスを差し込まない** — 出来事は閉じた語彙（`LOG_EVENTS`）で名乗り、添えられるのは
+    // `describeError(...)` の診断だけ (tests/error-logging.test.ts)。可変の値を 1 か所でも許すと
+    // 例外の message を埋める形と区別できなくなる。状況が分かるだけの出来事の名前にする
     if (result.status < 200 || result.status >= 300) {
       if (log.first('judge-status')) {
-        console.error('[evaluation] judge が 2xx 以外のステータスを返しました');
+        logEvent('evaluation.judge_status_not_2xx');
       }
       return unavailable();
     }
@@ -125,7 +126,7 @@ export async function scoreBatch(
     } catch {
       // 上流の応答そのものが JSON でない (プロキシの前段が壊れている等)
       if (log.first('judge-json')) {
-        console.error('[evaluation] judge の応答を JSON として解釈できませんでした');
+        logEvent('evaluation.judge_body_not_json');
       }
       return unavailable();
     }
@@ -134,7 +135,7 @@ export async function scoreBatch(
     // 取り出せなければ採点として使えない
     if (text === null) {
       if (log.first('judge-text')) {
-        console.error('[evaluation] judge の応答から本文を取り出せませんでした');
+        logEvent('evaluation.judge_text_missing');
       }
       return unavailable();
     }
@@ -143,7 +144,7 @@ export async function scoreBatch(
   } catch (error) {
     // 時間切れ・接続不能・設定不足。**詳細はサーバログにだけ残す** (§9)
     if (log.first('judge-error')) {
-      console.error('[evaluation] judge の呼び出しに失敗しました:', describeError(error));
+      logEvent('evaluation.judge_call_failed', describeError(error));
     }
     return unavailable();
   }

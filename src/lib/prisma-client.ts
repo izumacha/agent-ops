@@ -8,6 +8,7 @@ import { buildSearchPathOption } from './pg-search-path';
 import { guardRawSql } from './raw-sql-guard';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
+import { logEvent } from '@/lib/log';
 
 // `?schema=` が書かれていないときに使うスキーマ。Prisma 5 のクエリエンジンは接続時に search_path を
 // ここへ固定していたが、Prisma 7 のドライバアダプタは何もしない。既定値を明示して
@@ -110,10 +111,9 @@ export function createPrismaClient(options?: {
       // プールや待機中コネクションのエラーを握り潰さない。**形は describeError に任せる** —
       // `error.message` を素で出していた版は、上流 (pg) が message に接続情報を載せた時点で
       // 接続文字列がログへ流れる（§9 ログに機密を漏らさない）。経路ごとに書き分けない
-      onPoolError: (error: Error) =>
-        console.error('[prisma] 接続プールでエラー:', describeError(error)),
+      onPoolError: (error: Error) => logEvent('prisma.pool_error', describeError(error)),
       onConnectionError: (error: Error) =>
-        console.error('[prisma] コネクションでエラー:', describeError(error)),
+        logEvent('prisma.connection_error', describeError(error)),
     },
   );
 

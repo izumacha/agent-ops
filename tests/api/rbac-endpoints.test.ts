@@ -18,6 +18,7 @@ import { POST as stopAgent } from '@/app/api/v1/agents/[agentId]/stop/route';
 import { GET as listApiKeys, POST as createApiKey } from '@/app/api/v1/api-keys/route';
 import { DELETE as revokeApiKey } from '@/app/api/v1/api-keys/[apiKeyId]/route';
 import { GET as getMe } from '@/app/api/v1/me/route';
+import { GET as getMetrics } from '@/app/api/v1/metrics/route';
 import { GET as listTenants, POST as createTenant } from '@/app/api/v1/tenants/route';
 import { GET as getTenant, PATCH as updateTenantPlan } from '@/app/api/v1/tenants/[tenantId]/route';
 import { GET as listUsers, POST as createUser } from '@/app/api/v1/users/route';
@@ -81,6 +82,10 @@ const ENDPOINTS: Record<
   string,
   { requires: Requirement; invoke: (token: string) => Promise<number> }
 > = {
+  getMetrics: {
+    requires: 'platform',
+    invoke: async (t) => (await call(getMetrics, { token: t })).status,
+  },
   listTenants: {
     requires: 'platform',
     invoke: async (t) => (await call(listTenants, { token: t })).status,

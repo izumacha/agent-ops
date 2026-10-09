@@ -13,6 +13,8 @@ import type { PlanFeature } from '@/domain/plan';
 import { HTTP_STATUS } from './http-status';
 // エラーをログへ落とす形 (経路ごとに書き分けない。src/lib 直下の 1 か所が唯一の定義)
 import { describeError } from '@/lib/describe-error';
+import { incrementCounter, methodLabel, statusLabel } from '@/lib/metrics';
+import { logEvent } from '@/lib/log';
 
 // Next.js 16 の Route Handler が受け取る第 2 引数 (動的セグメントは Promise で届く)
 export interface RouteContext<P> {
@@ -179,7 +181,7 @@ export function toErrorResponse(error: unknown): Response {
     );
   }
   // それ以外は内部エラー。応答には出さず、サーバログに残す (§6 文脈を付けてログに残す / §9)
-  console.error('[api] 予期しないエラー:', describeError(error));
+  logEvent('api.unexpected_error', describeError(error));
   return errorResponse(HTTP_STATUS.INTERNAL_SERVER_ERROR, API_MESSAGES.internal);
 }
 
@@ -190,8 +192,8 @@ export function toErrorResponse(error: unknown): Response {
 export function route<P = Record<string, never>>(handler: Handler<P>, options: RouteOptions = {}) {
   // このルートで使う認証関数を決める (指定が無ければユーザートークンの経路)
   const authenticateRequest = options.auth === 'apiKey' ? authenticateApiKey : authenticate;
-  // Next.js が呼ぶ形の関数
-  const wrapped = async (request: Request, context: RouteContext<P>): Promise<Response> => {
+  // 応答を組み立てる本体（成功も失敗もここで Response になる）
+  const respond = async (request: Request, context: RouteContext<P>): Promise<Response> => {
     // 例外はすべて HTTP 応答へ写す
     try {
       // データ層の束 (本番/テストの切り替えは Composition Root が持つ)
@@ -227,6 +229,20 @@ export function route<P = Record<string, never>>(handler: Handler<P>, options: R
       // 応答に写す (401/403 等もテナント固有なので同じヘッダを付ける)
       return withPrivateCacheHeaders(toErrorResponse(error));
     }
+  };
+  // Next.js が呼ぶ形の関数。**応答を数えるのはここ 1 か所**（成功・失敗・例外のどの経路も
+  // `respond` を通って戻るので、数え漏れが構造的に起きない）。ラベルは method と status だけで、
+  // どちらも閉じた集合へ写してから渡す（可変の値を入れると系列が無制限に増える。src/lib/metrics.ts）
+  const wrapped = async (request: Request, context: RouteContext<P>): Promise<Response> => {
+    // 応答を組み立てる
+    const response = await respond(request, context);
+    // 1 件数える（この呼び出しは例外を投げない。投げると応答が 500 に化ける）
+    incrementCounter('agentops_http_responses_total', {
+      method: methodLabel(request.method),
+      status: statusLabel(response.status),
+    });
+    // 組み立てた応答をそのまま返す
+    return response;
   };
   // 「route() が包んだ」という印を付ける (列挙されない定義なので DTO や JSON には現れない)
   Object.defineProperty(wrapped, ROUTE_HANDLER_BRAND, { value: true });

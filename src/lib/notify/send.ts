@@ -17,6 +17,7 @@ import {
 import { describeError } from '@/lib/describe-error';
 import { parseOutboundUrl } from '@/lib/outbound-url';
 import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
+import { logEvent } from '@/lib/log';
 
 // 宛先の種類 (環境変数の名前と対になる)
 export const NotifyChannel = {
@@ -144,14 +145,14 @@ async function sendTo(
         });
       } catch (error) {
         // 読み捨てに失敗したことは残す (握り潰さない。§6) が、配信の判定には使わない
-        console.error('[notify] 応答本文を読み捨てられませんでした', describeError(error));
+        logEvent('notify.response_drain_failed', describeError(error));
       }
     }
     // 2xx 以外は届かなかったものとして扱う (3xx も「追わない」ので失敗)
     return response.ok ? { status: 'delivered', channel } : { status: 'failed', channel };
   } catch (error) {
     // 接続不能・時間切れ・打ち切りはすべて「届かなかった」。**例外を外へ出さない**
-    console.error('[notify] 通知を送れませんでした', describeError(error));
+    logEvent('notify.send_failed', describeError(error));
     return { status: 'failed', channel };
   } finally {
     // 成功・失敗どちらでもタイマーを解除する (§8 リソースを確実に解放する)
@@ -175,10 +176,9 @@ export async function notifyGuardrailIncident(
   );
   // 宛先の形が受け付けられなかったものはサーバログに残す (運用者が直せるようにする)。
   //
-  // **URL そのものも理由の値も実引数に混ぜない。** ログへ出してよい形は
-  // 「文字列リテラル / 置換の無いテンプレート / describeError(...) / 許可表の識別子だけのテンプレート」に
-  // 限られていて (tests/error-logging.test.ts が構文で見張る)、`{ channel, reason }` のような
-  // オブジェクトは通らない。宛先の URL はクエリに受け手のトークンが載っている形が普通にあるので、
+  // **URL そのものも理由の値もログに混ぜない。** 出来事は閉じた語彙 (`LOG_EVENTS`) で名乗り、
+  // 添えられるのは `describeError(...)` の診断だけ (tests/error-logging.test.ts が構文で見張る)
+  // なので、`{ channel, reason }` のようなオブジェクトは渡せない。宛先の URL はクエリに受け手のトークンが載っている形が普通にあるので、
   // 出さない方が正しい (§9)。**代わりに直すべき環境変数の名前を文言に書く** —
   // 運用者にとっては `{channel: 'webhook'}` より「どの変数を直すか」のほうが役に立つ
   for (const result of results) {
@@ -194,37 +194,29 @@ export async function notifyGuardrailIncident(
     // 宛先の形が受け付けられないとき
     if (result.status === 'rejected_target') {
       if (isWebhook) {
-        console.error(
-          '[notify] NOTIFY_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
-        );
+        logEvent('notify.webhook_url_invalid');
       } else {
-        console.error(
-          '[notify] NOTIFY_MAIL_WEBHOOK_URL の形が受け付けられません (https か非本番のループバック http のみ・資格情報付き URL は不可)',
-        );
+        logEvent('notify.mail_url_invalid');
       }
       continue;
     }
     // 署名鍵が無い・短いとき (宛先は設定されているので、運用者は送るつもりでいる)。
-    // **必要な長さの値を文言へ書き写さない** — ログの実引数は文字列リテラルに限られている
-    // (`tests/error-logging.test.ts`) ので補間もできず、写すと定数を変えたときに案内だけが
-    // 誤りになる。代わりに**定数の名前**を書く (`evaluate.ts` が環境変数の名前を書くのと同じ形)
+    // **必要な長さの値を文言へ書き写さない** — 文言は語彙の表 (`LOG_EVENTS`) が持ち、
+    // 写すと定数を変えたときに案内だけが誤りになる。代わりに**定数の名前**を書く
+    // (`evaluate.ts` が環境変数の名前を書くのと同じ形)
     if (result.status === 'unsigned') {
       if (isWebhook) {
-        console.error(
-          '[notify] NOTIFY_SIGNING_SECRET が未設定か短いため NOTIFY_WEBHOOK_URL へ送りませんでした (必要な長さは src/lib/constants.ts の NOTIFY_SIGNING_SECRET_MIN_LENGTH)',
-        );
+        logEvent('notify.webhook_unsigned');
       } else {
-        console.error(
-          '[notify] NOTIFY_SIGNING_SECRET が未設定か短いため NOTIFY_MAIL_WEBHOOK_URL へ送りませんでした (必要な長さは src/lib/constants.ts の NOTIFY_SIGNING_SECRET_MIN_LENGTH)',
-        );
+        logEvent('notify.mail_unsigned');
       }
       continue;
     }
     // 受け手へ届かなかったとき (2xx 以外・3xx・接続不能・時間切れ)
     if (isWebhook) {
-      console.error('[notify] NOTIFY_WEBHOOK_URL の受け手へ通知が届きませんでした');
+      logEvent('notify.webhook_undelivered');
     } else {
-      console.error('[notify] NOTIFY_MAIL_WEBHOOK_URL の受け手へ通知が届きませんでした');
+      logEvent('notify.mail_undelivered');
     }
   }
   // 呼び出し側が監査ログへ「送れたか」を残せるように結果を返す

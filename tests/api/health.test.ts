@@ -8,7 +8,7 @@ vi.mock('@/lib/prisma', () => ({ prisma: { $queryRaw: queryRaw } }));
 
 // 差し替えた後で読む (静的 import でも vi.mock が先に効く)
 import { GET } from '@/app/api/v1/health/route';
-import { parseLoggedLine, renderLoggedLine } from '../lib/log-lines';
+import { captureLogOutlet, parseLoggedLine, renderLoggedLine } from '../lib/log-lines';
 import { renderMetrics, resetMetricsForTesting } from '@/lib/metrics';
 import { NO_STORE_CACHE_CONTROL } from '@/lib/constants';
 
@@ -49,8 +49,11 @@ describe('GET /health', () => {
     // 接続情報を含む、いかにもドライバが投げそうなエラー
     const detail = 'connect ECONNREFUSED postgresql://postgres:s3cret@db-host:5432/agent_ops';
     queryRaw.mockRejectedValue(new Error(detail));
-    // ログは記録だけして端末へ出さない
-    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // ログは記録だけして端末へ出さない。**`warn` と `error` の両方を捕まえる**
+    // （`captureLogOutlet`）— メソッドを決め打つと、語彙の `level` を変えた瞬間に
+    // **この下の「DSN を漏らしていない」3 つの照合が空文字を相手に全部通る**
+    // （CLAUDE.md §3 がこの形を禁じている）
+    const outlet = captureLogOutlet();
     // ハンドラを直接呼ぶ
     const response = await GET(healthRequest());
     expect(response.status).toBe(503);
@@ -63,21 +66,23 @@ describe('GET /health', () => {
     expect(JSON.stringify(body)).not.toContain('ECONNREFUSED');
     expect(JSON.stringify(body)).not.toContain('s3cret');
     // 詳細はサーバログには残っていること (黙って握り潰していないこと。§6)
-    expect(errorLog).toHaveBeenCalledTimes(1);
+    expect(outlet.calls()).toHaveLength(1);
     // **ログにも message は出さない。** ドライバの接続失敗は message に DSN
     // (利用者名・パスワード込み) をそのまま埋めるので、素で出すと接続情報が
     // コンテナログへ流れる。しかも compose の healthcheck が 10 秒ごとに叩くため
     // 障害中は同じ 1 行が積まれ続ける。route() が通る経路と同じ describeError に
     // 通し、種類 (name / code) と発生箇所だけを残す
-    const logged = renderLoggedLine(errorLog.mock.calls[0]);
+    const logged = renderLoggedLine(outlet.calls()[0]);
     expect(logged).not.toContain('s3cret');
     expect(logged).not.toContain('postgresql://');
     expect(logged).not.toContain('db-host');
     // 何が起きたかは分かること (握り潰しではない)。**文言ではなく出来事の識別子で照合する**
     // （文言は推敲で変わるが、識別子は警報の条件そのものなので変えたら気付く必要がある）
-    const line = parseLoggedLine(errorLog.mock.calls[0]);
+    const line = parseLoggedLine(outlet.calls()[0]);
     expect(line.event).toBe('health.db_unreachable');
     expect(line.error).toMatchObject({ name: 'Error' });
+    // 出口を戻す
+    outlet.restore();
   });
 
   // **この経路も応答を数える**（ADR-0014）。`route()` を通らないので、数える結線が外れると
@@ -91,8 +96,8 @@ describe('GET /health', () => {
     resetMetricsForTesting();
     if (ready) queryRaw.mockResolvedValue([{ '?column?': 1 }]);
     else queryRaw.mockRejectedValue(new Error('boom'));
-    // 失敗側はログを端末へ出さない
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // 失敗側はログを端末へ出さない（深刻度でメソッドが分かれるので両方）
+    captureLogOutlet();
     // 呼ぶ
     expect((await GET(healthRequest())).status).toBe(status);
     // その応答が系列に 1 件乗っている

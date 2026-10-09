@@ -41,7 +41,9 @@ export function auditHmacSecret(env: NodeJS.ProcessEnv = process.env): string {
   }
   // 短すぎる鍵は総当たりで求められるので使わない (求められたら連鎖を作り直せる)
   if (configured.length < AUDIT_HMAC_SECRET_MIN_LENGTH) {
-    logEventThrottled('audit.secret_not_configured');
+    // **「未設定」とは別の出来事**（直し方が「変数を足す」ではなく「値を作り直す」なので、
+    // 同じ `event` だとログからも系列からも区別できない）
+    logEventThrottled('audit.secret_too_short');
     throw notConfiguredError();
   }
   // 使える鍵

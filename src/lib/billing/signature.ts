@@ -155,7 +155,9 @@ export function billingWebhookSecret(env: NodeJS.ProcessEnv = process.env): stri
   }
   // 短すぎる鍵は総当たりで求められる（求められたら任意の本文を署名できる）
   if (configured.length < BILLING_WEBHOOK_SECRET_MIN_LENGTH) {
-    logEventThrottled('billing.secret_not_configured');
+    // **「未設定」とは別の出来事**（未設定は繋いでいない配備では正常だが、こちらは設定ミスが
+    // 確定するので深刻度も違う。直し方も違う）
+    logEventThrottled('billing.secret_too_short');
     throw notConfiguredError();
   }
   // 使える鍵

@@ -187,6 +187,37 @@ function isAllowedLogArgument(argument: ts.Expression): boolean {
   return false;
 }
 
+/**
+ * 出口の所有モジュール（`src/lib/log.ts`）が持つ、**語彙のキーと同じ綴りの文字列リテラル**。
+ *
+ * あのファイルは自分の縮退の行を自分の出口に通さない（通すと同じ理由で投げうる）ので、
+ * 出口の呼び出しからは見えない。**語彙に実在する綴りだけを拾う**ので、無関係なリテラルを
+ * 「出している」ことにはしない。
+ * @returns 見つけた綴り
+ */
+function ownerEventLiterals(): Set<string> {
+  // 語彙のキー（この集合に無い綴りは拾わない）
+  const vocabulary = new Set<string>(Object.keys(LOG_EVENTS));
+  // 見つけた綴り
+  const found = new Set<string>();
+  // 所有モジュールだけを見る
+  for (const { path, source } of SOURCES) {
+    if (path !== LOG_OWNER) continue;
+    forEachNode(source, (node) => {
+      // 文字列リテラルで、語彙に実在する綴りのものだけ
+      if (!ts.isStringLiteralLike(node)) return;
+      if (!vocabulary.has(node.text)) return;
+      // **語彙そのものの鍵は数えない。** `LOG_EVENTS` はこのファイルにあるので、鍵の
+      // リテラルまで拾うと**宣言しただけで「出している」ことになり、この検査が丸ごと死ぬ**
+      // （実測で、縮退の行を語彙の外の綴りへ戻す変異が全件緑のまま通った）
+      const parent = node.parent;
+      if (parent !== undefined && ts.isPropertyAssignment(parent) && parent.name === node) return;
+      found.add(node.text);
+    });
+  }
+  return found;
+}
+
 describe('エラーのログ出力', () => {
   it('console のログの実引数は「出してよい形」だけ', () => {
     // 1 ファイルも読めなければ走査が壊れている (fail-closed)
@@ -425,6 +456,12 @@ describe('エラーのログ出力', () => {
           if (first !== undefined && ts.isStringLiteralLike(first)) emitted.add(first.text);
         }
       });
+    // **出口の所有モジュールが自分で名乗る分も数える。** `formatLogLine` は整形が失敗した
+    // ときに「ログの出口自身が縮退した」という行を出すが、それは自分の出口を通らない
+    // （通せば同じ理由で投げうる）。語彙の中の綴りとして `src/lib/log.ts` に書いてあれば
+    // 出していると認める — 認めないと、**その行を語彙の外の綴りにする**しかなくなり、
+    // 運用者が `LOG_EVENTS` から警報を組めない行が生まれる（それが直前の状態だった）
+    for (const literal of ownerEventLiterals()) emitted.add(literal);
     // 語彙が空なら走査が壊れている (fail-closed)
     expect(Object.keys(LOG_EVENTS).length, '語彙が空').toBeGreaterThan(0);
     // 出していないキーを並べる

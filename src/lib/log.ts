@@ -50,11 +50,25 @@ export const LOG_EVENTS = {
     message:
       'PLATFORM_ADMIN_TOKEN が短すぎます (必要な長さは src/lib/constants.ts の PLATFORM_ADMIN_TOKEN_MIN_LENGTH)。無視します。',
   },
+  // --- ログの出口自身（`src/lib/log.ts`） ---
+  'log.format_failed': {
+    level: 'error',
+    message:
+      'ログ 1 行の整形に失敗したため、出来事の名前を伏せた縮退の行を出しました。呼び出し側が語彙のキー以外を渡しています。',
+  },
   // --- 監査ログ ---
   'audit.secret_not_configured': {
     level: 'error',
+    message: 'AUDIT_HMAC_SECRET が設定されていません。人の操作と課金の反映を 503 で断ります。',
+  },
+  // **「未設定」と「短すぎる」を 1 つにまとめない。** 直し方が違う（変数を足すのか、値を
+  // 作り直すのか）のに、同じ `event` だと運用者はログからも
+  // `agentops_log_events_total` からも区別できない。間引きの窓も出来事ごとなので、
+  // まとめると一方の発生が他方の行を押し出す（監視トークンの 2 つと同じ分け方）
+  'audit.secret_too_short': {
+    level: 'error',
     message:
-      'AUDIT_HMAC_SECRET が設定されていません (または短すぎます)。人の操作と課金の反映を 503 で断ります。',
+      'AUDIT_HMAC_SECRET が短すぎます (必要な長さは src/lib/constants.ts の AUDIT_HMAC_SECRET_MIN_LENGTH)。人の操作と課金の反映を 503 で断ります。',
   },
   // --- 課金（受信 Webhook） ---
   // **`level` は `warn`。** `STRIPE_WEBHOOK_SECRET` は「課金を繋ぐなら必須」の任意設定で、
@@ -64,8 +78,15 @@ export const LOG_EVENTS = {
   // 深刻度ではなく `event` の等値で組む（`docs/deploy.md`）
   'billing.secret_not_configured': {
     level: 'warn',
+    message: 'STRIPE_WEBHOOK_SECRET が設定されていません。課金の受信 Webhook を 503 で断ります。',
+  },
+  // **値を入れたのに短すぎる側は `error`。** 未設定は「繋いでいない配備では正常」だが、
+  // こちらは設定ミスが確定する（しかも直し方が違う）。分ける理由は
+  // `audit.secret_too_short` と同じ
+  'billing.secret_too_short': {
+    level: 'error',
     message:
-      'STRIPE_WEBHOOK_SECRET が設定されていません (または短すぎます)。課金の受信 Webhook を 503 で断ります。',
+      'STRIPE_WEBHOOK_SECRET が短すぎます (必要な長さは src/lib/constants.ts の BILLING_WEBHOOK_SECRET_MIN_LENGTH)。課金の受信 Webhook を 503 で断ります。',
   },
   'billing.customer_unknown': {
     level: 'error',
@@ -244,8 +265,12 @@ export const LOG_EVENTS = {
 export type LogEventName = keyof typeof LOG_EVENTS;
 
 // 語彙も引けなかったときの深刻度。**最も重い側へ倒す**（縮退した行を見落とさせない）
-// 出来事の名前さえ文字列にできなかったときの定型文（縮退の最後の受け皿）
-const FALLBACK_LOG_EVENT = 'log.unprintable_event';
+// 整形そのものが失敗したときに名乗る出来事（**語彙の中の値**。下の `LOG_EVENTS` にある）。
+// 語彙の外の綴りを出していた頃は、運用者が `LOG_EVENTS` と `docs/deploy.md` から警報を
+// 組む以上**その行に当たる条件を書けず**、しかも数える側にも系列が無かった
+// （元の名前で数えようとして `incrementCounter` が捨てている）ので、
+// 「ログの出口自身が縮退した」というただ 1 行がどちらの出口からも見えなかった
+const FALLBACK_LOG_EVENT = 'log.format_failed';
 const FALLBACK_LOG_LEVEL: LogLevel = 'error';
 
 /**

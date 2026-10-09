@@ -226,14 +226,14 @@ describe('GET /metrics', () => {
     // 下限より 1 文字短い値を設定する
     const tooShort = 'a'.repeat(METRICS_TOKEN_MIN_LENGTH - 1);
     vi.stubEnv('METRICS_TOKEN', tooShort);
-    // ログを捕まえる
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // ログを捕まえる（**両方のメソッド**。決め打つと語彙の `level` を変えた瞬間に何も見なくなる）
+    const outlet = captureLogOutlet();
     try {
       // 2 回叩く（どちらも 503）
       expect((await fetchMetrics(tooShort)).status).toBe(503);
       expect((await fetchMetrics(tooShort)).status).toBe(503);
       // 間引いて出る（2 回なので 2 本。未認証の総当たりでも量は窓あたり対数に収まる）
-      expect(loggedEvents(spy.mock.calls)).toEqual([
+      expect(loggedEvents(outlet.calls())).toEqual([
         'metrics.token_too_short',
         'metrics.token_too_short',
       ]);
@@ -241,7 +241,7 @@ describe('GET /metrics', () => {
       // 元へ戻す。**環境変数も戻す** — `vitest.config.mts` は `unstubEnvs` を立てていないので
       // 差し替えたまま抜けると次のテストへ漏れる（このファイルの末尾にあるおかげで今は
       // 表に出ていないだけで、後ろにテストを 1 本足すと主題と無関係な理由で落ちる）
-      spy.mockRestore();
+      outlet.restore();
       resetThrottledLogsForTesting();
       vi.unstubAllEnvs();
     }

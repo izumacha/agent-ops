@@ -2,6 +2,7 @@
 // リクエスト本文 (413) と上流の応答 (502) の**両方**が通るので、HTTP から切り離してここで固定する
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readStreamWithinByteLimit } from '@/lib/stream-bytes';
+import { loggedEvents } from './lib/log-lines';
 
 // バイト列を 1 かたまりずつ流すストリームを作る
 function streamOf(chunks: Uint8Array[], onCancel?: () => void): ReadableStream<Uint8Array> {
@@ -110,10 +111,8 @@ describe('上限つきのストリーム読み取り', () => {
     const result = await readStreamWithinByteLimit(failing, 5, { cancelOnOverflow: true });
     // 結果は変わらない
     expect(result).toEqual({ ok: false, reason: 'too_large' });
-    // 失敗はログに残る
-    expect(logged.mock.calls.filter((args) => String(args[0]).includes('解放に失敗'))).toHaveLength(
-      1,
-    );
+    // 失敗はログに残る（**照合は `event` で行う**。文言は推敲してよいという分担）
+    expect(loggedEvents(logged.mock.calls)).toEqual(['stream.release_failed']);
   });
 
   it('UTF-8 として壊れたバイト列は置換せずに失敗として返す', async () => {

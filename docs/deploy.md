@@ -205,11 +205,15 @@ curl -sS -H "Authorization: Bearer $METRICS_TOKEN" https://<配備先>/api/v1/me
     ログの量＝保存の費用を好きなだけ増やせる）。対象は、断った側が
     `billing.signature_rejected` / `metrics.token_rejected` / `session.login_rejected` /
     `session.cross_origin_action`、設定が使えない側が `audit.secret_not_configured` /
-    `auth.platform_token_too_short` / `billing.secret_not_configured` /
+    `audit.secret_too_short` / `auth.platform_token_too_short` /
+    `billing.secret_not_configured` / `billing.secret_too_short` /
     `metrics.token_not_configured` / `metrics.token_too_short`
     （**一覧の正本は `src/` 全体で `logEventThrottled` を呼んでいる箇所**で、
     `tests/docs-gate.test.ts` がそこから導いてこの一覧と突き合わせる — 足しても消しても
     ここが古いままなら落ちる。件数とファイル名は書かない）。
+    - **「未設定」と「短すぎる」は別の出来事にしてある。** 直し方が違う（変数を足すのか、
+      値を作り直すのか）ので、同じ `event` だとログからも
+      `agentops_log_events_total` からも区別できない。
     - **設定が使えない側も 1 度きりにはしない。** 鍵やトークンの設定漏れは直すまで続き、
       続いていること自体が運用者の知りたいこと（たとえば `STRIPE_WEBHOOK_SECRET` の
       設定漏れは受信 Webhook を全滅させ、事業者はバックオフののちエンドポイントを無効化する

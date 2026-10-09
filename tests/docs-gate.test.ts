@@ -37,6 +37,9 @@ function docBlocks(text: string): string[] {
   return text.split(/\n\s*\n|\n(?=[ \t]*- )|\n(?=[ \t]*\|)/);
 }
 
+// src 配下の構文木（**1 度だけ**作って使い回す）
+const PARSED_SOURCES = parseSourceFiles();
+
 /**
  * `src/` 全体から「その出口へ渡した出来事の名前」を集める。
  *
@@ -49,8 +52,10 @@ function docBlocks(text: string): string[] {
 function eventsPassedTo(outlet: string): Set<string> {
   // 見つけた名前
   const found = new Set<string>();
-  // src 配下を構文で走査する
-  for (const parsed of parseSourceFiles()) {
+  // src 配下を構文で走査する（**走査結果はモジュール評価時の 1 度だけ**。呼ぶたびに
+  // `parseSourceFiles()` を叩いていた版は 1 回のテスト実行で src 全体を 3 度パースしていた
+  // ——`sourceImportGraph` に `parsed` を渡せるようにしたのと同じ理由）
+  for (const parsed of PARSED_SOURCES) {
     forEachNode(parsed.source, (node) => {
       // その出口の呼び出しなら実引数を得る
       const args = namedCallArguments(node, outlet);

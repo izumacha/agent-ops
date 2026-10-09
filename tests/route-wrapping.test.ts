@@ -115,12 +115,14 @@ const spec = parse(readFileSync(join(process.cwd(), 'openapi', 'openapi.yaml'), 
 // `parseSourceFiles()` が src 配下の全 .ts/.tsx を TypeScript パーサで読むので、テストごとに
 // 作り直すとその走査が丸ごと二重になる（`reachesModule` が graph を引数で受ける形も
 // 「1 度作って使い回す」ことを前提にしている）
-const importGraph = sourceImportGraph();
-
-// 解析済みの src 全体。**同じ理由でここも 1 度だけ作る** — テストの中で呼ぶと、1 回の
-// `npm test` でこのファイルだけが src を何度も解析する（この PR は 1 か所だったものを
-// 3 か所に増やしていた）。`tests/layering.test.ts` も同じ形で持っている
+// 解析済みの src 全体。**1 度だけ作る** — テストの中で呼ぶと、1 回の `npm test` で
+// このファイルだけが src を何度も解析する（この PR は 1 か所だったものを 3 か所に
+// 増やしていた）。`tests/layering.test.ts` も同じ形で持っている
 const parsedSources = parseSourceFiles();
+
+// src 全体の import グラフ。**解析済みを渡す** — 渡さないと `sourceImportGraph` が
+// 中でもう一度 src 全体をパースし、このファイルだけで 2 周ぶん走る（実測の指摘）
+const importGraph = sourceImportGraph(parsedSources);
 
 describe('Route Handler の結線', () => {
   // 走査が壊れて 0 件になったら落とす (fail-closed)

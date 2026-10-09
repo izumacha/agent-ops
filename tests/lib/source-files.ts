@@ -132,11 +132,18 @@ export function importedModulesOf(parsed: ParsedSourceFile): string[] {
 
 /**
  * src 全体の import グラフを 1 度だけ作る (ファイルごとの取り込み先の表)。
+ *
+ * **解析済みの一覧を受け取れる。** 既定では自分で `parseSourceFiles()` を呼ぶが、呼び出し側が
+ * 同じモジュールで解析結果も使う場合（`tests/route-wrapping.test.ts` / `tests/layering.test.ts`）
+ * はそれを渡す — 渡さないと src 全体の TypeScript パースが 1 ファイルあたり 2 度走る。
+ * @param parsed 解析済みの src 全体 (省略時はここで解析する)
  * @returns 絶対パス → 取り込み先の絶対パスの一覧
  */
-export function sourceImportGraph(): Map<string, string[]> {
-  // すべてのファイルを構文木にして取り込み先を集める
-  return new Map(parseSourceFiles().map((parsed) => [parsed.path, importedModulesOf(parsed)]));
+export function sourceImportGraph(
+  parsed: ParsedSourceFile[] = parseSourceFiles(),
+): Map<string, string[]> {
+  // 渡された（または解析した）ファイルごとに取り込み先を集める
+  return new Map(parsed.map((file) => [file.path, importedModulesOf(file)]));
 }
 
 /**

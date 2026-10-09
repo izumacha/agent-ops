@@ -215,10 +215,12 @@ describe('Step0 の設計成果物', () => {
         // 文書側の目印が正本の鍵であること
         expect(sources, `${path} の <!--uncounted:${key}--> は正本に無い鍵`).toContain(key);
       }
-      // 理由が空の宣言を許さない（登録するだけで黙らせる形にしない）
-      for (const reason of Object.values(UNCOUNTED_RESPONSE_SOURCES)) {
-        expect(reason.trim().length, '数えない種類の理由が空').toBeGreaterThan(0);
-      }
+    }
+    // 理由が空の宣言を許さない（登録するだけで黙らせる形にしない）。**文書ごとのループの外**で
+    // 見る — 表の性質は文書と無関係なので、中に置くと文書の数だけ同じ検査が繰り返され、
+    // 失敗したときの文言も「どの文書を見ていて落ちたか」と無関係になる
+    for (const reason of Object.values(UNCOUNTED_RESPONSE_SOURCES)) {
+      expect(reason.trim().length, '数えない種類の理由が空').toBeGreaterThan(0);
     }
   });
 

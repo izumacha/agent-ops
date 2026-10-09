@@ -130,6 +130,23 @@ describe('GET /metrics', () => {
     }
   });
 
+  it('resetMetricsAuthForTesting は本番では呼べない（警告 1 度だけの抑止を解除させない）', () => {
+    // 本番のふりをする
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      // 呼ぶと投げる（`resetMetricsForTesting` / `setReposForTesting` と同じ扱い）。
+      // **この 1 本が無いとガードの 3 行を消しても全件緑で通った**（実測）— 消えると本番で
+      // 「短すぎる設定の警告」を毎リクエスト出せるようになり、未認証の総当たりで
+      // エラーログを埋められる状態（上のテストが固定している抑止）へ戻る
+      expect(() => resetMetricsAuthForTesting()).toThrow(/本番/);
+    } finally {
+      // **このテストの中で戻す** — このファイルは `seedEachTest()` の後始末が
+      // `setReposForTesting` を呼ぶので、`NODE_ENV` を本番のまま抜けるとその後始末が
+      // 同じ種類のガードで投げ、無関係なテストまで赤くなる（実測で 2 件落ちた）
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('下限ちょうどの長さなら通る（境界）', async () => {
     // 下限と同じ長さの値を設定する
     const atLimit = 'b'.repeat(METRICS_TOKEN_MIN_LENGTH);

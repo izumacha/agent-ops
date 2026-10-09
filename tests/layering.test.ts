@@ -23,7 +23,7 @@ import {
 // 走査結果はモジュール評価時に 1 度だけ作って使い回す
 const PARSED = parseSourceFiles();
 // import の連鎖（ファイル → 取り込み先）
-const GRAPH = sourceImportGraph();
+const GRAPH = sourceImportGraph(PARSED);
 
 // 純粋な層（ここから下の層へは依存しない）
 const DOMAIN_DIR = join(SRC_DIR, 'domain');

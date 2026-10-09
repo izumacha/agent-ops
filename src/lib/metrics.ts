@@ -452,9 +452,6 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set(
 // **1xx は入れない** — `Response` の status は 200〜599 なので応答として返らない
 const STATUS_CLASS_LABELS = ['2xx', '3xx', '4xx', '5xx'] as const;
 
-/** ステータスの級を表すラベル値の型 */
-export type StatusClassLabel = (typeof STATUS_CLASS_LABELS)[number];
-
 /** 級に丸めるときの桁（HTTP のステータスは 3 桁） */
 const STATUS_CLASS_DIVISOR = 100;
 

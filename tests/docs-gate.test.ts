@@ -1051,3 +1051,66 @@ describe('tenantId の例外（行スコープ方式）の散文', () => {
     testBudgetFor(1),
   );
 });
+
+// **`CLAUDE.md` §3 の索引と `docs/implementation-notes.md` の節が 1 対 1 であること。**
+//
+// §3 は 20 万字を超えた `CLAUDE.md` から詳細を切り出して索引だけにした節で、**索引の行が
+// 指す先と、向こうの節は同じ集合でなければならない**。片方だけに足すと壊れ方が 2 つある:
+// 索引だけに足せば**指す先が無いリンク**（読む人はそこで止まる）、文書だけに足せば**誰も
+// 辿り着けない節**（索引を入口だと信じて読んだ人には存在しないのと同じ）。
+//
+// **手がかりを 2 つに分ける**: 索引側は `CLAUDE.md` の本文に現れる
+// `](./docs/implementation-notes.md#<アンカー>)` の綴り、文書側は `## ` の見出しから
+// 同じ規則で作ったアンカー。一覧を一覧自身と突き合わせる形にしないのは、載せ忘れた 1 節が
+// この検査からも同時に外れるため（`docs/index.md` の鮮度を見る検査と同じ理由）。
+//
+// **見るのは集合の一致だけで、リンクの文法は解析しない**（上の `docs/index.md` の節が
+// 6 巡の実測で記録している「Markdown を自前で再実装し続ける」道には戻らない）。アンカーの
+// 綴りが GitHub の生成規則と一致しているかも見ない — ずれても**誤って赤くなる側には
+// 倒れない**（両方が同じ規則で作られていれば集合は一致する）。
+describe('CLAUDE.md §3 の索引と実装ノートの対応', () => {
+  // 索引が指す先の文書
+  const NOTES = 'implementation-notes.md';
+
+  /** 見出しの文字列から GitHub と同じ規則でアンカーを作る（小文字化・記号を落とす・空白を `-` へ）。 */
+  function anchorOf(heading: string): string {
+    // 小文字化してから、文字・数字・ハイフン・下線・空白だけを残す
+    const kept = [...heading.toLowerCase()].filter((ch) => /[\p{L}\p{N}\-_ ]/u.test(ch)).join('');
+    // 空白はハイフンへ
+    return kept.replaceAll(' ', '-');
+  }
+
+  it('索引の行と実装ノートの節が 1 対 1', () => {
+    // 索引側: CLAUDE.md の本文に現れるアンカー付きリンクの宛先
+    const claude = readFileSync(join(ROOT, 'CLAUDE.md'), 'utf8');
+    const linked = new Set(
+      [...claude.matchAll(new RegExp(`\\]\\(\\./docs/${NOTES}#([^)]+)\\)`, 'g'))].map(
+        (match) => match[1],
+      ),
+    );
+    // 文書側: `## ` の見出しから作ったアンカー
+    const notes = readFileSync(join(DOCS, NOTES), 'utf8');
+    const sections = new Set(
+      notes
+        .split('\n')
+        .filter((line) => line.startsWith('## ') && !line.startsWith('## 目次'))
+        .map((line) => anchorOf(line.slice('## '.length).trim())),
+    );
+    // **どちらかが空なら落とす**（走査が壊れて「違反ゼロ＝緑」になるのを避ける fail-closed）
+    expect(
+      linked.size,
+      'CLAUDE.md から実装ノートへのリンクを 1 つも見つけられない',
+    ).toBeGreaterThan(0);
+    expect(sections.size, '実装ノートの節を 1 つも見つけられない').toBeGreaterThan(0);
+    // 索引が指しているのに節が無い（リンク切れ）
+    expect(
+      [...linked].filter((anchor) => !sections.has(anchor)),
+      `CLAUDE.md §3 の索引が docs/${NOTES} に無い節を指している（節を足すか、行を直す）`,
+    ).toEqual([]);
+    // 節があるのに索引から指していない（辿り着けない節）
+    expect(
+      [...sections].filter((anchor) => !linked.has(anchor)),
+      `docs/${NOTES} の節が CLAUDE.md §3 の索引から指されていない（索引へ 1 行足す）`,
+    ).toEqual([]);
+  });
+});

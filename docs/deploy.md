@@ -4,7 +4,9 @@ Step7 の成果物。**自前のサーバーを持たずに公開する場合の
 Docker で動かす手順は README の「Docker で動かす」、ローカル開発は README の「セットアップ」。
 
 > **この文書は「どう配備するか」だけを書く。** アプリ側の不変条件（fail-closed の設定・
-> レート制限の単位・テナント境界）は `CLAUDE.md` §3 と各 ADR が正本で、ここには写しを置かない。
+> レート制限の単位・テナント境界）は [`implementation-notes.md`](./implementation-notes.md)
+> （`CLAUDE.md` §3 の索引が指す詳細）・`CLAUDE.md` §3 のマルチテナントの節・各 ADR が正本で、
+> ここには写しを置かない。
 
 ## 構成
 

@@ -182,6 +182,27 @@ describe('保守の定期実行', () => {
       expect(result.passComplete).toBe(true);
     });
 
+    it('バッチ途中で落ちても、それまでに消した件数は応答に残る', async () => {
+      // 2 バッチ成功したあと 3 バッチ目で落ちる（接続の枯渇がこの形）
+      const counts = [MAINTENANCE_RATE_LIMIT_SWEEP_BATCH, MAINTENANCE_RATE_LIMIT_SWEEP_BATCH];
+      let call = 0;
+      vi.spyOn(repos.rateLimit, 'sweep').mockImplementation(() => {
+        const removed = counts[call];
+        call += 1;
+        // 3 回目は失敗させる
+        if (removed === undefined) return Promise.reject(new Error('掃きに失敗'));
+        return Promise.resolve(removed);
+      });
+      // 一巡を始める
+      const result = await run();
+      // **消した 2,000 件が応答に残っている**（包みを外側に置くと 0 になり、
+      // 実際に消えた行が応答・ティックの合計・運用者の目からまるごと消える）
+      expect(result.rateLimitHitsDeleted).toBe(MAINTENANCE_RATE_LIMIT_SWEEP_BATCH * 2);
+      // 失敗そのものは取りこぼしとして伝わる
+      expect(result.failed).toBe(1);
+      expect(result.rateLimitSweepComplete).toBeNull();
+    });
+
     it('一巡の途中（カーソルあり）では回収しない（同じ掃きを何十回も繰り返さない）', async () => {
       // 窓から外れる記録を 1 件入れる
       await recordRateLimitHit('tenant:gone');

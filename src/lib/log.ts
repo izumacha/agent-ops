@@ -216,7 +216,7 @@ export const LOG_EVENTS = {
   'maintenance.tenant_scan_failed': {
     level: 'error',
     message:
-      'テナントの一覧を読めませんでした (この要求はここで終わり、以降のテナントは次の要求が続きから歩きます)',
+      'テナントの一覧を読めませんでした (この一巡は打ち切りました。次のティックは先頭のテナントから数え直すので、ここで落ち続けると後ろのテナントは永久に判定されません)',
   },
   // --- 通知（Step4） ---
   'notify.response_drain_failed': {

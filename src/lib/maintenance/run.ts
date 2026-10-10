@@ -18,7 +18,7 @@
 // ことは応答に現れない**ので掃きが静かに効かなくなる。
 import type { CursorKey, Repositories } from '@/data';
 import { encodeCursor } from '@/data/page';
-import { AgentStatus, RuleKind } from '@/domain/types';
+import { AgentStatus } from '@/domain/types';
 import { rateLimitWindowMs } from '@/lib/api/rate-limit';
 import {
   MAINTENANCE_RATE_LIMIT_SWEEP_BATCH,
@@ -27,12 +27,8 @@ import {
   PAGE_LIMIT_MAX,
 } from '@/lib/constants';
 import { describeError } from '@/lib/describe-error';
-import { evaluateGuardrailsSafely } from '@/lib/guardrail/evaluate';
+import { ALL_RULE_KINDS, evaluateGuardrailsSafely } from '@/lib/guardrail/evaluate';
 import { logEvent } from '@/lib/log';
-
-// 全種別を見る。**enum から導く**ので、種別を足したときにここへ書き足す必要が無い
-// （明示実行 `POST /guardrails/run` と同じ理由・同じ形）
-const ALL_RULE_KINDS: readonly RuleKind[] = Object.values(RuleKind);
 
 /** 保守の定期実行の入力（続きの位置と 1 要求ぶんの予算） */
 export interface MaintenanceRunInput {
@@ -59,7 +55,13 @@ export interface MaintenanceRunResult {
   /**
    * 回収しきったか。`false` なら**まだ消せる行が残っている**（1 要求のバッチ数の上限で
    * 打ち切った）。そのときは**テナントを 1 件も歩かずに**戻るので、`passComplete` も偽・
-   * カーソルも両方 `null` になる（呼び出し側は同じ呼び方をもう一度するだけでよい）
+   * カーソルも両方 `null` になる（呼び出し側は同じ呼び方をもう一度するだけでよい）。
+   *
+   * **`null` は「確かめていない」**で、意味は 2 つある: 一巡の途中なので**そもそも回収を
+   * 試していない**場合と、**回収が失敗した**場合（後者は `failed` が 1 増え、
+   * `maintenance.sweep_failed` がサーバログに出る — 応答だけでは区別しない）。
+   * **`if (!swept.complete)` と書くとこの 3 つ目の値が偽に畳まれ**、一巡の途中の要求が
+   * テナントを 1 件も歩かずに戻る（実測で既存のテストが落ちた）。判定は必ず `=== false` で書く。
    */
   rateLimitSweepComplete: boolean | null;
   /**
@@ -80,12 +82,14 @@ export interface MaintenanceRunResult {
   // 発火したルールの件数（全エージェントぶんの合計）
   fired: number;
   /**
-   * 判定できなかったルールの件数（例外で飛ばしたもの）＋**判定そのものが失敗した**
-   * エージェントの件数＋**一覧が読めずに飛ばしたテナントの件数**。
+   * この要求が**取りこぼした仕事の件数**。寄与するのは 4 つで、(a) 判定できなかったルール
+   * （例外で飛ばしたもの）、(b) **判定そのものが失敗した**エージェント、(c) **一覧が読めずに
+   * 飛ばしたテナント**、(d) **レート制限の記録の回収の失敗**（この 1 本でも 1 と数える）。
    *
-   * **3 つを 1 つの欄にまとめてあるのは、どれも「掃きが取りこぼした」ことを意味するから**
+   * **1 つの欄にまとめてあるのは、どれも「掃きが取りこぼした」ことを意味するから**
    * （呼び出し側がすることは同じ＝非 0 終了で運用者へ見せる）。内訳はサーバログにある
-   * （`guardrail.*_failed` と `maintenance.tenant_scan_failed`）。
+   * （`guardrail.*_failed` / `maintenance.tenant_skipped` / `maintenance.tenant_scan_failed`
+   * / `maintenance.sweep_failed`）。
    *
    * **0 でないことを呼び出し側へ必ず伝える** — 伝えないと「何も超過していない」と
    * 見分けの付かない応答になり、運用者は上限内だと読む（`POST /guardrails/run` が
@@ -115,6 +119,11 @@ export interface MaintenanceRunResult {
  * **境目の時刻はここで作らない。** 渡すのは窓の長さだけで、`at` を書いたのと同じ時計
  * （記録側）が境目を決める — アプリの壁時計で決めると、DB より進んでいる配備で**窓の中の
  * 生きた記録を消して枠をリセットする**（理由は Port の `sweep`）。
+ * **投げない。** `DELETE` は落ちうる（文のタイムアウト・接続の枯渇）のに、ここが裸だと 500 に
+ * なって**テナントを 1 件も歩かないままこの機能の本題＝ガードレールの定期掃きが走らない**。
+ * しかも回収は一巡の開始でだけ行うので**毎回のティックが同じ所で落ち**、2 つの仕事のうち
+ * 軽いほうの失敗が重いほうを恒久的に止める、いちばん悪い倒れ方になる。
+ *
  * **「回収しきった」は「この要求ではもう消せる行が見えない」の意味**（別のトランザクションが
  * 掴んでいる行は数えない。掴まれているのはいま使われているキーの行で、そちらは `consume` が
  * 自分の操作の中で掃くので、この掃きが要る「二度と来ないキー」の行は掴まれない）。
@@ -123,15 +132,27 @@ export interface MaintenanceRunResult {
  */
 async function sweepRateLimitHits(
   repos: Repositories,
-): Promise<{ deleted: number; complete: boolean }> {
+  progress: Progress,
+): Promise<{ deleted: number; complete: boolean | null }> {
   // 窓の長さ（境目を決めるのは記録側。理由は Port の `sweep`）
   const windowMs = rateLimitWindowMs();
   // 消した合計
   let deleted = 0;
   // バッチ数の上限まで繰り返す
   for (let batch = 0; batch < MAINTENANCE_RATE_LIMIT_SWEEP_MAX_BATCHES; batch += 1) {
-    // 1 バッチぶん消す
-    const removed = await repos.rateLimit.sweep(windowMs, MAINTENANCE_RATE_LIMIT_SWEEP_BATCH);
+    // 1 バッチぶん消す。**包みはこのループの中に置く** — 外側で包むと、5 バッチ成功した後に
+    // 6 バッチ目が落ちたとき**既に消した 5,000 件が応答から消える**（`deleted` は外へ出ない）。
+    // ティック側で「失敗の出口でも合計を残す」と決めたのと同じ性質を、サーバー側でも保つ
+    let removed;
+    try {
+      removed = await repos.rateLimit.sweep(windowMs, MAINTENANCE_RATE_LIMIT_SWEEP_BATCH);
+    } catch (error) {
+      // 取りこぼしに数え、**ここまでに消した件数を持って**「確かめていない」で戻る
+      // （`false` で返すと呼び出し側が同じ要求を送り直し、落ちている DB を叩き続ける）
+      logEvent('maintenance.sweep_failed', describeError(error));
+      progress.failed += 1;
+      return { deleted, complete: null };
+    }
     // 合計へ足す
     deleted += removed;
     // **1 件も消えなければそこで終わり。** 「上限未満なら終わり」にはしない — 掃きは
@@ -143,36 +164,6 @@ async function sweepRateLimitHits(
   }
   // 上限まで消してもまだ残っている（次の要求が続ける）
   return { deleted, complete: false };
-}
-
-/**
- * 回収を**投げさせずに**行う。
- *
- * **この 1 本だけが裸だった。** 一覧の読み出しは両方包んである（理由はそれぞれの catch）のに
- * 回収は投げうるので、`DELETE` が落ちると（文のタイムアウト・接続の枯渇）500 になり、
- * **テナントを 1 件も歩かないままこの機能の本題＝ガードレールの定期掃きが走らない**。
- * しかも回収は一巡の開始でだけ行うので、**毎回のティックが同じ所で落ちる** — 2 つの仕事の
- * うち軽いほうの失敗が重いほうを恒久的に止める、いちばん悪い倒れ方になる。
- *
- * 失敗したときは「確かめていない」（`complete: null`）として返し、取りこぼしに数えて続ける
- * （`false` で返すと呼び出し側が同じ要求を送り直し、落ちている DB を叩き続ける）。
- * @param repos データ層
- * @param progress 取りこぼしを数える集計（破壊的に更新する）
- * @returns 消した件数と、回収しきったか（`null` は確かめられなかった）
- */
-async function sweepRateLimitHitsSafely(
-  repos: Repositories,
-  progress: Progress,
-): Promise<{ deleted: number; complete: boolean | null }> {
-  try {
-    // 通常はこちら
-    return await sweepRateLimitHits(repos);
-  } catch (error) {
-    // 残して数えて続ける（判定を止めない）
-    logEvent('maintenance.sweep_failed', describeError(error));
-    progress.failed += 1;
-    return { deleted: 0, complete: null };
-  }
 }
 
 /** 判定の進み具合（結果を組み立てるのに使う可変の集計） */
@@ -229,7 +220,7 @@ export async function runMaintenance(
   // ほとんどの要求が健全に見える（実際には 1 度も確かめていない）。`passComplete` を旗にした
   // のと同じ理由で、「見ていない」を別の値にする
   const swept: { deleted: number; complete: boolean | null } = startsPass
-    ? await sweepRateLimitHitsSafely(repos, progress)
+    ? await sweepRateLimitHits(repos, progress)
     : { deleted: 0, complete: null };
 
   // 結果を組み立てる（掃きの結果と集計は共通で、違うのは続きの位置だけ）
@@ -337,7 +328,10 @@ export async function runMaintenance(
         // 飛ばした事実を残す（ティックの終了コードにも出る）。
         // **渡すのは語彙のキーと `describeError(...)` だけ** — 出口の規約（`src/lib/log.ts` と
         // `tests/error-logging.test.ts`）で、例外に触れてよいのはあの関数だけなので
-        // テナント ID は添えない（どのテナントかは例外の文脈から追う）。
+        // テナント ID は添えない。**代償として、どのテナントを飛ばしたかは記録から分からない**
+        // （`describeError` は意図的に `message` を落とすので、例外の文脈からも追えない）—
+        // 運用者にできるのは「同じ時刻に失敗した DB 側のログと突き合わせる」ところまで。
+        // `docs/known-issues.md` に残っている制約（出口の規約を曲げるほうが高くつく）。
         // **語彙はテナントの一覧が読めなかった場合と分ける** — 同じ文言だと運用者が
         // 「1 テナントだけ取りこぼした」と読んで規模を取り違える
         logEvent('maintenance.tenant_skipped', describeError(error));

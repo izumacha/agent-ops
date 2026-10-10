@@ -131,6 +131,16 @@ export const USAGE_RULE_KINDS: readonly RuleKind[] = [RuleKind.cost, RuleKind.er
 export const QUALITY_RULE_KINDS: readonly RuleKind[] = [RuleKind.quality];
 
 /**
+ * 全種別。**明示実行（`POST /guardrails/run`）と定期実行（保守）が共有する**
+ * — どちらも「いま止まるべきか」を網羅的に確かめる操作なので絞らない。
+ *
+ * **`RuleKind` から導く**ので、種別を足したときにここへ書き足す必要が無い。
+ * 2 か所に写しを置いていた（両方同じ `Object.values(RuleKind)` の 1 行＋同じ理由のコメント）が、
+ * 上の 2 つの表と同じ関心事なので所有者をここ 1 つにした（§6 DRY）。
+ */
+export const ALL_RULE_KINDS: readonly RuleKind[] = Object.values(RuleKind);
+
+/**
  * 1 つのルールの判定に必要な測定値をそろえる。
  *
  * **同じ窓の長さの集計は 1 回だけ問い合わせる**（`usageByWindow` に貯める）。ルールを

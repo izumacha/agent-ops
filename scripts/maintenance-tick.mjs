@@ -32,7 +32,9 @@ import { fetchWithTimeout } from './lib/fetch-with-timeout.mjs';
 // 完了してよいと宣言している要求をこちら側が打ち切ることになり、**応答＝続きのカーソルを
 // 受け取れないまま**次のティックがまた先頭から始める（毎回同じ要求で落ちる）。
 // 値を写しているのは、このスクリプトが依存ゼロの素の node で動く前提で TypeScript の定数を
-// import できないため — 経路側の `maxDuration` を動かしたらここも見ること
+// import できないため。**写しが古くなったら落ちる**ようにしてあり、
+// `tests/maintenance-tick.test.ts` が両方のソースから数値を読んで「ここが経路の上限より長い」
+// ことを確かめる（経路側の `maxDuration` を伸ばすだけの差分はそこで赤くなる）
 const REQUEST_TIMEOUT_MS = 330_000;
 
 // 2xx 以外のときに標準エラーへ出す本文の長さの上限（HTML のエラーページで埋もれないため）
@@ -144,7 +146,20 @@ function die(message, cause) {
 }
 
 /**
- * ここまでの合計を 1 行 1 JSON で出す（アプリのログと同じ形）。
+ * ここまでの合計を 1 行 1 JSON で出す。
+ *
+ * **鍵の並びはアプリのログ（`src/lib/log.ts` の `buildLogLine`）に合わせる**
+ * （`ts` / `level` / `event` / `message` ＋ 中身）。運用者が組む警報は `event` の等値が条件で
+ * `level` が深刻度の軸なので、どちらかが無い行は振り分けから落ちる。
+ *
+ * **ただしアプリの閉じた語彙（`LOG_EVENTS`）には入っていない。** この行を出すのはアプリでは
+ * なくスケジューラから起動するこのスクリプトなので、語彙の網羅を見る検査
+ * （`tests/error-logging.test.ts`）とドキュメントとの突き合わせ（`tests/docs-gate.test.ts`）は
+ * ここには掛からない。代わりに形は `tests/maintenance-tick.test.ts` が固定する
+ * （守備範囲を実際より広く書かない）。
+ *
+ * 出し先は標準出力（fd 1）— アプリのログではなくこのスクリプトの結果で、cron のメールや
+ * CI のログに残るのが目的。診断（`[maintenance:tick]` の行）は標準エラーへ出す。
  *
  * **`process.stdout.write` ではなく同期の書き出しを使う。** 標準出力がパイプ（`tee` や
  * ログ収集）のときの書き込みは非同期で、`process.exit()` は**未完了の書き込みを捨てる** —
@@ -152,8 +167,16 @@ function die(message, cause) {
  * （この関数を足した理由＝「数えた取りこぼしを捨てない」が、まさにそこで破れる）。
  */
 function writeSummary() {
+  // 1 行の JSON（アプリのログと同じ鍵の並び）
+  const line = {
+    ts: new Date().toISOString(),
+    level: 'info',
+    event: 'maintenance.tick',
+    message: '保守の定期実行の一巡',
+    ...total,
+  };
   // ファイル記述子 1（標準出力）へ同期で書く
-  writeSync(1, `${JSON.stringify({ event: 'maintenance.tick', ...total })}\n`);
+  writeSync(1, `${JSON.stringify(line)}\n`);
 }
 
 // 一巡の合計（ログに出す）。

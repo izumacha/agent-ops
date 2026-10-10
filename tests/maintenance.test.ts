@@ -14,7 +14,7 @@ import {
   MAINTENANCE_TENANT_SCAN_MAX,
   RATE_LIMIT_WINDOW_MS,
 } from '@/lib/constants';
-import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
+import { RATE_LIMIT_TIER, setRateLimitOverridesForTesting } from '@/lib/api/rate-limit';
 import { createTestAgent } from './lib/agent-limits';
 
 // 監査ログの鍵（下限を満たす固定値）
@@ -180,6 +180,28 @@ describe('保守の定期実行', () => {
       expect(result.rateLimitHitsDeleted).toBe(0);
       // 一巡そのものは終わっている
       expect(result.passComplete).toBe(true);
+    });
+
+    it('窓の長さの設定が壊れていても判定は続ける（投げないという約束を窓の読み取りも守る）', async () => {
+      // 判定対象を 1 件用意する
+      const tenantId = await makeTenant('a');
+      await makeAgent(tenantId, 'a1');
+      // 窓の長さを壊す（`rateLimitWindowMs()` は正の整数でなければ `RangeError` を投げる）
+      setRateLimitOverridesForTesting({ windowMs: 0 });
+      try {
+        // 一巡を始める
+        const result = await run();
+        // **テナントを歩き、エージェントを判定している**（この 1 行が包みの外にあった頃は
+        // 500 になり、回収は一巡の開始でだけ走るので毎ティック同じ所で落ちていた）
+        expect(result.tenantsVisited).toBe(1);
+        expect(result.agentsEvaluated).toBe(1);
+        // 取りこぼしとして数え、回収は「確かめられなかった」として返す
+        expect(result.failed).toBe(1);
+        expect(result.rateLimitSweepComplete).toBeNull();
+      } finally {
+        // 上書きを戻す（他のテストへ漏らさない）
+        setRateLimitOverridesForTesting();
+      }
     });
 
     it('バッチ途中で落ちても、それまでに消した件数は応答に残る', async () => {

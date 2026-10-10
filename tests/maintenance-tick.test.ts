@@ -14,11 +14,23 @@
 //   6. **数として読めない応答で非 0 終了**（NaN になると 3 の出口が黙って 0 終了する）
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 
 // スクリプトの場所（リポジトリ直下から見た相対）
 const SCRIPT = join(process.cwd(), 'scripts', 'maintenance-tick.mjs');
+// 叩く先の経路のソース（実行時間上限の宣言を読む）
+const ROUTE_SOURCE = join(
+  process.cwd(),
+  'src',
+  'app',
+  'api',
+  'v1',
+  'maintenance',
+  'run',
+  'route.ts',
+);
 // トークン（スタブは中身を見ないが、未設定だと叩く前に落ちるので値を渡す）
 const TOKEN = 'maintenance-tick-test-token-0123456789';
 
@@ -381,6 +393,44 @@ describe('保守の定期実行のティック', () => {
       requests: 1,
       failed: 3,
     });
+  });
+
+  it('合計の行はアプリのログと同じ鍵を持つ（level が無いと深刻度で振り分けられない）', async () => {
+    const { baseUrl } = await startStub([result()]);
+    const tick = await runTick({ MAINTENANCE_BASE_URL: baseUrl, PLATFORM_ADMIN_TOKEN: TOKEN });
+    expect(tick.status, tick.stderr).toBe(0);
+    // 1 行 1 JSON として読める
+    const line = JSON.parse(tick.stdout.trim()) as Record<string, unknown>;
+    // **アプリのログ（`buildLogLine`）と同じ 4 つの鍵**を持つこと。
+    // 運用者が組む警報は `event` の等値が条件で `level` が深刻度の軸なので、
+    // どちらかが無い行は振り分けから落ちる（この行は掃きの成果を報告する唯一の出口）
+    expect(Object.keys(line)).toEqual(expect.arrayContaining(['ts', 'level', 'event', 'message']));
+    // 時刻は ISO 8601（アプリ側は `toISOString()`）
+    expect(typeof line.ts).toBe('string');
+    expect(new Date(String(line.ts)).toISOString()).toBe(line.ts);
+    // 深刻度はアプリの語彙と同じ 3 つのどれか
+    expect(['info', 'warn', 'error']).toContain(line.level);
+    // 文言は空でない（`event` だけだと収集側の一覧で中身が読めない）
+    expect(String(line.message).length).toBeGreaterThan(0);
+  });
+
+  it('要求の打ち切りは経路の実行時間上限より長い（写しが古くなっていない）', async () => {
+    // ティックの打ち切り（ミリ秒）
+    const tickSource = readFileSync(SCRIPT, 'utf8');
+    const tickMatch = /const REQUEST_TIMEOUT_MS = ([\d_]+);/.exec(tickSource);
+    // 経路が宣言する実行時間上限（秒）
+    const routeSource = readFileSync(ROUTE_SOURCE, 'utf8');
+    const routeMatch = /export const maxDuration = ([\d_]+);/.exec(routeSource);
+    // **読めなければ落とす**（書き方が変わって検出網が黙って死ぬのを防ぐ。fail-closed）
+    expect(tickMatch, 'ティックの REQUEST_TIMEOUT_MS を読めません').not.toBeNull();
+    expect(routeMatch, '経路の maxDuration を読めません').not.toBeNull();
+    const timeoutMs = Number((tickMatch?.[1] ?? '').replaceAll('_', ''));
+    const maxDurationMs = Number((routeMatch?.[1] ?? '').replaceAll('_', '')) * 1_000;
+    // **ティックの打ち切りは経路の上限より長い。** 短いと、経路が上限いっぱい使った回に
+    // ティック側が先に諦め、カーソルを 1 つも受け取らないまま非 0 終了する
+    // （次のティックはまた先頭のテナントから＝一巡が永久に終わらない）。
+    // ここが写しであることは承知のうえで、**古くなったら落ちる**ようにしてある
+    expect(timeoutMs).toBeGreaterThan(maxDurationMs);
   });
 
   it('予算の指定があれば本文に載せる', async () => {

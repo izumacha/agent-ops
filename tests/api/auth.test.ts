@@ -246,6 +246,38 @@ describe('プラットフォーム管理者トークン', () => {
     }
   });
 
+  it('短すぎる値のまま読めない値が来たら 1 行残す (設定ミスの配備の手掛かり)', async () => {
+    // 境界のちょうど 1 文字下（定数から作る。固定値だと上限を下げる変更でも緑になる）
+    process.env.PLATFORM_ADMIN_TOKEN = 'a'.repeat(PLATFORM_ADMIN_TOKEN_MIN_LENGTH - 1);
+    // 間引きの記憶を忘れる
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // どの資格情報としても読めない値（接頭辞が違う）
+      expect((await call(listTenants, { token: 'not-a-token' })).status).toBe(401);
+      // 1 行出ていること（未設定とは直し方が違うので語彙を分けている）
+      expect(loggedEvents(outlet.calls())).toEqual(['auth.platform_token_too_short']);
+    } finally {
+      outlet.restore();
+    }
+  });
+
+  it('短すぎる値でも正規のユーザートークンが通る要求では出さない (成功経路で警報を鳴らさない)', async () => {
+    // 設定ミスのまま（照合の関数の中で記録していた頃は、ここで毎要求 1 件を数えていた —
+    // `agentops_log_events_total` が総要求数と同じ系列になり、error の出口も成功要求で鳴る）
+    process.env.PLATFORM_ADMIN_TOKEN = 'a'.repeat(PLATFORM_ADMIN_TOKEN_MIN_LENGTH - 1);
+    resetThrottledLogsForTesting();
+    const outlet = captureLogOutlet();
+    try {
+      // 正規のユーザートークン（照合は上の分岐で返るので、設定ミスの記録まで届かない）
+      expect((await call(getMe, { token: seed.a.tokens.viewer })).status).toBe(200);
+      // 1 行も出ていないこと
+      expect(loggedEvents(outlet.calls())).toEqual([]);
+    } finally {
+      outlet.restore();
+    }
+  });
+
   it('設定済みなら一致しなくても出さない (正規の 401 と区別できないため)', async () => {
     // 設定はある（既定の seed のまま）
     resetThrottledLogsForTesting();

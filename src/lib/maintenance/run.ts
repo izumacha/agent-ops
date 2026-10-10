@@ -134,8 +134,19 @@ async function sweepRateLimitHits(
   repos: Repositories,
   progress: Progress,
 ): Promise<{ deleted: number; complete: boolean | null }> {
-  // 窓の長さ（境目を決めるのは記録側。理由は Port の `sweep`）
-  const windowMs = rateLimitWindowMs();
+  // 窓の長さ（境目を決めるのは記録側。理由は Port の `sweep`）。
+  // **この 1 行も包みの中に入れる** — `rateLimitWindowMs()` は設定が正の整数でなければ
+  // `RangeError` を投げる設計なので、外に置くと「投げない」という上の約束が破れ、
+  // 500 → 毎ティック同じ所で落ちる（この関数が存在する理由そのものの倒れ方）
+  let windowMs;
+  try {
+    windowMs = rateLimitWindowMs();
+  } catch (error) {
+    // 設定の誤りも取りこぼしとして数え、判定へ進む（回収だけが止まる）
+    logEvent('maintenance.sweep_failed', describeError(error));
+    progress.failed += 1;
+    return { deleted: 0, complete: null };
+  }
   // 消した合計
   let deleted = 0;
   // バッチ数の上限まで繰り返す

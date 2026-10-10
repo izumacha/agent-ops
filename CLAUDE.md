@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >
 > **§3「レイヤ構成」は索引だけで、詳細は [`docs/implementation-notes.md`](./docs/implementation-notes.md)。**
 > このファイルはセッションの入口として毎回全文が読まれるので、**層ごとの不変条件と「どの変異が
-> 実測で素通りしたか」はあちらへ出してある**（切り出し前は 1 ファイルで 20 万字を超えていた）。
+> 実測で素通りしたか」はあちらへ出してある**（切り出し前の大きさは実装ノートの冒頭に書いてある）。
 > 触る層の節は書く前に開くこと。索引の行と節の 1 対 1 は `tests/docs-gate.test.ts` が見張る。
 
 ---
@@ -129,17 +129,17 @@ CI（`.github/workflows/ci.yml`）は `gate` ジョブ（ジョブ名＝ステ�
 
 | 対象 | 責務（1 行） |
 | --- | --- |
-| [`src/proxy.ts`](./docs/implementation-notes.md#srcproxyts) | 全リクエストの入口（Next.js 16 の `proxy` ファイル規約。**エクスポート名は `proxy` 固定**）。percent-decode に失敗する要求を 400 で落とす |
+| [`src/proxy.ts`](./docs/implementation-notes.md#srcproxyts) | 全リクエストの入口（Next.js 16 の `proxy` ファイル規約。**エクスポート名は `proxy` 固定**）。壊れたパスをルーティングの前に落とす |
 | [`src/app/*`](./docs/implementation-notes.md#srcapp) | App Router。API は `src/app/api/v1/*`（OpenAPI の `servers.url` に合わせる） |
 | [`src/data/`](./docs/implementation-notes.md#srcdata) | **Ports & Adapters**（ADR-0006）。契約 `ports/`・本番 `adapters/prisma/`・テスト `adapters/memory/` |
-| [プロキシ（Step2）](./docs/implementation-notes.md#プロキシstep2) | `route()` に `auth: 'apiKey'`。**課金された呼び出しを台帳から落とさない**のが最優先 |
+| [プロキシ（Step2）](./docs/implementation-notes.md#プロキシstep2) | 上流への中継とコストの記録。**課金された呼び出しを台帳から落とさない**のが最優先 |
 | [品質評価（Step3）](./docs/implementation-notes.md#品質評価step3) | 2 段（対象へ投げる → judge が採点）。上流の結線は中継と共有 |
-| [ガードレール・監査ログ（Step4）](./docs/implementation-notes.md#ガードレール監査ログstep4) | 判定の入口は `evaluateGuardrails` **だけ**。3 つの起点が同じ関数を通る |
-| [監査ログ（Step4）](./docs/implementation-notes.md#監査ログstep4) | 書き込みは `recordAudit` **1 か所経由**。鍵は `AUDIT_HMAC_SECRET`（未設定は 500） |
+| [ガードレール・監査ログ（Step4）](./docs/implementation-notes.md#ガードレール監査ログstep4) | しきい値の判定と停止。入口は `evaluateGuardrails` **だけ**で、3 つの起点が同じ関数を通る |
+| [監査ログ（Step4）](./docs/implementation-notes.md#監査ログstep4) | 追記専用の証跡。書き込みは `recordAudit` **1 か所経由**（鍵が無ければ fail-closed） |
 | [レート制限と予算（Step4 / ADR-0007 の宿題）](./docs/implementation-notes.md#レート制限と予算step4--adr-0007-の宿題) | 枠は DB の共有ストア（ADR-0015）。キーはテナント、上限はプラン別 |
-| [保守の定期実行（ADR-0016）](./docs/implementation-notes.md#保守の定期実行adr-0016) | `POST /maintenance/run`（プラットフォーム限定）。**スケジューラは同梱しない**（ADR-0016） |
-| [通知（Step4）](./docs/implementation-notes.md#通知step4) | `src/lib/notify/send.ts`。**宛先は環境変数だけが決める**（SSRF の入口を作らない） |
-| [画面（Step5）](./docs/implementation-notes.md#画面step5) | `src/app/login/` と `(dashboard)/` の 4 画面。集計は `dashboard/summary.ts` の 1 か所 |
+| [保守の定期実行（ADR-0016）](./docs/implementation-notes.md#保守の定期実行adr-0016) | 定期掃きと記録の回収（プラットフォーム限定）。**スケジューラは同梱しない** |
+| [通知（Step4）](./docs/implementation-notes.md#通知step4) | Webhook とメール。**宛先は環境変数だけが決める**（SSRF の入口を作らない） |
+| [画面（Step5）](./docs/implementation-notes.md#画面step5) | ログインとダッシュボードの 4 画面。集計は `dashboard/summary.ts` の 1 か所 |
 | [プランと課金（Step6）](./docs/implementation-notes.md#プランと課金step6) | 上限と可否の正本は `PLAN_LIMITS`。課金は受信と参照だけ（Stripe の SDK は入れない） |
 | [リリース準備（Step7）](./docs/implementation-notes.md#リリース準備step7) | デプロイ設定・API リファレンス・負荷試験レポート・既知バグ。基準の正本は `step7-criteria.mjs` |
 | [観測性（ログとメトリクス。ADR-0014）](./docs/implementation-notes.md#観測性ログとメトリクスadr-0014) | **`console` を呼べるのは `src/lib/log.ts` だけ**。出口は 1 行 1 JSON と `/metrics` |
@@ -148,7 +148,7 @@ CI（`.github/workflows/ci.yml`）は `gate` ジョブ（ジョブ名＝ステ�
 | [`scripts/bench-*.ts`](./docs/implementation-notes.md#scriptsbench-ts) | 時間を測る受け入れ基準。しきい値は `scripts/lib/stepN-criteria.mjs` が唯一の定義 |
 | [`scripts/gate-stepN.mjs`](./docs/implementation-notes.md#scriptsgate-stepnmjs) | Step ごとの受け入れ基準の検査（ADR-0004）。数値はゲート本体に書かない |
 | [`prisma/`](./docs/implementation-notes.md#prisma) | スキーマ・マイグレーションと seed（値・投入手順・入口の 3 つに分ける） |
-| [カバレッジ（Step6 の受け入れ基準④）](./docs/implementation-notes.md#カバレッジstep6-の受け入れ基準④) | 測るのはロジック層のみ。定義の正本は `scripts/lib/step6-criteria.mjs` |
+| [カバレッジ（Step6 の受け入れ基準④）](./docs/implementation-notes.md#カバレッジstep6-の受け入れ基準) | 測るのはロジック層のみ。定義の正本は `scripts/lib/step6-criteria.mjs` |
 | [`tests/`](./docs/implementation-notes.md#tests) | Vitest（`environment: 'node'`）。API テストは memory アダプタで Route Handler を直接呼ぶ |
 
 どの層にも掛かる禁じ手（理由と抜け道の実測はそれぞれの節）:
@@ -156,8 +156,8 @@ CI（`.github/workflows/ci.yml`）は `gate` ジョブ（ジョブ名＝ステ�
 - **`console` を直接呼ばない** — すべて `logEvent('<語彙のキー>', describeError(error)?)` を通す（[観測性](./docs/implementation-notes.md#観測性ログとメトリクスadr-0014)）。
 - **Route Handler は必ず `route()` で包む** — 例外は理由付きの表に登録する（[`src/app/*`](./docs/implementation-notes.md#srcapp) ・ [プランと課金](./docs/implementation-notes.md#プランと課金step6)）。
 - **`src/` で Prisma を直接 import してよいのは結線 2 本と prisma アダプタだけ**（[`src/data/`](./docs/implementation-notes.md#srcdata)）。
-- **生の SQL はタグ付きテンプレートだけ** — `$queryRawUnsafe` / `$executeRawUnsafe` / `Prisma.raw` は実行時のガードが落とす（[`src/lib/`](./docs/implementation-notes.md#srclib)）。
-- **時刻は記録側の時計が決める** — 比較の境目を引数で渡せる形そのものを作らない（[レート制限と予算](./docs/implementation-notes.md#レート制限と予算step4--adr-0007-の宿題)）。
+- **生の SQL はタグ付きテンプレートだけ** — `$queryRawUnsafe` / `$executeRawUnsafe` / `Prisma.raw` は実行時のガードが落とす（理由と**ガードの外側に残る抜け道**は下の「Prisma 7 の結線」）。
+- **時刻は記録側の時計が決める** — 比較の境目を引数で渡せる形そのものを作らない（[保守の定期実行](./docs/implementation-notes.md#保守の定期実行adr-0016) ・ ADR-0015 / ADR-0016）。
 
 ### マルチテナントと RBAC（設計の不変条件）
 

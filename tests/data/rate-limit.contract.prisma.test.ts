@@ -256,17 +256,34 @@ describe.skipIf(!ENABLED)('レート制限の記録の契約', () => {
     // 古い行を 5 件、新しい行を 1 件入れる
     for (let index = 0; index < 5; index += 1) await insertHitSecondsAgo(300 + index);
     await insertHitSecondsAgo(1);
-    // 100 秒より古い行を 2 件まで消す
-    const cutoff = new Date(Date.now() - 100_000);
-    expect(await repos.rateLimit.sweep(cutoff, 2)).toBe(2);
+    // **渡すのは窓の長さだけ**（境目は DB の時計が決める。理由は Port の `sweep`）。
+    // 窓を 100 秒にすると、300 秒前の 5 件が外れて 1 秒前の 1 件は窓の中
+    const windowMs = 100_000;
+    expect(await repos.rateLimit.sweep(windowMs, 2)).toBe(2);
     // 残りは 4 件（古い 3 件 + 新しい 1 件）
     expect(await storedRows()).toBe(4);
     // 続けて呼べば古い分だけが消え、新しい行は残る
-    expect(await repos.rateLimit.sweep(cutoff, SWEEP_LIMIT)).toBe(3);
+    expect(await repos.rateLimit.sweep(windowMs, SWEEP_LIMIT)).toBe(3);
     expect(await storedRows()).toBe(1);
     // 消すものが無ければ 0（何度呼んでも安全）
-    expect(await repos.rateLimit.sweep(cutoff, SWEEP_LIMIT)).toBe(0);
+    expect(await repos.rateLimit.sweep(windowMs, SWEEP_LIMIT)).toBe(0);
   });
+
+  it('窓の中の行は消さない（境目の向きが逆になっていないこと）', async () => {
+    // 1 秒前の行を 1 件（窓の中）
+    await insertHitSecondsAgo(1);
+    // 窓の長さだけを渡して掃く（1 件も消えない）
+    expect(await repos.rateLimit.sweep(60_000, SWEEP_LIMIT)).toBe(0);
+    expect(await storedRows()).toBe(1);
+  });
+
+  // **「境目を決めるのが DB の時計か」はここでは確かめられない。**
+  // このテストのプロセスと PostgreSQL は同じホストで動くので時計が一致し、
+  // `statement_timestamp()` を `${new Date()}` へ差し替える変異は**契約テスト 10 件すべて緑**で
+  // 通った（実測。`tests/raw-sql.test.ts` が同じ記録を持つ）。その性質を見ているのは
+  // あちらの構文の網（SQL が時刻を DB に尋ねているかを見る）と、memory 側の
+  // 「表の時計を進めると消える」なので、**ここの名前にその保証を書かない**
+  // （書くと、読んだ人が本当の網を冗長だと判断して消しうる）。
 
   it('テナントを消しても記録は残る（業務データではないので FK を張っていない）', async () => {
     // テナントの枠として 1 件入れる

@@ -1076,8 +1076,8 @@ describe('秘密の生成と比較', () => {
     expect(returnsIn(body), '照合から抜ける道が増えている').toEqual([
       // 未設定（**記録するのは呼び出し側**。理由は authenticate のコメント）
       "return 'not_configured';",
-      // 短すぎる（記録してから不一致として扱う）
-      "return 'mismatch';",
+      // 短すぎる（**記録するのは呼び出し側**。認可の判断としては不一致と同じ扱い）
+      "return 'too_short';",
       // 一致・不一致は定数時間比較の結果だけで決まる
       "return secretsEqual(token, configured) ? 'match' : 'mismatch';",
     ]);

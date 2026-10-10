@@ -53,6 +53,7 @@ import { POST as resolveIncident } from '@/app/api/v1/incidents/[incidentId]/res
 import { GET as listAuditLogs } from '@/app/api/v1/audit-logs/route';
 import { GET as getBilling } from '@/app/api/v1/billing/route';
 import { GET as verifyAuditLogs } from '@/app/api/v1/audit-logs/verify/route';
+import { POST as runMaintenance } from '@/app/api/v1/maintenance/run/route';
 import { canPerform, type Action } from '@/domain/rbac';
 import { Plan, Role } from '@/domain/types';
 import { call, PLATFORM_TOKEN, seedEachTest } from './helpers';
@@ -95,6 +96,11 @@ const ENDPOINTS: Record<
   createTenant: {
     requires: 'platform',
     invoke: async (t) => (await call(createTenant, { token: t, body: {} })).status,
+  },
+  runMaintenance: {
+    requires: 'platform',
+    invoke: async (t) =>
+      (await call(runMaintenance, { method: 'POST', token: t, body: {} })).status,
   },
   getTenant: {
     requires: 'view',

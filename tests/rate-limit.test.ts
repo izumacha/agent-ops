@@ -17,6 +17,7 @@ import {
   sharedRateLimitFor,
 } from '@/lib/api/rate-limit';
 import type { Principal } from '@/lib/api/auth';
+import type { RateLimitTier } from '@/lib/api/rate-limit';
 import { ApiError } from '@/lib/api/errors';
 import { HTTP_STATUS } from '@/lib/api/http-status';
 import { Plan, Provider, Role } from '@/domain/types';
@@ -534,6 +535,14 @@ describe('追加の枠の上限', () => {
   it('種類ごとの表から引き、持たない種類は null', () => {
     // 標準の枠は追加の枠を持たない
     expect(extraRateLimitFor(RATE_LIMIT_TIER.standard)).toBeNull();
+  });
+
+  it('表に無い種類は拒否する（`null` へ倒すと小さいほうの上限が黙って消える）', () => {
+    // 型の外から届く値（`constructor` は `Object.prototype` 由来の値を返す綴り）。
+    // **`null` へ倒してはいけない** — それは「追加の枠を持たない種類」と同じ意味なので、
+    // その経路は共有の枠だけで守られる＝ fan-out や heavyRead の小さい上限が消える
+    for (const bogus of ['constructor', 'valueOf', 'unknownTier'])
+      expect(() => extraRateLimitFor(bogus as RateLimitTier)).toThrow(/種類/);
     // 残りの 3 種類は正の整数の上限を持つ（値そのものは constants.ts が正本）
     for (const tier of [
       RATE_LIMIT_TIER.fanOut,

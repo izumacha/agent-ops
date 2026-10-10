@@ -184,14 +184,18 @@ describe('時刻の出どころ', () => {
 });
 
 describe('窓から外れた記録の掃き出し (sweep)', () => {
+  // **渡すのは窓の長さで、境目は表の時計が決める**（prisma が `statement_timestamp()` で
+  // 決めるのと同じ分担。理由は Port の `sweep`）。この検査では `now` を固定しているので、
+  // 「`now` から何ミリ秒前より古い行を消すか」を直に書ける
   it('期限切れだけを消し、消した件数を返す', async () => {
     // 2 つのキーに 2 件ずつ入れる
     for (const key of [KEY, 'tenant:tn-2']) {
       await consume({ key, at: T0 });
       await consume({ key, at: new Date(T0.getTime() + 30_000) });
     }
-    // 古いほうだけを対象にする（T0 を含む = lte）
-    const deleted = await repos.rateLimit.sweep(T0, SWEEP_LIMIT);
+    // 表の時計を 60 秒先へ進め、窓を 31 秒にすると T0 の行だけが外れる
+    clock = new Date(T0.getTime() + 60_000);
+    const deleted = await repos.rateLimit.sweep(31_000, SWEEP_LIMIT);
     // 2 キー × 1 件
     expect(deleted).toBe(2);
     // 新しいほうは残っている
@@ -201,8 +205,9 @@ describe('窓から外れた記録の掃き出し (sweep)', () => {
   it('1 件も残らないキーは表から消える（二度と来ないキーを抱え続けない）', async () => {
     // 1 件だけ入れる
     await consume({ at: T0 });
-    // その時刻まで掃く
-    const deleted = await repos.rateLimit.sweep(T0, SWEEP_LIMIT);
+    // 表の時計を進めて、その行が窓から外れるようにする
+    clock = new Date(T0.getTime() + 60_000);
+    const deleted = await repos.rateLimit.sweep(1_000, SWEEP_LIMIT);
     expect(deleted).toBe(1);
     // **キーごと消えている**（これが sweep の目的）
     expect(repos.store.rateLimitHits.has(KEY)).toBe(false);
@@ -213,21 +218,56 @@ describe('窓から外れた記録の掃き出し (sweep)', () => {
     for (let index = 0; index < 5; index += 1) {
       await consume({ at: new Date(T0.getTime() + index), sharedLimit: 10 });
     }
+    // 表の時計を進めて 5 件すべてを窓の外に出す
+    clock = new Date(T0.getTime() + 60_000);
     // 上限 2 で掃くと 2 件だけ消える
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() + 10), 2)).toBe(2);
+    expect(await repos.rateLimit.sweep(1_000, 2)).toBe(2);
     // 残りは 3 件（呼び出し側は「上限未満が返るまで」繰り返す）
     expect(repos.store.rateLimitHits.get(KEY)).toHaveLength(3);
     // 続けて呼べば残りも消える
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() + 10), 2)).toBe(2);
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() + 10), 2)).toBe(1);
+    expect(await repos.rateLimit.sweep(1_000, 2)).toBe(2);
+    expect(await repos.rateLimit.sweep(1_000, 2)).toBe(1);
     expect(repos.store.rateLimitHits.has(KEY)).toBe(false);
   });
 
+  it('上限で打ち切るときは表全体で古い順に消す（キーの並びで後回しにしない）', async () => {
+    // **キー A に新しめの 3 件、キー B に最も古い 1 件**を入れる（A を先に入れるので
+    // `Map` の挿入順では A が先頭になる）
+    await consume({ key: 'tenant:A', at: new Date(T0.getTime() + 10), sharedLimit: 10 });
+    await consume({ key: 'tenant:A', at: new Date(T0.getTime() + 11), sharedLimit: 10 });
+    await consume({ key: 'tenant:A', at: new Date(T0.getTime() + 12), sharedLimit: 10 });
+    await consume({ key: 'tenant:B', at: T0, sharedLimit: 10 });
+    // 表の時計を進めて 4 件すべてを窓の外へ出す
+    clock = new Date(T0.getTime() + WINDOW_MS * 2);
+    // **上限 1 で掃く**。キーごとに消して打ち切る実装だと A の 1 件が消えるが、
+    // prisma は表全体から `ORDER BY at` で選ぶので消えるのは B の行
+    expect(await repos.rateLimit.sweep(WINDOW_MS, 1)).toBe(1);
+    // **B が消えている**（キーの並びで後回しにしない）
+    expect(repos.store.rateLimitHits.has('tenant:B')).toBe(false);
+    expect(repos.store.rateLimitHits.get('tenant:A')).toHaveLength(3);
+  });
+
   it('消すものが無ければ 0 を返す（何度呼んでも安全）', async () => {
-    // 記録を 1 件入れ、窓の下端より前を掃く
+    // 記録を 1 件入れ、まだ窓の中であるうちに掃く
     await consume({ at: T0 });
-    expect(await repos.rateLimit.sweep(new Date(T0.getTime() - 1), SWEEP_LIMIT)).toBe(0);
+    expect(await repos.rateLimit.sweep(60_000, SWEEP_LIMIT)).toBe(0);
     // 記録はそのまま
     expect(repos.store.rateLimitHits.get(KEY)).toHaveLength(1);
+  });
+
+  it('境目はアプリの時計ではなく表の時計が決める（表が先を指していても消す）', async () => {
+    // **表の時計を実時刻より先へ置く。** ここが要点で、「生きている記録を消さない」側は
+    // すぐ上の「消すものが無ければ 0 を返す」が既に固定している（T0 は実時刻より前なので、
+    // 境目を実時刻から決める実装ではあの行が消えて落ちる）。こちらは**逆向き＝消し残し**を見る:
+    // 実時刻から決めると「まだ未来の行」は境目より新しいので**永久に消えない**（二度と来ない
+    // キーの行を回収するというこの掃きの目的そのものが果たせなくなる）
+    const ahead = new Date(Date.now() + 60 * 60_000);
+    // 先の時刻で 1 件入れる
+    await consume({ at: ahead });
+    // 表の時計だけを窓の長さの 2 倍進める（表から見れば窓の外、実時刻から見ればまだ未来）
+    clock = new Date(ahead.getTime() + WINDOW_MS * 2);
+    // 表の時計が決めるので消える
+    expect(await repos.rateLimit.sweep(WINDOW_MS, SWEEP_LIMIT)).toBe(1);
+    expect(repos.store.rateLimitHits.has(KEY)).toBe(false);
   });
 });

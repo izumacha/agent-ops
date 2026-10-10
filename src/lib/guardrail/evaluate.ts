@@ -59,7 +59,10 @@ export interface GuardrailTrigger {
   /**
    * 通知の送信を**待たずに**戻るか（既定は待つ）。
    *
-   * **中継の経路だけ true にする。** 通知は受け手の応答時間が外部で決まるので、待つと
+   * **true にするのは「1 要求の長さを縛らねばならない経路」だけ**（現在は中継と、保守の
+   * 定期実行＝`src/lib/maintenance/run.ts`。あちらは予算ぶんのエージェントを 1 要求で判定する
+   * ので、待つと `NOTIFY_TIMEOUT_MS` × 件数が積み上がって予算が長さを縛れなくなる）。
+   * 通知は受け手の応答時間が外部で決まるので、待つと
    * その時間がまるごと中継の応答時間に乗る（受け手が黙り込めば `NOTIFY_TIMEOUT_MS` ぶん。
    * 実測では 1.2 秒で応答する受け手に対して中継が 1.2 秒以上掛かった）。受け入れ基準の
    * 「中継の追加遅延 ≦ 50ms」を外部の遅さで破ることになり、しかも**ベンチは発火しない
@@ -126,6 +129,16 @@ export const USAGE_RULE_KINDS: readonly RuleKind[] = [RuleKind.cost, RuleKind.er
  * `RuleKind` から導いて確かめる（種別を足して結線を忘れると、そのルールは永久に発火しない）
  */
 export const QUALITY_RULE_KINDS: readonly RuleKind[] = [RuleKind.quality];
+
+/**
+ * 全種別。**明示実行（`POST /guardrails/run`）と定期実行（保守）が共有する**
+ * — どちらも「いま止まるべきか」を網羅的に確かめる操作なので絞らない。
+ *
+ * **`RuleKind` から導く**ので、種別を足したときにここへ書き足す必要が無い。
+ * 2 か所に写しを置いていた（両方同じ `Object.values(RuleKind)` の 1 行＋同じ理由のコメント）が、
+ * 上の 2 つの表と同じ関心事なので所有者をここ 1 つにした（§6 DRY）。
+ */
+export const ALL_RULE_KINDS: readonly RuleKind[] = Object.values(RuleKind);
 
 /**
  * 1 つのルールの判定に必要な測定値をそろえる。

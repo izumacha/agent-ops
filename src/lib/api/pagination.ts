@@ -25,26 +25,33 @@ const decimalInteger = z.string().transform((value, ctx) => {
   return parsed;
 });
 
+/**
+ * 前応答の nextCursor (符号化されたキーセット) を位置へ復号する項目。形が違えば 422。
+ *
+ * **一覧のクエリと保守の定期実行の本文が共有する** (§6 DRY)。書き写すと、復号前の長さの上限
+ * (DoS 対策) や文言のどちらかだけを直した状態が生まれる
+ */
+export const cursorSchema = z
+  .string()
+  // 長さ超過も「形が違う」の一種なので同じ文言にする (上限は復号前の DoS 対策として残す)
+  .max(PAGE_CURSOR_MAX_LENGTH, { message: API_MESSAGES.invalidCursor })
+  .transform((value, ctx) => {
+    // 位置へ復号する (ここで 1 回だけ。アダプタには復号済みの位置が届く)
+    const key = decodeCursor(value);
+    // 形が違えば検証エラー
+    if (key === null) {
+      ctx.addIssue({ code: 'custom', message: API_MESSAGES.invalidCursor });
+      return z.NEVER;
+    }
+    return key;
+  });
+
 // limit は 1〜最大値の整数 (省略時は既定値)、cursor は前応答の nextCursor (符号化されたキーセット。形が違えば 422)
 export const pageQuerySchema = z.object({
   limit: decimalInteger
     .pipe(z.number().int().min(1).max(PAGE_LIMIT_MAX))
     .default(PAGE_LIMIT_DEFAULT),
-  cursor: z
-    .string()
-    // 長さ超過も「形が違う」の一種なので同じ文言にする (上限は復号前の DoS 対策として残す)
-    .max(PAGE_CURSOR_MAX_LENGTH, { message: API_MESSAGES.invalidCursor })
-    .transform((value, ctx) => {
-      // 位置へ復号する (ここで 1 回だけ。アダプタには復号済みの位置が届く)
-      const key = decodeCursor(value);
-      // 形が違えば検証エラー
-      if (key === null) {
-        ctx.addIssue({ code: 'custom', message: API_MESSAGES.invalidCursor });
-        return z.NEVER;
-      }
-      return key;
-    })
-    .optional(),
+  cursor: cursorSchema.optional(),
 });
 
 // URL のクエリから指定したキーを取り出す (無いキーは undefined のまま渡して default / optional に任せる)

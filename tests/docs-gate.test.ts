@@ -214,6 +214,26 @@ describe('Step0 の設計成果物', () => {
     }
   });
 
+  /**
+   * 保守のティックが出す 1 行の宣言を、**スクリプトのソースから**読む。
+   *
+   * 手で許可表に書くと、文書と表の両方を書き換えるだけで実在しない綴りを通せる。
+   * 1 件も読めなければ落とす（書き方が変わって検出網が黙って死ぬのを防ぐ。fail-closed）。
+   * @returns 出来事の名前 → 深刻度と文言
+   */
+  function scriptLogEvents(): Map<string, { level: string; message: string }> {
+    // スクリプトのソースを読む
+    const source = readFileSync(join(process.cwd(), 'scripts', 'maintenance-tick.mjs'), 'utf8');
+    // 深刻度・出来事・文言がこの順で並んだ 1 行の組み立てを探す
+    const match = /level: '([^']+)',\s*\n\s*event: '([^']+)',\s*\n\s*message: '([^']+)',/.exec(
+      source,
+    );
+    // 読めなければ落とす
+    expect(match, 'ティックが出す 1 行の宣言を読めません').not.toBeNull();
+    // 1 件の表にして返す
+    return new Map([[match![2], { level: match![1], message: match![3] }]]);
+  }
+
   // **`docs/deploy.md` のログの例は実在の出来事を指していること**（ADR-0014）。
   //
   // 運用者はこの例を見て警報の条件を組むので、`event` が語彙に無い綴りだと「その条件は
@@ -226,6 +246,11 @@ describe('Step0 の設計成果物', () => {
   it('deploy.md のログの例は LOG_EVENTS に実在する出来事を指している', () => {
     // 文書を読む
     const deploy = readFileSync(join(DOCS, 'deploy.md'), 'utf8');
+    // **アプリの語彙だけでは足りない。** 保守のティック（`scripts/maintenance-tick.mjs`）も
+    // 同じ鍵の 1 行を出すが、あれを出すのはアプリではないので `LOG_EVENTS` には入れていない
+    // （語彙の網羅を見る検査が「どこからも出ない鍵」を要求してしまう）。**綴りを許可表へ
+    // 手で書かず、スクリプト側の宣言から導く** — 文書の打ち間違いは引き続き落ちる
+    const scriptEvents = scriptLogEvents();
     // 例の行（JSON のコードブロック内で `"event":"..."` を含む行）
     const lines = deploy.split('\n').filter((line) => line.includes('"event":"'));
     // 1 件も無ければ走査が壊れている（fail-closed。例を消したときもここで気付く）
@@ -234,16 +259,17 @@ describe('Step0 の設計成果物', () => {
       // `event` と `level` を取り出す
       const event = /"event":"([^"]+)"/.exec(line)?.[1];
       const level = /"level":"([^"]+)"/.exec(line)?.[1];
-      // 語彙に実在すること
+      // 語彙に実在すること（アプリの語彙か、ティックが宣言する出来事のどちらか）
       expect(event, `${line} から event を読めない`).toBeDefined();
-      expect(Object.hasOwn(LOG_EVENTS, event!), `${event} は LOG_EVENTS に無い`).toBe(true);
-      // 深刻度も語彙の宣言と一致すること（例だけが別の深刻度を言っていると警報の重み付けが狂う）
-      expect(level, `${line} から level を読めない`).toBe(
-        LOG_EVENTS[event as keyof typeof LOG_EVENTS].level,
-      );
+      const spec = Object.hasOwn(LOG_EVENTS, event!)
+        ? LOG_EVENTS[event as keyof typeof LOG_EVENTS]
+        : scriptEvents.get(event!);
+      expect(spec, `${event} は LOG_EVENTS にもティックの宣言にも無い`).toBeDefined();
+      // 深刻度も宣言と一致すること（例だけが別の深刻度を言っていると警報の重み付けが狂う）
+      expect(level, `${line} から level を読めない`).toBe(spec?.level);
       // **文言は写していないこと**（正本の側で推敲してよいので、写すとこの例だけが古くなる）
       expect(
-        line.includes(LOG_EVENTS[event as keyof typeof LOG_EVENTS].message),
+        line.includes(spec?.message ?? ''),
         `${event} の文言を例へ写している（推敲すると古くなる）`,
       ).toBe(false);
     }

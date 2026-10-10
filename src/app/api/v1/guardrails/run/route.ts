@@ -12,13 +12,8 @@ import { requireAction } from '@/lib/api/guard';
 import { route } from '@/lib/api/handler';
 import { RATE_LIMIT_TIER } from '@/lib/api/rate-limit';
 import type { ApiSchemas } from '@/lib/api-types';
-import { evaluateGuardrails } from '@/lib/guardrail/evaluate';
+import { ALL_RULE_KINDS, evaluateGuardrails } from '@/lib/guardrail/evaluate';
 import { guardrailRunSchema } from '@/lib/validations/guardrail';
-import { RuleKind } from '@/domain/types';
-
-// 全種別を見る (明示実行は「いま止まるべきか」を網羅的に確かめる操作なので絞らない)。
-// **enum から導く**ので、種別を足したときにここへ書き足す必要が無い
-const ALL_RULE_KINDS: readonly RuleKind[] = Object.values(RuleKind);
 
 // POST /guardrails/run (runGuardrails)
 //

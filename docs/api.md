@@ -98,6 +98,7 @@
 | `GET /audit-logs/verify` | `verifyAuditLogs` | audit-logs |
 | `GET /billing` | `getBilling` | billing |
 | `POST /billing/webhook` | `receiveBillingWebhook` | billing |
+| `POST /maintenance/run` | `runMaintenance` | maintenance |
 
 ## 最短の手順（quickstart）
 

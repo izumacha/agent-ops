@@ -187,6 +187,17 @@ export function sharedRateLimitFor(
  * （ベンダーへの課金・外部の応答時間・DB と CPU）なので、上位プランでも 1 要求の重さは同じ。
  */
 export function extraRateLimitFor(tier: RateLimitTier): number | null {
+  // **素の添字では引かない** — 型の外から `constructor` のような値が届くと
+  // `Object.prototype` 由来の関数が返り、以降の比較が意図しない経路へ落ちる
+  // （`src/domain/plan.ts` の `planLimitsFor` と `src/lib/log.ts` の `lookupLogEvent` と同じ引き方）。
+  //
+  // **表に無い種類は拒否する（fail-closed）。** `null` へ倒すと「追加の枠を持たない種類」と
+  // 同じ意味になり、その経路は共有の枠だけで守られる＝**小さいほうの上限が黙って消える**
+  // （`planLimitsFor` が「いちばん厳しいプラン」へ倒して記録を残すのと向きをそろえる。
+  // こちらは倒れ先が「厳しい側」ではなく「緩い側」しか無いので、拒否が唯一の安全側）。
+  // 種類は経路の印（閉じた union）から来るので、正しい呼び出しでここへは来ない
+  if (!Object.hasOwn(EXTRA_FRAME_LIMIT, tier))
+    throw new RangeError(`レート制限の種類が表にありません: ${String(tier)}`);
   // 追加の枠を持たない種類
   const limit = EXTRA_FRAME_LIMIT[tier];
   if (limit === null) return null;
@@ -200,9 +211,12 @@ export function extraRateLimitFor(tier: RateLimitTier): number | null {
  * **正の整数でなければ落とす（fail-closed）。** 0 以下だと窓の下端が「いま」と同値以降になり、
  * **どの記録も数えられず全部通る**＝レート制限が無言で消える（以前はこの検証を制限器の
  * コンストラクタが持っていた）。渡す側のバグを隠さない。
+ * **`export` してあるのは保守の定期実行（`src/lib/maintenance/run.ts`）が「どの窓にも入らない
+ * 記録」の境目を同じ値から導くため。** `RATE_LIMIT_WINDOW_MS` を直接読む形にすると、
+ * テストの上書きが効かないうえ、上の fail-closed の検証を通らない値で境目が決まりうる。
  * @returns 窓の長さ
  */
-function rateLimitWindowMs(): number {
+export function rateLimitWindowMs(): number {
   // 上書きが無ければ既定（毎分）
   const windowMs = windowMsOverrideForTesting ?? RATE_LIMIT_WINDOW_MS;
   // 壊れていれば落とす（0 以下は「制限が丸ごと無効」を意味する）

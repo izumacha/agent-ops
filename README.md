@@ -305,6 +305,7 @@ npm run bench:evaluation # 固定評価セット 100 件を 2 回採点して再
 npm run bench:guardrail  # 発火から停止まで ≦ 3 秒 (専用 DB が必要)
 npm run bench:demo-ready # 本番ビルドの起動からデモの筋が通るまで ≦ 5 分 (先に npm run build。専用 DB が必要)
 npm run bench:concurrency # 同時 100 リクエストでエラー率 < 1% (同上)
+npm run maintenance:tick # 保守の定期実行を一巡回し切る (配備したアプリへ外から叩く。下記)
 ```
 
 `gate:step7`（と `gate:step2` 〜 `gate:step6`）はベンチを含むので `DATABASE_URL` に**契約テストと同じ専用 DB（名前が `_contract` で終わる）**を指定する（ベンチと E2E は全テーブルを TRUNCATE する。開発 DB を指していれば 1 件も書かずに落ちる）。ベンチはローカルに立てたスタブ上流を叩き、画面は上流を呼ばないので、**実際の Anthropic / OpenAI は呼ばず課金も発生しない**。
@@ -345,6 +346,13 @@ CI（`.github/workflows/ci.yml`）は `gate:step7` に加え、PostgreSQL サー
   直列化するので、同時に届いた要求でも上限を超えない）。**公開前に、ベンダー側の月次利用上限
   （spend limit）は必ず設定すること**（アプリ側の枠は毎分の回数しか見ないので、単価の高い
   モデルへの切り替えや長い本文による費用の増加は止められない）。
+- **保守の定期実行は配備側で繋ぐ**（[ADR-0016](./docs/adr/0016-scheduled-maintenance.md)）。
+  `POST /maintenance/run`（プラットフォーム管理者のみ）が 2 つの後片付けを行い、同梱の
+  `npm run maintenance:tick` が一巡を回し切る。**スケジューラは同梱していない**（配備先ごとに
+  手段が違う。繋ぎ方は [`docs/deploy.md`](./docs/deploy.md)）。繋がないと、**使われなくなった
+  エージェント**のエラー率・品質のルールが発火せず（集計窓から古い行が抜けるだけでしきい値を
+  越えるが、そのとき判定を起こす要求が無い）、二度と来ないキーのレート制限の記録も残る。
+  **Vercel Cron からは直接呼べない**（GET しか発行せず、この経路は副作用があるので POST）。
 - **前段にリバースプロキシを置く前提**（ADR-0005「残る宿題」）。未対応メソッド（`TRACE` 等）の遮断、
   本文サイズとタイムアウトの上限、`/api/v1/health` と **`/api/v1/metrics`** を内部からだけ見せることは
   前段の責務にしてある。**認証経路と `POST /billing/webhook`、`GET /api/v1/metrics` のレート制限は

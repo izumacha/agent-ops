@@ -106,12 +106,13 @@ function extractBearerToken(request: Request): string {
 /**
  * 環境変数のトークンと照合した結果。
  *
- * **`not_configured` を `mismatch` に畳まない** — 未設定は「プラットフォーム管理者が
- * 1 人も居ない」という配備の状態で、`POST /tenants`（最初の手順）が永久に 401 になる。
- * 記録の置き場所は `authenticate` 側（ここで出すと**成功するすべての要求が通る経路**なので、
- * 繋いでいない配備の警報が鳴り続ける）。
+ * **設定ミスの 2 つ（`not_configured` / `too_short`）を `mismatch` に畳まない** — 未設定は
+ * 「プラットフォーム管理者が 1 人も居ない」という配備の状態、短すぎは設定ミスで、どちらも
+ * `POST /tenants`（最初の手順）が永久に 401 になる。**記録の置き場所は `authenticate` 側**
+ * （ここで出すと**成功するすべての要求が通る経路**なので、繋いでいない配備の警報が鳴り続ける）。
+ * 認可の判断としては 2 つとも不一致と同じに扱う（fail-closed）。
  */
-type PlatformTokenVerdict = 'match' | 'mismatch' | 'not_configured';
+type PlatformTokenVerdict = 'match' | 'mismatch' | 'not_configured' | 'too_short';
 
 // 環境変数のプラットフォーム管理者トークンと照合する (未設定・短すぎは常に不一致 = fail-closed)
 function matchPlatformAdminToken(token: string): PlatformTokenVerdict {
@@ -122,13 +123,9 @@ function matchPlatformAdminToken(token: string): PlatformTokenVerdict {
   const configured = process.env.PLATFORM_ADMIN_TOKEN?.trim();
   // 未設定ならプラットフォーム管理者は存在しない（記録するかは呼び出し側が決める）
   if (!configured) return 'not_configured';
-  // 短すぎる値は設定ミスとみなし、使わない (弱いトークンで全テナントを作れる状態を作らない)
-  if (configured.length < PLATFORM_ADMIN_TOKEN_MIN_LENGTH) {
-    // 設定ミスの警告は間引いて出す（1 要求 1 行にはしないが、直すまで続く状態なので
-    // 1 度きりにもしない。理由は `logEventThrottled`）
-    logEventThrottled('auth.platform_token_too_short');
-    return 'mismatch';
-  }
+  // 短すぎる値は設定ミスとみなし、使わない (弱いトークンで全テナントを作れる状態を作らない)。
+  // **記録はここで出さない**（未設定とまったく同じ理由 — この関数は成功する要求もすべて通る）
+  if (configured.length < PLATFORM_ADMIN_TOKEN_MIN_LENGTH) return 'too_short';
   // 定数時間で比較する
   return secretsEqual(token, configured) ? 'match' : 'mismatch';
 }
@@ -221,7 +218,7 @@ export async function authenticate(
   // どちらでもなければ無効。**API キー (aop_k_) もここへ落ちる** — プロキシ専用なので、
   // 有効なキーであっても v1 の API では無効として扱う (経路を混ぜない。ADR-0007)
   //
-  // **「プラットフォーム管理者トークンが未設定」はここだけで記録する。** 他の 3 つの秘密
+  // **「プラットフォーム管理者トークンの設定ミス」はここだけで記録する。** 他の 3 つの秘密
   // （監査ログの鍵・課金の共有シークレット・監視用トークン）は専用の入口が 1 本ずつなので
   // 読んだ場所で記録できるが、この照合は**成功する要求もすべて通る**ので、同じ場所で出すと
   // 正常な配備が毎要求 1 件を数え、`agentops_log_events_total` が総要求数と同じ系列になる
@@ -229,6 +226,9 @@ export async function authenticate(
   // 今度は成功経路で起きる）。ここまで来るのは**どの資格情報としても読めない値**だけなので、
   // 正規の利用では鳴らず、設定漏れの配備では最初の手順（`POST /tenants`）で必ず鳴る。
   // 一致・不一致では何も出さない（正規の 401 と区別できないため）
+  // **直し方が違うので語彙は分ける**（設定する／長い値へ替える）。間引いて出すのは、
+  // 1 要求 1 行にはしないが直すまで続く状態なので 1 度きりにもしないため（`logEventThrottled`）
   if (platform === 'not_configured') logEventThrottled('auth.platform_token_not_configured');
+  if (platform === 'too_short') logEventThrottled('auth.platform_token_too_short');
   throw invalidTokenError();
 }

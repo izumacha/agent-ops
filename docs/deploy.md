@@ -110,9 +110,9 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 
 | 項目 | 内容 | 出典 |
 | ---- | ---- | ---- |
-| **レート制限の記録が DB に増える** | 枠は配備全体で 1 つ（`RateLimitHit`）。`consume` が**そのキーの**期限切れを同じ操作で掃くので通常は膨らまないが、**二度と来ないキー**（解約したテナント）の行は残る（定期掃きは宿題） | ADR-0015 |
+| **保守の定期実行は自分で繋ぐ** | スケジューラは同梱していない。繋がないと (a) 使われなくなったエージェントのエラー率・品質のルールが発火せず、(b) 二度と来ないキー（解約したテナント）のレート制限の記録が残る。繋ぎ方は下の「保守を定期実行する」 | ADR-0016 / ADR-0015 |
 | **本文サイズ・タイムアウト・未対応メソッド** | アプリ手前のリバースプロキシの責務。Vercel の既定で足りるかを配備先ごとに確認する | ADR-0005 / ADR-0007 |
-| **関数の実行時間上限** | 上流 LLM の中継は 1 リクエストが長い。プランの `maxDuration` を超えると 504 になるので、必要なら `vercel.json` の `functions` で延ばす | — |
+| **関数の実行時間上限** | 長い経路が 3 つある。**`POST /maintenance/run`**（1 要求でテナントを最大 1 ページぶん歩き、エージェントを予算ぶん判定する。ティックは 330 秒まで待つ）と**評価実行**は `export const maxDuration`（300 秒）を宣言してあるので、プランがその秒数を許していれば追加の設定は要らない。**上流 LLM の中継（`/proxy/*`）は宣言していない** — 1 リクエストは最長 `UPSTREAM_TIMEOUT_MS`（120 秒）まで伸びるので、既定が短いプラン（Hobby は 10 秒）では `vercel.json` の `functions` で延ばすか上位プランにする。延ばさないと中継は 504（利用の記録は残る）、保守のティックは毎回落ちて**繋いだのに一度も一巡しない**（症状はスケジューラが赤いだけ） | ADR-0009 / ADR-0016 |
 | **接続数** | プーラ（Transaction mode）を使う。直結のままだと Supabase の接続上限に当たる | 上記「1.」 |
 
 これらは「バグではなく設計上そうしてある／後の課題」なので、
@@ -131,6 +131,109 @@ DATABASE_URL='<直結の接続文字列>' npx tsx scripts/issue-user-token.ts --
 `docs/api.md` の一覧と README の「5 分で試す」をそのまま使う。所要時間の基準
 （クリーン環境から 5 分以内）は CI の `docker-smoke` ジョブと `npm run bench:demo-ready` が
 機械で確かめている（解釈は `docs/roadmap.md` の「Step7 の受け入れ基準の解釈」）。
+
+## 保守を定期実行する（配備後・必須）
+
+`POST /maintenance/run` が 2 つの後片付けを行う（ADR-0016）。**どちらも「誰も呼ばないと
+静かに効かなくなる」たち**なので、配備したら必ずスケジューラへ繋ぐ。
+
+1. **ガードレールの定期掃き**。判定は中継と評価実行の直後に走るが、**集計窓から古い行が抜ける
+   だけでしきい値を越える**ルールがある（エラー率は成功した古い呼び出しが抜けると分母が減って
+   率が上がり、品質は良い実行が抜けると平均が下がる）。どちらも**使われなくなったエージェント**で
+   起き、そのとき判定を起こす要求が無いので**繋がないと永久に発火しない**。
+2. **レート制限の記録の回収**。`consume` が**そのキーの**期限切れを同じ操作で掃くので通常は
+   膨らまないが、**二度と来ないキー**（解約したテナント）の行は残る。
+
+### ティックの回し方
+
+一巡は 1 要求では終わらない（1 要求でやる仕事に上限がある）。**`passComplete` が真になるまで
+カーソルを送り返して繰り返す**ループは同梱のスクリプトが持っているので、スケジューラは
+これを 1 回呼ぶだけでよい:
+
+```bash
+MAINTENANCE_BASE_URL=https://ops.example.com \
+PLATFORM_ADMIN_TOKEN=... \
+npm run maintenance:tick
+```
+
+| 環境変数 | 必須 | 内容 |
+| ---- | ---- | ---- |
+| `MAINTENANCE_BASE_URL` | ○ | アプリの入口（`/api/v1` までは付けない）。**https が必須**（ループバックだけ例外）。パスの接頭辞（`https://host/ops`）はそのまま使われる |
+| `PLATFORM_ADMIN_TOKEN` | ○ | この経路を叩ける唯一の資格情報（アプリへ渡しているものと同じ値） |
+| `MAINTENANCE_AGENT_BUDGET` | — | 1 要求で判定するエージェント数（省略するとアプリ側の既定。正の整数でないと**叩く前に**終了コード 1 で落ちる） |
+
+`http://` を設定すると**叩く前に**終了コード 1 で落ちる — ここで送るのは配備でいちばん強い
+資格情報（`PLATFORM_ADMIN_TOKEN` を `Authorization: Bearer` に載せる）なので、平文の経路を
+許さない（アプリの外向き通信を `src/lib/outbound-url.ts` が https に限っているのと同じ理由）。
+
+**これらはアプリの環境変数ではない**（スケジューラ側で設定する）。**ティックは `.env` を読まない**
+ので（依存ゼロの素の node で動かすため）、**起こす側が必ず渡すこと** — cron は環境変数をほとんど
+引き継がないので、何も渡さないと毎回「`MAINTENANCE_BASE_URL` が未設定です」で終了コード 1 に
+なる（下の例はすべて渡す形で書いてある）。だから `.env.example` には
+載せていない — あちらは「アプリが読む設定」の雛形で、`docker-compose` の app へ素通しする
+対象でもある。
+
+**終了コードを見張ること。** 0 = 一巡を回し切った、1 = 設定不足・HTTP エラー・**一巡を回し
+切れなかった**・**判定の取りこぼしが残っている**（`failed > 0`）。アプリ側は一巡を続けるために
+200 を返すので、**取りこぼしに気付けるのはこの終了コードだけ**。
+
+**合計の行は標準出力へ 1 行 1 JSON で出る**（`{"ts":…,"level":"info","event":"maintenance.tick",
+"message":…,"requests":…,"rateLimitHitsDeleted":…,"failed":…}`）。鍵の並びはアプリのログに
+合わせてあるので同じ収集設定で扱えるが、**`maintenance.tick` はアプリの閉じた語彙
+（`src/lib/log.ts` の `LOG_EVENTS`）には入っていない** — この行を出すのはアプリではなく
+スケジューラから起動するスクリプトなので、語彙を見張る検査の守備範囲の外にある
+（形は `tests/maintenance-tick.test.ts` が固定する）。診断の行（`[maintenance:tick] …`）は
+標準エラーへ出るので、合計だけを集めたいときは fd を分ける。
+
+**「一巡を回し切れなかった」が独立した失敗なのは、繰り返しの回数にも上限があるから**
+（上限なしだと、アプリ側が旗を立てられない状態に陥ったときティックが永久に回り続ける）。
+上限に達して止まった場合は `passComplete` が真にならないまま終わるので、**標準エラーに理由を
+出して非 0 で終わる** — ここを 0 にすると「掃きが毎回途中で終わっているのに毎時成功している」
+という、この経路全体がいちばん避けたい見え方になる。
+
+**2 つのティックを同時に走らせない。** 一巡が間隔より長くかかる規模（下の「既知の制限」）では、
+次の起動が前の一巡の途中で始まり、**同じテナントを両方が歩いて全エージェントを二重に判定する**
+（いちばん重い定期処理の負荷がちょうど重い規模で倍になる）。cron なら `flock` で囲む:
+
+```bash
+# /etc/cron.d/agent-ops-maintenance（環境変数は必ずここで渡す。cron は引き継がない）
+MAINTENANCE_BASE_URL=https://ops.example.com
+PLATFORM_ADMIN_TOKEN=...
+0 * * * * deploy flock -n /tmp/agent-ops-maintenance.lock -c 'cd /srv/agent-ops && npm run maintenance:tick'
+```
+
+秘密をファイルに置きたくなければ、ラッパー 1 本に寄せる（`set -a` で読み込んだ値を渡す）:
+
+```bash
+0 * * * * deploy flock -n /tmp/agent-ops-maintenance.lock /srv/agent-ops/bin/maintenance-tick.sh
+```
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd /srv/agent-ops
+set -a; . /etc/agent-ops/maintenance.env; set +a   # 600 で置く
+npm run maintenance:tick
+```
+
+GitHub Actions なら `concurrency` を、systemd なら 1 本のユニットで（タイマーは多重起動しない）。
+
+### 間隔
+
+**出発点は毎時**。短くすると判定の費用（エージェントごとに数クエリ）が増え、長くすると
+「窓が過ぎてから発火するまで」の遅れが伸びる。適切な値はルールの `windowMinutes` と配備の
+規模で決まるので、運用して調整する。
+
+### 繋ぎ先の例
+
+- **host の cron**（`docker compose` 配備）: 上の `flock` の例をそのまま使う（**環境変数を渡すこと**）
+- **systemd timer**: `OnCalendar=hourly` のユニットから同じコマンドを起こす
+  （`EnvironmentFile=/etc/agent-ops/maintenance.env` を付ける。タイマーは多重起動しない）
+- **GitHub Actions**: `on.schedule` のワークフローから `npm ci && npm run maintenance:tick`
+  （`MAINTENANCE_BASE_URL` / `PLATFORM_ADMIN_TOKEN` をリポジトリの secrets に置く）
+- **Vercel**: **Vercel Cron は使えない** — あちらは GET しか発行せず、この経路は副作用がある
+  ので POST にしてある（§9「副作用のある操作を GET で行わない」）。上記のいずれか外部の
+  スケジューラから回す。
 
 ## 監視を繋ぐ（配備後）
 

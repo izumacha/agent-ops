@@ -199,6 +199,25 @@ export const LOG_EVENTS = {
     level: 'error',
     message: 'ガードレールの判定に失敗しました',
   },
+  // --- 保守の定期実行（ADR-0016） ---
+  // **2 つに分けてある。** 文言は「その項目について真であること」だけを守る規約なので
+  // （`AllowedHostsPolicy` の `DeadEntryReason` を分けたのと同じ理由）、1 テナントを飛ばした
+  // 場合と、それ以降を 1 件も歩けなかった場合を同じ文言で出すと規模を取り違える
+  'maintenance.sweep_failed': {
+    level: 'error',
+    message:
+      'レート制限の記録を回収できませんでした (判定は続けます。回収は次の一巡で再試行します)',
+  },
+  'maintenance.tenant_skipped': {
+    level: 'error',
+    message:
+      'エージェントの一覧を読めませんでした (このテナントは今回の一巡では判定していません。次のテナントへ進みます)',
+  },
+  'maintenance.tenant_scan_failed': {
+    level: 'error',
+    message:
+      'テナントの一覧を読めませんでした (この一巡は打ち切りました。次のティックは先頭のテナントから数え直すので、ここで落ち続けると後ろのテナントは永久に判定されません)',
+  },
   // --- 通知（Step4） ---
   'notify.response_drain_failed': {
     level: 'error',

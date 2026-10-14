@@ -62,7 +62,7 @@
     "@vitest/coverage-v8": "^5.0.3",
     "autocannon": "^8.0.0",
     "eslint": "^9.39.4",
-    "eslint-config-next": "^16.3.6",
+    "eslint-config-next": "^16.4.0",
     "lighthouse": "^13.5.0",
     "openapi-typescript": "^7.9.1",
     "prettier": "^3.9.6",
